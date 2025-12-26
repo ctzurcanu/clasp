@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rlasp-runtime",
+    "crates/rlasp-ffi",
+    "crates/rlasp-jit",
+    "crates/rlasp-compiler",
+    "crates/rlasp-evaluator",
+    "crates/rlasp-clbind",
+    "crates/rlasp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["rlasp contributors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Core dependencies
+inkwell = { version = "0.7", features = ["llvm19-1"] }
+libffi = { version = "3.2", features = ["system"] }
+libloading = "0.8"
+libc = "0.2"
+cxx = "1.0"
+lazy_static = "1.4"
+atty = "0.2"
+
+# Numeric tower
+num-bigint = "0.4"
+num-rational = "0.4"
+num-complex = "0.4"
+num-traits = "0.2"
+
+# GC
+# bdwgc-alloc = "0.1"  # Uncomment when ready for Boehm GC
+
+# Utilities
+dashmap = "6.0"
+parking_lot = "0.12"
+crossbeam = "0.8"
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Build dependencies
+[workspace.build-dependencies]
+cc = "1.0"
+cxx-build = "1.0"
+bindgen = "0.70"

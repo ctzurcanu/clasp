@@ -1,0 +1,489 @@
+/// Control flow operations: do, dolist, dotimes, return
+
+use super::eval_types::{EvalResult, RETURN_VALUE};
+use super::eval_core::eval_with_env;
+use crate::ir::{ASTNode, ConstantValue};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+pub(super) fn eval_return(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // return exits from the nearest enclosing NIL block (implicitly created by do)
+    // For now, we signal this using a special error with JSON encoding
+    let return_val = if args.is_empty() {
+        EvalResult::Nil
+    } else {
+        eval_with_env(&args[0], env)?
+    };
+
+    // Encode the return value in a way we can decode
+    // For complex types, we use serde_json
+    let encoded = match &return_val {
+        EvalResult::Fixnum(n) => format!("RETURN:FIXNUM:{}", n),
+        EvalResult::Float(f) => format!("RETURN:FLOAT:{}", f),
+        EvalResult::Bool(b) => format!("RETURN:BOOL:{}", b),
+        EvalResult::Nil => "RETURN:NIL".to_string(),
+        EvalResult::String(s) => format!("RETURN:STRING:{}", s),
+        EvalResult::Symbol(s) => format!("RETURN:SYMBOL:{}", s),
+        EvalResult::Cons(_, _) => {
+            // For cons, store in a global and return a marker
+            // This is a workaround - ideally we'd use a proper exception mechanism
+            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(return_val.clone()));
+            "RETURN:CONS".to_string()
+        }
+        EvalResult::Lambda { .. } => {
+            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(return_val.clone()));
+            "RETURN:LAMBDA".to_string()
+        }
+        _ => {
+            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(return_val.clone()));
+            "RETURN:COMPLEX".to_string()
+        }
+    };
+
+    Err(encoded)
+}
+
+pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, sequential: bool) -> Result<EvalResult, String> {
+    // (do ((var init step)...) (end-test result...) body...)
+    if args.len() < 2 {
+        return Err("do requires at least 2 arguments".to_string());
+    }
+
+    // Parse variable bindings
+    let var_specs = &args[0];
+    let mut var_bindings: Vec<(String, EvalResult, Option<ASTNode>)> = Vec::new();
+
+    // Extract variable specifications
+    match var_specs {
+        ASTNode::Constant(ConstantValue::Nil) => {
+            // No variable bindings
+        }
+        ASTNode::Call { function, args: spec_args } => {
+            // Process first binding
+            if let ASTNode::Call { function: var_func, args: var_args } = &**function {
+                if let ASTNode::Variable(var_name) = &**var_func {
+                    let init_val = if !var_args.is_empty() {
+                        eval_with_env(&var_args[0], env)?
+                    } else {
+                        EvalResult::Nil
+                    };
+                    let step_form = if var_args.len() > 1 {
+                        Some(var_args[1].clone())
+                    } else {
+                        None
+                    };
+                    var_bindings.push((var_name.clone(), init_val, step_form));
+                }
+            }
+            // Process remaining bindings
+            for spec in spec_args {
+                if let ASTNode::Call { function: var_func, args: var_args } = spec {
+                    if let ASTNode::Variable(var_name) = &**var_func {
+                        let init_val = if !var_args.is_empty() {
+                            if sequential {
+                                // do*: evaluate in the extended environment
+                                let mut loop_env = env.clone();
+                                for (name, val, _) in &var_bindings {
+                                    loop_env.insert(name.clone(), val.clone());
+                                }
+                                eval_with_env(&var_args[0], &mut loop_env)?
+                            } else {
+                                // do: evaluate in original environment
+                                eval_with_env(&var_args[0], env)?
+                            }
+                        } else {
+                            EvalResult::Nil
+                        };
+                        let step_form = if var_args.len() > 1 {
+                            Some(var_args[1].clone())
+                        } else {
+                            None
+                        };
+                        var_bindings.push((var_name.clone(), init_val, step_form));
+                    }
+                }
+            }
+        }
+        _ => return Err("do: invalid variable specifications".to_string()),
+    }
+
+    // Parse end test and result forms
+    let end_clause = &args[1];
+    let (end_test, result_forms) = match end_clause {
+        ASTNode::Call { function, args: result_args } => {
+            (function.as_ref().clone(), result_args.clone())
+        }
+        _ => return Err("do: invalid end clause".to_string()),
+    };
+
+    // Body forms
+    let body_forms = &args[2..];
+
+    // Create loop environment
+    let mut loop_env = env.clone();
+    for (var_name, init_val, _) in &var_bindings {
+        loop_env.insert(var_name.clone(), init_val.clone());
+    }
+
+    // Loop until end test is true
+    let mut iteration_count = 0;
+    loop {
+        iteration_count += 1;
+        if iteration_count > 10000 {
+            return Err("do: exceeded maximum iterations (possible infinite loop)".to_string());
+        }
+
+        // Check end test
+        let test_result = eval_with_env(&end_test, &mut loop_env)?;
+        if !matches!(test_result, EvalResult::Nil | EvalResult::Bool(false)) {
+            // End test is true, evaluate result forms
+            let mut result = EvalResult::Nil;
+            for form in &result_forms {
+                result = eval_with_env(form, &mut loop_env)?;
+            }
+            return Ok(result);
+        }
+
+        // Execute body forms
+        for form in body_forms {
+            match eval_with_env(form, &mut loop_env) {
+                Ok(_) => {},
+                Err(e) if e.starts_with("RETURN:") => {
+                    // Return signaled from body - decode the value
+                    if e == "RETURN:NIL" {
+                        return Ok(EvalResult::Nil);
+                    } else if e.starts_with("RETURN:FIXNUM:") {
+                        let num_str = &e[14..];
+                        if let Ok(n) = num_str.parse::<i64>() {
+                            return Ok(EvalResult::Fixnum(n));
+                        }
+                    } else if e.starts_with("RETURN:FLOAT:") {
+                        let num_str = &e[13..];
+                        if let Ok(f) = num_str.parse::<f64>() {
+                            return Ok(EvalResult::Float(f));
+                        }
+                    } else if e.starts_with("RETURN:BOOL:") {
+                        let bool_str = &e[12..];
+                        if bool_str == "true" {
+                            return Ok(EvalResult::Bool(true));
+                        } else {
+                            return Ok(EvalResult::Nil);
+                        }
+                    } else if e.starts_with("RETURN:STRING:") {
+                        let s = &e[14..];
+                        return Ok(EvalResult::String(s.to_string()));
+                    } else if e.starts_with("RETURN:SYMBOL:") {
+                        let s = &e[14..];
+                        return Ok(EvalResult::Symbol(s.to_string()));
+                    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e == "RETURN:COMPLEX" {
+                        // Get from thread-local storage
+                        return RETURN_VALUE.with(|rv| {
+                            rv.borrow_mut().take().ok_or_else(|| "return value not found".to_string())
+                        });
+                    }
+                    return Ok(EvalResult::Nil);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Step variables
+        if sequential {
+            // do*: evaluate and update sequentially
+            for (var_name, _current_val, step_form) in &var_bindings {
+                if let Some(step) = step_form {
+                    let new_val = eval_with_env(step, &mut loop_env)?;
+                    loop_env.insert(var_name.clone(), new_val);
+                }
+            }
+        } else {
+            // do: evaluate all steps in parallel then update
+            let mut new_values = Vec::new();
+            for (var_name, _current_val, step_form) in &var_bindings {
+                let new_val = if let Some(step) = step_form {
+                    eval_with_env(step, &mut loop_env)?
+                } else {
+                    loop_env.get(var_name).cloned().unwrap_or(EvalResult::Nil)
+                };
+                new_values.push((var_name.clone(), new_val));
+            }
+            // Update all variables at once
+            for (var_name, new_val) in new_values {
+                loop_env.insert(var_name, new_val);
+            }
+        }
+    }
+}
+
+pub(super) fn decode_return_value(encoded: String) -> Result<EvalResult, String> {
+    if encoded == "RETURN:NIL" {
+        Ok(EvalResult::Nil)
+    } else if encoded.starts_with("RETURN:FIXNUM:") {
+        let num_str = &encoded[14..];
+        num_str.parse::<i64>()
+            .map(EvalResult::Fixnum)
+            .map_err(|_| "Failed to parse return fixnum".to_string())
+    } else if encoded.starts_with("RETURN:FLOAT:") {
+        let num_str = &encoded[13..];
+        num_str.parse::<f64>()
+            .map(EvalResult::Float)
+            .map_err(|_| "Failed to parse return float".to_string())
+    } else if encoded.starts_with("RETURN:BOOL:") {
+        let bool_str = &encoded[12..];
+        Ok(if bool_str == "true" {
+            EvalResult::Bool(true)
+        } else {
+            EvalResult::Nil
+        })
+    } else if encoded.starts_with("RETURN:STRING:") {
+        let s = &encoded[14..];
+        Ok(EvalResult::String(s.to_string()))
+    } else if encoded.starts_with("RETURN:SYMBOL:") {
+        let s = &encoded[14..];
+        Ok(EvalResult::Symbol(s.to_string()))
+    } else if encoded == "RETURN:CONS" || encoded == "RETURN:LAMBDA" || encoded == "RETURN:COMPLEX" {
+        // Get from thread-local storage
+        RETURN_VALUE.with(|rv| {
+            rv.borrow_mut().take().ok_or("No return value in storage".to_string())
+        })
+    } else {
+        Err(format!("Unknown return encoding: {}", encoded))
+    }
+}
+
+pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (dolist (var list-form result-form) body...)
+    if args.is_empty() {
+        return Err("dolist requires at least 1 argument".to_string());
+    }
+
+    // Parse the iteration spec: (var list-form result-form?)
+    let spec = &args[0];
+    let spec_parts = match spec {
+        ASTNode::Call { function, args: spec_args } => {
+            let mut parts = vec![*function.clone()];
+            parts.extend(spec_args.clone());
+            parts
+        }
+        _ => return Err("dolist spec must be a list".to_string()),
+    };
+
+    if spec_parts.len() < 2 || spec_parts.len() > 3 {
+        return Err("dolist spec must have 2 or 3 elements: (var list-form [result-form])".to_string());
+    }
+
+    let var_name = match &spec_parts[0] {
+        ASTNode::Variable(name) => name.clone(),
+        _ => return Err("dolist variable must be a symbol".to_string()),
+    };
+
+    let list_form = &spec_parts[1];
+    let result_form = spec_parts.get(2);
+    let body_forms = &args[1..];
+
+    // Evaluate the list form
+    let list_val = eval_with_env(list_form, env)?;
+
+    // Save old value of var (if it exists)
+    let old_val = env.get(&var_name).cloned();
+
+    // Iterate over the list
+    let mut current = list_val;
+    let mut iteration_count = 0;
+    loop {
+        iteration_count += 1;
+        if iteration_count > 10000 {
+            return Err("dolist: exceeded maximum iterations (possible infinite loop)".to_string());
+        }
+
+        // Extract current element and next before match
+        let (elem, next) = match &current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                (car.borrow().clone(), cdr.borrow().clone())
+            }
+            _ => return Err("dolist list must be a proper list".to_string()),
+        };
+
+        // Bind var to current element
+        env.insert(var_name.clone(), elem);
+
+        // Execute body forms
+        for form in body_forms {
+            match eval_with_env(form, env) {
+                Ok(_) => {},
+                Err(e) if e.starts_with("RETURN:") => {
+                    // Restore old value and return
+                    if let Some(val) = old_val {
+                        env.insert(var_name.clone(), val);
+                    } else {
+                        env.remove(&var_name);
+                    }
+                    return decode_return_value(e);
+                }
+                Err(e) => {
+                    // Restore old value before propagating error
+                    if let Some(val) = old_val {
+                        env.insert(var_name.clone(), val);
+                    } else {
+                        env.remove(&var_name);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Move to next element
+        current = next;
+    }
+
+    // Set var to nil after iteration (Common Lisp spec)
+    env.insert(var_name.clone(), EvalResult::Nil);
+
+    // Evaluate result form if provided
+    let result = if let Some(form) = result_form {
+        eval_with_env(form, env)?
+    } else {
+        EvalResult::Nil
+    };
+
+    // Restore old value of var
+    if let Some(val) = old_val {
+        env.insert(var_name, val);
+    } else {
+        env.remove(&var_name);
+    }
+
+    Ok(result)
+}
+
+pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (dotimes (var count-form result-form) body...)
+    if args.is_empty() {
+        return Err("dotimes requires at least 1 argument".to_string());
+    }
+
+    // Parse the iteration spec: (var count-form result-form?)
+    let spec = &args[0];
+    let spec_parts = match spec {
+        ASTNode::Call { function, args: spec_args } => {
+            let mut parts = vec![*function.clone()];
+            parts.extend(spec_args.clone());
+            parts
+        }
+        _ => return Err("dotimes spec must be a list".to_string()),
+    };
+
+    if spec_parts.len() < 2 || spec_parts.len() > 3 {
+        return Err("dotimes spec must have 2 or 3 elements: (var count-form [result-form])".to_string());
+    }
+
+    let var_name = match &spec_parts[0] {
+        ASTNode::Variable(name) => name.clone(),
+        _ => return Err("dotimes variable must be a symbol".to_string()),
+    };
+
+    let count_form = &spec_parts[1];
+    let result_form = spec_parts.get(2);
+    let body_forms = &args[1..];
+
+    // Evaluate the count form
+    let count_val = eval_with_env(count_form, env)?;
+    let count = match count_val {
+        EvalResult::Fixnum(n) if n >= 0 => n as usize,
+        EvalResult::Fixnum(n) => return Err(format!("dotimes count must be non-negative, got {}", n)),
+        _ => return Err("dotimes count must be a fixnum".to_string()),
+    };
+
+    // Save old value of var (if it exists)
+    let old_val = env.get(&var_name).cloned();
+
+    // Iterate from 0 to count-1
+    for i in 0..count {
+        // Bind var to current index
+        env.insert(var_name.clone(), EvalResult::Fixnum(i as i64));
+
+        // Execute body forms
+        for form in body_forms {
+            match eval_with_env(form, env) {
+                Ok(_) => {},
+                Err(e) if e.starts_with("RETURN:") => {
+                    // Restore old value and return
+                    if let Some(val) = old_val {
+                        env.insert(var_name.clone(), val);
+                    } else {
+                        env.remove(&var_name);
+                    }
+                    return decode_return_value(e);
+                }
+                Err(e) => {
+                    // Restore old value before propagating error
+                    if let Some(val) = old_val {
+                        env.insert(var_name.clone(), val);
+                    } else {
+                        env.remove(&var_name);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    // Set var to count after iteration (Common Lisp spec)
+    env.insert(var_name.clone(), EvalResult::Fixnum(count as i64));
+
+    // Evaluate result form if provided
+    let result = if let Some(form) = result_form {
+        eval_with_env(form, env)?
+    } else {
+        EvalResult::Nil
+    };
+
+    // Restore old value of var
+    if let Some(val) = old_val {
+        env.insert(var_name, val);
+    } else {
+        env.remove(&var_name);
+    }
+
+    Ok(result)
+}
+
+pub(super) fn eval_prog1(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (prog1 first-form other-forms...)
+    // Evaluates all forms in sequence, returns the value of the first form
+    if args.is_empty() {
+        return Err("prog1 requires at least 1 argument".to_string());
+    }
+
+    let first_result = eval_with_env(&args[0], env)?;
+
+    // Evaluate remaining forms for side effects
+    for form in &args[1..] {
+        eval_with_env(form, env)?;
+    }
+
+    Ok(first_result)
+}
+
+pub(super) fn eval_prog2(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (prog2 first-form second-form other-forms...)
+    // Evaluates all forms in sequence, returns the value of the second form
+    if args.len() < 2 {
+        return Err("prog2 requires at least 2 arguments".to_string());
+    }
+
+    // Evaluate first form for side effects
+    eval_with_env(&args[0], env)?;
+
+    // Evaluate second form and save result
+    let second_result = eval_with_env(&args[1], env)?;
+
+    // Evaluate remaining forms for side effects
+    for form in &args[2..] {
+        eval_with_env(form, env)?;
+    }
+
+    Ok(second_result)
+}

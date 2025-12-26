@@ -1,0 +1,490 @@
+//! CLOS (Common Lisp Object System) Runtime Support
+
+use rlasp_runtime::LispObject;
+use std::sync::Mutex;
+use std::collections::HashMap;
+
+//============================================================================
+// Data Structures
+//============================================================================
+
+/// Class definition with slots and superclasses
+#[derive(Clone)]
+struct ClassDef {
+    name: String,
+    slots: Vec<SlotDef>,
+    superclasses: Vec<String>,
+}
+
+/// Slot definition with initialization and access options
+#[derive(Clone)]
+struct SlotDef {
+    name: String,
+    initarg: Option<String>,
+    initform: Option<usize>,  // LispObject raw value
+    accessor: Option<String>,
+    reader: Option<String>,
+    writer: Option<String>,
+}
+
+/// Generic function with multiple methods
+struct GenericFunction {
+    name: String,
+    methods: Vec<Method>,
+}
+
+/// Method with specializers and implementation
+struct Method {
+    specializers: Vec<String>,  // Class names for each parameter
+    function_ptr: usize,  // Address of compiled method
+    arity: usize,
+}
+
+//============================================================================
+// Global Registries
+//============================================================================
+
+/// Global class registry
+static mut CLASS_REGISTRY: Option<Mutex<HashMap<String, ClassDef>>> = None;
+
+fn get_class_registry() -> &'static Mutex<HashMap<String, ClassDef>> {
+    unsafe {
+        CLASS_REGISTRY.get_or_insert_with(|| Mutex::new(HashMap::new()))
+    }
+}
+
+/// Generic function registry
+static mut GENERIC_REGISTRY: Option<Mutex<HashMap<String, GenericFunction>>> = None;
+
+fn get_generic_registry() -> &'static Mutex<HashMap<String, GenericFunction>> {
+    unsafe {
+        GENERIC_REGISTRY.get_or_insert_with(|| Mutex::new(HashMap::new()))
+    }
+}
+
+//============================================================================
+// Runtime Functions
+//============================================================================
+
+/// Define a class with slots and superclasses
+/// Instance representation: (class-name . slot-values-alist)
+/// where slot-values-alist is ((slot-name . value) ...)
+#[no_mangle]
+pub extern "C" fn cc_defclass(name: usize, slots: usize, superclasses: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(name) };
+    let class_name = extract_symbol_name(name_obj);
+
+    // Parse slots list
+    let mut slot_defs = Vec::new();
+    let mut current = unsafe { LispObject::from_raw(slots) };
+
+    while let Some(cons_ptr) = current.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        let slot_spec = cons.car();
+
+        // slot_spec can be: symbol (simple slot) or (name . options)
+        if let Some(sym_name) = slot_spec.as_symbol_name() {
+            // Simple slot
+            slot_defs.push(SlotDef {
+                name: sym_name.to_string(),
+                initarg: None,
+                initform: None,
+                accessor: None,
+                reader: None,
+                writer: None,
+            });
+        } else if let Some(spec_cons) = slot_spec.as_cons_ptr() {
+            // Complex slot: (slot-name :initarg :x :accessor x ...)
+            let spec_cons_ref = unsafe { &*spec_cons };
+            let slot_name_obj = spec_cons_ref.car();
+            let slot_name = extract_symbol_name(slot_name_obj);
+
+            let mut slot_def = SlotDef {
+                name: slot_name.clone(),
+                initarg: None,
+                initform: None,
+                accessor: None,
+                reader: None,
+                writer: None,
+            };
+
+            // Parse slot options
+            let mut opts = spec_cons_ref.cdr();
+            while let Some(opt_cons) = opts.as_cons_ptr() {
+                let opt_cons_ref = unsafe { &*opt_cons };
+                let key = opt_cons_ref.car();
+
+                if let Some(key_name) = key.as_symbol_name() {
+                    // Get the next item (value)
+                    if let Some(rest_cons) = opt_cons_ref.cdr().as_cons_ptr() {
+                        let rest_cons_ref = unsafe { &*rest_cons };
+                        let value = rest_cons_ref.car();
+
+                        match key_name {
+                            ":initarg" => {
+                                slot_def.initarg = value.as_symbol_name().map(|s| s.to_string());
+                            }
+                            ":accessor" => {
+                                slot_def.accessor = value.as_symbol_name().map(|s| s.to_string());
+                            }
+                            ":reader" => {
+                                slot_def.reader = value.as_symbol_name().map(|s| s.to_string());
+                            }
+                            ":writer" => {
+                                slot_def.writer = value.as_symbol_name().map(|s| s.to_string());
+                            }
+                            ":initform" => {
+                                slot_def.initform = Some(value.raw());
+                            }
+                            _ => {}
+                        }
+
+                        opts = rest_cons_ref.cdr();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            slot_defs.push(slot_def);
+        }
+
+        current = cons.cdr();
+    }
+
+    // Parse superclasses
+    let mut super_names = Vec::new();
+    let mut super_current = unsafe { LispObject::from_raw(superclasses) };
+    while let Some(super_cons) = super_current.as_cons_ptr() {
+        let super_cons_ref = unsafe { &*super_cons };
+        let super_name_obj = super_cons_ref.car();
+        if let Some(sn) = super_name_obj.as_symbol_name() {
+            super_names.push(sn.to_string());
+        }
+        super_current = super_cons_ref.cdr();
+    }
+
+    // Register class
+    let mut registry = get_class_registry().lock().unwrap();
+    registry.insert(class_name.clone(), ClassDef {
+        name: class_name.clone(),
+        slots: slot_defs,
+        superclasses: super_names,
+    });
+
+    // Return the class name as a symbol
+    name
+}
+
+/// Define a generic function
+#[no_mangle]
+pub extern "C" fn cc_defgeneric(name: usize, _lambda_list: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(name) };
+    let func_name = extract_symbol_name(name_obj);
+
+    let mut registry = get_generic_registry().lock().unwrap();
+    registry.entry(func_name.clone()).or_insert_with(|| GenericFunction {
+        name: func_name,
+        methods: Vec::new(),
+    });
+
+    name
+}
+
+/// Add a method to a generic function
+#[no_mangle]
+pub extern "C" fn cc_defmethod(generic_name: usize, specializers: usize, function_ptr: usize, arity: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(generic_name) };
+    let func_name = extract_symbol_name(name_obj);
+
+    // Parse specializers list
+    let mut spec_names = Vec::new();
+    let mut current = unsafe { LispObject::from_raw(specializers) };
+    while let Some(cons_ptr) = current.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        let spec = cons.car();
+        if let Some(sn) = spec.as_symbol_name() {
+            spec_names.push(sn.to_string());
+        } else {
+            spec_names.push("T".to_string());  // T means any type
+        }
+        current = cons.cdr();
+    }
+
+    let mut registry = get_generic_registry().lock().unwrap();
+    if let Some(gf) = registry.get_mut(&func_name) {
+        gf.methods.push(Method {
+            specializers: spec_names,
+            function_ptr,
+            arity,
+        });
+    } else {
+        // Create generic function if it doesn't exist
+        registry.insert(func_name.clone(), GenericFunction {
+            name: func_name,
+            methods: vec![Method {
+                specializers: spec_names,
+                function_ptr,
+                arity,
+            }],
+        });
+    }
+
+    generic_name
+}
+
+/// Make an instance of a class with initargs
+#[no_mangle]
+pub extern "C" fn cc_make_instance(class_name: usize, initargs: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(class_name) };
+    let class_name_str = extract_symbol_name(name_obj);
+
+    let registry = get_class_registry().lock().unwrap();
+    if let Some(class_def) = registry.get(&class_name_str) {
+        // Create slot values alist
+        let mut slot_values = LispObject::nil();
+
+        // Initialize slots
+        let initargs_obj = unsafe { LispObject::from_raw(initargs) };
+
+        for slot in &class_def.slots {
+            let mut value = if let Some(ref initform) = slot.initform {
+                unsafe { LispObject::from_raw(*initform) }
+            } else {
+                LispObject::nil()
+            };
+
+            // Check if initarg is provided
+            if let Some(ref initarg_name) = slot.initarg {
+                let mut ia_current = initargs_obj;
+                while let Some(ia_cons) = ia_current.as_cons_ptr() {
+                    let ia_cons_ref = unsafe { &*ia_cons };
+                    let key = ia_cons_ref.car();
+
+                    if let Some(key_name) = key.as_symbol_name() {
+                        let clean_key = key_name.trim_start_matches(':');
+                        let clean_initarg = initarg_name.trim_start_matches(':');
+
+                        if clean_key == clean_initarg {
+                            // Get the value
+                            if let Some(rest_cons) = ia_cons_ref.cdr().as_cons_ptr() {
+                                let rest_cons_ref = unsafe { &*rest_cons };
+                                value = rest_cons_ref.car();
+                                break;
+                            }
+                        }
+                    }
+
+                    // Skip to next pair
+                    if let Some(rest_cons) = ia_cons_ref.cdr().as_cons_ptr() {
+                        let rest_cons_ref = unsafe { &*rest_cons };
+                        ia_current = rest_cons_ref.cdr();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Add to slot values: (slot-name . value)
+            let slot_name_sym = LispObject::symbol(&slot.name);
+            let pair = LispObject::cons(slot_name_sym, value);
+            slot_values = LispObject::cons(pair, slot_values);
+        }
+
+        // Instance representation: (class-name . slot-values-alist)
+        let class_sym = LispObject::symbol(&class_name_str);
+        let instance = LispObject::cons(class_sym, slot_values);
+
+        instance.raw()
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// Get slot value from an instance
+#[no_mangle]
+pub extern "C" fn cc_slot_value(instance: usize, slot_name: usize) -> usize {
+    let inst_obj = unsafe { LispObject::from_raw(instance) };
+    let slot_name_obj = unsafe { LispObject::from_raw(slot_name) };
+    let slot_name_str = extract_symbol_name(slot_name_obj);
+
+    // Instance is (class-name . slot-values-alist)
+    if let Some(inst_cons) = inst_obj.as_cons_ptr() {
+        let inst_cons_ref = unsafe { &*inst_cons };
+        let slot_alist = inst_cons_ref.cdr();
+
+        // Search in alist
+        let mut current = slot_alist;
+        while let Some(cons_ptr) = current.as_cons_ptr() {
+            let cons = unsafe { &*cons_ptr };
+            let pair = cons.car();
+
+            if let Some(pair_cons) = pair.as_cons_ptr() {
+                let pair_ref = unsafe { &*pair_cons };
+                let sn = pair_ref.car();
+
+                if let Some(sn_str) = sn.as_symbol_name() {
+                    if sn_str == slot_name_str {
+                        return pair_ref.cdr().raw();
+                    }
+                }
+            }
+
+            current = cons.cdr();
+        }
+    }
+
+    LispObject::nil().raw()
+}
+
+/// Set slot value in an instance (mutating)
+#[no_mangle]
+pub extern "C" fn cc_set_slot_value(instance: usize, slot_name: usize, new_value: usize) -> usize {
+    let inst_obj = unsafe { LispObject::from_raw(instance) };
+    let slot_name_obj = unsafe { LispObject::from_raw(slot_name) };
+    let slot_name_str = extract_symbol_name(slot_name_obj);
+    let new_val_obj = unsafe { LispObject::from_raw(new_value) };
+
+    // Instance is (class-name . slot-values-alist)
+    if let Some(inst_cons) = inst_obj.as_cons_ptr() {
+        let inst_cons_ref = unsafe { &*inst_cons };
+        let slot_alist = inst_cons_ref.cdr();
+
+        // Search in alist and update
+        let mut current = slot_alist;
+        while let Some(cons_ptr) = current.as_cons_ptr() {
+            let cons = unsafe { &*cons_ptr };
+            let pair = cons.car();
+
+            if let Some(pair_cons) = pair.as_cons_ptr() {
+                let pair_ref = unsafe { &mut *(pair_cons as *const _ as *mut rlasp_runtime::Cons) };
+                let sn = pair_ref.car();
+
+                if let Some(sn_str) = sn.as_symbol_name() {
+                    if sn_str == slot_name_str {
+                        pair_ref.set_cdr(new_val_obj);
+                        return new_value;
+                    }
+                }
+            }
+
+            current = cons.cdr();
+        }
+    }
+
+    new_value
+}
+
+/// Call a generic function with method dispatch
+#[no_mangle]
+pub extern "C" fn cc_call_generic(generic_name: usize, args_and_env: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(generic_name) };
+    let func_name = extract_symbol_name(name_obj);
+
+    let registry = get_generic_registry().lock().unwrap();
+    if let Some(gf) = registry.get(&func_name) {
+        // Get argument types for dispatch
+        let args_obj = unsafe { LispObject::from_raw(args_and_env) };
+        let mut arg_types = Vec::new();
+        let mut current = args_obj;
+
+        while let Some(cons_ptr) = current.as_cons_ptr() {
+            let cons = unsafe { &*cons_ptr };
+            let arg = cons.car();
+
+            // Determine the type of this argument
+            let arg_type = get_object_class_name(arg);
+            arg_types.push(arg_type);
+
+            current = cons.cdr();
+        }
+
+        // Find matching method (simple method dispatch)
+        for method in &gf.methods {
+            if method.specializers.len() == arg_types.len() {
+                let mut matches = true;
+                for (spec, arg_type) in method.specializers.iter().zip(arg_types.iter()) {
+                    if spec != "T" && spec != arg_type {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if matches {
+                    // Call the method
+                    unsafe {
+                        let f: extern "C" fn(usize) -> usize = std::mem::transmute(method.function_ptr);
+                        return f(args_and_env);
+                    }
+                }
+            }
+        }
+    }
+
+    LispObject::nil().raw()
+}
+
+//============================================================================
+// Helper Functions
+//============================================================================
+
+/// Extract symbol name from LispObject
+fn extract_symbol_name(obj: LispObject) -> String {
+    if let Some(name) = obj.as_symbol_name() {
+        name.to_string()
+    } else if let Some(cons_ptr) = obj.as_cons_ptr() {
+        // Try as cons (for quoted symbols)
+        let cons = unsafe { &*cons_ptr };
+        if let Some(name) = cons.car().as_symbol_name() {
+            return name.to_string();
+        }
+        "UNKNOWN".to_string()
+    } else {
+        "UNKNOWN".to_string()
+    }
+}
+
+/// Get the class name of an object for method dispatch
+fn get_object_class_name(obj: LispObject) -> String {
+    // Check if it's a CLOS instance
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        let car = cons.car();
+
+        if let Some(class_name) = car.as_symbol_name() {
+            let class_registry = get_class_registry().lock().unwrap();
+            if class_registry.contains_key(class_name) {
+                return class_name.to_string();
+            }
+        }
+    }
+
+    // Otherwise return built-in type
+    if obj.is_fixnum() {
+        "FIXNUM".to_string()
+    } else if obj.is_float() {
+        "FLOAT".to_string()
+    } else if obj.as_cons_ptr().is_some() {
+        "CONS".to_string()
+    } else if obj.as_symbol_name().is_some() {
+        "SYMBOL".to_string()
+    } else {
+        "T".to_string()
+    }
+}
+
+/// Get class definition for accessor generation
+#[no_mangle]
+pub extern "C" fn cc_get_class_def(class_name: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(class_name) };
+    let class_name_str = extract_symbol_name(name_obj);
+
+    let registry = get_class_registry().lock().unwrap();
+    if registry.contains_key(&class_name_str) {
+        LispObject::t().raw()
+    } else {
+        LispObject::nil().raw()
+    }
+}

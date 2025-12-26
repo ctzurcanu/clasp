@@ -1,0 +1,17 @@
+[package]
+name = "rlasp-jit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rlasp-runtime = { path = "../rlasp-runtime" }
+rlasp-ffi = { path = "../rlasp-ffi" }
+rlasp-reader = { path = "../rlasp-reader" }
+inkwell = { workspace = true }
+llvm-sys = { workspace = true }
+num-bigint = { workspace = true }
+num-rational = { workspace = true }
+
+[lib]
+name = "rlasp_jit"
+path = "src/lib.rs"

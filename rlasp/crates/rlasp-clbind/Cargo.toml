@@ -1,0 +1,10 @@
+[package]
+name = "rlasp-clbind"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[lib]
+name = "rlasp_clbind"
+path = "src/lib.rs"

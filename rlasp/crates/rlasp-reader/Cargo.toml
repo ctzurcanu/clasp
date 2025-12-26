@@ -1,0 +1,12 @@
+[package]
+name = "rlasp-reader"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rlasp-runtime = { path = "../rlasp-runtime" }
+thiserror = { workspace = true }
+
+[dev-dependencies]

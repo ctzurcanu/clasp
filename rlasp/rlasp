@@ -1,0 +1,10 @@
+#!/bin/bash
+# Wrapper script for running rlasp with JIT by default
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# If first argument is a file that exists, add --mode llvm automatically
+if [ -f "$1" ] && [ "$1" != "--help" ] && [ "$1" != "-h" ]; then
+    PKG_CONFIG_PATH="/opt/homebrew/opt/libffi/lib/pkgconfig:$PKG_CONFIG_PATH" exec "$SCRIPT_DIR/target/release/irlasp" --mode llvm "$@"
+else
+    PKG_CONFIG_PATH="/opt/homebrew/opt/libffi/lib/pkgconfig:$PKG_CONFIG_PATH" exec "$SCRIPT_DIR/target/release/irlasp" "$@"
+fi

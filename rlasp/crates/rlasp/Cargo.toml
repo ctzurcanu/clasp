@@ -1,0 +1,32 @@
+[package]
+name = "rlasp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Internal crates
+rlasp-runtime = { path = "../rlasp-runtime" }
+rlasp-ffi = { path = "../rlasp-ffi" }
+rlasp-macros = { path = "../rlasp-macros" }
+rlasp-reader = { path = "../rlasp-reader" }
+rlasp-compiler = { path = "../rlasp-compiler" }
+rlasp-jit = { path = "../rlasp-jit" }
+
+# Workspace dependencies
+libffi = { workspace = true }
+libloading = { workspace = true }
+libc = { workspace = true }
+cxx = { workspace = true }
+lazy_static = { workspace = true }
+atty = { workspace = true }
+inkwell = { workspace = true }
+llvm-sys = { workspace = true }
+
+[build-dependencies]
+cc = "1.0"
+cxx-build = "1.0"
+
+[lib]
+name = "rlasp"
+crate-type = ["cdylib", "staticlib", "rlib"]
+path = "src/lib.rs"

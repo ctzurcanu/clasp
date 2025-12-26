@@ -1,0 +1,1025 @@
+/// System and utility functions for the evaluator
+
+use super::eval_types::{EvalResult, GENSYM_COUNTER, structural_equal};
+use super::eval_core::eval_with_env;
+use crate::ir::{ASTNode, ConstantValue};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+pub(super) fn eval_funcall(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("funcall requires at least 1 argument (function)".to_string());
+    }
+
+    // Evaluate the function
+    let func = eval_with_env(&args[0], env)?;
+
+    // Evaluate all other arguments
+    let mut eval_args = Vec::new();
+    for arg in &args[1..] {
+        eval_args.push(eval_with_env(arg, env)?);
+    }
+
+    // Call the function
+    match func {
+        EvalResult::Lambda { params, defaults, body, env: closure_env } => {
+            eval_lambda_call_with_values(params, body, closure_env, &eval_args, env)
+        }
+        EvalResult::Symbol(name) => {
+            // Look up the function by name
+            if let Some(EvalResult::Lambda { params, defaults, body, env: closure_env }) = env.get(&name).cloned() {
+                eval_lambda_call_with_values(params, body, closure_env, &eval_args, env)
+            } else {
+                // Try calling as a built-in function with pre-evaluated arguments
+                call_built_in_with_values(&name, &eval_args, env)
+            }
+        }
+        _ => Err("funcall: first argument must be a function".to_string()),
+    }
+}
+
+pub(super) fn eval_apply(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("apply requires at least 2 arguments (function arg-list)".to_string());
+    }
+
+    // Evaluate the function
+    let func = eval_with_env(&args[0], env)?;
+
+    // Evaluate all but the last argument
+    let mut eval_args = Vec::new();
+    for arg in &args[1..args.len()-1] {
+        eval_args.push(eval_with_env(arg, env)?);
+    }
+
+    // Evaluate the last argument (should be a list)
+    let last_arg = eval_with_env(&args[args.len()-1], env)?;
+
+    // Convert the list to a vector of values
+    let mut current = last_arg;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                eval_args.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("apply: last argument must be a list".to_string()),
+        }
+    }
+
+    // Call the function
+    match func {
+        EvalResult::Lambda { params, defaults, body, env: closure_env } => {
+            eval_lambda_call_with_values(params, body, closure_env, &eval_args, env)
+        }
+        EvalResult::Symbol(name) => {
+            // Try looking up as a user-defined function first
+            if let Some(EvalResult::Lambda { params, defaults, body, env: closure_env }) = env.get(&name).cloned() {
+                eval_lambda_call_with_values(params, body, closure_env, &eval_args, env)
+            } else {
+                // Try calling as a built-in function
+                // Convert eval_args back to ASTNodes
+                let ast_args: Result<Vec<ASTNode>, String> = eval_args.iter()
+                    .map(result_to_ast)
+                    .collect();
+                let ast_args = ast_args?;
+                let func_node = ASTNode::Variable(name.clone());
+                eval_with_env(&ASTNode::Call {
+                    function: Box::new(func_node),
+                    args: ast_args,
+                }, env)
+            }
+        }
+        _ => Err("apply: first argument must be a function".to_string()),
+    }
+}
+
+pub(super) fn eval_apply_key(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 2 {
+        return Err("apply-key requires 2 arguments (key element)".to_string());
+    }
+
+    let key = eval_with_env(&args[0], env)?;
+    let element = eval_with_env(&args[1], env)?;
+
+    // If key is nil, return element unchanged
+    // Otherwise, apply key function to element
+    match key {
+        EvalResult::Nil => Ok(element),
+        EvalResult::Lambda { params, defaults, body, env: closure_env } => {
+            eval_lambda_call_with_values(params, body, closure_env, &[element], env)
+        }
+        EvalResult::Symbol(name) => {
+            // Try looking up as a user-defined function first
+            if let Some(EvalResult::Lambda { params, defaults, body, env: closure_env }) = env.get(&name).cloned() {
+                eval_lambda_call_with_values(params, body, closure_env, &[element], env)
+            } else {
+                // Try calling as a built-in function
+                let element_ast = result_to_ast(&element)?;
+                let func_node = ASTNode::Variable(name.clone());
+                eval_with_env(&ASTNode::Call {
+                    function: Box::new(func_node),
+                    args: vec![element_ast],
+                }, env)
+            }
+        }
+        _ => Err("apply-key: key must be a function or nil".to_string()),
+    }
+}
+
+pub(super) fn eval_lambda_call_with_values(
+    params: Vec<String>,
+    body: Vec<ASTNode>,
+    mut closure_env: HashMap<String, EvalResult>,
+    args: &[EvalResult],
+    _call_env: &mut HashMap<String, EvalResult>
+) -> Result<EvalResult, String> {
+    // Check for &rest parameter
+    let mut rest_pos = None;
+    for (i, param) in params.iter().enumerate() {
+        if param == "&rest" {
+            rest_pos = Some(i);
+            break;
+        }
+    }
+
+    if let Some(rest_idx) = rest_pos {
+        // Handle &rest parameters
+        let required_params = &params[..rest_idx];
+        if args.len() < required_params.len() {
+            return Err(format!("Function requires at least {} arguments, got {}", required_params.len(), args.len()));
+        }
+        let rest_param = &params[rest_idx + 1];
+
+        // Bind required parameters
+        for (param, arg) in required_params.iter().zip(args.iter()) {
+            closure_env.insert(param.clone(), arg.clone());
+        }
+
+        // Bind rest parameter to list of remaining arguments
+        let mut rest_list = EvalResult::Nil;
+        for arg in args[required_params.len()..].iter().rev() {
+            rest_list = EvalResult::Cons(
+                Rc::new(RefCell::new(arg.clone())),
+                Rc::new(RefCell::new(rest_list))
+            );
+        }
+        closure_env.insert(rest_param.clone(), rest_list);
+    } else {
+        // Normal parameters
+        if args.len() != params.len() {
+            return Err(format!("Function requires {} arguments, got {}", params.len(), args.len()));
+        }
+        for (param, arg) in params.iter().zip(args.iter()) {
+            closure_env.insert(param.clone(), arg.clone());
+        }
+    }
+
+    // Evaluate body
+    let mut result = EvalResult::Nil;
+    for expr in &body {
+        result = eval_with_env(expr, &mut closure_env)?;
+    }
+
+    Ok(result)
+}
+
+pub(super) fn eval_error(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("Error".to_string());
+    }
+
+    let msg = eval_with_env(&args[0], env)?;
+    let error_msg = match msg {
+        EvalResult::String(s) => s,
+        EvalResult::Symbol(s) => s,
+        _ => format!("{:?}", msg),
+    };
+
+    Err(error_msg)
+}
+
+pub(super) fn eval_eval(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("eval requires 1 argument".to_string());
+    }
+
+    let quoted = eval_with_env(&args[0], env)?;
+    let ast = result_to_ast(&quoted)?;
+    eval_with_env(&ast, env)
+}
+
+pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
+    match result {
+        EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
+        EvalResult::Float(f) => Ok(ASTNode::float(*f)),
+        EvalResult::Bool(true) => Ok(ASTNode::t()),
+        EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
+        EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
+        EvalResult::Symbol(name) => Ok(ASTNode::variable(name.clone())),
+        EvalResult::Cons(car, cdr) => {
+            let car_ast = result_to_ast(&car.borrow())?;
+            let cdr_list = cons_to_list(&cdr.borrow())?;
+
+            // Check if this is a special form that needs special AST node
+            if let ASTNode::Variable(name) = &car_ast {
+                match name.as_str() {
+                    "if" => {
+                        // (if test then else)
+                        if cdr_list.len() == 3 {
+                            return Ok(ASTNode::If {
+                                test: Box::new(cdr_list[0].clone()),
+                                then_branch: Box::new(cdr_list[1].clone()),
+                                else_branch: Box::new(cdr_list[2].clone()),
+                            });
+                        } else if cdr_list.len() == 2 {
+                            return Ok(ASTNode::If {
+                                test: Box::new(cdr_list[0].clone()),
+                                then_branch: Box::new(cdr_list[1].clone()),
+                                else_branch: Box::new(ASTNode::nil()),
+                            });
+                        }
+                    }
+                    "setq" => {
+                        // (setq var val)
+                        if cdr_list.len() == 2 {
+                            if let ASTNode::Variable(var_name) = &cdr_list[0] {
+                                return Ok(ASTNode::Setq {
+                                    var: var_name.clone(),
+                                    value: Box::new(cdr_list[1].clone()),
+                                });
+                            }
+                        }
+                    }
+                    "progn" => {
+                        return Ok(ASTNode::Progn { exprs: cdr_list });
+                    }
+                    "quote" => {
+                        if cdr_list.len() == 1 {
+                            return Ok(ASTNode::Quote(Box::new(cdr_list[0].clone())));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Default: treat as function call
+            Ok(ASTNode::Call {
+                function: Box::new(car_ast),
+                args: cdr_list,
+            })
+        }
+        EvalResult::Lambda { params, body, .. } => {
+            Ok(ASTNode::Lambda {
+                params: params.clone(),
+                body: body.clone(),
+            })
+        }
+        EvalResult::Macro { params, body } => {
+            Ok(ASTNode::Macro {
+                params: params.clone(),
+                body: body.clone(),
+            })
+        }
+        _ => Err(format!("Cannot convert {:?} to AST", result)),
+    }
+}
+
+pub(super) fn cons_to_list(result: &EvalResult) -> Result<Vec<ASTNode>, String> {
+    match result {
+        EvalResult::Nil => Ok(vec![]),
+        EvalResult::Cons(car, cdr) => {
+            let mut list = vec![result_to_ast(&car.borrow())?];
+            list.extend(cons_to_list(&cdr.borrow())?);
+            Ok(list)
+        }
+        other => {
+            Ok(vec![result_to_ast(other)?])
+        }
+    }
+}
+
+pub(super) fn eval_eql(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 2 {
+        return Err("eql requires 2 arguments".to_string());
+    }
+
+    let first = eval_with_env(&args[0], env)?;
+    let second = eval_with_env(&args[1], env)?;
+
+    match (&first, &second) {
+        (EvalResult::Cons(car1, cdr1), EvalResult::Cons(car2, cdr2)) => {
+            if Rc::ptr_eq(car1, car2) && Rc::ptr_eq(cdr1, cdr2) {
+                Ok(EvalResult::Bool(true))
+            } else {
+                Ok(EvalResult::Nil)
+            }
+        }
+        _ => {
+            if structural_equal(&first, &second) {
+                Ok(EvalResult::Bool(true))
+            } else {
+                Ok(EvalResult::Nil)
+            }
+        }
+    }
+}
+
+pub(super) fn eval_equal(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 2 {
+        return Err("equal requires 2 arguments".to_string());
+    }
+
+    let first = eval_with_env(&args[0], env)?;
+    let second = eval_with_env(&args[1], env)?;
+
+    if deep_equal(&first, &second) {
+        Ok(EvalResult::Bool(true))
+    } else {
+        Ok(EvalResult::Nil)
+    }
+}
+
+// Deep equality comparison for equal function
+fn deep_equal(a: &EvalResult, b: &EvalResult) -> bool {
+    match (a, b) {
+        (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
+        (EvalResult::Float(a), EvalResult::Float(b)) => a == b,
+        (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Nil, EvalResult::Nil) => true,
+        (EvalResult::String(a), EvalResult::String(b)) => a == b,
+        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
+        (EvalResult::Cons(car1, cdr1), EvalResult::Cons(car2, cdr2)) => {
+            deep_equal(&car1.borrow(), &car2.borrow()) && deep_equal(&cdr1.borrow(), &cdr2.borrow())
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn eval_stringp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("stringp requires 1 argument".to_string());
+    }
+    match eval_with_env(&args[0], env)? {
+        EvalResult::String(_) => Ok(EvalResult::Bool(true)),
+        _ => Ok(EvalResult::Nil),
+    }
+}
+
+pub(super) fn eval_symbolp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("symbolp requires 1 argument".to_string());
+    }
+    match eval_with_env(&args[0], env)? {
+        EvalResult::Symbol(_) => Ok(EvalResult::Bool(true)),
+        _ => Ok(EvalResult::Nil),
+    }
+}
+
+pub(super) fn eval_gensym(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() > 1 {
+        return Err("gensym requires 0 or 1 arguments".to_string());
+    }
+
+    let prefix = if args.is_empty() {
+        "G".to_string()
+    } else {
+        match eval_with_env(&args[0], env)? {
+            EvalResult::String(s) => s,
+            EvalResult::Symbol(s) => s,
+            _ => return Err("gensym argument must be a string or symbol".to_string()),
+        }
+    };
+
+    let counter = GENSYM_COUNTER.with(|c| {
+        let mut counter = c.borrow_mut();
+        *counter += 1;
+        *counter
+    });
+
+    Ok(EvalResult::Symbol(format!("#:{}{}", prefix, counter)))
+}
+
+pub(super) fn eval_compile(args: &[ASTNode]) -> Result<EvalResult, String> {
+    if args.len() != 3 {
+        return Err("compile requires 3 arguments: expression, target, output-path\n  Example: (compile '(+ 1 2) \"wasm\" \"out/test.wasm\")".to_string());
+    }
+
+    // TODO: Fix compile function to work with updated IR API
+    Err("compile: function temporarily disabled due to IR API changes".to_string())
+}
+
+pub(super) fn eval_in_package(args: &[ASTNode]) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("in-package requires a package name".to_string());
+    }
+
+    let package_name = match &args[0] {
+        ASTNode::Variable(name) => name.clone(),
+        ASTNode::Constant(ConstantValue::String(s)) => s.clone(),
+        ASTNode::Quote(quoted) => {
+            match &**quoted {
+                ASTNode::Variable(name) => name.clone(),
+                _ => return Err("in-package argument must be a symbol or string".to_string()),
+            }
+        }
+        _ => return Err("in-package argument must be a symbol or string".to_string()),
+    };
+
+    rlasp_runtime::PACKAGE_MANAGER
+        .set_current_package(&package_name)
+        .map_err(|e| format!("Failed to set package: {}", e))?;
+
+    Ok(EvalResult::Nil)
+}
+
+pub(super) fn eval_boundp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("boundp requires a symbol argument".to_string());
+    }
+
+    let symbol_name = match &args[0] {
+        ASTNode::Quote(quoted) => {
+            match &**quoted {
+                ASTNode::Variable(name) => name.clone(),
+                _ => return Err("boundp argument must be a symbol".to_string()),
+            }
+        }
+        ASTNode::Variable(name) => name.clone(),
+        _ => return Err("boundp argument must be a symbol".to_string()),
+    };
+
+    if env.contains_key(&symbol_name) {
+        Ok(EvalResult::Bool(true))
+    } else {
+        Ok(EvalResult::Nil)
+    }
+}
+
+pub(super) fn eval_fset(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("fset requires 2 arguments: symbol and function".to_string());
+    }
+
+    let symbol_name = match &args[0] {
+        ASTNode::Quote(quoted) => {
+            match &**quoted {
+                ASTNode::Variable(name) => name.clone(),
+                _ => return Err("fset first argument must be a symbol".to_string()),
+            }
+        }
+        ASTNode::Variable(name) => name.clone(),
+        _ => return Err("fset first argument must be a symbol".to_string()),
+    };
+
+    let mut func_val = eval_with_env(&args[1], env)?;
+
+    // Check if third argument is present and true, indicating this should be a macro
+    if args.len() >= 3 {
+        let is_macro = eval_with_env(&args[2], env)?;
+        if !matches!(is_macro, EvalResult::Nil | EvalResult::Bool(false)) {
+            // Convert Lambda to Macro
+            func_val = match func_val {
+                EvalResult::Lambda { params, body, env: _closure_env } => {
+                    EvalResult::Macro { params, body }
+                }
+                other => other, // If it's not a lambda, just use it as-is
+            };
+        }
+    }
+
+    env.insert(symbol_name.clone(), func_val.clone());
+
+    Ok(func_val)
+}
+
+pub(super) fn eval_print(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("print requires at least 1 argument".to_string());
+    }
+
+    let val = eval_with_env(&args[0], env)?;
+    println!("{}", val);
+
+    Ok(val)
+}
+
+pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("load requires a file path argument".to_string());
+    }
+
+    let file_path = match eval_with_env(&args[0], env)? {
+        EvalResult::String(s) => s,
+        EvalResult::Symbol(s) => s,
+        _ => return Err("load argument must be a string".to_string()),
+    };
+
+    let contents = std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read file {}: {}", file_path, e))?;
+
+    let objects = rlasp_reader::read_all_from_string(&contents)
+        .map_err(|e| format!("Error parsing {}: {:?}", file_path, e))?;
+
+    use crate::repl::lisp_to_ast::lisp_to_ast;
+
+    let mut result = EvalResult::Nil;
+    for obj in objects {
+        let ast = lisp_to_ast(obj)?;
+        result = eval_with_env(&ast, env)?;
+    }
+
+    Ok(result)
+}
+
+pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("complement requires 1 argument (a function)".to_string());
+    }
+
+    let func = eval_with_env(&args[0], env)?;
+
+    // Create a lambda that negates the result of calling func
+    // The complement lambda takes any number of arguments (&rest args)
+    // and returns (not (apply func args))
+    match func {
+        EvalResult::Lambda { params, body, env: func_env } => {
+            // Create a new lambda that wraps the original and negates its result
+            // We'll create a special "complement lambda" that stores the original function
+            // For now, we'll use a simpler approach: create a lambda with &rest that calls the function and negates
+
+            // Build the body: (not (funcall original-func &rest-args))
+            let complement_body = vec![
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("not".to_string())),
+                    args: vec![
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("__complement_inner__".to_string())),
+                            args: vec![ASTNode::Variable("__complement_args__".to_string())],
+                        }
+                    ],
+                }
+            ];
+
+            // Store the original function in a new environment
+            let mut complement_env = func_env.clone();
+            complement_env.insert("__complement_inner__".to_string(), EvalResult::Lambda { params, body, env: func_env });
+
+            Ok(EvalResult::Lambda {
+                params: vec!["&rest".to_string(), "__complement_args__".to_string()],
+                body: complement_body,
+                env: complement_env,
+            })
+        }
+        EvalResult::Symbol(name) => {
+            // If it's a symbol, create a lambda that calls the named function and negates
+            let complement_body = vec![
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("not".to_string())),
+                    args: vec![
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable(name)),
+                            args: vec![ASTNode::Variable("__complement_args__".to_string())],
+                        }
+                    ],
+                }
+            ];
+
+            Ok(EvalResult::Lambda {
+                params: vec!["&rest".to_string(), "__complement_args__".to_string()],
+                body: complement_body,
+                env: env.clone(),
+            })
+        }
+        _ => Err("complement requires a function argument".to_string()),
+    }
+}
+
+pub(super) fn eval_coerce_fdesignator(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // coerce-fdesignator converts a function designator (symbol or lambda) to a function
+    // In Common Lisp, a function designator is either:
+    // - A symbol naming a function
+    // - A lambda expression
+    if args.len() != 1 {
+        return Err("coerce-fdesignator requires 1 argument".to_string());
+    }
+
+    let arg = eval_with_env(&args[0], env)?;
+
+    match arg {
+        // If it's already a lambda, return it as-is
+        EvalResult::Lambda { .. } => Ok(arg),
+
+        // If it's a symbol, look up the function
+        EvalResult::Symbol(name) => {
+            // Try to look up the function in the environment
+            if let Some(func) = env.get(&name).cloned() {
+                match func {
+                    EvalResult::Lambda { .. } => Ok(func),
+                    _ => {
+                        // The symbol exists but doesn't refer to a function
+                        // In CL, this would try fdefinition, but for now return the symbol
+                        Ok(EvalResult::Symbol(name))
+                    }
+                }
+            } else {
+                // Symbol not found, return it anyway (built-in functions handle this)
+                Ok(EvalResult::Symbol(name))
+            }
+        }
+
+        // Anything else is returned as-is (might be a built-in function reference)
+        _ => Ok(arg),
+    }
+}
+
+pub(super) fn eval_string_equal(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (string= string1 string2) - case-sensitive string equality
+    if args.len() != 2 {
+        return Err("string= requires 2 arguments".to_string());
+    }
+
+    let s1 = eval_with_env(&args[0], env)?;
+    let s2 = eval_with_env(&args[1], env)?;
+
+    match (s1, s2) {
+        (EvalResult::String(a), EvalResult::String(b)) => {
+            Ok(if a == b { EvalResult::Bool(true) } else { EvalResult::Nil })
+        }
+        _ => Err("string= requires string arguments".to_string()),
+    }
+}
+
+pub(super) fn eval_string_lessp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (string< string1 string2) - case-sensitive string less-than
+    if args.len() != 2 {
+        return Err("string< requires 2 arguments".to_string());
+    }
+
+    let s1 = eval_with_env(&args[0], env)?;
+    let s2 = eval_with_env(&args[1], env)?;
+
+    match (s1, s2) {
+        (EvalResult::String(a), EvalResult::String(b)) => {
+            Ok(if a < b { EvalResult::Bool(true) } else { EvalResult::Nil })
+        }
+        _ => Err("string< requires string arguments".to_string()),
+    }
+}
+
+pub(super) fn eval_string_equal_ci(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (string-equal string1 string2) - case-insensitive string equality
+    if args.len() != 2 {
+        return Err("string-equal requires 2 arguments".to_string());
+    }
+
+    let s1 = eval_with_env(&args[0], env)?;
+    let s2 = eval_with_env(&args[1], env)?;
+
+    match (s1, s2) {
+        (EvalResult::String(a), EvalResult::String(b)) => {
+            Ok(if a.to_lowercase() == b.to_lowercase() {
+                EvalResult::Bool(true)
+            } else {
+                EvalResult::Nil
+            })
+        }
+        _ => Err("string-equal requires string arguments".to_string()),
+    }
+}
+
+pub(super) fn eval_string_upcase(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (string-upcase string) - convert string to uppercase
+    if args.len() != 1 {
+        return Err("string-upcase requires 1 argument".to_string());
+    }
+
+    let s = eval_with_env(&args[0], env)?;
+
+    match s {
+        EvalResult::String(a) => Ok(EvalResult::String(a.to_uppercase())),
+        _ => Err("string-upcase requires a string argument".to_string()),
+    }
+}
+
+pub(super) fn eval_string_downcase(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (string-downcase string) - convert string to lowercase
+    if args.len() != 1 {
+        return Err("string-downcase requires 1 argument".to_string());
+    }
+
+    let s = eval_with_env(&args[0], env)?;
+
+    match s {
+        EvalResult::String(a) => Ok(EvalResult::String(a.to_lowercase())),
+        _ => Err("string-downcase requires a string argument".to_string()),
+    }
+}
+
+pub(super) fn eval_functionp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (functionp object) - test if object is a function
+    if args.len() != 1 {
+        return Err("functionp requires 1 argument".to_string());
+    }
+
+    let obj = eval_with_env(&args[0], env)?;
+
+    match obj {
+        EvalResult::Lambda { .. } => Ok(EvalResult::Bool(true)),
+        EvalResult::Symbol(name) => {
+            // Check if symbol is bound to a function
+            if let Some(val) = env.get(&name) {
+                match val {
+                    EvalResult::Lambda { .. } => Ok(EvalResult::Bool(true)),
+                    _ => Ok(EvalResult::Nil),
+                }
+            } else {
+                Ok(EvalResult::Nil)
+            }
+        }
+        _ => Ok(EvalResult::Nil),
+    }
+}
+
+// Hash table functions
+pub(super) fn eval_make_hash_table(_args: &[ASTNode], _env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // For now, ignore all keyword arguments like :test, :size, etc.
+    Ok(EvalResult::HashTable(Rc::new(RefCell::new(HashMap::new()))))
+}
+
+pub(super) fn eval_hash_table_p(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("hash-table-p requires 1 argument".to_string());
+    }
+    let obj = eval_with_env(&args[0], env)?;
+    match obj {
+        EvalResult::HashTable(_) => Ok(EvalResult::Bool(true)),
+        _ => Ok(EvalResult::Nil),
+    }
+}
+
+pub(super) fn eval_gethash(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err("gethash requires 2 or 3 arguments (key hash-table [default])".to_string());
+    }
+
+    let key = eval_with_env(&args[0], env)?;
+    let key_str = match key {
+        EvalResult::Symbol(s) => s,
+        EvalResult::String(s) => s,
+        EvalResult::Fixnum(n) => n.to_string(),
+        _ => return Err("gethash key must be a symbol, string, or number".to_string()),
+    };
+
+    let ht = eval_with_env(&args[1], env)?;
+    match ht {
+        EvalResult::HashTable(map) => {
+            let result = map.borrow().get(&key_str).cloned();
+            match result {
+                Some(val) => Ok(val),
+                None => {
+                    if args.len() == 3 {
+                        eval_with_env(&args[2], env)
+                    } else {
+                        Ok(EvalResult::Nil)
+                    }
+                }
+            }
+        }
+        _ => Err("gethash second argument must be a hash table".to_string()),
+    }
+}
+
+pub(super) fn eval_hash_set(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (si::hash-set key hash-table value)
+    if args.len() != 3 {
+        return Err("hash-set requires 3 arguments (key hash-table value)".to_string());
+    }
+
+    let key = eval_with_env(&args[0], env)?;
+    let key_str = match key {
+        EvalResult::Symbol(s) => s,
+        EvalResult::String(s) => s,
+        EvalResult::Fixnum(n) => n.to_string(),
+        _ => return Err("hash-set key must be a symbol, string, or number".to_string()),
+    };
+
+    let ht = eval_with_env(&args[1], env)?;
+    let value = eval_with_env(&args[2], env)?;
+
+    match ht {
+        EvalResult::HashTable(map) => {
+            map.borrow_mut().insert(key_str, value.clone());
+            Ok(value)
+        }
+        _ => Err("hash-set second argument must be a hash table".to_string()),
+    }
+}
+
+pub(super) fn eval_remhash(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 2 {
+        return Err("remhash requires 2 arguments (key hash-table)".to_string());
+    }
+
+    let key = eval_with_env(&args[0], env)?;
+    let key_str = match key {
+        EvalResult::Symbol(s) => s,
+        EvalResult::String(s) => s,
+        EvalResult::Fixnum(n) => n.to_string(),
+        _ => return Err("remhash key must be a symbol, string, or number".to_string()),
+    };
+
+    let ht = eval_with_env(&args[1], env)?;
+    match ht {
+        EvalResult::HashTable(map) => {
+            let removed = map.borrow_mut().remove(&key_str).is_some();
+            Ok(if removed { EvalResult::Bool(true) } else { EvalResult::Nil })
+        }
+        _ => Err("remhash second argument must be a hash table".to_string()),
+    }
+}
+
+// Record field functions for documentation system
+pub(super) fn eval_record_cons(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (record-cons record key sub-key)
+    // Search for a cons cell (key . sub-key) in the record
+    if args.len() != 3 {
+        return Err("record-cons requires 3 arguments (record key sub-key)".to_string());
+    }
+
+    let record = eval_with_env(&args[0], env)?;
+    let key = eval_with_env(&args[1], env)?;
+    let sub_key = eval_with_env(&args[2], env)?;
+
+    // Record is a list of (cons (cons key sub-key) value)
+    let mut current = record;
+    loop {
+        match current {
+            EvalResult::Nil => return Ok(EvalResult::Nil),
+            EvalResult::Cons(car_rc, cdr_rc) => {
+                let car = car_rc.borrow().clone();
+                // car should be (cons (cons key sub-key) value)
+                if let EvalResult::Cons(key_pair_rc, _value_rc) = car {
+                    let key_pair = key_pair_rc.borrow().clone();
+                    // key_pair should be (cons key sub-key)
+                    if let EvalResult::Cons(k_rc, sk_rc) = key_pair {
+                        let k = k_rc.borrow().clone();
+                        let sk = sk_rc.borrow().clone();
+                        // Check if key and sub-key match using equalp semantics
+                        if eval_equalp_values(&k, &key) && eval_equalp_values(&sk, &sub_key) {
+                            return Ok(EvalResult::Cons(car_rc.clone(), cdr_rc.clone()));
+                        }
+                    }
+                }
+                current = cdr_rc.borrow().clone();
+            }
+            _ => return Ok(EvalResult::Nil),
+        }
+    }
+}
+
+pub(super) fn eval_record_field(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (record-field record key sub-key)
+    // Return the value associated with (key . sub-key) or nil
+    if args.len() != 3 {
+        return Err("record-field requires 3 arguments (record key sub-key)".to_string());
+    }
+
+    let record_cons_result = eval_record_cons(args, env)?;
+    match record_cons_result {
+        EvalResult::Nil => Ok(EvalResult::Nil),
+        EvalResult::Cons(car_rc, _cdr_rc) => {
+            let entry = car_rc.borrow().clone();
+            // entry is ((key . sub-key) . value)
+            match entry {
+                EvalResult::Cons(_key_pair_rc, value_rc) => Ok(value_rc.borrow().clone()),
+                _ => Ok(EvalResult::Nil),
+            }
+        }
+        _ => Ok(EvalResult::Nil),
+    }
+}
+
+pub(super) fn eval_rem_record_field(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (rem-record-field record key sub-key)
+    // Remove the entry matching (key . sub-key) from the record
+    if args.len() != 3 {
+        return Err("rem-record-field requires 3 arguments (record key sub-key)".to_string());
+    }
+
+    let record = eval_with_env(&args[0], env)?;
+    let key = eval_with_env(&args[1], env)?;
+    let sub_key = eval_with_env(&args[2], env)?;
+
+    // Find the matching cons
+    let mut current = record.clone();
+    let mut found_entry: Option<EvalResult> = None;
+    loop {
+        match current.clone() {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car_rc, cdr_rc) => {
+                let car = car_rc.borrow().clone();
+                if let EvalResult::Cons(key_pair_rc, _value_rc) = &car {
+                    let key_pair = key_pair_rc.borrow().clone();
+                    if let EvalResult::Cons(k_rc, sk_rc) = key_pair {
+                        let k = k_rc.borrow().clone();
+                        let sk = sk_rc.borrow().clone();
+                        if eval_equalp_values(&k, &key) && eval_equalp_values(&sk, &sub_key) {
+                            found_entry = Some(car.clone());
+                            break;
+                        }
+                    }
+                }
+                current = cdr_rc.borrow().clone();
+            }
+            _ => break,
+        }
+    }
+
+    if found_entry.is_none() {
+        return Ok(record);
+    }
+
+    // Build new list excluding the found entry
+    let mut result = EvalResult::Nil;
+    let mut current = record;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car_rc, cdr_rc) => {
+                let car = car_rc.borrow().clone();
+                // Check if this is the entry to skip
+                let skip = if let Some(ref found) = found_entry {
+                    match (found, &car) {
+                        (EvalResult::Cons(f_kp, f_v), EvalResult::Cons(c_kp, c_v)) => {
+                            std::ptr::eq(f_kp.as_ref() as *const _, c_kp.as_ref() as *const _) &&
+                            std::ptr::eq(f_v.as_ref() as *const _, c_v.as_ref() as *const _)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                if !skip {
+                    result = EvalResult::Cons(
+                        Rc::new(RefCell::new(car)),
+                        Rc::new(RefCell::new(result))
+                    );
+                }
+                current = cdr_rc.borrow().clone();
+            }
+            _ => break,
+        }
+    }
+
+    // Reverse the result since we built it backwards
+    let mut reversed = EvalResult::Nil;
+    current = result;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car_rc, cdr_rc) => {
+                reversed = EvalResult::Cons(car_rc.clone(), Rc::new(RefCell::new(reversed)));
+                current = cdr_rc.borrow().clone();
+            }
+            _ => break,
+        }
+    }
+
+    Ok(reversed)
+}
+
+// Helper function for equalp comparison
+fn eval_equalp_values(a: &EvalResult, b: &EvalResult) -> bool {
+    match (a, b) {
+        (EvalResult::Nil, EvalResult::Nil) => true,
+        (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
+        (EvalResult::Float(a), EvalResult::Float(b)) => (a - b).abs() < f64::EPSILON,
+        (EvalResult::String(a), EvalResult::String(b)) => a.eq_ignore_ascii_case(b),
+        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
+        (EvalResult::Cons(a_car, a_cdr), EvalResult::Cons(b_car, b_cdr)) => {
+            eval_equalp_values(&a_car.borrow(), &b_car.borrow()) &&
+            eval_equalp_values(&a_cdr.borrow(), &b_cdr.borrow())
+        }
+        _ => false,
+    }
+}
+
+// Helper function to call built-in functions with pre-evaluated arguments
+// This is used by funcall when the function is a symbol referring to a built-in
+fn call_built_in_with_values(name: &str, args: &[EvalResult], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // Convert pre-evaluated results back to AST nodes
+    let ast_args: Result<Vec<ASTNode>, String> = args.iter()
+        .map(|arg| result_to_ast(arg))
+        .collect();
+    let ast_args = ast_args?;
+
+    // Call the built-in function through eval_call_with_env
+    // This works because result_to_ast converts values to constants,
+    // so re-evaluating them just returns the same value
+    super::eval_core::eval_call_with_env(&ASTNode::Variable(name.to_string()), &ast_args, env)
+}

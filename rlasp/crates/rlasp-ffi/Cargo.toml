@@ -1,0 +1,16 @@
+[package]
+name = "rlasp-ffi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rlasp-runtime = { path = "../rlasp-runtime" }
+rlasp-macros = { path = "../rlasp-macros" }
+libffi = { workspace = true }
+libloading = { workspace = true }
+libc = { workspace = true }
+thiserror = { workspace = true }
+
+[lib]
+name = "rlasp_ffi"
+path = "src/lib.rs"

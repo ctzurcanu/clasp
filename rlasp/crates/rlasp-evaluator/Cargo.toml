@@ -1,0 +1,10 @@
+[package]
+name = "rlasp-evaluator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[lib]
+name = "rlasp_evaluator"
+path = "src/lib.rs"

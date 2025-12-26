@@ -1,0 +1,23 @@
+[package]
+name = "irlasp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rlasp = { path = "../rlasp" }
+rlasp-jit = { path = "../rlasp-jit" }
+rlasp-runtime = { path = "../rlasp-runtime" }
+rlasp-reader = { path = "../rlasp-reader" }
+rlasp-mlir = { path = "../rlasp-mlir" }
+rustyline = "14.0.0"
+# Link to librlasp dynamically via C ABI
+libc = { workspace = true }
+inkwell = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+
+[build-dependencies]
+# No dependencies needed for build script
+
+[[bin]]
+name = "irlasp"
+path = "src/main.rs"

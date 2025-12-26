@@ -1,0 +1,487 @@
+/// Convert LispObject from rlasp-reader to ASTNode for evaluation
+
+use crate::ir::{ASTNode, ConstantValue};
+use rlasp_runtime::LispObject;
+
+pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
+    // Special case: raw value 0 is ambiguous - it could be fixnum(0) or nil()
+    // The runtime uses the same representation for both.
+    // We treat raw 0 as NIL (empty list) rather than the number 0.
+    // To use the number 0, it must come from a different code path (e.g., arithmetic).
+    if obj.is_nil() {
+        return Ok(ASTNode::nil());
+    }
+
+    // Fixnum - but note that fixnum(0) is handled above as NIL
+    if let Some(n) = obj.as_fixnum() {
+        return Ok(ASTNode::fixnum(n));
+    }
+
+    // T (represented as fixnum 1 - already checked above)
+
+    // General object - could be Symbol or Number
+    if obj.is_general() {
+        // Try Number first (Float, Bignum, etc.)
+        if let Some(f) = obj.as_float() {
+            return Ok(ASTNode::float(f));
+        }
+
+        // Then try Symbol
+        if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+            if !symbol_ptr.is_null() {
+                let symbol = unsafe { &*symbol_ptr };
+                let name = symbol.name();
+
+                // Check if it's a string disguised as a symbol (starts and ends with ")
+                if name.starts_with('"') && name.ends_with('"') {
+                    let string_content = &name[1..name.len()-1];
+                    return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
+                }
+
+                // Special case: the symbol 'nil' should be treated as NIL constant
+                if name.to_lowercase() == "nil" {
+                    return Ok(ASTNode::nil());
+                }
+
+                // Special case: the symbol 't' should be treated as T (true)
+                if name.to_lowercase() == "t" {
+                    return Ok(ASTNode::Constant(ConstantValue::T));
+                }
+
+                return Ok(ASTNode::variable(name.to_string()));
+            }
+        }
+    }
+
+    // Cons (list)
+    if obj.is_cons() {
+        return cons_to_ast(obj);
+    }
+
+    // Character
+    if obj.is_character() {
+        if let Some(ch) = obj.as_character() {
+            return Ok(ASTNode::Constant(ConstantValue::String(ch.to_string())));
+        }
+    }
+
+    Err(format!("Cannot convert LispObject to AST: {:?}", obj))
+}
+
+fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
+    if !obj.is_cons() {
+        return Err("Not a cons".to_string());
+    }
+
+    let cons_ptr = obj.as_cons_ptr().ok_or("Invalid cons pointer")?;
+    if cons_ptr.is_null() {
+        return Err("Null cons pointer".to_string());
+    }
+    let cons = unsafe { &*cons_ptr };
+    let car = cons.car();
+    let cdr = cons.cdr();
+
+    // Check for quote
+    if car.is_general() && !car.is_number() {
+        if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
+            if !symbol_ptr.is_null() {
+                let symbol = unsafe { &*symbol_ptr };
+                let name = symbol.name();
+
+                if name == "quote" {
+                    // (quote x) -> Quote(x)
+                    if cdr.is_cons() {
+                        if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                            if !cdr_ptr.is_null() {
+                                let cdr_cons = unsafe { &*cdr_ptr };
+                                let quoted = lisp_to_ast(cdr_cons.car())?;
+                                return Ok(ASTNode::Quote(Box::new(quoted)));
+                            }
+                        }
+                    }
+                }
+
+                if name == "backquote" || name == "quasiquote" {
+                    // (backquote x) -> Backquote(x)
+                    if cdr.is_cons() {
+                        if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                            if !cdr_ptr.is_null() {
+                                let cdr_cons = unsafe { &*cdr_ptr };
+                                let form = lisp_to_ast(cdr_cons.car())?;
+                                return Ok(ASTNode::Backquote(Box::new(form)));
+                            }
+                        }
+                    }
+                }
+
+                if name == "unquote" {
+                    // (unquote x) -> Unquote(x)
+                    if cdr.is_cons() {
+                        if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                            if !cdr_ptr.is_null() {
+                                let cdr_cons = unsafe { &*cdr_ptr };
+                                let form = lisp_to_ast(cdr_cons.car())?;
+                                return Ok(ASTNode::Unquote(Box::new(form)));
+                            }
+                        }
+                    }
+                }
+
+                if name == "unquote-splicing" {
+                    // (unquote-splicing x) -> UnquoteSplicing(x)
+                    if cdr.is_cons() {
+                        if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                            if !cdr_ptr.is_null() {
+                                let cdr_cons = unsafe { &*cdr_ptr };
+                                let form = lisp_to_ast(cdr_cons.car())?;
+                                return Ok(ASTNode::UnquoteSplicing(Box::new(form)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for special forms
+    if car.is_general() && !car.is_number() {
+        if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
+            if !symbol_ptr.is_null() {
+                let symbol = unsafe { &*symbol_ptr };
+                let name = symbol.name();
+
+                match name {
+                    "if" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.len() < 2 {
+                            return Err("if requires at least 2 arguments".to_string());
+                        }
+                        return Ok(ASTNode::if_then_else(
+                            args[0].clone(),
+                            args[1].clone(),
+                            args.get(2).cloned().unwrap_or(ASTNode::nil())
+                        ));
+                    }
+                    "progn" => {
+                        let exprs = cdr_to_vec(cdr)?;
+                        return Ok(ASTNode::progn(exprs));
+                    }
+                    "setq" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.is_empty() || args.len() % 2 != 0 {
+                            return Err("setq requires an even number of arguments (var value pairs)".to_string());
+                        }
+                        if args.len() == 2 {
+                            // Simple case: (setq var val)
+                            match &args[0] {
+                                ASTNode::Variable(var) => {
+                                    return Ok(ASTNode::setq(var.clone(), args[1].clone()));
+                                }
+                                ASTNode::Unquote(_) => {
+                                    // Inside backquote - don't validate yet, just create a Call
+                                    return Ok(ASTNode::Call {
+                                        function: Box::new(ASTNode::variable("setq".to_string())),
+                                        args: args,
+                                    });
+                                }
+                                _ => return Err("setq variable must be a symbol".to_string()),
+                            }
+                        }
+                        // Multiple pairs: (setq x 1 y 2 z 3) => (progn (setq x 1) (setq y 2) (setq z 3))
+                        let mut setqs = Vec::new();
+                        for i in (0..args.len()).step_by(2) {
+                            match &args[i] {
+                                ASTNode::Variable(var) => {
+                                    setqs.push(ASTNode::setq(var.clone(), args[i + 1].clone()));
+                                }
+                                ASTNode::Unquote(_) => {
+                                    // Inside backquote - create individual setq calls
+                                    setqs.push(ASTNode::Call {
+                                        function: Box::new(ASTNode::variable("setq".to_string())),
+                                        args: vec![args[i].clone(), args[i + 1].clone()],
+                                    });
+                                }
+                                _ => return Err("setq variable must be a symbol".to_string()),
+                            }
+                        }
+                        return Ok(ASTNode::progn(setqs));
+                    }
+                    "lambda" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.is_empty() {
+                            return Err("lambda requires at least 1 argument".to_string());
+                        }
+                        let params = extract_params(&args[0]);
+                        let body = args[1..].to_vec();
+                        return Ok(ASTNode::Lambda { params, defaults: _, body });
+                    }
+                    "let" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.len() < 2 {
+                            return Err("let requires at least 2 arguments".to_string());
+                        }
+                        // If bindings contain unquote (from backquote), keep as Call
+                        if contains_unquote(&args[0]) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("let".to_string())),
+                                args: args,
+                            });
+                        }
+                        let bindings = extract_bindings(&args[0])?;
+                        let body = args[1..].to_vec();
+                        return Ok(ASTNode::Let { bindings, body });
+                    }
+                    "let*" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.len() < 2 {
+                            return Err("let* requires at least 2 arguments".to_string());
+                        }
+                        // If bindings contain unquote (from backquote), keep as Call
+                        if contains_unquote(&args[0]) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("let*".to_string())),
+                                args: args,
+                            });
+                        }
+                        let bindings = extract_bindings(&args[0])?;
+                        let body = args[1..].to_vec();
+                        return Ok(ASTNode::LetStar { bindings, body });
+                    }
+                    "defun" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.len() < 3 {
+                            return Err("defun requires at least 3 arguments (name params body)".to_string());
+                        }
+                        // Extract function name
+                        let name = if let ASTNode::Variable(n) = &args[0] {
+                            n.clone()
+                        } else {
+                            return Err("defun first argument must be a symbol".to_string());
+                        };
+                        // Extract parameters
+                        let params = extract_params(&args[1]);
+                        // Extract body (rest of the arguments)
+                        let body = args[2..].to_vec();
+                        // Desugar to (setq name (lambda (params) body...))
+                        let lambda = ASTNode::Lambda { params, defaults: _, body };
+                        return Ok(ASTNode::setq(name, lambda));
+                    }
+                    "defvar" | "defparameter" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.len() < 2 {
+                            return Err(format!("{} requires at least 2 arguments (name value [doc])", name));
+                        }
+                        // Extract variable name
+                        let var_name = if let ASTNode::Variable(n) = &args[0] {
+                            n.clone()
+                        } else {
+                            return Err(format!("{} first argument must be a symbol", name));
+                        };
+                        // Extract value (second argument)
+                        let value = args[1].clone();
+                        // Ignore doc string if present (args[2])
+                        // Desugar to (setq name value)
+                        return Ok(ASTNode::setq(var_name, value));
+                    }
+                    "when" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.is_empty() {
+                            return Err("when requires at least 1 argument (test)".to_string());
+                        }
+                        let test = args[0].clone();
+                        let body = if args.len() > 1 {
+                            ASTNode::progn(args[1..].to_vec())
+                        } else {
+                            ASTNode::nil()
+                        };
+                        // Desugar to (if test (progn body...) nil)
+                        return Ok(ASTNode::if_then_else(test, body, ASTNode::nil()));
+                    }
+                    "unless" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.is_empty() {
+                            return Err("unless requires at least 1 argument (test)".to_string());
+                        }
+                        let test = args[0].clone();
+                        let body = if args.len() > 1 {
+                            ASTNode::progn(args[1..].to_vec())
+                        } else {
+                            ASTNode::nil()
+                        };
+                        // Desugar to (if test nil (progn body...))
+                        return Ok(ASTNode::if_then_else(test, ASTNode::nil(), body));
+                    }
+                    "cond" => {
+                        let args = cdr_to_vec(cdr)?;
+                        if args.is_empty() {
+                            return Ok(ASTNode::nil());
+                        }
+                        // Build nested if-then-else from cond clauses
+                        // (cond (test1 body1...) (test2 body2...) ...) =>
+                        // (if test1 (progn body1...) (if test2 (progn body2...) ...))
+                        let mut result = ASTNode::nil();
+                        for clause in args.iter().rev() {
+                            // Each clause should be a list: (test body...)
+                            let clause_parts = match clause {
+                                ASTNode::Call { function, args: clause_args } => {
+                                    let mut parts = vec![*function.clone()];
+                                    parts.extend(clause_args.clone());
+                                    parts
+                                }
+                                _ => return Err("cond: each clause must be a list".to_string()),
+                            };
+
+                            if clause_parts.is_empty() {
+                                return Err("cond: empty clause".to_string());
+                            }
+
+                            let test = clause_parts[0].clone();
+                            let body = if clause_parts.len() > 1 {
+                                ASTNode::progn(clause_parts[1..].to_vec())
+                            } else {
+                                // If no body, return the test value
+                                test.clone()
+                            };
+
+                            result = ASTNode::if_then_else(test, body, result);
+                        }
+                        return Ok(result);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Check if this is a dotted pair (car . cdr) where cdr is not a list
+    if !cdr.is_nil() && !cdr.is_cons() {
+        // This is a dotted pair: (car . cdr)
+        let car_ast = lisp_to_ast(car)?;
+        let cdr_ast = lisp_to_ast(cdr)?;
+        return Ok(ASTNode::DottedPair {
+            car: Box::new(car_ast),
+            cdr: Box::new(cdr_ast),
+        });
+    }
+
+    // Regular list - convert to Call
+    let car_ast = lisp_to_ast(car)?;
+    let args = cdr_to_vec(cdr)?;
+
+    Ok(ASTNode::Call {
+        function: Box::new(car_ast),
+        args,
+    })
+}
+
+fn extract_params(ast: &ASTNode) -> Vec<String> {
+    match ast {
+        ASTNode::Call { function, args } => {
+            let mut params = vec![];
+            if let ASTNode::Variable(name) = &**function {
+                params.push(name.clone());
+            }
+            for arg in args {
+                match arg {
+                    ASTNode::Variable(name) => {
+                        params.push(name.clone());
+                    }
+                    // Handle keyword parameter with default value: (name default-expr)
+                    ASTNode::Call { function: param_func, args: _param_args } => {
+                        if let ASTNode::Variable(param_name) = &**param_func {
+                            // For now, encode as "name" - we'll handle defaults separately
+                            params.push(param_name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            params
+        }
+        ASTNode::Variable(name) => vec![name.clone()],
+        ASTNode::Constant(ConstantValue::Nil) => vec![],
+        _ => vec![],
+    }
+}
+
+fn contains_unquote(ast: &ASTNode) -> bool {
+    match ast {
+        ASTNode::Unquote(_) | ASTNode::UnquoteSplicing(_) => true,
+        ASTNode::Call { function, args } => {
+            contains_unquote(function) || args.iter().any(|arg| contains_unquote(arg))
+        }
+        ASTNode::Quote(inner) | ASTNode::Backquote(inner) => contains_unquote(inner),
+        ASTNode::If { test, then_branch, else_branch } => {
+            contains_unquote(test) || contains_unquote(then_branch) || contains_unquote(else_branch)
+        }
+        ASTNode::Progn { exprs } => exprs.iter().any(|e| contains_unquote(e)),
+        _ => false,
+    }
+}
+
+fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
+    match ast {
+        // Empty bindings: ()
+        ASTNode::Constant(ConstantValue::Nil) => Ok(vec![]),
+        // Single binding or list of bindings
+        ASTNode::Call { function, args } => {
+            let mut bindings = vec![];
+
+            // First binding from function position
+            if let ASTNode::Call { function: var, args: val_args } = &**function {
+                if let ASTNode::Variable(var_name) = &**var {
+                    if val_args.len() == 1 {
+                        bindings.push((var_name.clone(), val_args[0].clone()));
+                    } else {
+                        return Err(format!("Invalid binding: expected (var val), got {} values", val_args.len() + 1));
+                    }
+                } else {
+                    return Err("Binding variable must be a symbol".to_string());
+                }
+            } else {
+                return Err("Invalid binding format: expected (var val)".to_string());
+            }
+
+            // Remaining bindings from args
+            for arg in args {
+                if let ASTNode::Call { function: var, args: val_args } = arg {
+                    if let ASTNode::Variable(var_name) = &**var {
+                        if val_args.len() == 1 {
+                            bindings.push((var_name.clone(), val_args[0].clone()));
+                        } else {
+                            return Err(format!("Invalid binding: expected (var val), got {} values", val_args.len() + 1));
+                        }
+                    } else {
+                        return Err("Binding variable must be a symbol".to_string());
+                    }
+                } else {
+                    return Err("Invalid binding format: expected (var val)".to_string());
+                }
+            }
+
+            Ok(bindings)
+        }
+        _ => Err(format!("Invalid bindings format: {:?}", ast)),
+    }
+}
+
+fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
+    let mut result = Vec::new();
+
+    while cdr.is_cons() {
+        let cons_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
+        if cons_ptr.is_null() {
+            return Err("Null cons pointer in cdr_to_vec".to_string());
+        }
+        let cons = unsafe { &*cons_ptr };
+        result.push(lisp_to_ast(cons.car())?);
+        cdr = cons.cdr();
+    }
+
+    // Handle dotted pair
+    if !cdr.is_nil() {
+        return Err("Dotted pairs not yet supported in AST conversion".to_string());
+    }
+
+    Ok(result)
+}

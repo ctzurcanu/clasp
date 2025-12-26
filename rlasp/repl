@@ -1,0 +1,5 @@
+#!/bin/bash
+# Launch rlasp REPL
+
+cd "$(dirname "$0")"
+PKG_CONFIG_PATH="/opt/homebrew/opt/libffi/lib/pkgconfig:$PKG_CONFIG_PATH" exec cargo run --bin rlasp --quiet

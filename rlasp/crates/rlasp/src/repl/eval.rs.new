@@ -1,0 +1,29 @@
+/// Modular evaluator - main coordinator
+///
+/// This file coordinates the evaluation modules
+
+// Module declarations
+mod eval_types;
+mod eval_arithmetic;
+
+// Re-export types
+pub use eval_types::EvalResult;
+use eval_types::{RETURN_VALUE, GENSYM_COUNTER, structural_equal};
+
+// Re-export arithmetic operations  
+use eval_arithmetic::*;
+
+use crate::ir::{ASTNode, ConstantValue, Module, LowerContext, InstructionKind, WasmCodegen};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+pub fn eval(ast: &ASTNode) -> Result<EvalResult, String> {
+    eval_with_env(ast, &mut HashMap::new())
+}
+
+/// Evaluate with a persistent environment (for REPL)
+pub fn eval_with_persistent_env(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    eval_with_env(ast, env)
+}
+

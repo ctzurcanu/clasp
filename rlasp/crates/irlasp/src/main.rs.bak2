@@ -1,0 +1,1737 @@
+/// irlasp - Interactive rlasp REPL and script runner
+///
+/// Usage:
+///   irlasp              - Start REPL in interpreter mode
+///   irlasp -m llvm      - Start REPL in LLVM ORC JIT mode
+///   irlasp file.lisp    - Run file in interpreter mode
+///   irlasp -m llvm file.lisp - Run file in LLVM ORC JIT mode
+
+use clap::Parser;
+use rustyline::error::ReadlineError;
+use rustyline::{DefaultEditor, Result};
+use std::ffi::CString;
+use std::fs;
+use std::os::raw::{c_char, c_int};
+use inkwell::values::AnyValue;
+
+extern crate rlasp_reader;
+
+#[derive(Parser)]
+#[command(name = "irlasp")]
+#[command(about = "Interactive rlasp REPL and Lisp interpreter", long_about = None)]
+struct Args {
+    /// Execution mode: interpreter (default) or llvm (ORC JIT)
+    #[arg(short, long, value_name = "MODE", default_value = "interpreter")]
+    mode: String,
+
+    /// Lisp file to execute
+    file: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExecutionMode {
+    Interpreter,
+    LlvmJit,
+}
+
+// Declare external C functions from librlasp for interpreter mode
+#[link(name = "rlasp")]
+extern "C" {
+    fn rlasp_init() -> *mut std::ffi::c_void;
+    fn rlasp_eval(
+        runtime: *mut std::ffi::c_void,
+        expr: *const c_char,
+        result_out: *mut *mut c_char,
+    ) -> c_int;
+    fn rlasp_eval_file(
+        runtime: *mut std::ffi::c_void,
+        source: *const c_char,
+        result_out: *mut *mut c_char,
+    ) -> c_int;
+    fn rlasp_free_string(s: *mut c_char);
+    fn rlasp_shutdown(runtime: *mut std::ffi::c_void);
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let mode = match args.mode.as_str() {
+        "interpreter" | "interp" | "i" => ExecutionMode::Interpreter,
+        "llvm" | "jit" => ExecutionMode::LlvmJit,
+        _ => {
+            eprintln!("Error: Unknown mode '{}'. Use 'interpreter' or 'llvm'", args.mode);
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(file_path) = args.file {
+        // File execution mode
+        run_file(&file_path, mode)
+    } else {
+        // REPL mode
+        run_repl(mode)
+    }
+}
+
+fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
+    // Read file
+    let source = match fs::read_to_string(file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading file {}: {}", file_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    match mode {
+        ExecutionMode::Interpreter => {
+            unsafe {
+                let runtime = rlasp_init();
+                if runtime.is_null() {
+                    eprintln!("Failed to initialize rlasp runtime");
+                    std::process::exit(1);
+                }
+
+                eval_file_interp(runtime, &source);
+                rlasp_shutdown(runtime);
+            }
+        }
+        ExecutionMode::LlvmJit => {
+            if let Err(e) = eval_file_llvm(&source, file_path) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_repl(mode: ExecutionMode) -> Result<()> {
+    println!("rlasp REPL v0.1.0 (mode: {})", match mode {
+        ExecutionMode::Interpreter => "interpreter",
+        ExecutionMode::LlvmJit => "llvm-jit",
+    });
+    println!("Type expressions to evaluate, or :quit to exit");
+    println!();
+
+    match mode {
+        ExecutionMode::Interpreter => run_repl_interpreter(),
+        ExecutionMode::LlvmJit => run_repl_llvm(),
+    }
+}
+
+fn run_repl_interpreter() -> Result<()> {
+    let runtime = unsafe {
+        let rt = rlasp_init();
+        if rt.is_null() {
+            eprintln!("Failed to initialize rlasp runtime");
+            std::process::exit(1);
+        }
+        rt
+    };
+
+    let mut rl = DefaultEditor::new()?;
+
+    // Load history from home directory
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut history_path = std::path::PathBuf::from(home);
+        history_path.push(".rlasp_history");
+        let _ = rl.load_history(&history_path);
+    }
+
+    let mut accumulated_input = String::new();
+
+    loop {
+        let prompt = if accumulated_input.is_empty() {
+            "rlasp> "
+        } else {
+            "    .. "
+        };
+        let readline = rl.readline(prompt);
+
+        match readline {
+            Ok(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                if accumulated_input.is_empty() {
+                    let trimmed = line.trim();
+                    if trimmed == ":quit" || trimmed == ":q" {
+                        println!("Goodbye!");
+                        break;
+                    }
+                    if trimmed == ":help" || trimmed == ":h" {
+                        print_help();
+                        rl.add_history_entry(line.as_str())?;
+                        continue;
+                    }
+                }
+
+                accumulated_input.push_str(&line);
+                accumulated_input.push('\n');
+
+                if is_complete_expression(&accumulated_input) {
+                    let input = accumulated_input.trim().to_string();
+                    accumulated_input.clear();
+
+                    if is_only_comments(&input) {
+                        continue;
+                    }
+
+                    rl.add_history_entry(input.as_str())?;
+                    unsafe { eval_expression_interp(runtime, &input) };
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                if !accumulated_input.trim().is_empty() {
+                    unsafe { eval_expression_interp(runtime, accumulated_input.trim()) };
+                }
+                break;
+            }
+            Err(err) => {
+                println!("Error: {:?}", err);
+                break;
+            }
+        }
+    }
+
+    // Save history to home directory
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut history_path = std::path::PathBuf::from(home);
+        history_path.push(".rlasp_history");
+        let _ = rl.save_history(&history_path);
+    }
+
+    unsafe {
+        rlasp_shutdown(runtime);
+    }
+    Ok(())
+}
+
+fn run_repl_llvm() -> Result<()> {
+    let mut rl = DefaultEditor::new()?;
+
+    // Load history from home directory
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut history_path = std::path::PathBuf::from(home);
+        history_path.push(".rlasp_history_llvm");
+        let _ = rl.load_history(&history_path);
+    }
+
+    let mut accumulated_input = String::new();
+
+    loop {
+        let prompt = if accumulated_input.is_empty() {
+            "rlasp[llvm]> "
+        } else {
+            "         .. "
+        };
+        let readline = rl.readline(prompt);
+
+        match readline {
+            Ok(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                if accumulated_input.is_empty() {
+                    let trimmed = line.trim();
+                    if trimmed == ":quit" || trimmed == ":q" {
+                        println!("Goodbye!");
+                        break;
+                    }
+                    if trimmed == ":help" || trimmed == ":h" {
+                        print_help();
+                        rl.add_history_entry(line.as_str())?;
+                        continue;
+                    }
+                }
+
+                accumulated_input.push_str(&line);
+                accumulated_input.push('\n');
+
+                if is_complete_expression(&accumulated_input) {
+                    let input = accumulated_input.trim().to_string();
+                    accumulated_input.clear();
+
+                    if is_only_comments(&input) {
+                        continue;
+                    }
+
+                    rl.add_history_entry(input.as_str())?;
+
+                    if let Err(e) = eval_expression_llvm(&input) {
+                        println!("Error: {}", e);
+                    }
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                if !accumulated_input.trim().is_empty() {
+                    if let Err(e) = eval_expression_llvm(accumulated_input.trim()) {
+                        println!("Error: {}", e);
+                    }
+                }
+                break;
+            }
+            Err(err) => {
+                println!("Error: {:?}", err);
+                break;
+            }
+        }
+    }
+
+    // Save history to home directory
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut history_path = std::path::PathBuf::from(home);
+        history_path.push(".rlasp_history_llvm");
+        let _ = rl.save_history(&history_path);
+    }
+    Ok(())
+}
+
+unsafe fn eval_expression_interp(runtime: *mut std::ffi::c_void, expr: &str) {
+    let c_expr = match CString::new(expr) {
+        Ok(s) => s,
+        Err(_) => {
+            println!("Error: Invalid string");
+            return;
+        }
+    };
+
+    let mut result_ptr: *mut c_char = std::ptr::null_mut();
+    let ret = rlasp_eval(runtime, c_expr.as_ptr(), &mut result_ptr);
+
+    if ret == 0 {
+        if !result_ptr.is_null() {
+            let c_str = std::ffi::CStr::from_ptr(result_ptr);
+            if let Ok(result) = c_str.to_str() {
+                println!("=> {}", result);
+            }
+            rlasp_free_string(result_ptr);
+        }
+    } else {
+        if !result_ptr.is_null() {
+            let c_str = std::ffi::CStr::from_ptr(result_ptr);
+            if let Ok(error_msg) = c_str.to_str() {
+                println!("Error: {}", error_msg);
+            }
+            rlasp_free_string(result_ptr);
+        } else {
+            println!("Error evaluating expression (no details available)");
+        }
+    }
+}
+
+unsafe fn eval_file_interp(runtime: *mut std::ffi::c_void, source: &str) {
+    let c_source = match CString::new(source) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("Error: Invalid file contents");
+            return;
+        }
+    };
+
+    let mut result_ptr: *mut c_char = std::ptr::null_mut();
+    let ret = rlasp_eval_file(runtime, c_source.as_ptr(), &mut result_ptr);
+
+    if ret == 0 {
+        if !result_ptr.is_null() {
+            let c_str = std::ffi::CStr::from_ptr(result_ptr);
+            if let Ok(result) = c_str.to_str() {
+                println!("=> {}", result);
+            }
+            rlasp_free_string(result_ptr);
+        }
+    } else {
+        if !result_ptr.is_null() {
+            let c_str = std::ffi::CStr::from_ptr(result_ptr);
+            if let Ok(error_msg) = c_str.to_str() {
+                eprintln!("Error: {}", error_msg);
+            }
+            rlasp_free_string(result_ptr);
+        } else {
+            eprintln!("Error evaluating file (no details available)");
+        }
+    }
+}
+
+/// Format a LispObject as a list string
+fn format_list(obj: &rlasp_runtime::LispObject) -> String {
+    if obj.is_nil() {
+        return "NIL".to_string();
+    }
+
+    if !obj.is_cons() {
+        return format!("{:?}", obj);
+    }
+
+    let mut result = String::from("(");
+    let mut current = *obj;
+    let mut first = true;
+
+    loop {
+        if current.is_nil() {
+            result.push(')');
+            break;
+        }
+
+        if !current.is_cons() {
+            // Improper list (dotted pair)
+            result.push_str(" . ");
+            result.push_str(&format_element(&current));
+            result.push(')');
+            break;
+        }
+
+        if !first {
+            result.push(' ');
+        }
+        first = false;
+
+        // Get car and cdr
+        if let Some(cons_ptr) = current.as_cons_ptr() {
+            unsafe {
+                let car = (*cons_ptr).car();
+                result.push_str(&format_element(&car));
+                current = (*cons_ptr).cdr();
+            }
+        } else {
+            break;
+        }
+    }
+
+    result
+}
+
+/// Format a single element
+fn format_element(obj: &rlasp_runtime::LispObject) -> String {
+    use rlasp_jit::intrinsics::cc_t;
+
+    if let Some(val) = obj.as_fixnum() {
+        val.to_string()
+    } else if obj.is_nil() {
+        "NIL".to_string()
+    } else if obj.raw() == unsafe { cc_t() } {
+        "T".to_string()
+    } else if obj.is_cons() {
+        format_list(obj)
+    } else {
+        format!("{:?}", obj)
+    }
+}
+
+fn eval_expression_llvm(expr: &str) -> std::result::Result<(), String> {
+    use rlasp::repl::reader::Reader;
+    use rlasp::repl::expand_macros;
+    use rlasp_jit::{CodeGenerator, JitEngine};
+    use inkwell::context::Context;
+    use inkwell::values::BasicValueEnum;
+
+    // 1. Parse with reader
+    let mut reader = Reader::new(expr);
+    let ast = match reader.read() {
+        Ok(ast) => ast,
+        Err(e) => return Err(format!("Parse error: {}", e)),
+    };
+
+    // 2. Expand macros
+    let expanded = expand_macros(&ast);
+
+    // 3. Generate LLVM IR
+    let context = Context::create();
+    let codegen = CodeGenerator::new(&context, "repl");
+    codegen.declare_intrinsics();
+
+    // Add function that evaluates the expression
+    let i64_type = context.i64_type();
+    let eval_fn_type = i64_type.fn_type(&[], false);
+    let eval_fn = codegen.module().add_function("__rlasp_eval", eval_fn_type, None);
+
+    let entry_block = context.append_basic_block(eval_fn, "entry");
+    codegen.builder().position_at_end(entry_block);
+
+    // Compile the AST to LLVM IR
+    let mut env = std::collections::HashMap::new();
+    let result_val = compile_ast_to_llvm(&context, &codegen, &expanded, &mut env)?;
+    codegen.builder().build_return(Some(&result_val)).unwrap();
+
+    // 4. Create JIT and execute
+    let jit = codegen.into_jit_engine()
+        .map_err(|e| format!("Failed to create JIT: {}", e))?;
+
+    unsafe {
+        let func = jit.get_function_0("__rlasp_eval")
+            .map_err(|e| format!("Failed to get function: {}", e))?;
+
+        let result_raw = func.call();
+
+        // Format result for display
+        use rlasp_runtime::LispObject;
+        use rlasp_jit::intrinsics::cc_t;
+
+        let result_obj = LispObject::from_raw(result_raw);
+        let t_val = cc_t();
+
+        if let Some(val) = result_obj.as_fixnum() {
+            println!("=> Fixnum({})", val);
+        } else if result_obj.is_nil() {
+            println!("=> NIL");
+        } else if result_raw == t_val {
+            println!("=> T");
+        } else if result_obj.is_cons() {
+            // Format as a list
+            println!("=> {}", format_list(&result_obj));
+        } else {
+            println!("=> {:?}", result_obj);
+        }
+    }
+
+    Ok(())
+}
+
+fn compile_ast_to_llvm<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    codegen: &rlasp_jit::CodeGenerator<'ctx>,
+    ast: &rlasp::ir::ASTNode,
+    env: &mut std::collections::HashMap<String, inkwell::values::PointerValue<'ctx>>,
+    user_functions: &std::collections::HashMap<String, Vec<String>>,
+) -> std::result::Result<inkwell::values::BasicValueEnum<'ctx>, String> {
+    use rlasp::ir::ASTNode;
+    use rlasp::ir::ConstantValue;
+
+    match ast {
+        ASTNode::Constant(ConstantValue::Fixnum(n)) => {
+            // Box the fixnum
+            let i64_type = context.i64_type();
+            let box_fixnum_fn = codegen.module().get_function("cc_box_fixnum")
+                .ok_or("cc_box_fixnum not found")?;
+
+            let val = i64_type.const_int(*n as u64, true);
+            let call_site = codegen.builder().build_call(box_fixnum_fn, &[val.into()], "boxed")
+                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+            let result = call_site.as_any_value_enum().into_int_value();
+            Ok(result.into())
+        }
+
+        ASTNode::Constant(ConstantValue::Nil) => {
+            let nil_fn = codegen.module().get_function("cc_nil")
+                .ok_or("cc_nil not found")?;
+            let call_site = codegen.builder().build_call(nil_fn, &[], "nil")
+                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+            let result = call_site.as_any_value_enum().into_int_value();
+            Ok(result.into())
+        }
+
+        ASTNode::Constant(ConstantValue::T) => {
+            let t_fn = codegen.module().get_function("cc_t")
+                .ok_or("cc_t not found")?;
+            let call_site = codegen.builder().build_call(t_fn, &[], "t")
+                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+            let result = call_site.as_any_value_enum().into_int_value();
+            Ok(result.into())
+        }
+
+        ASTNode::Variable(name) => {
+            // Look up variable in environment
+            if let Some(ptr) = env.get(name) {
+                let loaded = codegen.builder().build_load(codegen.lisp_object_type(), *ptr, name)
+                    .map_err(|e| format!("Failed to load variable: {:?}", e))?;
+                Ok(loaded)
+            } else {
+                // Handle special variables
+                match name.as_str() {
+                    "t" => {
+                        let t_fn = codegen.module().get_function("cc_t")
+                            .ok_or("cc_t not found")?;
+                        let call_site = codegen.builder().build_call(t_fn, &[], "t")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "nil" => {
+                        let nil_fn = codegen.module().get_function("cc_nil")
+                            .ok_or("cc_nil not found")?;
+                        let call_site = codegen.builder().build_call(nil_fn, &[], "nil")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    _ => Err(format!("Undefined variable: {}", name))
+                }
+            }
+        }
+
+        ASTNode::Progn { exprs } => {
+            // Evaluate expressions in sequence, return the last one
+            let mut result = None;
+            for expr in exprs {
+                result = Some(compile_ast_to_llvm(context, codegen, expr, env)?);
+            }
+            result.ok_or_else(|| "Progn body cannot be empty".to_string())
+        }
+
+        ASTNode::If { test, then_branch, else_branch } => {
+            // Compile the test expression
+            let test_val = compile_ast_to_llvm(context, codegen, test, env)?;
+
+            // Check if test is nil (false)
+            let is_nil_fn = codegen.module().get_function("cc_is_nil")
+                .ok_or("cc_is_nil not found")?;
+            let is_nil_call = codegen.builder().build_call(is_nil_fn, &[test_val.into()], "is_nil")
+                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+            let is_nil_result = is_nil_call.as_any_value_enum().into_int_value();
+
+            // Convert i32 to i1 for branch condition (0 = false/nil, non-zero = true)
+            let cond = codegen.builder().build_int_compare(
+                inkwell::IntPredicate::EQ,
+                is_nil_result,
+                context.i32_type().const_zero(),
+                "is_false"
+            ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+            // Get the current function
+            let current_fn = codegen.builder().get_insert_block()
+                .and_then(|bb| bb.get_parent())
+                .ok_or("No current function")?;
+
+            // Create basic blocks for then, else, and merge
+            let then_bb = context.append_basic_block(current_fn, "then");
+            let else_bb = context.append_basic_block(current_fn, "else");
+            let merge_bb = context.append_basic_block(current_fn, "merge");
+
+            // Build conditional branch (if cond is true (test is NOT nil), goto then, otherwise goto else)
+            codegen.builder().build_conditional_branch(cond, then_bb, else_bb)
+                .map_err(|e| format!("Failed to build conditional branch: {:?}", e))?;
+
+            // Build then block
+            codegen.builder().position_at_end(then_bb);
+            let then_val = compile_ast_to_llvm(context, codegen, then_branch, env)?;
+            codegen.builder().build_unconditional_branch(merge_bb)
+                .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+            let then_bb_end = codegen.builder().get_insert_block().unwrap();
+
+            // Build else block
+            codegen.builder().position_at_end(else_bb);
+            let else_val = compile_ast_to_llvm(context, codegen, else_branch, env)?;
+            codegen.builder().build_unconditional_branch(merge_bb)
+                .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+            let else_bb_end = codegen.builder().get_insert_block().unwrap();
+
+            // Build merge block with phi node
+            codegen.builder().position_at_end(merge_bb);
+            let phi = codegen.builder().build_phi(codegen.lisp_object_type(), "if_result")
+                .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+
+            phi.add_incoming(&[
+                (&then_val.into_int_value(), then_bb_end),
+                (&else_val.into_int_value(), else_bb_end),
+            ]);
+
+            Ok(phi.as_basic_value())
+        }
+
+        ASTNode::Let { bindings, body } => {
+            // Create a new environment scope by cloning the current one
+            let mut new_env = env.clone();
+
+            // Process each binding
+            for (name, value_ast) in bindings {
+                // Compile the value expression
+                let value = compile_ast_to_llvm(context, codegen, value_ast, env)?;
+
+                // Allocate stack space for the variable
+                let alloca = codegen.builder().build_alloca(codegen.lisp_object_type(), name)
+                    .map_err(|e| format!("Failed to allocate variable: {:?}", e))?;
+
+                // Store the value
+                codegen.builder().build_store(alloca, value)
+                    .map_err(|e| format!("Failed to store variable: {:?}", e))?;
+
+                // Add to new environment
+                new_env.insert(name.clone(), alloca);
+            }
+
+            // Evaluate body expressions in sequence with new environment
+            let mut result = None;
+            for expr in body {
+                result = Some(compile_ast_to_llvm(context, codegen, expr, &mut new_env)?);
+            }
+
+            result.ok_or_else(|| "Let body cannot be empty".to_string())
+        }
+
+        ASTNode::Call { function, args } => {
+            if let ASTNode::Variable(op) = &**function {
+                match op.as_str() {
+                    "+" => {
+                        if args.is_empty() {
+                            // (+) returns 0
+                            let box_fixnum = codegen.module().get_function("cc_box_fixnum")
+                                .ok_or("cc_box_fixnum not found")?;
+                            let zero = context.i64_type().const_int(0, false);
+                            let call_site = codegen.builder().build_call(
+                                box_fixnum, &[zero.into()], "zero"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let result = call_site.as_any_value_enum().into_int_value();
+                            Ok(result.into())
+                        } else if args.len() == 1 {
+                            // (+ x) returns x
+                            compile_ast_to_llvm(context, codegen, &args[0], env)
+                        } else {
+                            // (+ x y z ...) - sum all arguments
+                            let add_fn = codegen.module().get_function("cc_add")
+                                .ok_or("cc_add not found")?;
+
+                            let mut result = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                            for arg in &args[1..] {
+                                let next = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                let call_site = codegen.builder().build_call(
+                                    add_fn, &[result.into(), next.into()], "add_result"
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                result = call_site.as_any_value_enum().into_int_value().into();
+                            }
+                            Ok(result)
+                        }
+                    }
+                    "-" => {
+                        if args.is_empty() {
+                            return Err("- requires at least one argument".to_string());
+                        } else if args.len() == 1 {
+                            // (- x) returns negation: 0 - x
+                            let box_fixnum = codegen.module().get_function("cc_box_fixnum")
+                                .ok_or("cc_box_fixnum not found")?;
+                            let zero = context.i64_type().const_int(0, false);
+                            let zero_call = codegen.builder().build_call(
+                                box_fixnum, &[zero.into()], "zero"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let zero_val = zero_call.as_any_value_enum().into_int_value();
+
+                            let arg_val = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                            let sub_fn = codegen.module().get_function("cc_sub")
+                                .ok_or("cc_sub not found")?;
+                            let call_site = codegen.builder().build_call(
+                                sub_fn, &[zero_val.into(), arg_val.into()], "neg_result"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let result = call_site.as_any_value_enum().into_int_value();
+                            Ok(result.into())
+                        } else {
+                            // (- x y z ...) - subtract all from first
+                            let sub_fn = codegen.module().get_function("cc_sub")
+                                .ok_or("cc_sub not found")?;
+
+                            let mut result = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                            for arg in &args[1..] {
+                                let next = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                let call_site = codegen.builder().build_call(
+                                    sub_fn, &[result.into(), next.into()], "sub_result"
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                result = call_site.as_any_value_enum().into_int_value().into();
+                            }
+                            Ok(result)
+                        }
+                    }
+                    "*" => {
+                        if args.is_empty() {
+                            // (*) returns 1
+                            let box_fixnum = codegen.module().get_function("cc_box_fixnum")
+                                .ok_or("cc_box_fixnum not found")?;
+                            let one = context.i64_type().const_int(1, false);
+                            let call_site = codegen.builder().build_call(
+                                box_fixnum, &[one.into()], "one"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let result = call_site.as_any_value_enum().into_int_value();
+                            Ok(result.into())
+                        } else if args.len() == 1 {
+                            // (* x) returns x
+                            compile_ast_to_llvm(context, codegen, &args[0], env)
+                        } else {
+                            // (* x y z ...) - multiply all arguments
+                            let mul_fn = codegen.module().get_function("cc_mul")
+                                .ok_or("cc_mul not found")?;
+
+                            let mut result = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                            for arg in &args[1..] {
+                                let next = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                let call_site = codegen.builder().build_call(
+                                    mul_fn, &[result.into(), next.into()], "mul_result"
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                result = call_site.as_any_value_enum().into_int_value().into();
+                            }
+                            Ok(result)
+                        }
+                    }
+                    "/" => {
+                        if args.is_empty() {
+                            return Err("/ requires at least one argument".to_string());
+                        } else if args.len() == 1 {
+                            // (/ x) returns reciprocal: 1 / x
+                            let box_fixnum = codegen.module().get_function("cc_box_fixnum")
+                                .ok_or("cc_box_fixnum not found")?;
+                            let one = context.i64_type().const_int(1, false);
+                            let one_call = codegen.builder().build_call(
+                                box_fixnum, &[one.into()], "one"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let one_val = one_call.as_any_value_enum().into_int_value();
+
+                            let arg_val = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                            let div_fn = codegen.module().get_function("cc_div")
+                                .ok_or("cc_div not found")?;
+                            let call_site = codegen.builder().build_call(
+                                div_fn, &[one_val.into(), arg_val.into()], "recip_result"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let result = call_site.as_any_value_enum().into_int_value();
+                            Ok(result.into())
+                        } else {
+                            // (/ x y z ...) - divide first by rest
+                            let div_fn = codegen.module().get_function("cc_div")
+                                .ok_or("cc_div not found")?;
+
+                            let mut result = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                            for arg in &args[1..] {
+                                let next = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                let call_site = codegen.builder().build_call(
+                                    div_fn, &[result.into(), next.into()], "div_result"
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                result = call_site.as_any_value_enum().into_int_value().into();
+                            }
+                            Ok(result)
+                        }
+                    }
+                    "<" if args.len() == 2 => {
+                        let left = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                        let right = compile_ast_to_llvm(context, codegen, &args[1], env)?;
+
+                        let lt_fn = codegen.module().get_function("cc_lt")
+                            .ok_or("cc_lt not found")?;
+                        let call_site = codegen.builder().build_call(
+                            lt_fn, &[left.into(), right.into()], "lt_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    ">" if args.len() == 2 => {
+                        let left = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                        let right = compile_ast_to_llvm(context, codegen, &args[1], env)?;
+
+                        let gt_fn = codegen.module().get_function("cc_gt")
+                            .ok_or("cc_gt not found")?;
+                        let call_site = codegen.builder().build_call(
+                            gt_fn, &[left.into(), right.into()], "gt_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "=" if args.len() == 2 => {
+                        let left = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                        let right = compile_ast_to_llvm(context, codegen, &args[1], env)?;
+
+                        let eq_fn = codegen.module().get_function("cc_eq")
+                            .ok_or("cc_eq not found")?;
+                        let call_site = codegen.builder().build_call(
+                            eq_fn, &[left.into(), right.into()], "eq_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "<=" if args.len() == 2 => {
+                        let left = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                        let right = compile_ast_to_llvm(context, codegen, &args[1], env)?;
+
+                        let le_fn = codegen.module().get_function("cc_le")
+                            .ok_or("cc_le not found")?;
+                        let call_site = codegen.builder().build_call(
+                            le_fn, &[left.into(), right.into()], "le_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    ">=" if args.len() == 2 => {
+                        let left = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                        let right = compile_ast_to_llvm(context, codegen, &args[1], env)?;
+
+                        let ge_fn = codegen.module().get_function("cc_ge")
+                            .ok_or("cc_ge not found")?;
+                        let call_site = codegen.builder().build_call(
+                            ge_fn, &[left.into(), right.into()], "ge_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "cons" if args.len() == 2 => {
+                        let car = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+                        let cdr = compile_ast_to_llvm(context, codegen, &args[1], env)?;
+
+                        let cons_fn = codegen.module().get_function("cc_cons")
+                            .ok_or("cc_cons not found")?;
+                        let call_site = codegen.builder().build_call(
+                            cons_fn, &[car.into(), cdr.into()], "cons_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "car" if args.len() == 1 => {
+                        let cons = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                        let car_fn = codegen.module().get_function("cc_car")
+                            .ok_or("cc_car not found")?;
+                        let call_site = codegen.builder().build_call(
+                            car_fn, &[cons.into()], "car_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "cdr" if args.len() == 1 => {
+                        let cons = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                        let cdr_fn = codegen.module().get_function("cc_cdr")
+                            .ok_or("cc_cdr not found")?;
+                        let call_site = codegen.builder().build_call(
+                            cdr_fn, &[cons.into()], "cdr_result"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+
+                        let result = call_site.as_any_value_enum().into_int_value();
+                        Ok(result.into())
+                    }
+                    "list" => {
+                        // Build a list from right to left: (list 1 2 3) = (cons 1 (cons 2 (cons 3 nil)))
+                        if args.is_empty() {
+                            // Empty list is nil
+                            let nil_fn = codegen.module().get_function("cc_nil")
+                                .ok_or("cc_nil not found")?;
+                            let call_site = codegen.builder().build_call(
+                                nil_fn, &[], "nil_result"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let result = call_site.as_any_value_enum().into_int_value();
+                            Ok(result.into())
+                        } else {
+                            let cons_fn = codegen.module().get_function("cc_cons")
+                                .ok_or("cc_cons not found")?;
+                            let nil_fn = codegen.module().get_function("cc_nil")
+                                .ok_or("cc_nil not found")?;
+
+                            // Start with nil
+                            let nil_call = codegen.builder().build_call(
+                                nil_fn, &[], "nil_result"
+                            ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            let mut current = nil_call.as_any_value_enum().into_int_value();
+
+                            // Build list from right to left
+                            for arg in args.iter().rev() {
+                                let element = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                let cons_call = codegen.builder().build_call(
+                                    cons_fn, &[element.into(), current.into()], "cons_result"
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                current = cons_call.as_any_value_enum().into_int_value();
+                            }
+
+                            Ok(current.into())
+                        }
+                    }
+                    "null" if args.len() == 1 => {
+                        // (null x) returns T if x is nil, NIL otherwise
+                        let arg = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                        let is_nil_fn = codegen.module().get_function("cc_is_nil")
+                            .ok_or("cc_is_nil not found")?;
+                        let is_nil_call = codegen.builder().build_call(
+                            is_nil_fn, &[arg.into()], "is_nil"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let is_nil_result = is_nil_call.as_any_value_enum().into_int_value();
+
+                        // Convert i32 to LispObject (T or NIL)
+                        let t_fn = codegen.module().get_function("cc_t")
+                            .ok_or("cc_t not found")?;
+                        let nil_fn = codegen.module().get_function("cc_nil")
+                            .ok_or("cc_nil not found")?;
+
+                        let t_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_null_true"
+                        );
+                        let nil_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_null_false"
+                        );
+                        let merge_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_null_merge"
+                        );
+
+                        let cond = codegen.builder().build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            is_nil_result,
+                            context.i32_type().const_zero(),
+                            "is_null_cond"
+                        ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+                        codegen.builder().build_conditional_branch(cond, t_bb, nil_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(t_bb);
+                        let t_call = codegen.builder().build_call(t_fn, &[], "t_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let t_val = t_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(nil_bb);
+                        let nil_call = codegen.builder().build_call(nil_fn, &[], "nil_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let nil_val = nil_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(merge_bb);
+                        let phi = codegen.builder().build_phi(codegen.lisp_object_type(), "null_result")
+                            .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+                        phi.add_incoming(&[(&t_val, t_bb), (&nil_val, nil_bb)]);
+
+                        Ok(phi.as_basic_value())
+                    }
+                    "consp" if args.len() == 1 => {
+                        // (consp x) returns T if x is a cons, NIL otherwise
+                        let arg = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                        let is_cons_fn = codegen.module().get_function("cc_is_cons")
+                            .ok_or("cc_is_cons not found")?;
+                        let is_cons_call = codegen.builder().build_call(
+                            is_cons_fn, &[arg.into()], "is_cons"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let is_cons_result = is_cons_call.as_any_value_enum().into_int_value();
+
+                        // Convert i32 to LispObject (T or NIL)
+                        let t_fn = codegen.module().get_function("cc_t")
+                            .ok_or("cc_t not found")?;
+                        let nil_fn = codegen.module().get_function("cc_nil")
+                            .ok_or("cc_nil not found")?;
+
+                        let t_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_cons_true"
+                        );
+                        let nil_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_cons_false"
+                        );
+                        let merge_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_cons_merge"
+                        );
+
+                        let cond = codegen.builder().build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            is_cons_result,
+                            context.i32_type().const_zero(),
+                            "is_cons_cond"
+                        ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+                        codegen.builder().build_conditional_branch(cond, t_bb, nil_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(t_bb);
+                        let t_call = codegen.builder().build_call(t_fn, &[], "t_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let t_val = t_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(nil_bb);
+                        let nil_call = codegen.builder().build_call(nil_fn, &[], "nil_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let nil_val = nil_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(merge_bb);
+                        let phi = codegen.builder().build_phi(codegen.lisp_object_type(), "consp_result")
+                            .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+                        phi.add_incoming(&[(&t_val, t_bb), (&nil_val, nil_bb)]);
+
+                        Ok(phi.as_basic_value())
+                    }
+                    "atom" if args.len() == 1 => {
+                        // (atom x) returns T if x is not a cons, NIL otherwise (opposite of consp)
+                        let arg = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                        let is_cons_fn = codegen.module().get_function("cc_is_cons")
+                            .ok_or("cc_is_cons not found")?;
+                        let is_cons_call = codegen.builder().build_call(
+                            is_cons_fn, &[arg.into()], "is_cons"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let is_cons_result = is_cons_call.as_any_value_enum().into_int_value();
+
+                        // Convert i32 to LispObject (T or NIL) - reversed logic
+                        let t_fn = codegen.module().get_function("cc_t")
+                            .ok_or("cc_t not found")?;
+                        let nil_fn = codegen.module().get_function("cc_nil")
+                            .ok_or("cc_nil not found")?;
+
+                        let t_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_atom_true"
+                        );
+                        let nil_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_atom_false"
+                        );
+                        let merge_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "is_atom_merge"
+                        );
+
+                        // Reversed: EQ (is 0) means not a cons, so atom is true
+                        let cond = codegen.builder().build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            is_cons_result,
+                            context.i32_type().const_zero(),
+                            "is_atom_cond"
+                        ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+                        codegen.builder().build_conditional_branch(cond, t_bb, nil_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(t_bb);
+                        let t_call = codegen.builder().build_call(t_fn, &[], "t_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let t_val = t_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(nil_bb);
+                        let nil_call = codegen.builder().build_call(nil_fn, &[], "nil_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let nil_val = nil_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(merge_bb);
+                        let phi = codegen.builder().build_phi(codegen.lisp_object_type(), "atom_result")
+                            .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+                        phi.add_incoming(&[(&t_val, t_bb), (&nil_val, nil_bb)]);
+
+                        Ok(phi.as_basic_value())
+                    }
+                    "not" if args.len() == 1 => {
+                        // (not x) returns T if x is nil, NIL otherwise (same as null)
+                        let arg = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                        let is_nil_fn = codegen.module().get_function("cc_is_nil")
+                            .ok_or("cc_is_nil not found")?;
+                        let is_nil_call = codegen.builder().build_call(
+                            is_nil_fn, &[arg.into()], "is_nil"
+                        ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let is_nil_result = is_nil_call.as_any_value_enum().into_int_value();
+
+                        let t_fn = codegen.module().get_function("cc_t")
+                            .ok_or("cc_t not found")?;
+                        let nil_fn = codegen.module().get_function("cc_nil")
+                            .ok_or("cc_nil not found")?;
+
+                        let t_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "not_true"
+                        );
+                        let nil_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "not_false"
+                        );
+                        let merge_bb = context.append_basic_block(
+                            codegen.builder().get_insert_block()
+                                .and_then(|bb| bb.get_parent())
+                                .ok_or("No current function")?,
+                            "not_merge"
+                        );
+
+                        let cond = codegen.builder().build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            is_nil_result,
+                            context.i32_type().const_zero(),
+                            "not_cond"
+                        ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+                        codegen.builder().build_conditional_branch(cond, t_bb, nil_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(t_bb);
+                        let t_call = codegen.builder().build_call(t_fn, &[], "t_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let t_val = t_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(nil_bb);
+                        let nil_call = codegen.builder().build_call(nil_fn, &[], "nil_result")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        let nil_val = nil_call.as_any_value_enum().into_int_value();
+                        codegen.builder().build_unconditional_branch(merge_bb)
+                            .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                        codegen.builder().position_at_end(merge_bb);
+                        let phi = codegen.builder().build_phi(codegen.lisp_object_type(), "not_result")
+                            .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+                        phi.add_incoming(&[(&t_val, t_bb), (&nil_val, nil_bb)]);
+
+                        Ok(phi.as_basic_value())
+                    }
+                    "and" => {
+                        // (and) returns T
+                        // (and x) returns x
+                        // (and x y z...) evaluates left to right, short-circuits on first NIL
+                        if args.is_empty() {
+                            let t_fn = codegen.module().get_function("cc_t")
+                                .ok_or("cc_t not found")?;
+                            let call_site = codegen.builder().build_call(t_fn, &[], "and_empty")
+                                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            Ok(call_site.as_any_value_enum().into_int_value().into())
+                        } else if args.len() == 1 {
+                            compile_ast_to_llvm(context, codegen, &args[0], env)
+                        } else {
+                            let is_nil_fn = codegen.module().get_function("cc_is_nil")
+                                .ok_or("cc_is_nil not found")?;
+                            let nil_fn = codegen.module().get_function("cc_nil")
+                                .ok_or("cc_nil not found")?;
+
+                            let mut current_val = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                            for (i, arg) in args[1..].iter().enumerate() {
+                                // Check if current value is nil
+                                let is_nil_call = codegen.builder().build_call(
+                                    is_nil_fn, &[current_val.into()], &format!("and_is_nil_{}", i)
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                let is_nil_result = is_nil_call.as_any_value_enum().into_int_value();
+
+                                let cond = codegen.builder().build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    is_nil_result,
+                                    context.i32_type().const_zero(),
+                                    &format!("and_cond_{}", i)
+                                ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+                                // Create blocks
+                                let continue_bb = context.append_basic_block(
+                                    codegen.builder().get_insert_block()
+                                        .and_then(|bb| bb.get_parent())
+                                        .ok_or("No current function")?,
+                                    &format!("and_continue_{}", i)
+                                );
+                                let short_circuit_bb = context.append_basic_block(
+                                    codegen.builder().get_insert_block()
+                                        .and_then(|bb| bb.get_parent())
+                                        .ok_or("No current function")?,
+                                    &format!("and_short_{}", i)
+                                );
+                                let merge_bb = context.append_basic_block(
+                                    codegen.builder().get_insert_block()
+                                        .and_then(|bb| bb.get_parent())
+                                        .ok_or("No current function")?,
+                                    &format!("and_merge_{}", i)
+                                );
+
+                                codegen.builder().build_conditional_branch(cond, continue_bb, short_circuit_bb)
+                                    .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                                // Continue block: evaluate next arg
+                                codegen.builder().position_at_end(continue_bb);
+                                let next_val = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                codegen.builder().build_unconditional_branch(merge_bb)
+                                    .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+                                let continue_bb_end = codegen.builder().get_insert_block().unwrap();
+
+                                // Short-circuit block: return NIL
+                                codegen.builder().position_at_end(short_circuit_bb);
+                                let nil_call = codegen.builder().build_call(nil_fn, &[], &format!("and_nil_{}", i))
+                                    .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                let nil_val = nil_call.as_any_value_enum().into_int_value();
+                                codegen.builder().build_unconditional_branch(merge_bb)
+                                    .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+                                let short_circuit_bb_end = codegen.builder().get_insert_block().unwrap();
+
+                                // Merge
+                                codegen.builder().position_at_end(merge_bb);
+                                let phi = codegen.builder().build_phi(codegen.lisp_object_type(), &format!("and_phi_{}", i))
+                                    .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+                                phi.add_incoming(&[
+                                    (&next_val.into_int_value(), continue_bb_end),
+                                    (&nil_val, short_circuit_bb_end),
+                                ]);
+
+                                current_val = phi.as_basic_value();
+                            }
+
+                            Ok(current_val)
+                        }
+                    }
+                    "or" => {
+                        // (or) returns NIL
+                        // (or x) returns x
+                        // (or x y z...) evaluates left to right, short-circuits on first non-NIL
+                        if args.is_empty() {
+                            let nil_fn = codegen.module().get_function("cc_nil")
+                                .ok_or("cc_nil not found")?;
+                            let call_site = codegen.builder().build_call(nil_fn, &[], "or_empty")
+                                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            Ok(call_site.as_any_value_enum().into_int_value().into())
+                        } else if args.len() == 1 {
+                            compile_ast_to_llvm(context, codegen, &args[0], env)
+                        } else {
+                            let is_nil_fn = codegen.module().get_function("cc_is_nil")
+                                .ok_or("cc_is_nil not found")?;
+
+                            let mut current_val = compile_ast_to_llvm(context, codegen, &args[0], env)?;
+
+                            for (i, arg) in args[1..].iter().enumerate() {
+                                // Check if current value IS nil
+                                let is_nil_call = codegen.builder().build_call(
+                                    is_nil_fn, &[current_val.into()], &format!("or_is_nil_{}", i)
+                                ).map_err(|e| format!("Failed to build call: {:?}", e))?;
+                                let is_nil_result = is_nil_call.as_any_value_enum().into_int_value();
+
+                                // If is_nil_result == 0, it's NOT nil, so short-circuit with current value
+                                // If is_nil_result != 0, it IS nil, so continue evaluating
+                                let cond = codegen.builder().build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    is_nil_result,
+                                    context.i32_type().const_zero(),
+                                    &format!("or_cond_{}", i)
+                                ).map_err(|e| format!("Failed to build comparison: {:?}", e))?;
+
+                                // Create blocks
+                                let short_circuit_bb = context.append_basic_block(
+                                    codegen.builder().get_insert_block()
+                                        .and_then(|bb| bb.get_parent())
+                                        .ok_or("No current function")?,
+                                    &format!("or_short_{}", i)
+                                );
+                                let continue_bb = context.append_basic_block(
+                                    codegen.builder().get_insert_block()
+                                        .and_then(|bb| bb.get_parent())
+                                        .ok_or("No current function")?,
+                                    &format!("or_continue_{}", i)
+                                );
+                                let merge_bb = context.append_basic_block(
+                                    codegen.builder().get_insert_block()
+                                        .and_then(|bb| bb.get_parent())
+                                        .ok_or("No current function")?,
+                                    &format!("or_merge_{}", i)
+                                );
+
+                                // If cond is true (NOT nil), go to short_circuit_bb, otherwise continue_bb
+                                codegen.builder().build_conditional_branch(cond, short_circuit_bb, continue_bb)
+                                    .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+
+                                // Short-circuit block: return current value
+                                codegen.builder().position_at_end(short_circuit_bb);
+                                codegen.builder().build_unconditional_branch(merge_bb)
+                                    .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+                                let short_circuit_bb_end = codegen.builder().get_insert_block().unwrap();
+
+                                // Continue block: evaluate next arg
+                                codegen.builder().position_at_end(continue_bb);
+                                let next_val = compile_ast_to_llvm(context, codegen, arg, env)?;
+                                codegen.builder().build_unconditional_branch(merge_bb)
+                                    .map_err(|e| format!("Failed to build branch: {:?}", e))?;
+                                let continue_bb_end = codegen.builder().get_insert_block().unwrap();
+
+                                // Merge
+                                codegen.builder().position_at_end(merge_bb);
+                                let phi = codegen.builder().build_phi(codegen.lisp_object_type(), &format!("or_phi_{}", i))
+                                    .map_err(|e| format!("Failed to build phi: {:?}", e))?;
+                                phi.add_incoming(&[
+                                    (&current_val.into_int_value(), short_circuit_bb_end),
+                                    (&next_val.into_int_value(), continue_bb_end),
+                                ]);
+
+                                current_val = phi.as_basic_value();
+                            }
+
+                            Ok(current_val)
+                        }
+                    }
+                    _ => Err(format!("Unsupported function: {}", op))
+                }
+            } else {
+                Err("Function must be a variable".to_string())
+            }
+        }
+
+        _ => Err(format!("Unsupported AST node: {:?}", ast))
+    }
+}
+
+fn compile_ast_to_llvm_with_funcs<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    codegen: &rlasp_jit::CodeGenerator<'ctx>,
+    ast: &rlasp::ir::ASTNode,
+    env: &mut std::collections::HashMap<String, inkwell::values::PointerValue<'ctx>>,
+    user_functions: &std::collections::HashMap<String, Vec<String>>,
+) -> std::result::Result<inkwell::values::BasicValueEnum<'ctx>, String> {
+    use rlasp::ir::ASTNode;
+
+    // Check if this is a call to a user-defined function
+    if let ASTNode::Call { function, args } = ast {
+        if let ASTNode::Variable(func_name) = &**function {
+            if user_functions.contains_key(func_name) {
+                // Call user-defined function
+                let func = codegen.module().get_function(func_name)
+                    .ok_or(format!("User function {} not found", func_name))?;
+
+                // Compile arguments
+                let mut arg_vals = Vec::new();
+                for arg in args {
+                    let val = compile_ast_to_llvm_with_funcs(context, codegen, arg, env, user_functions)?;
+                    arg_vals.push(val.into());
+                }
+
+                // Call the function
+                let call = codegen.builder().build_call(func, &arg_vals, "user_call")
+                    .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                return Ok(call.as_any_value_enum().into_int_value().into());
+            }
+        }
+    }
+
+    // Otherwise delegate to regular compilation
+    compile_ast_to_llvm(context, codegen, ast, env)
+}
+
+fn eval_file_llvm(source: &str, file_path: &str) -> std::result::Result<(), String> {
+    use rlasp_jit::CodeGenerator;
+    use inkwell::context::Context;
+    use std::path::Path;
+    use rlasp::repl::lisp_to_ast;
+    use std::collections::HashMap;
+
+    // Create LLVM context and module
+    let context = Context::create();
+    let module_name = Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module");
+
+    let codegen = CodeGenerator::new(&context, module_name);
+    codegen.declare_intrinsics();
+
+    // Read all forms from the file
+    let lisp_objs = rlasp_reader::read_all_from_string(source)
+        .map_err(|e| format!("Read error: {}", e))?;
+
+    let mut form_count = 0;
+    let mut compiled_any = false;
+    let mut user_functions: HashMap<String, Vec<String>> = HashMap::new();
+    let mut defuns: Vec<(String, Vec<String>, Vec<rlasp::ir::ASTNode>)> = Vec::new();
+
+    // First pass: collect and declare all defuns
+    for lisp_obj in &lisp_objs {
+        match lisp_to_ast::lisp_to_ast(lisp_obj.clone()) {
+            Ok(ast) => {
+                // Check if this is a defun (setq name (lambda ...))
+                if let rlasp::ir::ASTNode::Setq { var, value } = &ast {
+                    if let rlasp::ir::ASTNode::Lambda { params, body, .. } = value.as_ref() {
+                        // Declare the function signature
+                        let i64_type = context.i64_type();
+                        let param_types: Vec<_> = params.iter().map(|_| i64_type.into()).collect();
+                        let fn_type = i64_type.fn_type(&param_types, false);
+                        codegen.module().add_function(var, fn_type, None);
+
+                        // Save for later compilation
+                        defuns.push((var.clone(), params.clone(), body.clone()));
+                        user_functions.insert(var.clone(), params.clone());
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Second pass: compile all defun bodies (now all functions are declared)
+    for (name, params, body) in &defuns {
+        match compile_defun(&context, &codegen, name, params, body, &user_functions) {
+            Ok(_) => {
+                compiled_any = true;
+            }
+            Err(e) => {
+                println!("[Warning: Could not compile defun {}: {}]", name, e);
+            }
+        }
+    }
+
+    // Second pass: compile other forms
+    for lisp_obj in &lisp_objs {
+        match lisp_to_ast::lisp_to_ast(lisp_obj.clone()) {
+            Ok(ast) => {
+                // Skip defuns (already compiled)
+                if let rlasp::ir::ASTNode::Setq { value, .. } = &ast {
+                    if matches!(value.as_ref(), rlasp::ir::ASTNode::Lambda { .. }) {
+                        form_count += 1;
+                        continue;
+                    }
+                }
+
+                // Check if this is a compilable form
+                if is_jit_compilable(&ast) {
+                    let func_name = format!("__form_{}", form_count);
+                    match compile_toplevel_form_with_funcs(&context, &codegen, &ast, &func_name, &user_functions) {
+                        Ok(_) => {
+                            compiled_any = true;
+                        }
+                        Err(e) => {
+                            println!("[Warning: Could not compile form {}: {}]", form_count, e);
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        form_count += 1;
+    }
+
+    // Save IR to file
+    let ir_path = format!("/tmp/{}.ll", module_name);
+    println!("[Generating LLVM IR: {}]", ir_path);
+
+    use std::fs::File;
+    use std::io::Write;
+
+    let ir_string = codegen.module().print_to_string().to_string();
+    let mut file = File::create(&ir_path)
+        .map_err(|e| format!("Failed to create IR file: {}", e))?;
+    file.write_all(ir_string.as_bytes())
+        .map_err(|e| format!("Failed to write IR file: {}", e))?;
+
+    println!("[Saved LLVM IR to: {}]", ir_path);
+    println!("[Compiled {} forms total, {} defuns, {} other]", form_count, user_functions.len(), if compiled_any { "some" } else { "none" });
+
+    // Execute with interpreter for actual results
+    unsafe {
+        let runtime = rlasp_init();
+        if runtime.is_null() {
+            return Err("Failed to initialize rlasp runtime".to_string());
+        }
+
+        eval_file_interp(runtime, source);
+        rlasp_shutdown(runtime);
+    }
+
+    Ok(())
+}
+
+fn is_jit_compilable(ast: &rlasp::ir::ASTNode) -> bool {
+    use rlasp::ir::ASTNode;
+    match ast {
+        ASTNode::Constant(_) => true,
+        ASTNode::Variable(_) => true,
+        ASTNode::Let { .. } => true,
+        ASTNode::If { .. } => true,
+        ASTNode::Progn { .. } => true,
+        ASTNode::Call { .. } => true,
+        _ => false, // defun, defpackage, etc. not supported
+    }
+}
+
+fn compile_defun<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    codegen: &rlasp_jit::CodeGenerator<'ctx>,
+    name: &str,
+    params: &[String],
+    body: &[rlasp::ir::ASTNode],
+    user_functions: &std::collections::HashMap<String, Vec<String>>,
+) -> std::result::Result<(), String> {
+    let i64_type = context.i64_type();
+
+    // Get the function (should already be declared)
+    let function = codegen.module().get_function(name)
+        .ok_or(format!("Function {} not found", name))?;
+
+    let entry_block = context.append_basic_block(function, "entry");
+    codegen.builder().position_at_end(entry_block);
+
+    // Create environment with parameters (allocate them on stack)
+    let mut env = std::collections::HashMap::new();
+    for (i, param_name) in params.iter().enumerate() {
+        let param_val = function.get_nth_param(i as u32)
+            .ok_or(format!("Missing parameter {}", i))?
+            .into_int_value();
+
+        // Allocate stack space for the parameter
+        let alloca = codegen.builder().build_alloca(i64_type, param_name)
+            .map_err(|e| format!("Failed to build alloca: {:?}", e))?;
+
+        // Store parameter value
+        codegen.builder().build_store(alloca, param_val)
+            .map_err(|e| format!("Failed to build store: {:?}", e))?;
+
+        env.insert(param_name.clone(), alloca);
+    }
+
+    // Compile body
+    let mut last_result = None;
+    for expr in body {
+        last_result = Some(compile_ast_to_llvm_with_funcs(context, codegen, expr, &mut env, user_functions)?);
+    }
+
+    // Return last result or NIL
+    let result = if let Some(val) = last_result {
+        val
+    } else {
+        let nil_fn = codegen.module().get_function("cc_nil")
+            .ok_or("cc_nil not found")?;
+        let call = codegen.builder().build_call(nil_fn, &[], "nil")
+            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+        call.as_any_value_enum().into_int_value().into()
+    };
+
+    codegen.builder().build_return(Some(&result.into_int_value()))
+        .map_err(|e| format!("Failed to build return: {:?}", e))?;
+
+    Ok(())
+}
+
+fn compile_toplevel_form_with_funcs<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    codegen: &rlasp_jit::CodeGenerator<'ctx>,
+    ast: &rlasp::ir::ASTNode,
+    func_name: &str,
+    user_functions: &std::collections::HashMap<String, Vec<String>>,
+) -> std::result::Result<(), String> {
+    let i64_type = context.i64_type();
+    let fn_type = i64_type.fn_type(&[], false);
+    let function = codegen.module().add_function(func_name, fn_type, None);
+
+    let entry_block = context.append_basic_block(function, "entry");
+    codegen.builder().position_at_end(entry_block);
+
+    let mut env = std::collections::HashMap::new();
+    let result_val = compile_ast_to_llvm_with_funcs(context, codegen, ast, &mut env, user_functions)?;
+    codegen.builder().build_return(Some(&result_val))
+        .map_err(|e| format!("Failed to build return: {:?}", e))?;
+
+    Ok(())
+}
+
+fn compile_toplevel_form<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    codegen: &rlasp_jit::CodeGenerator<'ctx>,
+    ast: &rlasp::ir::ASTNode,
+    func_name: &str,
+) -> std::result::Result<(), String> {
+    let empty_funcs = std::collections::HashMap::new();
+    compile_toplevel_form_with_funcs(context, codegen, ast, func_name, &empty_funcs)
+}
+
+fn is_complete_expression(input: &str) -> bool {
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if in_string {
+            if ch == '\\' {
+                chars.next();
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            ';' => in_comment = true,
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+
+    !in_string && depth == 0 && !input.trim().is_empty()
+}
+
+fn is_only_comments(input: &str) -> bool {
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut chars = input.chars();
+
+    while let Some(ch) = chars.next() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if in_string {
+            if ch == '\\' {
+                chars.next();
+            } else if ch == '"' {
+                in_string = false;
+            }
+            return false;
+        }
+
+        match ch {
+            ';' => in_comment = true,
+            '"' => in_string = true,
+            c if c.is_whitespace() => continue,
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+fn print_help() {
+    println!("Commands:");
+    println!("  :help, :h    - Show this help");
+    println!("  :quit, :q    - Exit REPL");
+    println!();
+    println!("Execution modes:");
+    println!("  interpreter  - Use AST interpreter (default)");
+    println!("  llvm         - Use LLVM ORC JIT compiler");
+}

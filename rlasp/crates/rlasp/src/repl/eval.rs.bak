@@ -1,0 +1,21 @@
+/// Modular evaluator - main coordinator
+///
+/// This file coordinates the evaluation modules
+
+// Module declarations with explicit paths
+#[path = "eval_types.rs"]
+mod eval_types;
+#[path = "eval_arithmetic.rs"]
+mod eval_arithmetic;
+#[path = "eval_list.rs"]
+mod eval_list;
+#[path = "eval_control.rs"]
+mod eval_control;
+#[path = "eval_system.rs"]
+mod eval_system;
+#[path = "eval_core.rs"]
+mod eval_core;
+
+// Re-export main types and functions
+pub use eval_types::EvalResult;
+pub use eval_core::{eval, eval_with_persistent_env};

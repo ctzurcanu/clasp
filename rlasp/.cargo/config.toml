@@ -1,0 +1,9 @@
+[env]
+# Use system LLVM from homebrew instead of statically linking
+LLVM_SYS_190_PREFIX = "/opt/homebrew/opt/llvm@19"
+# Force dynamic linking to LLVM shared library
+LLVM_LINK_DYLIB = "1"
+
+[build]
+# Additional flags for dynamic linking
+rustflags = []

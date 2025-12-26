@@ -1,0 +1,214 @@
+// Runtime function declarations for rlasp
+// These are provided by the JIT runtime and linked at execution time
+
+// ==============================================================================
+// STACK OPERATIONS - Global evaluation stack (two-stack architecture)
+// ==============================================================================
+func.func private @stack_push_fixnum(i64)
+func.func private @stack_push_pointer(i64)
+func.func private @stack_push_nil()
+func.func private @stack_pop_fixnum() -> i64
+func.func private @stack_pop_pointer() -> i64
+func.func private @stack_depth() -> i64
+func.func private @stack_clear()
+
+// ==============================================================================
+// BOXING / UNBOXING - Convert between raw values and LispObject pointers
+// ==============================================================================
+func.func private @cc_box_fixnum(i64) -> i64
+func.func private @cc_unbox_fixnum(i64) -> i64
+func.func private @cc_box_float(f64) -> i64
+func.func private @cc_unbox_float(i64) -> f64
+
+// ==============================================================================
+// LEGACY RUNTIME FUNCTIONS (will be migrated to stack-based)
+// ==============================================================================
+
+// Basic types
+func.func private @cc_nil() -> i64
+func.func private @cc_t() -> i64
+
+// List operations
+func.func private @cc_cons(i64, i64) -> i64
+func.func private @cc_car(i64) -> i64
+func.func private @cc_cdr(i64) -> i64
+func.func private @cc_append(i64, i64) -> i64
+func.func private @cc_copy_seq(i64) -> i64
+
+// Arithmetic
+func.func private @cc_add(i64, i64) -> i64
+func.func private @cc_sub(i64, i64) -> i64
+func.func private @cc_mul(i64, i64) -> i64
+func.func private @cc_div(i64, i64) -> i64
+func.func private @ratio(i64) -> i64
+func.func private @complex(i64) -> i64
+func.func private @cc_mod(i64, i64) -> i64
+func.func private @cc_expt(i64, i64) -> i64
+func.func private @cc_sqrt(i64) -> i64
+func.func private @cc_floor(i64) -> i64
+func.func private @cc_floor_2(i64, i64) -> i64
+func.func private @cc_ceiling(i64) -> i64
+func.func private @cc_ceiling_2(i64, i64) -> i64
+func.func private @cc_round(i64) -> i64
+func.func private @cc_round_2(i64, i64) -> i64
+func.func private @cc_truncate(i64) -> i64
+func.func private @cc_truncate_2(i64, i64) -> i64
+func.func private @cc_gcd(i64, i64) -> i64
+func.func private @cc_lcm(i64, i64) -> i64
+func.func private @cc_isqrt(i64) -> i64
+func.func private @cc_signum(i64) -> i64
+func.func private @cc_incf(i64) -> i64
+
+// Predicates
+func.func private @cc_evenp(i64) -> i64
+func.func private @cc_oddp(i64) -> i64
+func.func private @cc_lt(i64, i64) -> i64
+func.func private @cc_gt(i64, i64) -> i64
+func.func private @cc_eq(i64, i64) -> i64
+func.func private @cc_null(i64) -> i64
+func.func private @cc_truthiness(i64) -> i64
+func.func private @cc_le(i64, i64) -> i64
+func.func private @cc_ge(i64, i64) -> i64
+
+// Type predicates
+func.func private @cc_numberp(i64) -> i64
+func.func private @cc_integerp(i64) -> i64
+func.func private @cc_floatp(i64) -> i64
+func.func private @cc_rationalp(i64) -> i64
+func.func private @cc_complexp(i64) -> i64
+func.func private @cc_realp(i64) -> i64
+func.func private @cc_characterp(i64) -> i64
+func.func private @cc_stringp(i64) -> i64
+func.func private @cc_symbolp(i64) -> i64
+func.func private @cc_arrayp(i64) -> i64
+func.func private @cc_vectorp(i64) -> i64
+func.func private @cc_hash_table_p(i64) -> i64
+func.func private @cc_plusp(i64) -> i64
+func.func private @cc_minusp(i64) -> i64
+func.func private @cc_equal(i64, i64) -> i64
+func.func private @cc_equalp(i64, i64) -> i64
+
+// Complex numbers
+func.func private @cc_numerator(i64) -> i64
+func.func private @cc_denominator(i64) -> i64
+func.func private @cc_realpart(i64) -> i64
+func.func private @cc_imagpart(i64) -> i64
+func.func private @cc_complex(i64) -> i64
+func.func private @cc_ratio(i64) -> i64
+func.func private @cc_magnitude(i64) -> i64
+
+// I/O
+func.func private @cc_print(i64) -> i64
+func.func private @cc_format(i64, i64) -> i64
+
+// Arrays
+func.func private @cc_make_array(i64) -> i64
+func.func private @cc_aref(i64, i64) -> i64
+func.func private @cc_set_aref(i64, i64, i64) -> i64
+
+// Lists
+func.func private @cc_make_list(i64) -> i64
+func.func private @cc_reverse(i64) -> i64
+func.func private @cc_length(i64) -> i64
+func.func private @cc_nth(i64, i64) -> i64
+func.func private @cc_nthcdr(i64, i64) -> i64
+func.func private @cc_last(i64) -> i64
+func.func private @cc_butlast(i64) -> i64
+func.func private @cc_is_cons(i64) -> i32
+func.func private @cc_nil_value() -> i64
+func.func private @cc_t_value() -> i64
+
+// Hash tables
+func.func private @cc_make_hash_table() -> i64
+func.func private @cc_gethash(i64, i64, i64) -> i64
+func.func private @cc_puthash(i64, i64, i64) -> i64
+func.func private @cc_maphash_stack(i64, i64)
+
+// Strings
+func.func private @cc_make_string(!llvm.ptr, i64) -> i64
+func.func private @cc_make_string_repeat(i64, i64) -> i64
+func.func private @cc_string_equal(i64, i64) -> i64
+func.func private @cc_set_char(i64, i64, i64) -> i64
+func.func private @cc_string_upcase(i64) -> i64
+func.func private @cc_string_downcase(i64) -> i64
+func.func private @cc_string_capitalize(i64) -> i64
+
+// Sequence operations
+func.func private @cc_find(i64, i64) -> i64
+func.func private @cc_position(i64, i64) -> i64
+func.func private @cc_remove(i64, i64) -> i64
+func.func private @cc_subseq(i64, i64, i64) -> i64
+func.func private @cc_count(i64, i64) -> i64
+func.func private @cc_member(i64, i64) -> i64
+func.func private @cc_assoc(i64, i64) -> i64
+
+// Symbols
+func.func private @cc_make_symbol(!llvm.ptr, i64) -> i64
+
+// Reduction
+func.func private @cc_reduce(i64, i64) -> i64
+func.func private @cc_reduce_stack(i64, i64) -> i64
+
+// Mapping
+func.func private @cc_mapcar_stack(i64, i64) -> i64
+
+// Loop
+func.func private @cc_loop_collect(i64, i64, i64, i64) -> i64
+func.func private @cc_build_range(i64, i64, i64) -> i64
+
+// Introspection
+func.func private @cc_fboundp(i64) -> i64
+func.func private @cc_boundp(i64) -> i64
+func.func private @cc_functionp(i64) -> i64
+
+// Evaluation
+func.func private @cc_read_from_string(i64) -> i64
+func.func private @cc_eval(i64) -> i64
+func.func private @cc_compile(i64) -> i64
+
+// CLOS
+func.func private @cc_defclass(i64, i64, i64) -> i64
+func.func private @cc_defgeneric(i64, i64) -> i64
+func.func private @cc_defmethod(i64, i64, i64, i64) -> i64
+func.func private @cc_make_instance(i64, i64) -> i64
+func.func private @cc_slot_value(i64, i64) -> i64
+func.func private @cc_set_slot_value(i64, i64, i64) -> i64
+func.func private @cc_call_generic(i64, i64) -> i64
+func.func private @cc_get_class_def(i64) -> i64
+
+// Mutation
+func.func private @cc_set_car(i64, i64) -> i64
+func.func private @cc_set_cdr(i64, i64) -> i64
+
+// Uniform calling convention support
+func.func private @cc_arg(i64, i64) -> i64
+func.func private @cc_collect_args(i64) -> i64
+func.func private @cc_collect_rest_args(i64, i64) -> i64
+func.func private @cc_if(i64, i64, i64) -> i64
+
+// Function objects
+func.func private @cc_make_lambda_ref_str(!llvm.ptr) -> i64
+func.func private @cc_make_lambda_ref_id(i64) -> i64
+func.func private @cc_funcall(i64, i64) -> i64
+func.func private @cc_funcall_stack(i64)
+func.func private @cc_apply(i64, i64) -> i64
+
+// Control flow
+func.func private @cc_dotimes(i64) -> i64
+func.func private @cc_dolist(i64, i64) -> i64
+
+// FFI (Foreign Function Interface)
+func.func private @cc_ccall(i64, i64) -> i64
+func.func private @cc_cpp_method_call(i64, i64, i64) -> i64
+
+// Logical operators
+func.func private @cc_and(i64) -> i64
+func.func private @cc_or(i64) -> i64
+func.func private @cc_not(i64) -> i64
+
+// Time/system functions
+func.func private @cc_get_internal_real_time() -> i64
+func.func private @cc_get_universal_time(i64) -> i64
+
+// System interaction
+func.func private @cc_shell(i64) -> i64
