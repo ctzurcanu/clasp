@@ -109,18 +109,34 @@ impl EvalStack {
     }
 
     /// Pop a pointer
+    /// For fixnums: boxes the raw value into a LispObject pointer
+    /// This bridges the two-stack architecture with functions expecting tagged pointers
+    /// Values exceeding 62 bits are promoted to bignum
     pub fn pop_pointer(&mut self) -> Option<usize> {
         let (tag, data) = self.pop()?;
 
-        // Handle NIL specially - return the NIL symbol pointer
-        if tag == TypeTag::Nil {
-            return Some(crate::symbol::NIL_SYMBOL.raw());
+        match tag {
+            TypeTag::Nil => Some(crate::symbol::NIL_SYMBOL.raw()),
+            TypeTag::Fixnum if data.len() == 8 => {
+                // Box the raw fixnum into a LispObject
+                let val = i64::from_le_bytes(data.try_into().ok()?);
+                // Check if value fits in 62-bit fixnum representation
+                // 62 bits signed: -2^61 to 2^61-1
+                const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                const MIN_FIXNUM: i64 = -(1 << 61);
+                if val >= MIN_FIXNUM && val <= MAX_FIXNUM {
+                    Some(crate::LispObject::fixnum(val).raw())
+                } else {
+                    // Overflow: promote to bignum
+                    use malachite::Integer;
+                    Some(crate::Number::allocate_bignum(Integer::from(val)).raw())
+                }
+            }
+            TypeTag::Pointer if data.len() == 8 => {
+                Some(usize::from_le_bytes(data.try_into().ok()?))
+            }
+            _ => None,
         }
-
-        if tag != TypeTag::Pointer || data.len() != 8 {
-            return None;
-        }
-        Some(usize::from_le_bytes(data.try_into().ok()?))
     }
 
     /// Peek at top value without popping

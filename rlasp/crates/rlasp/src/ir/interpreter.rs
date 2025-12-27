@@ -272,6 +272,24 @@ impl Interpreter {
             Datum::Constant(c) => {
                 match &c.value {
                     ConstantValue::Fixnum(n) => Value::Int(*n),
+                    ConstantValue::Bignum(s) => {
+                        // Parse bignum and convert to LispObject
+                        // The IR interpreter doesn't fully support bignums yet, so just try to parse as i64
+                        use malachite::Integer;
+                        use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+                        if let Ok(bignum) = s.parse::<Integer>() {
+                            if i64::convertible_from(&bignum) {
+                                Value::Int(i64::exact_from(&bignum))
+                            } else {
+                                // Too large for the IR interpreter, return nil
+                                // The IR interpreter is mainly for testing simple cases
+                                Value::Object(LispObject::nil())
+                            }
+                        } else {
+                            Value::Int(0) // Parse error, default to 0
+                        }
+                    }
                     ConstantValue::Float(f) => Value::Float(*f),
                     ConstantValue::Character(ch) => Value::Object(LispObject::from_char(*ch)),
                     ConstantValue::String(_s) => Value::Object(LispObject::nil()), // TODO: proper string handling

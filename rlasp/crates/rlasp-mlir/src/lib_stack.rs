@@ -18,6 +18,7 @@ pub struct StackMLIRCodegen {
     local_function_map: HashMap<String, String>,  // Maps local function names to unique mangled names
     special_param_functions: HashSet<String>,  // Functions that use &optional, &key, or supplied-p
     function_counter: usize,
+    loop_carried_vars: Option<Vec<String>>,  // Variables that must be threaded through loops (None when not in loop)
 }
 
 impl StackMLIRCodegen {
@@ -34,6 +35,7 @@ impl StackMLIRCodegen {
             local_function_map: HashMap::new(),
             special_param_functions: HashSet::new(),
             function_counter: 0,
+            loop_carried_vars: None,
         };
 
         codegen.writeln("module {");
@@ -124,6 +126,53 @@ impl StackMLIRCodegen {
         self.output = saved_output;
     }
 
+    /// Find variables that are modified via setq in an expression
+    fn find_setq_vars(&self, ast: &ASTNode) -> HashSet<String> {
+        let mut setq_vars = HashSet::new();
+        match ast {
+            ASTNode::Setq { var, value } => {
+                setq_vars.insert(var.clone());
+                setq_vars.extend(self.find_setq_vars(value));
+            }
+            ASTNode::Call { function, args } => {
+                setq_vars.extend(self.find_setq_vars(function));
+                for arg in args {
+                    setq_vars.extend(self.find_setq_vars(arg));
+                }
+            }
+            ASTNode::If { test, then_branch, else_branch } => {
+                setq_vars.extend(self.find_setq_vars(test));
+                setq_vars.extend(self.find_setq_vars(then_branch));
+                setq_vars.extend(self.find_setq_vars(else_branch));
+            }
+            ASTNode::Progn { exprs } => {
+                for expr in exprs {
+                    setq_vars.extend(self.find_setq_vars(expr));
+                }
+            }
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                for (_, val) in bindings {
+                    setq_vars.extend(self.find_setq_vars(val));
+                }
+                for expr in body {
+                    setq_vars.extend(self.find_setq_vars(expr));
+                }
+            }
+            ASTNode::Dotimes { body, .. } | ASTNode::Dolist { body, .. } => {
+                for expr in body {
+                    setq_vars.extend(self.find_setq_vars(expr));
+                }
+            }
+            ASTNode::Lambda { body, .. } => {
+                for expr in body {
+                    setq_vars.extend(self.find_setq_vars(expr));
+                }
+            }
+            _ => {}
+        }
+        setq_vars
+    }
+
     /// Find free variables in an expression (variables used but not defined in bound_vars)
     fn find_free_vars(&self, ast: &ASTNode, bound_vars: &HashSet<String>) -> HashSet<String> {
         let mut free_vars = HashSet::new();
@@ -178,12 +227,21 @@ impl StackMLIRCodegen {
             ASTNode::Constant(val) => {
                 match val {
                     rlasp::ir::ConstantValue::Fixnum(n) => {
-                        // Box fixnum and push as pointer
+                        // Push raw fixnum - type is tracked in type stack (two-stack architecture)
                         let value_ssa = self.fresh_ssa();
                         self.writeln(&format!("{} = arith.constant {} : i64", value_ssa, n));
-                        let boxed_ssa = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_ssa, value_ssa));
-                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_ssa));
+                        self.writeln(&format!("func.call @stack_push_fixnum({}) : (i64) -> ()", value_ssa));
+                    }
+                    rlasp::ir::ConstantValue::Bignum(s) => {
+                        // Parse bignum from string at runtime
+                        let str_const = self.create_string_constant(s);
+                        let str_ptr = self.fresh_ssa();
+                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", str_ptr, str_const));
+                        let len_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, s.len()));
+                        let bignum_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_parse_bignum({}, {}) : (!llvm.ptr, i64) -> i64", bignum_ssa, str_ptr, len_ssa));
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", bignum_ssa));
                     }
                     rlasp::ir::ConstantValue::Nil => {
                         self.writeln("func.call @stack_push_nil() : () -> ()");
@@ -250,9 +308,9 @@ impl StackMLIRCodegen {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                     return Ok(());
                 } else if name == "internal-time-units-per-second" {
-                    // Common Lisp constant: 1000 (milliseconds per second)
+                    // Common Lisp constant: 1_000_000_000 (nanoseconds per second)
                     let val_ssa = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.constant 1000 : i64", val_ssa));
+                    self.writeln(&format!("{} = arith.constant 1000000000 : i64", val_ssa));
                     let boxed_ssa = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_ssa, val_ssa));
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_ssa));
@@ -309,22 +367,91 @@ impl StackMLIRCodegen {
                 let cond_bool = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, nil_val));
 
-                // scf.if with both branches
-                self.writeln(&format!("scf.if {} {{", cond_bool));
-                self.indent();
+                // Find which variables might be modified in either branch
+                let mut modified_vars = self.find_setq_vars(then_branch);
+                modified_vars.extend(self.find_setq_vars(else_branch));
 
-                // Then branch
-                self.compile_expr(then_branch)?;
+                // Filter to only variables that exist in current scope
+                let vars_to_return: Vec<String> = modified_vars.iter()
+                    .filter(|v| self.symbol_table.contains_key(*v))
+                    .cloned()
+                    .collect();
 
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
+                // If in loop context, only return loop-carried variables
+                let vars_to_return: Vec<String> = if let Some(ref loop_vars) = self.loop_carried_vars {
+                    vars_to_return.iter()
+                        .filter(|v| loop_vars.contains(v))
+                        .cloned()
+                        .collect()
+                } else {
+                    vars_to_return
+                };
 
-                // Else branch
-                self.compile_expr(else_branch)?;
+                if !vars_to_return.is_empty() {
+                    // scf.if needs to return the potentially modified variables
+                    let result_ssa = self.fresh_ssa();
+                    let num_results = vars_to_return.len();
+                    let type_sig = vec!["i64"; num_results].join(", ");
 
-                self.dedent();
-                self.writeln("}");
+                    self.writeln(&format!("{}:{} = scf.if {} -> ({}) {{",
+                        result_ssa, num_results, cond_bool, type_sig));
+                    self.indent();
+
+                    // Then branch
+                    let saved_symbols_before_then = self.symbol_table.clone();
+                    self.compile_expr(then_branch)?;
+                    let _discard = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
+
+                    // Yield all vars_to_return (get current values from symbol table after execution)
+                    let then_yields: Vec<String> = vars_to_return.iter()
+                        .map(|v| self.symbol_table.get(v).unwrap().clone())
+                        .collect();
+                    self.writeln(&format!("scf.yield {} : {}", then_yields.join(", "), type_sig));
+
+                    self.dedent();
+                    self.writeln("} else {");
+                    self.indent();
+
+                    // Restore symbol table to state before then branch, then execute else branch
+                    self.symbol_table = saved_symbols_before_then;
+                    self.compile_expr(else_branch)?;
+                    let _discard = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
+
+                    // Yield all vars_to_return (get current values from symbol table after execution)
+                    let else_yields: Vec<String> = vars_to_return.iter()
+                        .map(|v| self.symbol_table.get(v).unwrap().clone())
+                        .collect();
+                    self.writeln(&format!("scf.yield {} : {}", else_yields.join(", "), type_sig));
+
+                    self.dedent();
+                    self.writeln("}");
+
+                    // Update symbol table with returned values
+                    for (i, var_name) in vars_to_return.iter().enumerate() {
+                        let var_val = if num_results == 1 {
+                            result_ssa.clone()
+                        } else {
+                            format!("{}#{}", result_ssa, i)
+                        };
+                        self.symbol_table.insert(var_name.clone(), var_val);
+                    }
+
+                    // Push nil to stack (if returns nil)
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                } else {
+                    // No variables modified, use simple scf.if without returns
+                    self.writeln(&format!("scf.if {} {{", cond_bool));
+                    self.indent();
+                    self.compile_expr(then_branch)?;
+                    self.dedent();
+                    self.writeln("} else {");
+                    self.indent();
+                    self.compile_expr(else_branch)?;
+                    self.dedent();
+                    self.writeln("}");
+                }
 
                 Ok(())
             }
@@ -497,8 +624,24 @@ impl StackMLIRCodegen {
                     }
                 }
 
-                // Restore symbol table
-                self.symbol_table = saved_symbols;
+                // Restore symbol table, but preserve loop-carried variables
+                if let Some(ref loop_vars) = self.loop_carried_vars {
+                    // Save current values of loop-carried variables
+                    let loop_carried_values: Vec<(String, String)> = loop_vars.iter()
+                        .filter_map(|v| self.symbol_table.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+
+                    // Restore saved symbol table
+                    self.symbol_table = saved_symbols;
+
+                    // Restore loop-carried variables to their updated values
+                    for (var, val) in loop_carried_values {
+                        self.symbol_table.insert(var, val);
+                    }
+                } else {
+                    // Not in a loop, just restore
+                    self.symbol_table = saved_symbols;
+                }
                 Ok(())
             }
 
@@ -529,8 +672,24 @@ impl StackMLIRCodegen {
                     }
                 }
 
-                // Restore symbol table
-                self.symbol_table = saved_symbols;
+                // Restore symbol table, but preserve loop-carried variables
+                if let Some(ref loop_vars) = self.loop_carried_vars {
+                    // Save current values of loop-carried variables
+                    let loop_carried_values: Vec<(String, String)> = loop_vars.iter()
+                        .filter_map(|v| self.symbol_table.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+
+                    // Restore saved symbol table
+                    self.symbol_table = saved_symbols;
+
+                    // Restore loop-carried variables to their updated values
+                    for (var, val) in loop_carried_values {
+                        self.symbol_table.insert(var, val);
+                    }
+                } else {
+                    // Not in a loop, just restore
+                    self.symbol_table = saved_symbols;
+                }
                 Ok(())
             }
 
@@ -733,6 +892,17 @@ impl StackMLIRCodegen {
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
 
+                // Find variables that are modified via setq in the loop body
+                let mut modified_vars = HashSet::new();
+                for expr in body {
+                    modified_vars.extend(self.find_setq_vars(expr));
+                }
+                // Only include variables that exist in outer scope
+                let loop_carried_vars: Vec<String> = modified_vars.iter()
+                    .filter(|v| saved_symbols.contains_key(*v))
+                    .cloned()
+                    .collect();
+
                 // Evaluate count expression
                 self.compile_expr(count)?;
                 let count_boxed = self.fresh_ssa();
@@ -746,29 +916,59 @@ impl StackMLIRCodegen {
                 let one = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant 1 : i64", one));
 
-                // Create loop using scf.while
-                // Loop carries i64 around and returns i64 (final loop variable value)
-                let final_i = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.while (%arg0 = {}) : (i64) -> (i64) {{", final_i, zero));
+                // Build initial values for loop-carried variables
+                let mut initial_values = vec![zero.clone()];
+                for var_name in &loop_carried_vars {
+                    initial_values.push(saved_symbols.get(var_name).unwrap().clone());
+                }
+
+                // Create loop using scf.while with loop-carried variables
+                let num_results = 1 + loop_carried_vars.len();
+                let final_results = self.fresh_ssa();
+
+                // Build type signature
+                let type_sig = format!("({}) -> ({})",
+                    vec!["i64"; num_results].join(", "),
+                    vec!["i64"; num_results].join(", "));
+
+                self.writeln(&format!("{}:{} = scf.while ({}) : {} {{",
+                    final_results, num_results,
+                    (0..num_results).map(|i| format!("%arg{} = {}", i, initial_values[i])).collect::<Vec<_>>().join(", "),
+                    type_sig));
                 self.indent();
 
                 // Loop condition: i < count
                 let cond = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.cmpi slt, %arg0, {} : i64", cond, count_val));
-                self.writeln(&format!("scf.condition({}) %arg0 : i64", cond));
+                let condition_vals = (0..num_results).map(|i| format!("%arg{}", i)).collect::<Vec<_>>().join(", ");
+                self.writeln(&format!("scf.condition({}) {} : {}", cond, condition_vals, vec!["i64"; num_results].join(", ")));
 
                 self.dedent();
                 self.writeln("} do {");
                 self.indent();
 
-                // Loop body
-                let loop_var = self.fresh_ssa();
-                self.writeln(&format!("^bb0({}: i64):", loop_var));
+                // Loop body - receive all loop-carried variables
+                let block_args = (0..num_results).map(|i| format!("%{}", self.next_ssa_id + i)).collect::<Vec<_>>();
+                for _ in 0..num_results {
+                    self.next_ssa_id += 1;
+                }
+                self.writeln(&format!("^bb0({}):",
+                    block_args.iter().enumerate().map(|(_, arg)| format!("{}: i64", arg)).collect::<Vec<_>>().join(", ")));
+
+                let loop_var = block_args[0].clone();
 
                 // Box the loop variable and bind it
                 let loop_var_boxed = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", loop_var_boxed, loop_var));
                 self.symbol_table.insert(var.clone(), loop_var_boxed);
+
+                // Bind loop-carried variables
+                for (i, var_name) in loop_carried_vars.iter().enumerate() {
+                    self.symbol_table.insert(var_name.clone(), block_args[i + 1].clone());
+                }
+
+                // Set loop context for conditional compilation
+                self.loop_carried_vars = Some(loop_carried_vars.clone());
 
                 // Execute body
                 for expr in body {
@@ -778,13 +978,34 @@ impl StackMLIRCodegen {
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _tmp));
                 }
 
+                // Clear loop context
+                self.loop_carried_vars = None;
+
+                // Collect updated values for all loop-carried variables
+                let mut yield_values = vec![];
+
                 // Increment loop variable
                 let next_i = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.addi {}, {} : i64", next_i, loop_var, one));
-                self.writeln(&format!("scf.yield {} : i64", next_i));
+                yield_values.push(next_i);
+
+                // Get updated values for modified variables
+                for var_name in &loop_carried_vars {
+                    yield_values.push(self.symbol_table.get(var_name).unwrap().clone());
+                }
+
+                self.writeln(&format!("scf.yield {} : {}",
+                    yield_values.join(", "),
+                    vec!["i64"; num_results].join(", ")));
 
                 self.dedent();
                 self.writeln("}");
+
+                // Extract final values and update symbol table
+                // In MLIR, multi-result values are accessed with #index syntax
+                for (i, var_name) in loop_carried_vars.iter().enumerate() {
+                    self.symbol_table.insert(var_name.clone(), format!("{}#{}", final_results, i + 1));
+                }
 
                 // Evaluate result form (or nil)
                 if let Some(result_expr) = result {
@@ -793,8 +1014,12 @@ impl StackMLIRCodegen {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 }
 
-                // Restore symbol table
-                self.symbol_table = saved_symbols;
+                // Only restore variables that weren't modified in the loop
+                for (var_name, var_val) in &saved_symbols {
+                    if !loop_carried_vars.contains(var_name) {
+                        self.symbol_table.insert(var_name.clone(), var_val.clone());
+                    }
+                }
                 Ok(())
             }
 
@@ -1411,26 +1636,18 @@ impl StackMLIRCodegen {
                 for arg in &args[1..] {
                     self.compile_expr(arg)?;
 
-                    // Pop two boxed values, unbox, add, box result, push
+                    // Pop both operands
                     let right_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
                     let left_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
 
-                    // Unbox
-                    let right = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
-                    let left = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
-
-                    // Add them
+                    // Use cc_add which handles type coercion (fixnum, float, bignum, etc.)
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.addi {}, {} : i64", result, left, right));
+                    self.writeln(&format!("{} = func.call @cc_add({}, {}) : (i64, i64) -> i64", result, left_boxed, right_boxed));
 
-                    // Box and push result
-                    let boxed_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_result, result));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_result));
+                    // Push result
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 }
                 Ok(())
             }
@@ -1439,27 +1656,25 @@ impl StackMLIRCodegen {
                 if args.is_empty() {
                     anyhow::bail!("- requires at least one argument");
                 } else if args.len() == 1 {
-                    // (- x) = negate
+                    // (- x) = negate = (0 - x)
                     self.compile_expr(&args[0])?;
 
                     // Pop as pointer
                     let val_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_boxed));
 
-                    // Unbox
-                    let val = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", val, val_boxed));
-
-                    // Negate
+                    // Create boxed zero
                     let zero = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant 0 : i64", zero));
-                    let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.subi {}, {} : i64", result, zero, val));
+                    let zero_boxed = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", zero_boxed, zero));
 
-                    // Box and push as pointer
-                    let boxed_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_result, result));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_result));
+                    // Use cc_sub which handles type coercion
+                    let result = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64", result, zero_boxed, val_boxed));
+
+                    // Push result
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                     return Ok(());
                 }
 
@@ -1470,26 +1685,18 @@ impl StackMLIRCodegen {
                 for arg in &args[1..] {
                     self.compile_expr(arg)?;
 
-                    // Pop as pointer
+                    // Pop both operands
                     let right_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
                     let left_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
 
-                    // Unbox
-                    let right = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
-                    let left = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
-
-                    // Subtract
+                    // Use cc_sub which handles type coercion (fixnum, float, bignum, etc.)
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.subi {}, {} : i64", result, left, right));
+                    self.writeln(&format!("{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64", result, left_boxed, right_boxed));
 
-                    // Box and push as pointer
-                    let boxed_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_result, result));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_result));
+                    // Push result
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 }
                 Ok(())
             }
@@ -1509,26 +1716,18 @@ impl StackMLIRCodegen {
                 for arg in &args[1..] {
                     self.compile_expr(arg)?;
 
-                    // Pop as pointer
+                    // Pop both operands
                     let right_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
                     let left_boxed = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
 
-                    // Unbox
-                    let right = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
-                    let left = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
-
-                    // Multiply
+                    // Use cc_mul which handles type coercion (fixnum, float, bignum, etc.)
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.muli {}, {} : i64", result, left, right));
+                    self.writeln(&format!("{} = func.call @cc_mul({}, {}) : (i64, i64) -> i64", result, left_boxed, right_boxed));
 
-                    // Box and push as pointer
-                    let boxed_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_result, result));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_result));
+                    // Push result
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 }
                 Ok(())
             }
@@ -3274,32 +3473,110 @@ impl StackMLIRCodegen {
 
                 let nil_val = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                let is_nil = self.fresh_ssa();
+                let cond_bool = self.fresh_ssa();
                 let cmp_op = if is_when { "ne" } else { "eq" };
-                self.writeln(&format!("{} = arith.cmpi {}, {}, {} : i64", is_nil, cmp_op, test_val, nil_val));
+                self.writeln(&format!("{} = arith.cmpi {}, {}, {} : i64", cond_bool, cmp_op, test_val, nil_val));
 
-                // Generate blocks using function_counter
-                let block_id = self.function_counter;
-                self.function_counter += 1;
-                let then_block = format!("{}_{}", func_name, block_id);
-                let end_block = format!("{}_end_{}", func_name, block_id);
+                // Check if we're in a loop and need to return loop-carried variables
+                if let Some(ref loop_vars) = self.loop_carried_vars {
+                    // Find which loop-carried variables might be modified in the body
+                    let mut modified_vars = HashSet::new();
+                    for body_expr in &args[1..] {
+                        modified_vars.extend(self.find_setq_vars(body_expr));
+                    }
 
-                self.writeln(&format!("cf.cond_br {}, ^{}, ^{}", is_nil, then_block, end_block));
+                    // Only care about variables that are loop-carried
+                    let vars_to_return: Vec<String> = loop_vars.iter()
+                        .filter(|v| modified_vars.contains(*v))
+                        .cloned()
+                        .collect();
 
-                // Then block
-                self.writeln(&format!("^{}:", then_block));
-                for (i, body_expr) in args[1..].iter().enumerate() {
-                    self.compile_expr(body_expr)?;
-                    if i < args.len() - 2 {
+                    if !vars_to_return.is_empty() {
+                        // Capture current values of variables BEFORE the scf.if
+                        let saved_values: Vec<String> = vars_to_return.iter()
+                            .map(|v| self.symbol_table.get(v).unwrap().clone())
+                            .collect();
+
+                        // scf.if needs to return the potentially modified variables
+                        let result_ssa = self.fresh_ssa();
+                        let num_results = vars_to_return.len();
+                        let type_sig = vec!["i64"; num_results].join(", ");
+
+                        self.writeln(&format!("{}:{} = scf.if {} -> ({}) {{",
+                            result_ssa, num_results, cond_bool, type_sig));
+                        self.indent();
+
+                        // Then block - execute body
+                        for (i, body_expr) in args[1..].iter().enumerate() {
+                            self.compile_expr(body_expr)?;
+                            if i < args.len() - 2 {
+                                let _discard = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
+                            }
+                        }
+                        // Discard the result of the last expression
                         let _discard = self.fresh_ssa();
                         self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
-                    }
-                }
-                self.writeln(&format!("cf.br ^{}", end_block));
 
-                // End block
-                self.writeln(&format!("^{}:", end_block));
-                self.writeln("func.call @stack_push_nil() : () -> ()");
+                        // Yield all vars_to_return (get current values from symbol table after execution)
+                        let then_yields: Vec<String> = vars_to_return.iter()
+                            .map(|v| self.symbol_table.get(v).unwrap().clone())
+                            .collect();
+                        self.writeln(&format!("scf.yield {} : {}", then_yields.join(", "), type_sig));
+
+                        self.dedent();
+                        self.writeln("} else {");
+                        self.indent();
+
+                        // Else block - yield the saved values (unchanged)
+                        self.writeln(&format!("scf.yield {} : {}", saved_values.join(", "), type_sig));
+
+                        self.dedent();
+                        self.writeln("}");
+
+                        // Update symbol table with returned values
+                        for (i, var_name) in vars_to_return.iter().enumerate() {
+                            let var_val = if num_results == 1 {
+                                result_ssa.clone()
+                            } else {
+                                format!("{}#{}", result_ssa, i)
+                            };
+                            self.symbol_table.insert(var_name.clone(), var_val);
+                        }
+
+                        // Push nil to stack (when/unless returns nil)
+                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                    } else {
+                        // No loop-carried variables modified, use simple scf.if
+                        self.writeln(&format!("scf.if {} {{", cond_bool));
+                        self.indent();
+                        for (i, body_expr) in args[1..].iter().enumerate() {
+                            self.compile_expr(body_expr)?;
+                            if i < args.len() - 2 {
+                                let _discard = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
+                            }
+                        }
+                        self.dedent();
+                        self.writeln("}");
+                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                    }
+                } else {
+                    // Not in a loop, use simple scf.if
+                    self.writeln(&format!("scf.if {} {{", cond_bool));
+                    self.indent();
+                    for (i, body_expr) in args[1..].iter().enumerate() {
+                        self.compile_expr(body_expr)?;
+                        if i < args.len() - 2 {
+                            let _discard = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
+                        }
+                    }
+                    self.dedent();
+                    self.writeln("}");
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+
                 Ok(())
             }
 

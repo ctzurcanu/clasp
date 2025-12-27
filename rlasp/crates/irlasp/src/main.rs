@@ -446,6 +446,70 @@ fn expand_global_macros(
                 body: expanded_body,
             }
         }
+        ASTNode::LetStar { bindings, body } => {
+            let expanded_bindings: Vec<(String, ASTNode)> = bindings.iter()
+                .map(|(name, val)| (name.clone(), expand_global_macros(val, macros)))
+                .collect();
+            let expanded_body: Vec<ASTNode> = body.iter()
+                .map(|e| expand_global_macros(e, macros))
+                .collect();
+            ASTNode::LetStar {
+                bindings: expanded_bindings,
+                body: expanded_body,
+            }
+        }
+        ASTNode::Lambda { params, defaults, supplied_p_vars, body } => {
+            let expanded_defaults: HashMap<String, ASTNode> = defaults.iter()
+                .map(|(name, val)| (name.clone(), expand_global_macros(val, macros)))
+                .collect();
+            let expanded_body: Vec<ASTNode> = body.iter()
+                .map(|e| expand_global_macros(e, macros))
+                .collect();
+            ASTNode::Lambda {
+                params: params.clone(),
+                defaults: expanded_defaults,
+                supplied_p_vars: supplied_p_vars.clone(),
+                body: expanded_body,
+            }
+        }
+        ASTNode::Setq { var, value } => {
+            ASTNode::Setq {
+                var: var.clone(),
+                value: Box::new(expand_global_macros(value, macros)),
+            }
+        }
+        ASTNode::Block { name, body } => {
+            ASTNode::Block {
+                name: name.clone(),
+                body: body.iter().map(|e| expand_global_macros(e, macros)).collect(),
+            }
+        }
+        ASTNode::Dotimes { var, count, result, body } => {
+            ASTNode::Dotimes {
+                var: var.clone(),
+                count: Box::new(expand_global_macros(count, macros)),
+                result: result.as_ref().map(|r| Box::new(expand_global_macros(r, macros))),
+                body: body.iter().map(|e| expand_global_macros(e, macros)).collect(),
+            }
+        }
+        ASTNode::Dolist { var, list, result, body } => {
+            ASTNode::Dolist {
+                var: var.clone(),
+                list: Box::new(expand_global_macros(list, macros)),
+                result: result.as_ref().map(|r| Box::new(expand_global_macros(r, macros))),
+                body: body.iter().map(|e| expand_global_macros(e, macros)).collect(),
+            }
+        }
+        ASTNode::Cond { clauses } => {
+            ASTNode::Cond {
+                clauses: clauses.iter()
+                    .map(|(test, result)| {
+                        (expand_global_macros(test, macros),
+                         expand_global_macros(result, macros))
+                    })
+                    .collect(),
+            }
+        }
         _ => ast.clone(),
     }
 }
@@ -482,6 +546,37 @@ fn substitute_macro_body(
         }
         ASTNode::Quote(inner) => {
             ASTNode::Quote(Box::new(substitute_macro_body(inner, substitutions)))
+        }
+        ASTNode::Let { bindings, body } => {
+            let sub_bindings: Vec<(String, rlasp::ir::ASTNode)> = bindings.iter()
+                .map(|(name, val)| (name.clone(), substitute_macro_body(val, substitutions)))
+                .collect();
+            let sub_body: Vec<ASTNode> = body.iter()
+                .map(|e| substitute_macro_body(e, substitutions))
+                .collect();
+            ASTNode::Let {
+                bindings: sub_bindings,
+                body: sub_body,
+            }
+        }
+        ASTNode::LetStar { bindings, body } => {
+            let sub_bindings: Vec<(String, rlasp::ir::ASTNode)> = bindings.iter()
+                .map(|(name, val)| (name.clone(), substitute_macro_body(val, substitutions)))
+                .collect();
+            let sub_body: Vec<ASTNode> = body.iter()
+                .map(|e| substitute_macro_body(e, substitutions))
+                .collect();
+            ASTNode::LetStar {
+                bindings: sub_bindings,
+                body: sub_body,
+            }
+        }
+        ASTNode::If { test, then_branch, else_branch } => {
+            ASTNode::If {
+                test: Box::new(substitute_macro_body(test, substitutions)),
+                then_branch: Box::new(substitute_macro_body(then_branch, substitutions)),
+                else_branch: Box::new(substitute_macro_body(else_branch, substitutions)),
+            }
         }
         _ => ast.clone(),
     }
@@ -539,6 +634,37 @@ fn expand_macro_backquote_inner(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode 
                 .collect();
             ASTNode::Progn { exprs: expanded_exprs }
         }
+        ASTNode::Let { bindings, body } => {
+            let expanded_bindings: Vec<(String, ASTNode)> = bindings.iter()
+                .map(|(name, val)| (name.clone(), expand_macro_backquote_inner(val)))
+                .collect();
+            let expanded_body: Vec<ASTNode> = body.iter()
+                .map(expand_macro_backquote_inner)
+                .collect();
+            ASTNode::Let {
+                bindings: expanded_bindings,
+                body: expanded_body,
+            }
+        }
+        ASTNode::LetStar { bindings, body } => {
+            let expanded_bindings: Vec<(String, ASTNode)> = bindings.iter()
+                .map(|(name, val)| (name.clone(), expand_macro_backquote_inner(val)))
+                .collect();
+            let expanded_body: Vec<ASTNode> = body.iter()
+                .map(expand_macro_backquote_inner)
+                .collect();
+            ASTNode::LetStar {
+                bindings: expanded_bindings,
+                body: expanded_body,
+            }
+        }
+        ASTNode::If { test, then_branch, else_branch } => {
+            ASTNode::If {
+                test: Box::new(expand_macro_backquote_inner(test)),
+                then_branch: Box::new(expand_macro_backquote_inner(then_branch)),
+                else_branch: Box::new(expand_macro_backquote_inner(else_branch)),
+            }
+        }
         _ => ast.clone(),
     }
 }
@@ -568,38 +694,41 @@ fn normalize_special_forms(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode {
                         }
 
                         // Extract bindings from first argument
-                        let bindings = match &norm_args[0] {
-                            ASTNode::Call { function, args } => {
-                                // Bindings are represented as nested Call nodes
-                                // Each binding is Call { function: Call { function: var, args: [val] }, args: [] }
-                                let mut result = vec![];
-                                let mut current = &norm_args[0];
-
-                                loop {
-                                    match current {
-                                        ASTNode::Call { function, args } if args.is_empty() => {
-                                            // This is a cons cell representing one binding
-                                            if let ASTNode::Call { function: var_node, args: val_args } = &**function {
-                                                if let ASTNode::Variable(var_name) = &**var_node {
-                                                    if !val_args.is_empty() {
-                                                        result.push((var_name.clone(), val_args[0].clone()));
-                                                    }
-                                                }
-                                                break;
-                                            }
-                                            break;
-                                        }
-                                        ASTNode::Variable(_) => {
-                                            // Empty binding list (nil)
-                                            break;
-                                        }
-                                        _ => break,
+                        // The binding list is represented as:
+                        // Call { function: first_binding, args: [rest_bindings...] }
+                        // Where each binding is Call { function: Variable(name), args: [value] }
+                        fn extract_binding(node: &ASTNode) -> Option<(String, ASTNode)> {
+                            if let ASTNode::Call { function, args } = node {
+                                if let ASTNode::Variable(var_name) = &**function {
+                                    if !args.is_empty() {
+                                        return Some((var_name.clone(), args[0].clone()));
                                     }
                                 }
-                                result
                             }
-                            _ => vec![],
-                        };
+                            None
+                        }
+
+                        fn extract_bindings(node: &ASTNode) -> Vec<(String, ASTNode)> {
+                            let mut result = vec![];
+                            match node {
+                                ASTNode::Call { function, args } => {
+                                    // First binding is in function
+                                    if let Some(binding) = extract_binding(function) {
+                                        result.push(binding);
+                                    }
+                                    // Remaining bindings are in args
+                                    for arg in args {
+                                        if let Some(binding) = extract_binding(arg) {
+                                            result.push(binding);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            result
+                        }
+
+                        let bindings = extract_bindings(&norm_args[0]);
 
                         let body = if norm_args.len() > 1 {
                             norm_args[1..].to_vec()
@@ -607,7 +736,11 @@ fn normalize_special_forms(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode {
                             vec![ASTNode::nil()]
                         };
 
-                        return ASTNode::Let { bindings, body };
+                        if name == "let*" {
+                            return ASTNode::LetStar { bindings, body };
+                        } else {
+                            return ASTNode::Let { bindings, body };
+                        }
                     }
                     "if" => {
                         // (if test then [else])
@@ -1905,12 +2038,12 @@ fn compile_ast_to_llvm<'ctx>(
                         Ok(result.into())
                     }
                     "internal-time-units-per-second" => {
-                        // Return constant 1000 (milliseconds per second)
+                        // Return constant 1_000_000_000 (nanoseconds per second)
                         let i64_type = context.i64_type();
-                        let const_val = i64_type.const_int(1000, false);
+                        let const_val = i64_type.const_int(1_000_000_000, false);
                         let box_fn = codegen.module().get_function("cc_box_fixnum")
                             .ok_or("cc_box_fixnum not found")?;
-                        let call = codegen.builder().build_call(box_fn, &[const_val.into()], "box_1000")
+                        let call = codegen.builder().build_call(box_fn, &[const_val.into()], "box_ns")
                             .map_err(|e| format!("Failed to build call: {:?}", e))?;
                         Ok(call.as_any_value_enum().into_int_value().into())
                     }

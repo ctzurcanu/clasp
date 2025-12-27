@@ -72,6 +72,7 @@ pub struct Constant {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstantValue {
     Fixnum(i64),
+    Bignum(String), // String representation of large integer
     Float(f64),
     Character(char),
     String(String),

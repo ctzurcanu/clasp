@@ -45,9 +45,12 @@ impl LispObject {
     // === Constructors ===
 
     /// Create a fixnum (immediate integer)
+    /// Uses 62-bit representation with 2-bit tag for LispObject
+    /// Full 64-bit values use bignum representation
     #[inline]
     pub fn fixnum(n: i64) -> Self {
-        // Shift left by 2 to make room for tag
+        // Note: Tag::Fixnum == 0b00, so no OR needed
+        // Just shift left by 2 to make room for tag
         let raw = ((n as usize) << 2) | (Tag::Fixnum as usize);
         Self { raw }
     }
@@ -141,6 +144,7 @@ impl LispObject {
     // === Accessors ===
 
     /// Extract fixnum value (unchecked)
+    /// Shift right by 2 to remove tag bits
     #[inline]
     pub fn as_fixnum_unchecked(self) -> i64 {
         (self.raw as i64) >> 2

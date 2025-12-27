@@ -43,6 +43,28 @@ impl Parser {
                 Ok(LispObject::fixnum(val))
             }
 
+            TokenKind::Bignum(s) => {
+                let bignum_str = s.clone();
+                self.advance()?;
+                // Parse the bignum string
+                use malachite::Integer;
+                use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+                if let Ok(bignum) = bignum_str.parse::<Integer>() {
+                    // Check if it actually fits in a fixnum
+                    if i64::convertible_from(&bignum) {
+                        Ok(LispObject::fixnum(i64::exact_from(&bignum)))
+                    } else {
+                        Ok(rlasp_runtime::Number::allocate_bignum(bignum))
+                    }
+                } else {
+                    Err(ReaderError::InvalidSyntax {
+                        msg: format!("Invalid bignum: {}", bignum_str),
+                        pos: self.current_token.pos,
+                    })
+                }
+            }
+
             TokenKind::Float(f) => {
                 let val = *f;
                 self.advance()?;

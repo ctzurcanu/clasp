@@ -26,6 +26,17 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
             return Ok(ASTNode::float(f));
         }
 
+        // Try Bignum
+        if let Some(num_ptr) = obj.as_general_ptr::<rlasp_runtime::Number>() {
+            if !num_ptr.is_null() {
+                let num = unsafe { &*num_ptr };
+                if let Some(bignum) = num.as_bignum() {
+                    // Convert bignum to string representation for IR
+                    return Ok(ASTNode::Constant(ConstantValue::Bignum(bignum.to_string())));
+                }
+            }
+        }
+
         // Then try Symbol
         if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {

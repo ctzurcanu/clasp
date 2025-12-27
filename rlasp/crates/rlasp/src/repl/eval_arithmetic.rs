@@ -77,12 +77,13 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
         return Err("- requires at least one argument".to_string());
     }
 
-    let first = eval_with_env(&args[0], env)?;
-    let (mut result_int, mut result_ratio, mut result_float, mut has_float, mut has_ratio) = match first {
-        EvalResult::Fixnum(n) => (n, Rational::from(n), n as f64, false, false),
-        EvalResult::Ratio(r) => (0, r, 0.0, false, true),
-        EvalResult::Float(f) => (0, Rational::from(0), f, true, false),
-        EvalResult::Nil => (0, Rational::from(0), 0.0, false, false), // Treat nil as 0 (runtime limitation)
+    let first = primary_value(eval_with_env(&args[0], env)?);
+    let (mut result_bigint, mut result_ratio, mut result_float, mut has_float, mut has_ratio) = match first {
+        EvalResult::Fixnum(n) => (Integer::from(n), Rational::from(n), n as f64, false, false),
+        EvalResult::Bignum(b) => (b.clone(), Rational::from(b), 0.0, false, false),
+        EvalResult::Ratio(r) => (Integer::from(0), r, 0.0, false, true),
+        EvalResult::Float(f) => (Integer::from(0), Rational::from(0), f, true, false),
+        EvalResult::Nil => (Integer::from(0), Rational::from(0), 0.0, false, false), // Treat nil as 0
         _ => return Err("- requires numeric arguments".to_string()),
     };
 
@@ -102,16 +103,26 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 Ok(EvalResult::Ratio(neg))
             }
         } else {
-            Ok(EvalResult::Fixnum(-result_int))
+            let neg = -result_bigint;
+            if i64::convertible_from(&neg) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&neg)))
+            } else {
+                Ok(EvalResult::Bignum(neg))
+            }
         };
     }
 
     for arg in &args[1..] {
-        match eval_with_env(arg, env)? {
+        let val = primary_value(eval_with_env(arg, env)?);
+        match val {
             EvalResult::Fixnum(n) => {
-                result_int -= n;
+                result_bigint -= Integer::from(n);
                 result_ratio -= Rational::from(n);
                 result_float -= n as f64;
+            }
+            EvalResult::Bignum(b) => {
+                result_bigint -= &b;
+                result_ratio -= Rational::from(b);
             }
             EvalResult::Ratio(r) => {
                 has_ratio = true;
@@ -122,8 +133,7 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 result_float -= f;
             }
             EvalResult::Nil => {
-                // Treat nil as 0 (runtime limitation: nil == fixnum 0)
-                // Don't subtract anything
+                // Treat nil as 0 - don't subtract anything
             }
             _ => return Err("- requires numeric arguments".to_string()),
         }
@@ -143,25 +153,35 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
             Ok(EvalResult::Ratio(result_ratio))
         }
     } else {
-        Ok(EvalResult::Fixnum(result_int))
+        // Try to fit in Fixnum, otherwise return Bignum
+        if i64::convertible_from(&result_bigint) {
+            Ok(EvalResult::Fixnum(i64::exact_from(&result_bigint)))
+        } else {
+            Ok(EvalResult::Bignum(result_bigint))
+        }
     }
 }
 
 pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     use malachite::Rational;
 
-    let mut product_int: i64 = 1;
+    let mut product_bigint = Integer::from(1);
     let mut product_ratio = Rational::from(1);
     let mut product_float: f64 = 1.0;
     let mut has_float = false;
     let mut has_ratio = false;
 
     for arg in args {
-        match eval_with_env(arg, env)? {
+        let val = primary_value(eval_with_env(arg, env)?);
+        match val {
             EvalResult::Fixnum(n) => {
-                product_int *= n;
+                product_bigint *= Integer::from(n);
                 product_ratio *= Rational::from(n);
                 product_float *= n as f64;
+            }
+            EvalResult::Bignum(b) => {
+                product_bigint *= &b;
+                product_ratio *= Rational::from(b);
             }
             EvalResult::Ratio(r) => {
                 has_ratio = true;
@@ -170,6 +190,10 @@ pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
             EvalResult::Float(f) => {
                 has_float = true;
                 product_float *= f;
+            }
+            EvalResult::Nil => {
+                // Treat nil as 0 for multiplication makes result 0
+                return Ok(EvalResult::Fixnum(0));
             }
             _ => return Err("* requires numeric arguments".to_string()),
         }
@@ -189,7 +213,12 @@ pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
             Ok(EvalResult::Ratio(product_ratio))
         }
     } else {
-        Ok(EvalResult::Fixnum(product_int))
+        // Try to fit in Fixnum, otherwise return Bignum
+        if i64::convertible_from(&product_bigint) {
+            Ok(EvalResult::Fixnum(i64::exact_from(&product_bigint)))
+        } else {
+            Ok(EvalResult::Bignum(product_bigint))
+        }
     }
 }
 

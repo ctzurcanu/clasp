@@ -22,6 +22,7 @@ pub enum TokenKind {
 
     // Atoms
     Integer(i64),
+    Bignum(String),  // String representation of large integer
     Float(f64),
     Ratio(i64, i64),
     String(String),
@@ -81,6 +82,7 @@ impl fmt::Display for TokenKind {
             TokenKind::LeftBrace => write!(f, "{{"),
             TokenKind::RightBrace => write!(f, "}}"),
             TokenKind::Integer(n) => write!(f, "{}", n),
+            TokenKind::Bignum(s) => write!(f, "{}", s),
             TokenKind::Float(n) => write!(f, "{}", n),
             TokenKind::Ratio(n, d) => write!(f, "{}/{}", n, d),
             TokenKind::String(s) => write!(f, "\"{}\"", s),

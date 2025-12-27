@@ -9,6 +9,8 @@ use rlasp_runtime::eval_stack::{
     stack_pop_fixnum, stack_pop_pointer
 };
 use rlasp_runtime::string::RString;
+use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+use malachite::Integer;
 
 /// Box a fixnum (i64 → LispObject)
 #[no_mangle]
@@ -51,6 +53,33 @@ pub extern "C" fn cc_box_character(val: u32) -> usize {
 pub extern "C" fn cc_unbox_character(obj: usize) -> u32 {
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
     lisp_obj.as_character().unwrap_or('\0') as u32
+}
+
+/// Parse a bignum from a string (for large numeric literals)
+#[no_mangle]
+pub extern "C" fn cc_parse_bignum(ptr: *const u8, len: usize) -> usize {
+    if ptr.is_null() {
+        return LispObject::fixnum(0).raw();
+    }
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(ptr, len);
+        let s = String::from_utf8_lossy(bytes);
+
+        // Try to parse as Integer
+        if let Ok(bignum) = s.parse::<malachite::Integer>() {
+            // Check if it fits in a fixnum
+            use malachite::num::conversion::traits::IsInteger;
+            if i64::convertible_from(&bignum) {
+                LispObject::fixnum(i64::exact_from(&bignum)).raw()
+            } else {
+                rlasp_runtime::Number::allocate_bignum(bignum).raw()
+            }
+        } else {
+            // Parse failed, return 0
+            LispObject::fixnum(0).raw()
+        }
+    }
 }
 
 /// Allocate a cons cell - direct args version
@@ -160,124 +189,449 @@ pub extern "C" fn cc_is_cons(obj: usize) -> i32 {
     if lisp_obj.is_cons() { 1 } else { 0 }
 }
 
-/// Add two numbers (supports fixnum, bignum, float, ratio)
+/// Add two numbers (tagged LispObjects: fixnum, bignum, float, ratio)
 #[no_mangle]
 pub extern "C" fn cc_add(a: usize, b: usize) -> usize {
     use malachite::Integer;
+    use malachite::Rational;
     use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
-    use rlasp_runtime::Number;
+    use rlasp_runtime::{Number, NumberValue};
 
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
-    // Try fixnum + fixnum first (fast path)
+    // Fast path: both are fixnums
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        // Check for overflow
         if let Some(result) = a_val.checked_add(b_val) {
-            return LispObject::fixnum(result).raw();
+            // Check if result fits in 62-bit fixnum
+            const MAX_FIXNUM: i64 = (1 << 61) - 1;
+            const MIN_FIXNUM: i64 = -(1 << 61);
+            if result >= MIN_FIXNUM && result <= MAX_FIXNUM {
+                return LispObject::fixnum(result).raw();
+            } else {
+                return Number::allocate_bignum(Integer::from(result)).raw();
+            }
         } else {
-            // Overflow: convert to bignum
+            // Overflow - promote to bignum
             let result = Integer::from(a_val) + Integer::from(b_val);
             return Number::allocate_bignum(result).raw();
         }
     }
 
-    // Convert both to floats if either is a float
-    if let (Some(a_float), Some(b_float)) = (a_obj.as_float(), b_obj.as_float()) {
-        return Number::allocate_float(a_float + b_float).raw();
+    // Slow path: at least one is not a simple fixnum
+    // Helper enum for numeric type dispatch
+    enum NumericValue {
+        Fixnum(i64),
+        Float(f64),
+        Bignum(Integer),
+        Ratio(Rational),
     }
 
-    // Handle bignum + fixnum or fixnum + bignum or bignum + bignum
-    let a_bigint = if let Some(a_val) = a_obj.as_fixnum() {
-        Integer::from(a_val)
-    } else if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
-        if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
-            bignum.clone()
-        } else {
-            return LispObject::nil().raw();
+    let extract_value = |obj: LispObject| -> Option<NumericValue> {
+        if let Some(fix) = obj.as_fixnum() {
+            return Some(NumericValue::Fixnum(fix));
         }
-    } else {
-        return LispObject::nil().raw();
+        if let Some(ptr) = obj.as_general_ptr::<Number>() {
+            unsafe {
+                match &(*ptr).value {
+                    NumberValue::Float(f) => Some(NumericValue::Float(*f)),
+                    NumberValue::Bignum(b) => Some(NumericValue::Bignum(b.clone())),
+                    NumberValue::Ratio(r) => Some(NumericValue::Ratio(r.clone())),
+                    _ => None,
+                }
+            }
+        } else {
+            None
+        }
     };
 
-    let b_bigint = if let Some(b_val) = b_obj.as_fixnum() {
-        Integer::from(b_val)
-    } else if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
-        if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
-            bignum.clone()
-        } else {
-            return LispObject::nil().raw();
+    let a_val = extract_value(a_obj);
+    let b_val = extract_value(b_obj);
+
+    match (a_val, b_val) {
+        // Float + anything => float
+        (Some(NumericValue::Float(a_f)), Some(b)) => {
+            let b_f = match b {
+                NumericValue::Fixnum(x) => x as f64,
+                NumericValue::Float(x) => x,
+                NumericValue::Bignum(x) => x.to_string().parse::<f64>().unwrap_or(0.0),
+                NumericValue::Ratio(x) => {
+                    let n: f64 = x.numerator_ref().to_string().parse().unwrap_or(0.0);
+                    let d: f64 = x.denominator_ref().to_string().parse().unwrap_or(1.0);
+                    n / d
+                }
+            };
+            Number::allocate_float(a_f + b_f).raw()
         }
-    } else {
-        return LispObject::nil().raw();
-    };
+        (Some(a), Some(NumericValue::Float(b_f))) => {
+            let a_f = match a {
+                NumericValue::Fixnum(x) => x as f64,
+                NumericValue::Float(x) => x,
+                NumericValue::Bignum(x) => x.to_string().parse::<f64>().unwrap_or(0.0),
+                NumericValue::Ratio(x) => {
+                    let n: f64 = x.numerator_ref().to_string().parse().unwrap_or(0.0);
+                    let d: f64 = x.denominator_ref().to_string().parse().unwrap_or(1.0);
+                    n / d
+                }
+            };
+            Number::allocate_float(a_f + b_f).raw()
+        }
 
-    let result = a_bigint + b_bigint;
+        // Ratio + Ratio => Ratio
+        (Some(NumericValue::Ratio(a_r)), Some(NumericValue::Ratio(b_r))) => {
+            let result = a_r + b_r;
+            Number::allocate_ratio(result).raw()
+        }
 
-    // Try to fit in Fixnum, otherwise return Bignum
-    if i64::convertible_from(&result) {
-        LispObject::fixnum(i64::exact_from(&result)).raw()
-    } else {
-        Number::allocate_bignum(result).raw()
+        // Ratio + integer => Ratio
+        (Some(NumericValue::Ratio(a_r)), Some(NumericValue::Fixnum(b_i))) => {
+            let result = a_r + Rational::from(b_i);
+            Number::allocate_ratio(result).raw()
+        }
+        (Some(NumericValue::Fixnum(a_i)), Some(NumericValue::Ratio(b_r))) => {
+            let result = Rational::from(a_i) + b_r;
+            Number::allocate_ratio(result).raw()
+        }
+        (Some(NumericValue::Ratio(a_r)), Some(NumericValue::Bignum(b_i))) => {
+            let result = a_r + Rational::from(b_i);
+            Number::allocate_ratio(result).raw()
+        }
+        (Some(NumericValue::Bignum(a_i)), Some(NumericValue::Ratio(b_r))) => {
+            let result = Rational::from(a_i) + b_r;
+            Number::allocate_ratio(result).raw()
+        }
+
+        // Integer + Integer => Integer
+        (Some(NumericValue::Fixnum(a_i)), Some(NumericValue::Fixnum(b_i))) => {
+            // Already handled in fast path, but keep for completeness
+            let result = Integer::from(a_i) + Integer::from(b_i);
+            if i64::convertible_from(&result) {
+                let r = i64::exact_from(&result);
+                const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                const MIN_FIXNUM: i64 = -(1 << 61);
+                if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+                    LispObject::fixnum(r).raw()
+                } else {
+                    Number::allocate_bignum(result).raw()
+                }
+            } else {
+                Number::allocate_bignum(result).raw()
+            }
+        }
+        (Some(NumericValue::Fixnum(a_i)), Some(NumericValue::Bignum(b_b))) => {
+            let result = Integer::from(a_i) + b_b;
+            if i64::convertible_from(&result) {
+                let r = i64::exact_from(&result);
+                const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                const MIN_FIXNUM: i64 = -(1 << 61);
+                if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+                    return LispObject::fixnum(r).raw();
+                }
+            }
+            Number::allocate_bignum(result).raw()
+        }
+        (Some(NumericValue::Bignum(a_b)), Some(NumericValue::Fixnum(b_i))) => {
+            let result = a_b + Integer::from(b_i);
+            if i64::convertible_from(&result) {
+                let r = i64::exact_from(&result);
+                const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                const MIN_FIXNUM: i64 = -(1 << 61);
+                if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+                    return LispObject::fixnum(r).raw();
+                }
+            }
+            Number::allocate_bignum(result).raw()
+        }
+        (Some(NumericValue::Bignum(a_b)), Some(NumericValue::Bignum(b_b))) => {
+            let result = a_b + b_b;
+            if i64::convertible_from(&result) {
+                let r = i64::exact_from(&result);
+                const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                const MIN_FIXNUM: i64 = -(1 << 61);
+                if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+                    return LispObject::fixnum(r).raw();
+                }
+            }
+            Number::allocate_bignum(result).raw()
+        }
+
+        // Default: return 0
+        _ => LispObject::fixnum(0).raw(),
     }
 }
 
-/// Subtract two fixnums
+/// Subtract two numbers (tagged LispObjects: fixnum, bignum, float, ratio)
 #[no_mangle]
 pub extern "C" fn cc_sub(a: usize, b: usize) -> usize {
-    let a_obj = unsafe { LispObject::from_raw(a) };
-    let b_obj = unsafe { LispObject::from_raw(b) };
-
-    if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        LispObject::fixnum(a_val - b_val).raw()
-    } else {
-        LispObject::nil().raw()
-    }
-}
-
-/// Multiply two fixnums
-#[no_mangle]
-pub extern "C" fn cc_mul(a: usize, b: usize) -> usize {
-    let a_obj = unsafe { LispObject::from_raw(a) };
-    let b_obj = unsafe { LispObject::from_raw(b) };
-
-    if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        LispObject::fixnum(a_val * b_val).raw()
-    } else {
-        LispObject::nil().raw()
-    }
-}
-
-/// Divide two fixnums
-#[no_mangle]
-pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
-    use malachite::Rational;
+    use rlasp_runtime::{Number, NumberValue};
+    use malachite::Integer;
     use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
+    // Fast path: both are fixnums
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+        if let Some(result) = a_val.checked_sub(b_val) {
+            // Check if result fits in 62-bit fixnum
+            const MAX_FIXNUM: i64 = (1 << 61) - 1;
+            const MIN_FIXNUM: i64 = -(1 << 61);
+            if result >= MIN_FIXNUM && result <= MAX_FIXNUM {
+                return LispObject::fixnum(result).raw();
+            } else {
+                return Number::allocate_bignum(Integer::from(result)).raw();
+            }
+        } else {
+            // Overflow - promote to bignum
+            let result = Integer::from(a_val) - Integer::from(b_val);
+            return Number::allocate_bignum(result).raw();
+        }
+    }
+
+    // Slow path: at least one is not a simple fixnum
+    // Helper to extract numeric value
+    let extract_value = |obj: LispObject| -> (Option<i64>, Option<f64>, Option<Integer>) {
+        if let Some(fix) = obj.as_fixnum() {
+            return (Some(fix), None, None);
+        }
+        // General pointer (bignum, float, ratio)
+        if let Some(ptr) = obj.as_general_ptr::<Number>() {
+            unsafe {
+                match &(*ptr).value {
+                    NumberValue::Float(f) => (None, Some(*f), None),
+                    NumberValue::Bignum(b) => (None, None, Some(b.clone())),
+                    NumberValue::Ratio(r) => {
+                        let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                        let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0);
+                        (None, Some(n / d), None)
+                    }
+                    _ => (None, None, None),
+                }
+            }
+        } else {
+            (None, None, None)
+        }
+    };
+
+    let (a_fix, a_float, a_big) = extract_value(a_obj);
+    let (b_fix, b_float, b_big) = extract_value(b_obj);
+
+    // If either is a float, do float arithmetic
+    if a_float.is_some() || b_float.is_some() {
+        let a_f = a_float.or_else(|| a_fix.map(|x| x as f64)).or_else(|| a_big.as_ref().map(|x| x.to_string().parse::<f64>().unwrap_or(0.0))).unwrap_or(0.0);
+        let b_f = b_float.or_else(|| b_fix.map(|x| x as f64)).or_else(|| b_big.as_ref().map(|x| x.to_string().parse::<f64>().unwrap_or(0.0))).unwrap_or(0.0);
+        return Number::allocate_float(a_f - b_f).raw();
+    }
+
+    // Convert to bignum for precise arithmetic
+    let a_int = a_big.unwrap_or_else(|| Integer::from(a_fix.unwrap_or(0)));
+    let b_int = b_big.unwrap_or_else(|| Integer::from(b_fix.unwrap_or(0)));
+    let result = a_int - b_int;
+
+    // Try to fit back into fixnum
+    if i64::convertible_from(&result) {
+        let r = i64::exact_from(&result);
+        const MAX_FIXNUM: i64 = (1 << 61) - 1;
+        const MIN_FIXNUM: i64 = -(1 << 61);
+        if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+            LispObject::fixnum(r).raw()
+        } else {
+            Number::allocate_bignum(result).raw()
+        }
+    } else {
+        Number::allocate_bignum(result).raw()
+    }
+}
+
+/// Multiply two numbers (tagged LispObjects: fixnum, bignum, float, ratio)
+#[no_mangle]
+pub extern "C" fn cc_mul(a: usize, b: usize) -> usize {
+    use rlasp_runtime::{Number, NumberValue};
+    use malachite::Integer;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+    let a_obj = unsafe { LispObject::from_raw(a) };
+    let b_obj = unsafe { LispObject::from_raw(b) };
+
+    // Fast path: both are fixnums
+    if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+        if let Some(result) = a_val.checked_mul(b_val) {
+            // Check if result fits in 62-bit fixnum
+            const MAX_FIXNUM: i64 = (1 << 61) - 1;
+            const MIN_FIXNUM: i64 = -(1 << 61);
+            if result >= MIN_FIXNUM && result <= MAX_FIXNUM {
+                return LispObject::fixnum(result).raw();
+            } else {
+                return Number::allocate_bignum(Integer::from(result)).raw();
+            }
+        } else {
+            // Overflow - promote to bignum
+            let a_big = Integer::from(a_val);
+            let b_big = Integer::from(b_val);
+            return Number::allocate_bignum(a_big * b_big).raw();
+        }
+    }
+
+    // Slow path: at least one is not a simple fixnum
+    // Helper to extract numeric value
+    let extract_value = |obj: LispObject| -> (Option<i64>, Option<f64>, Option<Integer>) {
+        if let Some(fix) = obj.as_fixnum() {
+            return (Some(fix), None, None);
+        }
+        // General pointer (bignum, float, ratio)
+        if let Some(ptr) = obj.as_general_ptr::<Number>() {
+            unsafe {
+                match &(*ptr).value {
+                    NumberValue::Float(f) => (None, Some(*f), None),
+                    NumberValue::Bignum(b) => (None, None, Some(b.clone())),
+                    NumberValue::Ratio(r) => {
+                        let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                        let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0);
+                        (None, Some(n / d), None)
+                    }
+                    _ => (None, None, None),
+                }
+            }
+        } else {
+            (None, None, None)
+        }
+    };
+
+    let (a_fix, a_float, a_big) = extract_value(a_obj);
+    let (b_fix, b_float, b_big) = extract_value(b_obj);
+
+    // If either is a float, do float arithmetic
+    if a_float.is_some() || b_float.is_some() {
+        let a_f = a_float.or_else(|| a_fix.map(|x| x as f64)).or_else(|| a_big.as_ref().map(|x| x.to_string().parse::<f64>().unwrap_or(0.0))).unwrap_or(0.0);
+        let b_f = b_float.or_else(|| b_fix.map(|x| x as f64)).or_else(|| b_big.as_ref().map(|x| x.to_string().parse::<f64>().unwrap_or(0.0))).unwrap_or(0.0);
+        return Number::allocate_float(a_f * b_f).raw();
+    }
+
+    // Convert to bignum for precise arithmetic
+    let a_int = a_big.unwrap_or_else(|| Integer::from(a_fix.unwrap_or(0)));
+    let b_int = b_big.unwrap_or_else(|| Integer::from(b_fix.unwrap_or(0)));
+    let result = a_int * b_int;
+
+    // Try to fit back into fixnum
+    if i64::convertible_from(&result) {
+        let r = i64::exact_from(&result);
+        const MAX_FIXNUM: i64 = (1 << 61) - 1;
+        const MIN_FIXNUM: i64 = -(1 << 61);
+        if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+            LispObject::fixnum(r).raw()
+        } else {
+            Number::allocate_bignum(result).raw()
+        }
+    } else {
+        Number::allocate_bignum(result).raw()
+    }
+}
+
+/// Divide two numbers (returns fixnum if exact, ratio or float otherwise)
+#[no_mangle]
+pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
+    use rlasp_runtime::{Number, NumberValue};
+    use malachite::{Integer, Rational};
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+    let a_obj = unsafe { LispObject::from_raw(a) };
+    let b_obj = unsafe { LispObject::from_raw(b) };
+
+    // Check if either operand is actually a float type (not just convertible)
+    let a_is_float = if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
+        matches!(unsafe { &(*ptr).value }, NumberValue::Float(_))
+    } else {
+        false
+    };
+    let b_is_float = if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
+        matches!(unsafe { &(*ptr).value }, NumberValue::Float(_))
+    } else {
+        false
+    };
+
+    // Only use float division if at least one operand is actually a float
+    if a_is_float || b_is_float {
+        let to_float = |obj: LispObject| -> Option<f64> {
+            if let Some(n) = obj.as_fixnum() {
+                Some(n as f64)
+            } else if let Some(ptr) = obj.as_general_ptr::<Number>() {
+                let num = unsafe { &*ptr };
+                match &num.value {
+                    NumberValue::Float(f) => Some(*f),
+                    NumberValue::Bignum(b) => b.to_string().parse::<f64>().ok(),
+                    NumberValue::Ratio(r) => {
+                        let numer = r.numerator_ref().to_string().parse::<f64>().ok()?;
+                        let denom = r.denominator_ref().to_string().parse::<f64>().ok()?;
+                        Some(numer / denom)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+
+        if let (Some(af), Some(bf)) = (to_float(a_obj), to_float(b_obj)) {
+            if bf != 0.0 {
+                return Number::allocate_float(af / bf).raw();
+            } else {
+                return LispObject::nil().raw();
+            }
+        }
+    }
+
+    // Helper to convert LispObject to Integer
+    let to_integer = |obj: LispObject| -> Option<Integer> {
+        if let Some(n) = obj.as_fixnum() {
+            Some(Integer::from(n))
+        } else if let Some(ptr) = obj.as_general_ptr::<Number>() {
+            if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
+                Some(bignum.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Get both operands as integers
+    let a_int = to_integer(a_obj);
+    let b_int = to_integer(b_obj);
+
+    if let (Some(a_val), Some(b_val)) = (a_int, b_int) {
         if b_val != 0 {
             // Create ratio for exact division
-            let ratio = Rational::from_signeds(a_val, b_val);
+            let ratio = Rational::from_integers(a_val, b_val);
 
-            // If the result is an integer, return fixnum
+            // If the result is an integer, return fixnum or bignum
             if ratio.denominator_ref() == &1 {
                 let numerator = ratio.numerator_ref();
                 if i64::convertible_from(numerator) {
-                    return LispObject::fixnum(i64::exact_from(numerator)).raw();
+                    let r = i64::exact_from(numerator);
+                    // Check 62-bit fixnum bounds
+                    const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                    const MIN_FIXNUM: i64 = -(1 << 61);
+                    if r >= MIN_FIXNUM && r <= MAX_FIXNUM {
+                        return LispObject::fixnum(r).raw();
+                    } else {
+                        return Number::allocate_bignum(Integer::from(r)).raw();
+                    }
+                } else {
+                    // Convert Natural to Integer for allocate_bignum
+                    let numerator_int: Integer = numerator.clone().into();
+                    return Number::allocate_bignum(numerator_int).raw();
                 }
             }
 
             // Otherwise return ratio
-            rlasp_runtime::Number::allocate_ratio(ratio).raw()
+            return Number::allocate_ratio(ratio).raw();
         } else {
-            LispObject::nil().raw()
+            return LispObject::nil().raw();
         }
-    } else {
-        LispObject::nil().raw()
     }
+
+    LispObject::nil().raw()
 }
 
 /// Create a ratio from numerator and denominator
@@ -580,7 +934,7 @@ pub extern "C" fn cc_ge(a: usize, b: usize) -> usize {
     }
 }
 
-/// Get internal real time in milliseconds
+/// Get internal real time in nanoseconds
 #[no_mangle]
 pub extern "C" fn cc_get_internal_real_time() -> usize {
     use std::sync::OnceLock;
@@ -590,14 +944,14 @@ pub extern "C" fn cc_get_internal_real_time() -> usize {
     let start = START_TIME.get_or_init(|| Instant::now());
 
     let elapsed = start.elapsed();
-    let millis = elapsed.as_millis() as i64;
-    LispObject::fixnum(millis).raw()
+    let nanos = elapsed.as_nanos() as i64;
+    LispObject::fixnum(nanos).raw()
 }
 
-/// Internal time units per second (1000 for milliseconds)
+/// Internal time units per second (1_000_000_000 for nanoseconds)
 #[no_mangle]
 pub extern "C" fn cc_internal_time_units_per_second() -> usize {
-    LispObject::fixnum(1000).raw()
+    LispObject::fixnum(1_000_000_000).raw()
 }
 
 /// Modulo operation
@@ -1462,7 +1816,7 @@ fn format_list_sexpr(obj: LispObject, first: bool) -> String {
 /// Helper function to print a Lisp object in readable form
 /// Format a LispObject to a string (for use in format ~A directive)
 fn format_lisp_object(obj: LispObject) -> String {
-    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString};
+    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString, Number, NumberValue};
 
     if obj.is_nil() {
         "NIL".to_string()
@@ -1489,12 +1843,34 @@ fn format_lisp_object(obj: LispObject) -> String {
                             let string = &*ptr;
                             return string.as_str().to_string();
                         }
+                        ObjectType::Symbol => {
+                            // Cast to Symbol and get name
+                            let sym_ptr = ptr as *const rlasp_runtime::Symbol;
+                            let sym = &*sym_ptr;
+                            return sym.name().to_string();
+                        }
+                        ObjectType::Number => {
+                            // Cast to Number and check value type
+                            let num_ptr = ptr as *const Number;
+                            match &(*num_ptr).value {
+                                NumberValue::Ratio(r) => {
+                                    return format!("{}/{}", r.numerator_ref(), r.denominator_ref());
+                                }
+                                NumberValue::Bignum(b) => {
+                                    return b.to_string();
+                                }
+                                NumberValue::Float(f) => {
+                                    return f.to_string();
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
-        // Try as symbol
+        // Fallback: try as symbol without type header check
         if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
             unsafe {
                 let sym = &*sym_ptr;

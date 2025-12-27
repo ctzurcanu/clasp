@@ -209,10 +209,18 @@ impl Reader {
                 .map(ASTNode::float)
                 .map_err(|_| ReadError::InvalidNumber(num_str))
         } else {
-            num_str
-                .parse::<i64>()
-                .map(ASTNode::fixnum)
-                .map_err(|_| ReadError::InvalidNumber(num_str))
+            // Try to parse as i64 first
+            if let Ok(n) = num_str.parse::<i64>() {
+                Ok(ASTNode::fixnum(n))
+            } else {
+                // Too large for i64, store as bignum
+                // Validate it's a valid integer
+                if num_str.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+') {
+                    Ok(ASTNode::Constant(crate::ir::ConstantValue::Bignum(num_str)))
+                } else {
+                    Err(ReadError::InvalidNumber(num_str))
+                }
+            }
         }
     }
 

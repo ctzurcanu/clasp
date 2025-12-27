@@ -826,6 +826,7 @@ dependencies = [
 name = "rlasp-reader"
 version = "0.1.0"
 dependencies = [
+ "malachite",
  "rlasp-runtime",
  "thiserror 1.0.69",
 ]

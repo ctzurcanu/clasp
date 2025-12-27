@@ -538,8 +538,25 @@ impl Lexer {
         let text = self.read_atom_text();
 
         // Try to parse as number
-        if let Ok(n) = text.parse::<i64>() {
-            return Ok(Token::new(TokenKind::Integer(n), start_pos));
+        // First check if it looks like an integer (all digits, possibly with sign)
+        let looks_like_int = text.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+                          && text.chars().any(|c| c.is_ascii_digit())
+                          && !text.is_empty();
+
+        if looks_like_int {
+            // Try parsing as i64, but also check if it's actually valid
+            if let Ok(n) = text.parse::<i64>() {
+                // Check if the number round-trips correctly (to detect overflow)
+                if n.to_string() == text {
+                    return Ok(Token::new(TokenKind::Integer(n), start_pos));
+                } else {
+                    // Overflow detected - the parsed value doesn't match the input
+                    return Ok(Token::new(TokenKind::Bignum(text), start_pos));
+                }
+            } else {
+                // Parse failed completely - must be too large
+                return Ok(Token::new(TokenKind::Bignum(text), start_pos));
+            }
         }
 
         // Handle Common Lisp float suffixes (e.g., 1.0d0, 2.5e0, 3.14f0, 5.0l0, 6.0s0)

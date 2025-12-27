@@ -38,11 +38,11 @@ pub fn call_env_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
         }
 
         "get-internal-real-time" => {
-            // Internal time in implementation-defined units (we use milliseconds)
+            // Internal time in implementation-defined units (we use nanoseconds for high resolution)
             static START_TIME: OnceLock<Instant> = OnceLock::new();
             let start = START_TIME.get_or_init(|| Instant::now());
             let elapsed = start.elapsed();
-            Ok(EvalResult::Fixnum(elapsed.as_millis() as i64))
+            Ok(EvalResult::Fixnum(elapsed.as_nanos() as i64))
         }
 
         "get-internal-run-time" => {

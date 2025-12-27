@@ -12,10 +12,12 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defmacro time-it (expr)
-  `(progn
-     (format t "~S => " ',expr)
-     (let ((result ,expr))
-       (format t "~A~%" result)
+  `(let ((start-time (get-internal-real-time)))
+     (let* ((result ,expr)
+            (end-time (get-internal-real-time))
+            (elapsed-ms (/ (* 1000.0 (- end-time start-time))
+                           internal-time-units-per-second)))
+       (format t "~A => ~A  [~A ms]~%" ',expr result elapsed-ms)
        result)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -268,13 +270,14 @@
   (time-it (collatz-length 100))
 
   (format t "~%--- BIGNUM (Arbitrary Precision) ---~%")
+  (time-it (power-bignum 2 100))
   (time-it (factorial-bignum 10))
   (time-it (factorial-bignum 20))
   (time-it (factorial-bignum 30))
   (time-it (fibonacci-bignum 90))
   (time-it (fibonacci-bignum 100))
   (time-it (power-bignum 2 100))
-  (time-it (power-bignum 10 30))
+  (time-it (power-bignum 13 30))
   (time-it (bignum-sum 10))
 
   (format t "~%--- RATIO (Exact Rationals) ---~%")

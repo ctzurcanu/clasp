@@ -38,7 +38,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 "t" => Ok(EvalResult::Bool(true)),
                 "nil" => Ok(EvalResult::Nil),
                 "*features*" => Ok(EvalResult::Nil), // Empty features list for now
-                "internal-time-units-per-second" => Ok(EvalResult::Fixnum(1000)), // 1000 units per second (millisecond resolution)
+                "internal-time-units-per-second" => Ok(EvalResult::Fixnum(1_000_000_000)), // nanosecond resolution
                 "most-positive-fixnum" => Ok(EvalResult::Fixnum(i64::MAX)),
                 "most-negative-fixnum" => Ok(EvalResult::Fixnum(i64::MIN)),
                 "pi" => Ok(EvalResult::Float(std::f64::consts::PI)),
@@ -291,8 +291,25 @@ fn eval_let(
         result = eval_with_env(expr, env)?;
     }
 
+    // Collect variables bound by this let
+    let bound_vars: std::collections::HashSet<String> = bindings.iter().map(|(v, _)| v.clone()).collect();
+
+    // Save variables from outer scope that were potentially modified
+    let mut preserved_vars = HashMap::new();
+    for (var, value) in env.iter() {
+        // Preserve if: variable existed in outer scope and was NOT bound by this let
+        if old_env.contains_key(var) && !bound_vars.contains(var) {
+            preserved_vars.insert(var.clone(), value.clone());
+        }
+    }
+
     // Restore environment
     *env = old_env;
+
+    // Restore outer-scope variables (which may have been modified by setq)
+    for (var, value) in preserved_vars {
+        env.insert(var, value);
+    }
 
     Ok(result)
 }
@@ -317,8 +334,25 @@ fn eval_let_star(
         result = eval_with_env(expr, env)?;
     }
 
+    // Collect variables bound by this let*
+    let bound_vars: std::collections::HashSet<String> = bindings.iter().map(|(v, _)| v.clone()).collect();
+
+    // Save variables from outer scope that were potentially modified
+    let mut preserved_vars = HashMap::new();
+    for (var, value) in env.iter() {
+        // Preserve if: variable existed in outer scope and was NOT bound by this let*
+        if old_env.contains_key(var) && !bound_vars.contains(var) {
+            preserved_vars.insert(var.clone(), value.clone());
+        }
+    }
+
     // Restore environment
     *env = old_env;
+
+    // Restore outer-scope variables (which may have been modified by setq)
+    for (var, value) in preserved_vars {
+        env.insert(var, value);
+    }
 
     Ok(result)
 }
@@ -842,6 +876,22 @@ fn list_to_result(list: &[ASTNode]) -> Result<EvalResult, String> {
 fn eval_constant(c: &ConstantValue) -> Result<EvalResult, String> {
     match c {
         ConstantValue::Fixnum(n) => Ok(EvalResult::Fixnum(*n)),
+        ConstantValue::Bignum(s) => {
+            // Parse the bignum string
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+            s.parse::<Integer>()
+                .map(|bignum| {
+                    // Check if it actually fits in a fixnum
+                    if i64::convertible_from(&bignum) {
+                        EvalResult::Fixnum(i64::exact_from(&bignum))
+                    } else {
+                        EvalResult::Bignum(bignum)
+                    }
+                })
+                .map_err(|_| format!("Invalid bignum constant: {}", s))
+        }
         ConstantValue::Float(f) => Ok(EvalResult::Float(*f)),
         ConstantValue::Nil => Ok(EvalResult::Nil),
         ConstantValue::T => Ok(EvalResult::Bool(true)),
