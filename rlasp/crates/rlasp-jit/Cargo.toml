@@ -9,8 +9,10 @@ rlasp-ffi = { path = "../rlasp-ffi" }
 rlasp-reader = { path = "../rlasp-reader" }
 inkwell = { workspace = true }
 llvm-sys = { workspace = true }
-num-bigint = { workspace = true }
-num-rational = { workspace = true }
+malachite = { workspace = true }
+malachite-base = { workspace = true }
+malachite-q = { workspace = true }
+num-complex = { workspace = true }
 
 [lib]
 name = "rlasp_jit"

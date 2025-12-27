@@ -160,23 +160,66 @@ pub extern "C" fn cc_is_cons(obj: usize) -> i32 {
     if lisp_obj.is_cons() { 1 } else { 0 }
 }
 
-/// Add two numbers (supports fixnum, float, ratio)
+/// Add two numbers (supports fixnum, bignum, float, ratio)
 #[no_mangle]
 pub extern "C" fn cc_add(a: usize, b: usize) -> usize {
+    use malachite::Integer;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+    use rlasp_runtime::Number;
+
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
     // Try fixnum + fixnum first (fast path)
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        return LispObject::fixnum(a_val + b_val).raw();
+        // Check for overflow
+        if let Some(result) = a_val.checked_add(b_val) {
+            return LispObject::fixnum(result).raw();
+        } else {
+            // Overflow: convert to bignum
+            let result = Integer::from(a_val) + Integer::from(b_val);
+            return Number::allocate_bignum(result).raw();
+        }
     }
 
     // Convert both to floats if either is a float
     if let (Some(a_float), Some(b_float)) = (a_obj.as_float(), b_obj.as_float()) {
-        return rlasp_runtime::Number::allocate_float(a_float + b_float).raw();
+        return Number::allocate_float(a_float + b_float).raw();
     }
 
-    LispObject::nil().raw()
+    // Handle bignum + fixnum or fixnum + bignum or bignum + bignum
+    let a_bigint = if let Some(a_val) = a_obj.as_fixnum() {
+        Integer::from(a_val)
+    } else if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
+        if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
+            bignum.clone()
+        } else {
+            return LispObject::nil().raw();
+        }
+    } else {
+        return LispObject::nil().raw();
+    };
+
+    let b_bigint = if let Some(b_val) = b_obj.as_fixnum() {
+        Integer::from(b_val)
+    } else if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
+        if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
+            bignum.clone()
+        } else {
+            return LispObject::nil().raw();
+        }
+    } else {
+        return LispObject::nil().raw();
+    };
+
+    let result = a_bigint + b_bigint;
+
+    // Try to fit in Fixnum, otherwise return Bignum
+    if i64::convertible_from(&result) {
+        LispObject::fixnum(i64::exact_from(&result)).raw()
+    } else {
+        Number::allocate_bignum(result).raw()
+    }
 }
 
 /// Subtract two fixnums
@@ -208,12 +251,27 @@ pub extern "C" fn cc_mul(a: usize, b: usize) -> usize {
 /// Divide two fixnums
 #[no_mangle]
 pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
+    use malachite::Rational;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
         if b_val != 0 {
-            LispObject::fixnum(a_val / b_val).raw()
+            // Create ratio for exact division
+            let ratio = Rational::from_signeds(a_val, b_val);
+
+            // If the result is an integer, return fixnum
+            if ratio.denominator_ref() == &1 {
+                let numerator = ratio.numerator_ref();
+                if i64::convertible_from(numerator) {
+                    return LispObject::fixnum(i64::exact_from(numerator)).raw();
+                }
+            }
+
+            // Otherwise return ratio
+            rlasp_runtime::Number::allocate_ratio(ratio).raw()
         } else {
             LispObject::nil().raw()
         }
@@ -226,8 +284,7 @@ pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
 /// Takes args_and_env containing (numerator denominator)
 #[no_mangle]
 pub extern "C" fn ratio(args_and_env: usize) -> usize {
-    use num_bigint::BigInt;
-    use num_rational::BigRational;
+    use malachite::Rational;
 
     let args_obj = unsafe { LispObject::from_raw(args_and_env) };
 
@@ -242,13 +299,39 @@ pub extern "C" fn ratio(args_and_env: usize) -> usize {
             let cdr_cons = unsafe { &*cdr_cons_ptr };
             let denominator_obj = cdr_cons.car();
 
-            // Convert to fixnums and create BigRational
+            // Convert to fixnums and create Malachite Rational
             if let (Some(num), Some(denom)) = (numerator_obj.as_fixnum(), denominator_obj.as_fixnum()) {
                 if denom != 0 {
-                    let ratio = BigRational::new(BigInt::from(num), BigInt::from(denom));
+                    let ratio = Rational::from_signeds(num, denom);
                     return rlasp_runtime::Number::allocate_ratio(ratio).raw();
                 }
             }
+        }
+    }
+
+    LispObject::nil().raw()
+}
+
+/// Create a ratio from numerator and denominator (standard calling convention)
+#[no_mangle]
+pub extern "C" fn cc_ratio(numerator: usize, denominator: usize) -> usize {
+    use malachite::Rational;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+    let num_obj = unsafe { LispObject::from_raw(numerator) };
+    let denom_obj = unsafe { LispObject::from_raw(denominator) };
+
+    if let (Some(num), Some(denom)) = (num_obj.as_fixnum(), denom_obj.as_fixnum()) {
+        if denom != 0 {
+            let ratio = Rational::from_signeds(num, denom);
+            // If the result is an integer, return fixnum
+            if ratio.denominator_ref() == &1 {
+                let n = ratio.numerator_ref();
+                if i64::convertible_from(n) {
+                    return LispObject::fixnum(i64::exact_from(n)).raw();
+                }
+            }
+            return rlasp_runtime::Number::allocate_ratio(ratio).raw();
         }
     }
 
@@ -260,6 +343,7 @@ pub extern "C" fn ratio(args_and_env: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_numerator(obj: usize) -> usize {
     use rlasp_runtime::Number;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
@@ -268,9 +352,10 @@ pub extern "C" fn cc_numerator(obj: usize) -> usize {
         let num = unsafe { &*ptr };
         // Access the value field - it's a public field in Number
         if let rlasp_runtime::NumberValue::Ratio(ref r) = num.value {
-            // Convert BigInt numerator to i64 (if it fits)
-            if let Ok(n) = r.numer().to_string().parse::<i64>() {
-                return LispObject::fixnum(n).raw();
+            // Convert Malachite Integer numerator to i64 (if it fits)
+            let numerator = r.numerator_ref();
+            if i64::convertible_from(numerator) {
+                return LispObject::fixnum(i64::exact_from(numerator)).raw();
             }
         }
     }
@@ -283,6 +368,7 @@ pub extern "C" fn cc_numerator(obj: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_denominator(obj: usize) -> usize {
     use rlasp_runtime::Number;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
@@ -291,9 +377,10 @@ pub extern "C" fn cc_denominator(obj: usize) -> usize {
         let num = unsafe { &*ptr };
         // Access the value field
         if let rlasp_runtime::NumberValue::Ratio(ref r) = num.value {
-            // Convert BigInt denominator to i64 (if it fits)
-            if let Ok(d) = r.denom().to_string().parse::<i64>() {
-                return LispObject::fixnum(d).raw();
+            // Convert Malachite Natural denominator to i64 (if it fits)
+            let denominator = r.denominator_ref();
+            if i64::convertible_from(denominator) {
+                return LispObject::fixnum(i64::exact_from(denominator)).raw();
             }
         }
     }
@@ -327,35 +414,84 @@ pub extern "C" fn complex(args_and_env: usize) -> usize {
     LispObject::nil().raw()
 }
 
+/// Create a complex number (standard calling convention)
+#[no_mangle]
+pub extern "C" fn cc_complex(real: usize, imag: usize) -> usize {
+    use num_complex::Complex;
+
+    let real_obj = unsafe { LispObject::from_raw(real) };
+    let imag_obj = unsafe { LispObject::from_raw(imag) };
+
+    // Convert to f64
+    let real_val = if let Some(r) = real_obj.as_fixnum() {
+        r as f64
+    } else if let Some(f) = real_obj.as_float() {
+        f
+    } else {
+        return LispObject::nil().raw();
+    };
+
+    let imag_val = if let Some(i) = imag_obj.as_fixnum() {
+        i as f64
+    } else if let Some(f) = imag_obj.as_float() {
+        f
+    } else {
+        return LispObject::nil().raw();
+    };
+
+    let complex = Complex::new(real_val, imag_val);
+    rlasp_runtime::Number::allocate_complex(complex).raw()
+}
+
 /// Extract real part from a complex number
-/// Complex numbers are represented as cons pairs (real . imaginary)
 #[no_mangle]
 pub extern "C" fn cc_realpart(obj: usize) -> usize {
+    use rlasp_runtime::Number;
+
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
-    // Complex is stored as a cons pair (real . imaginary)
-    if let Some(cons_ptr) = lisp_obj.as_cons_ptr() {
-        let cons = unsafe { &*cons_ptr };
-        return cons.car().raw();
+    // Check if it's a complex number
+    if lisp_obj.is_number() {
+        if let Some(ptr) = lisp_obj.as_general_ptr::<Number>() {
+            let num = unsafe { &*ptr };
+            if let rlasp_runtime::NumberValue::Complex(c) = &num.value {
+                // Return fixnum if it's an integer value
+                let re_int = c.re.round();
+                if (c.re - re_int).abs() < f64::EPSILON {
+                    return LispObject::fixnum(re_int as i64).raw();
+                }
+                return rlasp_runtime::Number::allocate_float(c.re).raw();
+            }
+        }
     }
 
-    // If not a cons (e.g., a real number), return as-is
+    // If not complex (e.g., a real number), return as-is
     obj
 }
 
 /// Extract imaginary part from a complex number
-/// Complex numbers are represented as cons pairs (real . imaginary)
 #[no_mangle]
 pub extern "C" fn cc_imagpart(obj: usize) -> usize {
+    use rlasp_runtime::Number;
+
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
-    // Complex is stored as a cons pair (real . imaginary)
-    if let Some(cons_ptr) = lisp_obj.as_cons_ptr() {
-        let cons = unsafe { &*cons_ptr };
-        return cons.cdr().raw();
+    // Check if it's a complex number
+    if lisp_obj.is_number() {
+        if let Some(ptr) = lisp_obj.as_general_ptr::<Number>() {
+            let num = unsafe { &*ptr };
+            if let rlasp_runtime::NumberValue::Complex(c) = &num.value {
+                // Return fixnum if it's an integer value
+                let im_int = c.im.round();
+                if (c.im - im_int).abs() < f64::EPSILON {
+                    return LispObject::fixnum(im_int as i64).raw();
+                }
+                return rlasp_runtime::Number::allocate_float(c.im).raw();
+            }
+        }
     }
 
-    // If not a cons (e.g., a real number), return 0
+    // If not complex (e.g., a real number), return 0
     LispObject::fixnum(0).raw()
 }
 
@@ -467,23 +603,59 @@ pub extern "C" fn cc_internal_time_units_per_second() -> usize {
 /// Modulo operation
 #[no_mangle]
 pub extern "C" fn cc_mod(a: usize, b: usize) -> usize {
+    use malachite::Integer;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+    use rlasp_runtime::Number;
+
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
-    if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        if b_val != 0 {
-            LispObject::fixnum(a_val.rem_euclid(b_val)).raw()
+    // Try to get bignum first, then fallback to fixnum
+    let a_bigint = if let Some(a_val) = a_obj.as_fixnum() {
+        Integer::from(a_val)
+    } else if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
+        if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
+            bignum.clone()
         } else {
-            LispObject::nil().raw()
+            return LispObject::nil().raw();
         }
     } else {
-        LispObject::nil().raw()
+        return LispObject::nil().raw();
+    };
+
+    let b_bigint = if let Some(b_val) = b_obj.as_fixnum() {
+        if b_val == 0 {
+            return LispObject::nil().raw();
+        }
+        Integer::from(b_val)
+    } else if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
+        if let Some(bignum) = unsafe { (*ptr).as_bignum() } {
+            bignum.clone()
+        } else {
+            return LispObject::nil().raw();
+        }
+    } else {
+        return LispObject::nil().raw();
+    };
+
+    let result = a_bigint % b_bigint;
+
+    // Try to fit in Fixnum, otherwise return Bignum
+    if i64::convertible_from(&result) {
+        LispObject::fixnum(i64::exact_from(&result)).raw()
+    } else {
+        Number::allocate_bignum(result).raw()
     }
 }
 
 /// Exponentiation (expt base power)
 #[no_mangle]
 pub extern "C" fn cc_expt(base: usize, power: usize) -> usize {
+    use malachite::Integer;
+    use malachite::num::arithmetic::traits::Pow;
+    use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+    use rlasp_runtime::Number;
+
     let base_obj = unsafe { LispObject::from_raw(base) };
     let power_obj = unsafe { LispObject::from_raw(power) };
 
@@ -492,8 +664,14 @@ pub extern "C" fn cc_expt(base: usize, power: usize) -> usize {
             // For negative powers, return nil (could also compute float result)
             LispObject::nil().raw()
         } else {
-            let result = (base_val as i64).pow(power_val as u32);
-            LispObject::fixnum(result).raw()
+            // Use Malachite Integer for exponentiation to avoid overflow
+            let result = Integer::from(base_val).pow(power_val as u64);
+            // Check if result fits in i64, otherwise allocate bignum
+            if i64::convertible_from(&result) {
+                LispObject::fixnum(i64::exact_from(&result)).raw()
+            } else {
+                Number::allocate_bignum(result).raw()
+            }
         }
     } else {
         LispObject::nil().raw()
@@ -1211,6 +1389,76 @@ pub extern "C" fn cc_print(obj: usize) -> usize {
     obj
 }
 
+/// Format a LispObject as an s-expression (for use in format ~S directive)
+fn format_s_expr(obj: LispObject) -> String {
+    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString};
+
+    if obj.is_nil() {
+        "NIL".to_string()
+    } else if obj.raw() == LispObject::t().raw() {
+        "T".to_string()
+    } else if let Some(fixnum) = obj.as_fixnum() {
+        fixnum.to_string()
+    } else if let Some(ch) = obj.as_character() {
+        format!("#\\{}", ch)
+    } else if let Some(float) = obj.as_float() {
+        float.to_string()
+    } else if let Some(_cons_ptr) = obj.as_cons_ptr() {
+        let mut result = String::from("(");
+        result.push_str(&format_list_sexpr(obj, true));
+        result.push(')');
+        result
+    } else if obj.is_general() {
+        // Check the type header to determine what kind of general object this is
+        if let Some(ptr) = obj.as_general_ptr::<RString>() {
+            unsafe {
+                if let Some(obj_type) = TypeHeader::from_ptr(ptr) {
+                    match obj_type {
+                        ObjectType::String => {
+                            let string = &*ptr;
+                            // For ~S, print strings with quotes
+                            return format!("\"{}\"", string.as_str());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Try as symbol
+        if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+            unsafe {
+                let sym = &*sym_ptr;
+                return sym.name().to_uppercase();
+            }
+        }
+        // Fallback for other general objects
+        format!("{:?}", obj)
+    } else {
+        format!("{:?}", obj)
+    }
+}
+
+/// Helper to format a list as s-expression
+fn format_list_sexpr(obj: LispObject, first: bool) -> String {
+    if obj.is_nil() {
+        return String::new();
+    }
+
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        let mut result = String::new();
+        if !first {
+            result.push(' ');
+        }
+        result.push_str(&format_s_expr(cons.car()));
+        result.push_str(&format_list_sexpr(cons.cdr(), false));
+        result
+    } else {
+        // Improper list (dotted pair)
+        format!(" . {}", format_s_expr(obj))
+    }
+}
+
 /// Helper function to print a Lisp object in readable form
 /// Format a LispObject to a string (for use in format ~A directive)
 fn format_lisp_object(obj: LispObject) -> String {
@@ -1383,6 +1631,15 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
                             let cons = unsafe { &*cons_ptr };
                             let arg = cons.car();
                             result.push_str(&format_lisp_object(arg));
+                            arg_list = cons.cdr();
+                        }
+                    },
+                    'S' | 's' => {
+                        // Print s-expression form (same as ~A for now, but could be different for strings)
+                        if let Some(cons_ptr) = arg_list.as_cons_ptr() {
+                            let cons = unsafe { &*cons_ptr };
+                            let arg = cons.car();
+                            result.push_str(&format_s_expr(arg));
                             arg_list = cons.cdr();
                         }
                     },
@@ -2536,9 +2793,11 @@ pub extern "C" fn cc_round(val: usize) -> usize {
     if let Some(fx) = val_obj.as_fixnum() {
         // Already an integer
         val
+    } else if let Some(fl) = val_obj.as_float() {
+        // Round float to nearest integer
+        LispObject::fixnum(fl.round() as i64).raw()
     } else {
-        // For floats or other types, just return the value as-is for now
-        // A full implementation would extract the float value and round it
+        // For other types, return as-is
         val
     }
 }

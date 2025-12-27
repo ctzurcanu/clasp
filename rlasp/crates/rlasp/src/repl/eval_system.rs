@@ -336,6 +336,73 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                 other => vec![result_to_ast(other)?],
             };
 
+            // Check if this is a special form and construct the appropriate ASTNode
+            if let ASTNode::Variable(name) = &car_ast {
+                match name.as_str() {
+                    "let" => {
+                        // (let ((var1 val1) (var2 val2) ...) body...)
+                        if args.is_empty() {
+                            return Err("let requires at least one argument (bindings)".to_string());
+                        }
+
+                        // Parse bindings
+                        let bindings_ast = &args[0];
+                        let bindings = parse_let_bindings(bindings_ast)?;
+                        let body = args[1..].to_vec();
+
+                        return Ok(ASTNode::Let { bindings, body });
+                    }
+                    "let*" => {
+                        // (let* ((var1 val1) (var2 val2) ...) body...)
+                        if args.is_empty() {
+                            return Err("let* requires at least one argument (bindings)".to_string());
+                        }
+
+                        let bindings_ast = &args[0];
+                        let bindings = parse_let_bindings(bindings_ast)?;
+                        let body = args[1..].to_vec();
+
+                        return Ok(ASTNode::LetStar { bindings, body });
+                    }
+                    "progn" => {
+                        return Ok(ASTNode::Progn { exprs: args });
+                    }
+                    "if" => {
+                        if args.len() < 2 {
+                            return Err("if requires at least 2 arguments".to_string());
+                        }
+                        let test = Box::new(args[0].clone());
+                        let then_branch = Box::new(args[1].clone());
+                        let else_branch = if args.len() > 2 {
+                            Box::new(args[2].clone())
+                        } else {
+                            Box::new(ASTNode::nil())
+                        };
+                        return Ok(ASTNode::If { test, then_branch, else_branch });
+                    }
+                    "dotimes" => {
+                        // (dotimes (var count [result]) body...)
+                        if args.is_empty() {
+                            return Err("dotimes requires at least one argument".to_string());
+                        }
+
+                        let spec = &args[0];
+                        let (var, count, result) = parse_dotimes_spec(spec)?;
+                        let body = args[1..].to_vec();
+
+                        return Ok(ASTNode::Dotimes { var, count: Box::new(count), result: result.map(Box::new), body });
+                    }
+                    "quote" => {
+                        // (quote form) => Quote(form)
+                        if args.len() != 1 {
+                            return Err("quote requires exactly one argument".to_string());
+                        }
+                        return Ok(ASTNode::Quote(Box::new(args[0].clone())));
+                    }
+                    _ => {}
+                }
+            }
+
             Ok(ASTNode::Call {
                 function: Box::new(car_ast),
                 args,
@@ -371,6 +438,78 @@ pub(super) fn cons_to_list(result: &EvalResult) -> Result<Vec<ASTNode>, String> 
         other => {
             Ok(vec![result_to_ast(other)?])
         }
+    }
+}
+
+fn parse_let_bindings(bindings_ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
+    // Bindings are represented as a list of (var value) pairs
+    // After result_to_ast, this becomes a Call structure
+    // We need to extract the individual bindings
+
+    match bindings_ast {
+        ASTNode::Constant(crate::ir::ConstantValue::Nil) => Ok(vec![]),
+        ASTNode::Call { function, args } => {
+            // The bindings list has been converted to a Call
+            // Each element (binding) is itself a Call of (var value)
+            let mut bindings = vec![];
+
+            // First element is the function (which is the first binding)
+            if let ASTNode::Call { function: bind_func, args: bind_args } = &**function {
+                if let ASTNode::Variable(var) = &**bind_func {
+                    if bind_args.len() != 1 {
+                        return Err(format!("let binding must have exactly one value, got {}", bind_args.len()));
+                    }
+                    bindings.push((var.clone(), bind_args[0].clone()));
+                } else {
+                    return Err("let binding must start with a variable".to_string());
+                }
+            } else {
+                return Err("Invalid let binding format".to_string());
+            }
+
+            // Rest of the bindings are in args
+            for arg in args {
+                if let ASTNode::Call { function: bind_func, args: bind_args } = arg {
+                    if let ASTNode::Variable(var) = &**bind_func {
+                        if bind_args.len() != 1 {
+                            return Err(format!("let binding must have exactly one value, got {}", bind_args.len()));
+                        }
+                        bindings.push((var.clone(), bind_args[0].clone()));
+                    } else {
+                        return Err("let binding must start with a variable".to_string());
+                    }
+                } else {
+                    return Err("Invalid let binding format".to_string());
+                }
+            }
+
+            Ok(bindings)
+        }
+        _ => Err(format!("Invalid let bindings format: expected list, got {:?}", bindings_ast)),
+    }
+}
+
+fn parse_dotimes_spec(spec: &ASTNode) -> Result<(String, ASTNode, Option<ASTNode>), String> {
+    // Spec is (var count [result])
+    // After result_to_ast, this is a Call
+    match spec {
+        ASTNode::Call { function, args } => {
+            if let ASTNode::Variable(var) = &**function {
+                if args.is_empty() {
+                    return Err("dotimes spec must have a count".to_string());
+                }
+                let count = args[0].clone();
+                let result = if args.len() > 1 {
+                    Some(args[1].clone())
+                } else {
+                    None
+                };
+                Ok((var.clone(), count, result))
+            } else {
+                Err("dotimes spec must start with a variable".to_string())
+            }
+        }
+        _ => Err("Invalid dotimes spec format".to_string()),
     }
 }
 
@@ -619,6 +758,119 @@ pub(super) fn eval_print(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     println!("{}", val);
 
     Ok(val)
+}
+
+pub(super) fn eval_format(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (format destination control-string &rest format-arguments)
+    // destination: t (stdout), nil (return string), or a stream
+    // For simplicity, we only handle t and nil
+
+    if args.len() < 2 {
+        return Err("format requires at least 2 arguments (destination and control-string)".to_string());
+    }
+
+    // Evaluate destination
+    let dest = eval_with_env(&args[0], env)?;
+    let to_stdout = match &dest {
+        EvalResult::Bool(true) => true,
+        EvalResult::Symbol(s) if s == "t" || s == "T" => true,
+        EvalResult::Nil => false,
+        _ => return Err("format destination must be t or nil".to_string()),
+    };
+
+    // Get control string
+    let control_str = match eval_with_env(&args[1], env)? {
+        EvalResult::String(s) => s,
+        EvalResult::Symbol(s) => {
+            // Handle quoted strings like "foo"
+            if s.starts_with('"') && s.ends_with('"') {
+                s[1..s.len()-1].to_string()
+            } else {
+                return Err("format control-string must be a string".to_string());
+            }
+        }
+        _ => return Err("format control-string must be a string".to_string()),
+    };
+
+    // Evaluate format arguments
+    let mut format_args = Vec::new();
+    for i in 2..args.len() {
+        format_args.push(eval_with_env(&args[i], env)?);
+    }
+
+    // Simple format string processing
+    let mut output = String::new();
+    let mut chars = control_str.chars().peekable();
+    let mut arg_index = 0;
+
+    while let Some(ch) = chars.next() {
+        if ch == '~' {
+            if let Some(&directive) = chars.peek() {
+                chars.next(); // consume directive
+                match directive {
+                    '&' => {
+                        // Fresh line - for simplicity, just add newline if output is not empty
+                        if !output.is_empty() && !output.ends_with('\n') {
+                            output.push('\n');
+                        }
+                    }
+                    '%' => {
+                        // Newline
+                        output.push('\n');
+                    }
+                    'A' | 'a' => {
+                        // Aesthetic - print the argument
+                        if arg_index < format_args.len() {
+                            output.push_str(&format_value(&format_args[arg_index]));
+                            arg_index += 1;
+                        }
+                    }
+                    'S' | 's' => {
+                        // Standard - same as aesthetic for our purposes
+                        if arg_index < format_args.len() {
+                            output.push_str(&format_value(&format_args[arg_index]));
+                            arg_index += 1;
+                        }
+                    }
+                    '~' => {
+                        // Literal tilde
+                        output.push('~');
+                    }
+                    _ => {
+                        // Unknown directive - just output as-is
+                        output.push('~');
+                        output.push(directive);
+                    }
+                }
+            } else {
+                output.push('~');
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+
+    if to_stdout {
+        print!("{}", output);
+        Ok(EvalResult::Nil)
+    } else {
+        Ok(EvalResult::String(output))
+    }
+}
+
+fn format_value(val: &EvalResult) -> String {
+    match val {
+        EvalResult::Fixnum(n) => n.to_string(),
+        EvalResult::Bignum(n) => n.to_string(),
+        EvalResult::Ratio(r) => format!("{}/{}", r.numerator_ref(), r.denominator_ref()),
+        EvalResult::Float(f) => f.to_string(),
+        EvalResult::String(s) => s.clone(),
+        EvalResult::Symbol(s) => s.clone(),
+        EvalResult::Nil => "NIL".to_string(),
+        EvalResult::Bool(true) | EvalResult::Boolean(true) => "T".to_string(),
+        EvalResult::Bool(false) | EvalResult::Boolean(false) => "NIL".to_string(),
+        other => format!("{}", other),
+    }
 }
 
 pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1619,6 +1871,8 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::Nil => "NULL",
         EvalResult::Bool(_) | EvalResult::Boolean(_) => "BOOLEAN",
         EvalResult::Fixnum(_) => "FIXNUM",
+        EvalResult::Bignum(_) => "BIGNUM",
+        EvalResult::Ratio(_) => "RATIO",
         EvalResult::Float(_) | EvalResult::Float(_) => "FLOAT",
         EvalResult::Character(_) => "CHARACTER",
         EvalResult::String(_) => "STRING",

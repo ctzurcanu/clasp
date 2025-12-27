@@ -6,20 +6,22 @@
 //! - Ratio (exact rational)
 //! - Float (double precision)
 //! - Complex (complex numbers)
+//!
+//! Using Malachite for high-performance numerics
 
 use crate::object::LispObject;
-use num_bigint::BigInt;
-use num_rational::BigRational;
+use malachite::Integer;
+use malachite::Rational;
 use num_complex::Complex;
 
 /// Number variants (heap-allocated)
 #[derive(Debug, Clone)]
 pub enum NumberValue {
-    /// Arbitrary precision integer
-    Bignum(BigInt),
+    /// Arbitrary precision integer (using Malachite)
+    Bignum(Integer),
 
-    /// Exact rational (numerator/denominator)
-    Ratio(BigRational),
+    /// Exact rational (numerator/denominator, using Malachite)
+    Ratio(Rational),
 
     /// Double-precision float
     Float(f64),
@@ -47,14 +49,14 @@ impl Number {
     }
 
     /// Allocate a bignum and return LispObject
-    pub fn allocate_bignum(n: BigInt) -> LispObject {
+    pub fn allocate_bignum(n: Integer) -> LispObject {
         let num = Box::new(Number::new(NumberValue::Bignum(n)));
         let ptr = Box::into_raw(num);
         LispObject::from_general_ptr(ptr)
     }
 
     /// Allocate a ratio and return LispObject
-    pub fn allocate_ratio(r: BigRational) -> LispObject {
+    pub fn allocate_ratio(r: Rational) -> LispObject {
         let num = Box::new(Number::new(NumberValue::Ratio(r)));
         let ptr = Box::into_raw(num);
         LispObject::from_general_ptr(ptr)
@@ -73,6 +75,14 @@ impl Number {
         let ptr = Box::into_raw(num);
         LispObject::from_general_ptr(ptr)
     }
+
+    /// Try to get bignum value
+    pub fn as_bignum(&self) -> Option<&Integer> {
+        match &self.value {
+            NumberValue::Bignum(b) => Some(b),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Number {
@@ -83,7 +93,10 @@ impl std::fmt::Display for Number {
         }
         match &self.value {
             NumberValue::Bignum(n) => write!(f, "{}", n),
-            NumberValue::Ratio(r) => write!(f, "{}/{}", r.numer(), r.denom()),
+            NumberValue::Ratio(r) => {
+                use malachite::num::arithmetic::traits::Reciprocal;
+                write!(f, "{}/{}", r.numerator_ref(), r.denominator_ref())
+            }
             NumberValue::Float(fl) => write!(f, "{}", fl),
             NumberValue::Complex(c) => write!(f, "#C({} {})", c.re, c.im),
         }
@@ -134,11 +147,13 @@ impl LispObject {
             }
             match &num.value {
                 NumberValue::Float(f) => Some(*f),
-                NumberValue::Bignum(b) => b.to_string().parse().ok(),
+                NumberValue::Bignum(b) => {
+                    // Convert Malachite Integer to f64 (approximate)
+                    b.to_string().parse().ok()
+                }
                 NumberValue::Ratio(r) => {
-                    let n = r.numer().to_string().parse::<f64>().ok()?;
-                    let d = r.denom().to_string().parse::<f64>().ok()?;
-                    Some(n / d)
+                    // Convert Malachite Rational to f64 (approximate)
+                    r.to_string().parse().ok()
                 }
                 _ => None,
             }
@@ -151,11 +166,10 @@ impl LispObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use num_bigint::ToBigInt;
 
     #[test]
     fn test_bignum() {
-        let big = 12345678901234567890_i128.to_bigint().unwrap();
+        let big = Integer::from(12345678901234567890_i128);
         let obj = Number::allocate_bignum(big.clone());
 
         assert!(obj.is_general());

@@ -11,8 +11,13 @@ use std::process;
 use rlasp::repl::reader::Reader;
 use rlasp::repl::expand_macros;
 use rlasp::ir::lower::LowerContext;
+use rlasp::ir::module::Module as BIRModule;
+use rlasp::ir::instruction::{InstructionKind, InstructionId};
+use rlasp::ir::datum::{DatumId, ConstantValue};
 use rlasp_jit::CodeGenerator;
 use inkwell::context::Context;
+use inkwell::values::{FunctionValue, BasicValueEnum};
+use std::collections::HashMap;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -183,12 +188,19 @@ entry:
         }
     }
 
-    // 4. Generate LLVM IR
+    // 4. Generate LLVM IR from BIR
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, &module_name);
 
     // Declare intrinsics
     codegen.declare_intrinsics();
+
+    // Generate LLVM functions from BIR
+    eprintln!("BIR Module has {} functions, {} instructions",
+              lower_ctx.module.functions.len(),
+              lower_ctx.module.instructions.len());
+
+    generate_llvm_from_bir(&lower_ctx.module, &codegen, &context)?;
 
     // Add initialization function
     let i64_type = context.i64_type();
@@ -214,6 +226,39 @@ entry:
     if output.ends_with(".ll") {
         let bc_output = output.replace(".ll", ".bc");
         codegen.module().write_bitcode_to_path(Path::new(&bc_output));
+    }
+
+    Ok(())
+}
+
+/// Generate LLVM IR from BIR module
+fn generate_llvm_from_bir<'ctx>(
+    bir: &BIRModule,
+    codegen: &CodeGenerator<'ctx>,
+    context: &'ctx Context,
+) -> Result<(), String> {
+    // For now, generate stubs for each function
+    // Full implementation requires walking through all instructions
+    // and generating corresponding LLVM IR
+
+    for (func_id, bir_func) in &bir.functions {
+        eprintln!("Generating LLVM for function {:?}", func_id);
+
+        // Create LLVM function
+        let i64_type = context.i64_type();
+        let fn_type = i64_type.fn_type(&vec![i64_type.into(); bir_func.parameters.len()], false);
+
+        let fn_name = format!("_rlasp_fn_{}", func_id);
+        let llvm_func = codegen.module().add_function(&fn_name, fn_type, None);
+
+        // Create entry block
+        let entry_block = context.append_basic_block(llvm_func, "entry");
+        codegen.builder().position_at_end(entry_block);
+
+        // For now, just return 0
+        // TODO: Walk through BIR instructions and generate LLVM IR
+        let zero = i64_type.const_zero();
+        codegen.builder().build_return(Some(&zero)).unwrap();
     }
 
     Ok(())

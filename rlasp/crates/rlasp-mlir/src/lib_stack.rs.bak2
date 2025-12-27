@@ -1606,13 +1606,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -1648,13 +1648,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -1692,13 +1692,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -1734,13 +1734,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -1776,13 +1776,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -2177,7 +2177,7 @@ impl StackMLIRCodegen {
                     } else {
                         // If variable doesn't exist, treat as nil
                         let nil_val = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                         nil_val
                     };
 

@@ -406,7 +406,8 @@ fn expand_global_macros(
                         }
                         let expanded = substitute_macro_body(body, &substitutions);
                         let expanded_backquote = expand_macro_backquote(&expanded);
-                        return expand_global_macros(&expanded_backquote, macros);
+                        let normalized = normalize_special_forms(&expanded_backquote);
+                        return expand_global_macros(&normalized, macros);
                     }
                 }
             }
@@ -479,7 +480,9 @@ fn substitute_macro_body(
                 exprs: exprs.iter().map(|e| substitute_macro_body(e, substitutions)).collect(),
             }
         }
-        ASTNode::Quote(_) => ast.clone(),
+        ASTNode::Quote(inner) => {
+            ASTNode::Quote(Box::new(substitute_macro_body(inner, substitutions)))
+        }
         _ => ast.clone(),
     }
 }
@@ -503,6 +506,15 @@ fn expand_macro_backquote_inner(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode 
 
     match ast {
         ASTNode::Unquote(inner) => (**inner).clone(),
+        ASTNode::Quote(inner) => {
+            // Handle ',expr pattern: Quote(Unquote(x)) becomes Quote(x)
+            if let ASTNode::Unquote(unquoted) = &**inner {
+                ASTNode::Quote(unquoted.clone())
+            } else {
+                // Recursively expand inside Quote
+                ASTNode::Quote(Box::new(expand_macro_backquote_inner(inner)))
+            }
+        }
         ASTNode::Call { function, args } => {
             let expanded_args: Vec<ASTNode> = args.iter().map(|arg| {
                 match arg {
@@ -520,6 +532,135 @@ fn expand_macro_backquote_inner(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode 
                 function: Box::new(expanded_func),
                 args: expanded_args,
             }
+        }
+        ASTNode::Progn { exprs } => {
+            let expanded_exprs: Vec<ASTNode> = exprs.iter()
+                .map(expand_macro_backquote_inner)
+                .collect();
+            ASTNode::Progn { exprs: expanded_exprs }
+        }
+        _ => ast.clone(),
+    }
+}
+
+/// Convert Call nodes representing special forms into proper ASTNode types
+/// This is needed after backquote expansion, which creates Call nodes for everything
+fn normalize_special_forms(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode {
+    use rlasp::ir::ASTNode;
+    use std::collections::HashMap;
+
+    match ast {
+        ASTNode::Call { function, args } => {
+            // First, recursively normalize all arguments and function
+            let norm_args: Vec<ASTNode> = args.iter().map(normalize_special_forms).collect();
+            let norm_func = normalize_special_forms(function);
+
+            // Check if this is a call to a special form
+            if let ASTNode::Variable(name) = &norm_func {
+                match name.as_str() {
+                    "let" | "let*" => {
+                        // (let ((var val) ...) body...)
+                        if norm_args.is_empty() {
+                            return ASTNode::Let {
+                                bindings: vec![],
+                                body: vec![ASTNode::nil()],
+                            };
+                        }
+
+                        // Extract bindings from first argument
+                        let bindings = match &norm_args[0] {
+                            ASTNode::Call { function, args } => {
+                                // Bindings are represented as nested Call nodes
+                                // Each binding is Call { function: Call { function: var, args: [val] }, args: [] }
+                                let mut result = vec![];
+                                let mut current = &norm_args[0];
+
+                                loop {
+                                    match current {
+                                        ASTNode::Call { function, args } if args.is_empty() => {
+                                            // This is a cons cell representing one binding
+                                            if let ASTNode::Call { function: var_node, args: val_args } = &**function {
+                                                if let ASTNode::Variable(var_name) = &**var_node {
+                                                    if !val_args.is_empty() {
+                                                        result.push((var_name.clone(), val_args[0].clone()));
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                            break;
+                                        }
+                                        ASTNode::Variable(_) => {
+                                            // Empty binding list (nil)
+                                            break;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                result
+                            }
+                            _ => vec![],
+                        };
+
+                        let body = if norm_args.len() > 1 {
+                            norm_args[1..].to_vec()
+                        } else {
+                            vec![ASTNode::nil()]
+                        };
+
+                        return ASTNode::Let { bindings, body };
+                    }
+                    "if" => {
+                        // (if test then [else])
+                        if norm_args.is_empty() {
+                            return ASTNode::nil();
+                        }
+                        let test = norm_args.get(0).cloned().unwrap_or(ASTNode::nil());
+                        let then_branch = norm_args.get(1).cloned().unwrap_or(ASTNode::nil());
+                        let else_branch = norm_args.get(2).cloned().unwrap_or(ASTNode::nil());
+
+                        return ASTNode::If {
+                            test: Box::new(test),
+                            then_branch: Box::new(then_branch),
+                            else_branch: Box::new(else_branch),
+                        };
+                    }
+                    "progn" => {
+                        return ASTNode::Progn { exprs: norm_args };
+                    }
+                    _ => {}
+                }
+            }
+
+            // Not a special form, keep as Call
+            ASTNode::Call {
+                function: Box::new(norm_func),
+                args: norm_args,
+            }
+        }
+        ASTNode::Let { bindings, body } => {
+            let norm_bindings: Vec<(String, ASTNode)> = bindings.iter()
+                .map(|(name, val)| (name.clone(), normalize_special_forms(val)))
+                .collect();
+            let norm_body: Vec<ASTNode> = body.iter().map(normalize_special_forms).collect();
+            ASTNode::Let {
+                bindings: norm_bindings,
+                body: norm_body,
+            }
+        }
+        ASTNode::If { test, then_branch, else_branch } => {
+            ASTNode::If {
+                test: Box::new(normalize_special_forms(test)),
+                then_branch: Box::new(normalize_special_forms(then_branch)),
+                else_branch: Box::new(normalize_special_forms(else_branch)),
+            }
+        }
+        ASTNode::Progn { exprs } => {
+            ASTNode::Progn {
+                exprs: exprs.iter().map(normalize_special_forms).collect(),
+            }
+        }
+        ASTNode::Quote(inner) => {
+            ASTNode::Quote(Box::new(normalize_special_forms(inner)))
         }
         _ => ast.clone(),
     }
@@ -1079,11 +1220,17 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         if let Some(f) = module.get_function("complex") {
             execution_engine.add_global_mapping(&f, complex as usize);
         }
+        if let Some(f) = module.get_function("cc_ratio") {
+            execution_engine.add_global_mapping(&f, cc_ratio as usize);
+        }
         if let Some(f) = module.get_function("cc_numerator") {
             execution_engine.add_global_mapping(&f, cc_numerator as usize);
         }
         if let Some(f) = module.get_function("cc_denominator") {
             execution_engine.add_global_mapping(&f, cc_denominator as usize);
+        }
+        if let Some(f) = module.get_function("cc_complex") {
+            execution_engine.add_global_mapping(&f, cc_complex as usize);
         }
         if let Some(f) = module.get_function("cc_realpart") {
             execution_engine.add_global_mapping(&f, cc_realpart as usize);
@@ -1499,10 +1646,23 @@ fn eval_expression_llvm(expr: &str) -> std::result::Result<(), String> {
         } else if result_raw == t_val {
             println!("=> T");
         } else if let Some(val) = result_obj.as_fixnum() {
-            println!("=> Fixnum({})", val);
+            println!("=> (fixnum {})", val);
         } else if result_obj.is_cons() {
             // Format as a list
             println!("=> {}", format_list(&result_obj));
+        } else if result_obj.is_number() {
+            // Format numbers with type info
+            if let Some(ptr) = result_obj.as_general_ptr::<rlasp_runtime::Number>() {
+                let num = unsafe { &*ptr };
+                match &num.value {
+                    rlasp_runtime::NumberValue::Bignum(b) => println!("=> (bignum {})", b),
+                    rlasp_runtime::NumberValue::Ratio(r) => println!("=> (ratio {} {})", r.numerator_ref(), r.denominator_ref()),
+                    rlasp_runtime::NumberValue::Float(f) => println!("=> (float {})", f),
+                    rlasp_runtime::NumberValue::Complex(c) => println!("=> (complex {} {})", c.re, c.im),
+                }
+            } else {
+                println!("=> {:?}", result_obj);
+            }
         } else {
             println!("=> {:?}", result_obj);
         }
@@ -6432,7 +6592,20 @@ fn format_jit_result(val: i64) -> String {
     if obj.is_nil() {
         "NIL".to_string()
     } else if let Some(fixnum) = obj.as_fixnum() {
-        format!("Fixnum({})", fixnum)
+        format!("(fixnum {})", fixnum)
+    } else if obj.is_number() {
+        // Format heap-allocated numbers
+        if let Some(ptr) = obj.as_general_ptr::<rlasp_runtime::Number>() {
+            let num = unsafe { &*ptr };
+            match &num.value {
+                rlasp_runtime::NumberValue::Bignum(b) => format!("(bignum {})", b),
+                rlasp_runtime::NumberValue::Ratio(r) => format!("(ratio {} {})", r.numerator_ref(), r.denominator_ref()),
+                rlasp_runtime::NumberValue::Float(f) => format!("(float {})", f),
+                rlasp_runtime::NumberValue::Complex(c) => format!("(complex {} {})", c.re, c.im),
+            }
+        } else {
+            format!("Value(0x{:x})", val_usize)
+        }
     } else {
         // For debugging: print raw value
         format!("Value(0x{:x})", val_usize)

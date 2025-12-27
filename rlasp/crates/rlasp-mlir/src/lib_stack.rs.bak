@@ -1606,13 +1606,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -1641,23 +1641,11 @@ impl StackMLIRCodegen {
                 let left = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
 
-                // Compare and convert to Lisp boolean (nil or t)
+                // Compare and convert to i64 boolean (0 or 1)
                 let cmp = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.cmpi sgt, {}, {} : i64", cmp, left, right));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = arith.extui {} : i1 to i64", result, cmp));
 
                 // Push result as pointer
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
@@ -1692,13 +1680,13 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
                 self.indent();
                 let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("{} = func.call @cc_t() : () -> i64", t_val));
                 self.writeln(&format!("scf.yield {} : i64", t_val));
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
                 let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                 self.writeln(&format!("scf.yield {} : i64", nil_val));
                 self.dedent();
                 self.writeln("}");
@@ -1727,23 +1715,11 @@ impl StackMLIRCodegen {
                 let left = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
 
-                // Compare and convert to Lisp boolean (nil or t)
+                // Compare and convert to i64 boolean (0 or 1)
                 let cmp = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.cmpi sle, {}, {} : i64", cmp, left, right));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = arith.extui {} : i1 to i64", result, cmp));
 
                 // Push result as pointer
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
@@ -1769,23 +1745,11 @@ impl StackMLIRCodegen {
                 let left = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
 
-                // Compare and convert to Lisp boolean (nil or t)
+                // Compare and convert to i64 boolean (0 or 1)
                 let cmp = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.cmpi sge, {}, {} : i64", cmp, left, right));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = arith.extui {} : i1 to i64", result, cmp));
 
                 // Push result as pointer
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
@@ -2177,7 +2141,7 @@ impl StackMLIRCodegen {
                     } else {
                         // If variable doesn't exist, treat as nil
                         let nil_val = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
                         nil_val
                     };
 

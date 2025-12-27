@@ -1,6 +1,8 @@
 /// eval_numeric.rs - Common Lisp numeric builtins
 use super::eval_types::EvalResult;
 use std::collections::HashMap;
+use malachite::Integer;
+use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
 pub fn register_numeric_builtins(env: &mut HashMap<String, EvalResult>) {
     // Numeric predicates
@@ -65,6 +67,14 @@ pub fn register_numeric_builtins(env: &mut HashMap<String, EvalResult>) {
     env.insert("lcm".to_string(), EvalResult::BuiltinFunction("lcm".to_string()));
     env.insert("integer-length".to_string(), EvalResult::BuiltinFunction("integer-length".to_string()));
 
+    // Type constructors (for reading back typed values)
+    env.insert("fixnum".to_string(), EvalResult::BuiltinFunction("fixnum".to_string()));
+    env.insert("bignum".to_string(), EvalResult::BuiltinFunction("bignum".to_string()));
+    env.insert("float".to_string(), EvalResult::BuiltinFunction("float".to_string()));
+    env.insert("string".to_string(), EvalResult::BuiltinFunction("string".to_string()));
+    env.insert("symbol".to_string(), EvalResult::BuiltinFunction("symbol".to_string()));
+    env.insert("character".to_string(), EvalResult::BuiltinFunction("character".to_string()));
+
     // Float operations
     env.insert("float-radix".to_string(), EvalResult::BuiltinFunction("float-radix".to_string()));
     env.insert("float-sign".to_string(), EvalResult::BuiltinFunction("float-sign".to_string()));
@@ -75,6 +85,7 @@ pub fn register_numeric_builtins(env: &mut HashMap<String, EvalResult>) {
     env.insert("integer-decode-float".to_string(), EvalResult::BuiltinFunction("integer-decode-float".to_string()));
 
     // Rational/complex operations
+    env.insert("ratio".to_string(), EvalResult::BuiltinFunction("ratio".to_string()));
     env.insert("numerator".to_string(), EvalResult::BuiltinFunction("numerator".to_string()));
     env.insert("denominator".to_string(), EvalResult::BuiltinFunction("denominator".to_string()));
     env.insert("rational".to_string(), EvalResult::BuiltinFunction("rational".to_string()));
@@ -94,6 +105,29 @@ pub fn register_numeric_builtins(env: &mut HashMap<String, EvalResult>) {
 
 pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
+        // Type constructors (for reading back typed values)
+        "fixnum" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(*n)),
+            _ => Err("fixnum requires an integer argument".to_string()),
+        },
+        "bignum" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Bignum((*n).into())),
+            Some(EvalResult::Bignum(n)) => Ok(EvalResult::Bignum(n.clone())),
+            _ => Err("bignum requires an integer argument".to_string()),
+        },
+        "string" => match args.get(0) {
+            Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
+            _ => Err("string requires a string argument".to_string()),
+        },
+        "symbol" => match args.get(0) {
+            Some(EvalResult::Symbol(s)) => Ok(EvalResult::Symbol(s.clone())),
+            _ => Err("symbol requires a symbol argument".to_string()),
+        },
+        "character" => match args.get(0) {
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Character(*c)),
+            _ => Err("character requires a character argument".to_string()),
+        },
+
         // Predicates
         "numberp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Float(_))))),
         "integerp" => Ok(EvalResult::Boolean(match args.get(0) {
@@ -252,7 +286,18 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 Ok(EvalResult::Float(base.powf(*power)))
             }
             (Some(EvalResult::Fixnum(base)), Some(EvalResult::Fixnum(power))) => {
-                Ok(EvalResult::Float((*base as f64).powf(*power as f64)))
+                if *power >= 0 {
+                    use malachite::num::arithmetic::traits::Pow;
+                    let result = Integer::from(*base).pow(*power as u64);
+                    // Check if result fits in i64, otherwise return Bignum
+                    if i64::convertible_from(&result) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+                    } else {
+                        Ok(EvalResult::Bignum(result))
+                    }
+                } else {
+                    Ok(EvalResult::Float((*base as f64).powf(*power as f64)))
+                }
             }
             _ => Err("expt requires two numbers".to_string()),
         },
@@ -328,21 +373,63 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             _ => Err("float requires a number".to_string()),
         },
 
+        "ratio" => {
+            use malachite::Rational;
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+
+            match (args.get(0), args.get(1)) {
+                (Some(EvalResult::Fixnum(num)), Some(EvalResult::Fixnum(denom))) => {
+                    if *denom == 0 {
+                        return Err("Division by zero".to_string());
+                    }
+                    let ratio = Rational::from_signeds(*num, *denom);
+                    // If the result is an integer, return fixnum
+                    if ratio.denominator_ref() == &1 {
+                        let n = ratio.numerator_ref();
+                        if i64::convertible_from(n) {
+                            return Ok(EvalResult::Fixnum(i64::exact_from(n)));
+                        }
+                    }
+                    Ok(EvalResult::Ratio(ratio))
+                }
+                _ => Err("ratio requires two integer arguments".to_string()),
+            }
+        },
+
         "rational" | "rationalize" => match args.get(0) {
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
             Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(*n)),
+            Some(EvalResult::Ratio(r)) => Ok(EvalResult::Ratio(r.clone())),
             _ => Err("rational requires a number".to_string()),
         },
 
         "numerator" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(*n)),
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
+            Some(EvalResult::Ratio(r)) => {
+                use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+                let num = r.numerator_ref();
+                if i64::convertible_from(num) {
+                    Ok(EvalResult::Fixnum(i64::exact_from(num)))
+                } else {
+                    Err("numerator too large".to_string())
+                }
+            }
             _ => Err("numerator requires a rational".to_string()),
         },
 
         "denominator" => match args.get(0) {
             Some(EvalResult::Fixnum(_)) => Ok(EvalResult::Fixnum(1)),
             Some(EvalResult::Float(_)) => Ok(EvalResult::Float(1.0)),
+            Some(EvalResult::Ratio(r)) => {
+                use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+                let denom = r.denominator_ref();
+                if i64::convertible_from(denom) {
+                    Ok(EvalResult::Fixnum(i64::exact_from(denom)))
+                } else {
+                    Err("denominator too large".to_string())
+                }
+            }
             _ => Err("denominator requires a rational".to_string()),
         },
 

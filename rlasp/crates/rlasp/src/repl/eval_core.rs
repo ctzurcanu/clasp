@@ -502,6 +502,9 @@ fn eval_symbol_macrolet(
 }
 
 fn expand_backquote(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if matches!(ast, ASTNode::Quote(_)) {
+        eprintln!("DEBUG expand_backquote: processing Quote node");
+    }
     match ast {
         ASTNode::Unquote(form) => {
             // Evaluate the unquoted form
@@ -534,6 +537,64 @@ fn expand_backquote(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Res
                 );
             }
             Ok(result)
+        }
+        ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+            // Convert Let/LetStar to list form and process it
+            // (let ((var val) ...) body...)
+            let let_symbol = if matches!(ast, ASTNode::Let { .. }) { "let" } else { "let*" };
+
+            // Process bindings
+            let mut binding_results = Vec::new();
+            for (var, val_ast) in bindings {
+                // Each binding is (var val)
+                let val_result = expand_backquote(val_ast, env)?;
+                let binding_list = vec_to_list(&[EvalResult::Symbol(var.clone()), val_result])?;
+                binding_results.push(binding_list);
+            }
+            let bindings_list = vec_to_list(&binding_results)?;
+
+            // Process body
+            let mut body_results = Vec::new();
+            for expr in body {
+                body_results.push(expand_backquote(expr, env)?);
+            }
+
+            // Build final list: (let bindings body...)
+            let mut items = vec![EvalResult::Symbol(let_symbol.to_string()), bindings_list];
+            items.extend(body_results);
+            vec_to_list(&items)
+        }
+        // Handle other special forms similarly if needed
+        ASTNode::Progn { exprs } => {
+            let mut results = vec![EvalResult::Symbol("progn".to_string())];
+            for expr in exprs {
+                results.push(expand_backquote(expr, env)?);
+            }
+            vec_to_list(&results)
+        }
+        ASTNode::If { test, then_branch, else_branch } => {
+            let test_result = expand_backquote(test, env)?;
+            let then_result = expand_backquote(then_branch, env)?;
+            let else_result = expand_backquote(else_branch, env)?;
+            vec_to_list(&[
+                EvalResult::Symbol("if".to_string()),
+                test_result,
+                then_result,
+                else_result,
+            ])
+        }
+        ASTNode::Quote(inner) => {
+            // (quote form) inside backquote
+            // Special case: (quote (unquote x)) should evaluate x
+            // This handles ',expr which parses as Quote(Unquote(expr))
+            if let ASTNode::Unquote(expr) = &**inner {
+                // This is ',expr - evaluate expr to get the value, then return it quoted
+                let result = eval_with_env(expr, env)?;
+                return Ok(result);
+            }
+            // Otherwise, process the inner form normally
+            let inner_result = expand_backquote(inner, env)?;
+            vec_to_list(&[EvalResult::Symbol("quote".to_string()), inner_result])
         }
         _ => {
             // Everything else is kept as-is (quoted)
@@ -568,6 +629,20 @@ fn expand_backquote_element(ast: &ASTNode, env: &mut HashMap<String, EvalResult>
             }
             Ok(items)
         }
+        ASTNode::Quote(inner) => {
+            // Handle ',expr pattern inside backquote
+            if let ASTNode::Unquote(expr) = &**inner {
+                // This is ',expr - evaluate expr to get the value, then quote it
+                let val = eval_with_env(expr, env)?;
+                // Return (quote val) so it doesn't get evaluated when the macro expansion is evaluated
+                let quoted = vec_to_list(&[EvalResult::Symbol("quote".to_string()), val])?;
+                Ok(vec![quoted])
+            } else {
+                // Regular quote - process recursively through expand_backquote
+                let result = expand_backquote(ast, env)?;
+                Ok(vec![result])
+            }
+        }
         ASTNode::Call { function, args } => {
             // Recursively process nested list
             let nested = expand_backquote(ast, env)?;
@@ -578,6 +653,17 @@ fn expand_backquote_element(ast: &ASTNode, env: &mut HashMap<String, EvalResult>
             let val = ast_to_result(ast)?;
             Ok(vec![val])
         }
+    }
+}
+
+// Helper to preserve AST structure including backquote/unquote when quoting
+fn preserve_ast_structure(ast: &ASTNode) -> Result<EvalResult, String> {
+    match ast {
+        ASTNode::Backquote(inner) | ASTNode::Unquote(inner) | ASTNode::UnquoteSplicing(inner) => {
+            // Recursively preserve nested backquote/unquote structures
+            preserve_ast_structure(inner)
+        }
+        _ => ast_to_result(ast),
     }
 }
 
@@ -697,26 +783,28 @@ fn ast_to_result(ast: &ASTNode) -> Result<EvalResult, String> {
             vec_to_list(&items)
         }
         ASTNode::Backquote(inner) => {
-            // (backquote inner) or `inner
+            // Don't expand backquote here - it should be evaluated, not quoted
+            // This case shouldn't normally occur because backquotes are evaluated
+            // But if we're quoting code that contains a backquote, preserve it
             let items = vec![
                 EvalResult::Symbol("backquote".to_string()),
-                ast_to_result(inner)?,
+                preserve_ast_structure(inner)?,
             ];
             vec_to_list(&items)
         }
         ASTNode::Unquote(inner) => {
-            // (unquote inner) or ,inner
+            // Preserve unquote structure when quoting code
             let items = vec![
                 EvalResult::Symbol("unquote".to_string()),
-                ast_to_result(inner)?,
+                preserve_ast_structure(inner)?,
             ];
             vec_to_list(&items)
         }
         ASTNode::UnquoteSplicing(inner) => {
-            // (unquote-splicing inner) or ,@inner
+            // Preserve unquote-splicing structure when quoting code
             let items = vec![
                 EvalResult::Symbol("unquote-splicing".to_string()),
-                ast_to_result(inner)?,
+                preserve_ast_structure(inner)?,
             ];
             vec_to_list(&items)
         }
@@ -1745,6 +1833,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "core:fset" => eval_fset(args, env),
             "si::fset" => eval_fset(args, env),
             "print" => eval_print(args, env),
+            "format" => eval_format(args, env),
             "load" => eval_load(args, env),
             "load-lib" => eval_load_lib(args, env),
             "defforeign" => eval_defforeign(args, env),

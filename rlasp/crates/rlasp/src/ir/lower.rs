@@ -238,7 +238,19 @@ impl LowerContext {
         }
 
         // Lower function expression
-        let func_val = self.lower_ast(function)?;
+        // For variable references to unknown functions, create a runtime lookup
+        let func_val = match function {
+            ASTNode::Variable(name) => {
+                if let Some(&existing) = self.env.get(name) {
+                    existing
+                } else {
+                    // Unknown function - create a runtime symbol lookup
+                    // For now, create a constant with the function name
+                    self.module.make_constant(ConstantValue::Symbol(name.clone()))
+                }
+            }
+            other => self.lower_ast(other)?
+        };
 
         // Lower arguments
         let arg_vals: Result<Vec<_>, _> = args.iter().map(|arg| self.lower_ast(arg)).collect();
@@ -264,10 +276,26 @@ impl LowerContext {
 
     fn lower_builtin_call(&mut self, name: &str, args: &[ASTNode]) -> Result<Option<DatumId>, String> {
         let kind = match name {
+            // Arithmetic
             "+" => Some(InstructionKind::Add),
             "-" => Some(InstructionKind::Sub),
             "*" => Some(InstructionKind::Mul),
             "/" => Some(InstructionKind::Div),
+            // Numeric comparisons
+            "=" => Some(InstructionKind::NumEq),
+            "/=" => Some(InstructionKind::NumNe),
+            "<" => Some(InstructionKind::NumLt),
+            "<=" => Some(InstructionKind::NumLe),
+            ">" => Some(InstructionKind::NumGt),
+            ">=" => Some(InstructionKind::NumGe),
+            // Identity/equality comparisons
+            "eq" => Some(InstructionKind::Eq),
+            "eql" => Some(InstructionKind::Eql),
+            "equal" => Some(InstructionKind::Equal),
+            // List operations
+            "car" => Some(InstructionKind::Car),
+            "cdr" => Some(InstructionKind::Cdr),
+            "cons" => Some(InstructionKind::Cons),
             _ => None,
         };
 
@@ -383,11 +411,16 @@ impl LowerContext {
 
     fn lower_setq(&mut self, var: &str, value: &ASTNode) -> Result<DatumId, String> {
         let val_datum = self.lower_ast(value)?;
-        let var_datum = self
-            .env
-            .get(var)
-            .copied()
-            .ok_or_else(|| format!("Undefined variable: {}", var))?;
+
+        // Get or create variable datum
+        let var_datum = if let Some(&existing) = self.env.get(var) {
+            existing
+        } else {
+            // Create new variable (for top-level definitions like defun)
+            let new_var = self.module.make_variable(Some(var.to_string()));
+            self.env.insert(var.to_string(), new_var);
+            new_var
+        };
 
         // Emit write instruction
         let _write_inst = self.module.make_instruction(

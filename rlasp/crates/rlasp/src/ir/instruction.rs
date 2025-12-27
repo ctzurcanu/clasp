@@ -117,6 +117,24 @@ pub enum InstructionKind {
     Mul,
     /// Primop: /
     Div,
+    /// Primop: = (numeric equality)
+    NumEq,
+    /// Primop: /= (numeric inequality)
+    NumNe,
+    /// Primop: < (less than)
+    NumLt,
+    /// Primop: <= (less than or equal)
+    NumLe,
+    /// Primop: > (greater than)
+    NumGt,
+    /// Primop: >= (greater than or equal)
+    NumGe,
+    /// Primop: eq (identity comparison)
+    Eq,
+    /// Primop: eql (value comparison)
+    Eql,
+    /// Primop: equal (structural comparison)
+    Equal,
     /// Generic primop
     Primop { name: String },
 }

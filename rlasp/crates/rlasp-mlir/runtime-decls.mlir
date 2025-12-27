@@ -88,13 +88,13 @@ func.func private @cc_minusp(i64) -> i64
 func.func private @cc_equal(i64, i64) -> i64
 func.func private @cc_equalp(i64, i64) -> i64
 
-// Complex numbers
+// Rational and complex numbers
+func.func private @cc_ratio(i64, i64) -> i64
 func.func private @cc_numerator(i64) -> i64
 func.func private @cc_denominator(i64) -> i64
+func.func private @cc_complex(i64, i64) -> i64
 func.func private @cc_realpart(i64) -> i64
 func.func private @cc_imagpart(i64) -> i64
-func.func private @cc_complex(i64) -> i64
-func.func private @cc_ratio(i64) -> i64
 func.func private @cc_magnitude(i64) -> i64
 
 // I/O

@@ -32,11 +32,11 @@ cxx = "1.0"
 lazy_static = "1.4"
 atty = "0.2"
 
-# Numeric tower
-num-bigint = "0.4"
-num-rational = "0.4"
+# Numeric tower - using Malachite for high performance
+malachite = "0.4"
+malachite-base = "0.4"
+malachite-q = "0.4"
 num-complex = "0.4"
-num-traits = "0.2"
 
 # GC
 # bdwgc-alloc = "0.1"  # Uncomment when ready for Boehm GC

@@ -21,6 +21,9 @@ lazy_static = { workspace = true }
 atty = { workspace = true }
 inkwell = { workspace = true }
 llvm-sys = { workspace = true }
+malachite = { workspace = true }
+malachite-base = { workspace = true }
+malachite-q = { workspace = true }
 
 [build-dependencies]
 cc = "1.0"

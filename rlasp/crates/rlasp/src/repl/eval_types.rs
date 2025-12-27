@@ -4,6 +4,8 @@ use crate::ir::ASTNode;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
+use malachite::Integer;
+use malachite::Rational;
 
 // Thread-local storage for complex return values and gensym counter
 thread_local! {
@@ -14,6 +16,8 @@ thread_local! {
 #[derive(Clone)]
 pub enum EvalResult {
     Fixnum(i64),
+    Bignum(Integer),
+    Ratio(Rational),
     Float(f64),
     Bool(bool),
     Boolean(bool),  // CL boolean type
@@ -51,14 +55,16 @@ pub(super) enum NonLocalExit {
 impl std::fmt::Display for EvalResult {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            EvalResult::Fixnum(n) => write!(f, "{}", n),
-            EvalResult::Float(fl) => write!(f, "{}", fl),
+            EvalResult::Fixnum(n) => write!(f, "(fixnum {})", n),
+            EvalResult::Bignum(n) => write!(f, "(bignum {})", n),
+            EvalResult::Ratio(r) => write!(f, "(ratio {} {})", r.numerator_ref(), r.denominator_ref()),
+            EvalResult::Float(fl) => write!(f, "(float {})", fl),
             EvalResult::Bool(true) | EvalResult::Boolean(true) => write!(f, "T"),
             EvalResult::Bool(false) | EvalResult::Boolean(false) => write!(f, "NIL"),
             EvalResult::Nil => write!(f, "NIL"),
-            EvalResult::String(s) => write!(f, "\"{}\"", s),
-            EvalResult::Symbol(s) => write!(f, "{}", s),
-            EvalResult::Character(c) => write!(f, "#\\{}", c),
+            EvalResult::String(s) => write!(f, "(string \"{}\")", s),
+            EvalResult::Symbol(s) => write!(f, "(symbol {})", s),
+            EvalResult::Character(c) => write!(f, "(character #\\{})", c),
             EvalResult::Cons(car, cdr) => {
                 write!(f, "(")?;
                 self.fmt_list(f)?;
@@ -106,26 +112,8 @@ impl EvalResult {
 
 impl std::fmt::Debug for EvalResult {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            EvalResult::Fixnum(n) => write!(f, "Fixnum({})", n),
-            EvalResult::Float(fl) => write!(f, "Float({})", fl),
-            EvalResult::Bool(b) => write!(f, "Bool({})", b),
-            EvalResult::Boolean(b) => write!(f, "Boolean({})", b),
-            EvalResult::Nil => write!(f, "Nil"),
-            EvalResult::String(s) => write!(f, "String({:?})", s),
-            EvalResult::Symbol(s) => write!(f, "Symbol({})", s),
-            EvalResult::Character(c) => write!(f, "Character({:?})", c),
-            EvalResult::Cons(_, _) => write!(f, "Cons(..)"),
-            EvalResult::Lambda { .. } => write!(f, "Lambda {{ .. }}"),
-            EvalResult::Macro { .. } => write!(f, "Macro {{ .. }}"),
-            EvalResult::HashTable(_) => write!(f, "HashTable(..)"),
-            EvalResult::Array(_) => write!(f, "Array(..)"),
-            EvalResult::WasmBytes(bytes) => write!(f, "WasmBytes({} bytes)", bytes.len()),
-            EvalResult::BuiltinFunction(name) => write!(f, "BuiltinFunction({})", name),
-            EvalResult::MultipleValues(vals) => write!(f, "MultipleValues({} values)", vals.len()),
-            EvalResult::ForeignLibrary(_) => write!(f, "ForeignLibrary(..)"),
-            EvalResult::ForeignFunction(_) => write!(f, "ForeignFunction(..)"),
-        }
+        // Use the Display implementation for Debug as well
+        write!(f, "{}", self)
     }
 }
 
