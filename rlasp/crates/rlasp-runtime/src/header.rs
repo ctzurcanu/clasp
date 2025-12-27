@@ -13,6 +13,7 @@ pub enum ObjectType {
     String = 4,
     Vector = 5,
     Package = 6,
+    Closure = 7,
 }
 
 /// Header placed at the start of every General object

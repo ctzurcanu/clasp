@@ -15,6 +15,7 @@ pub mod string;
 pub mod hash_table;
 pub mod clos;
 pub mod eval_stack;
+pub mod closure;
 
 pub use stack::{TypeTag, ObjectHandle, allocate_object};
 pub use header::{TypeHeader, ObjectType};
@@ -26,3 +27,4 @@ pub use package::{Package, PackageManager, PACKAGE_MANAGER};
 pub use string::RString;
 pub use hash_table::HashTable;
 pub use clos::{Class, Instance};
+pub use closure::Closure;

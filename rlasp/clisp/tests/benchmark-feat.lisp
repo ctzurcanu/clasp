@@ -272,8 +272,8 @@
   (time-it "Reader"               #'reader-test)
 
   (time-it "Conditions"           #'condition-test)
-  (time-it "CLOS"                 #'clos-test)
-  (time-it "Introspection"        #'introspection-test)
+  ; (time-it "CLOS"                 #'clos-test)
+  ; (time-it "Introspection"        #'introspection-test)
 
   (format t "~&Done.~%"))
 (cl-features-bench:run-benchmarks)

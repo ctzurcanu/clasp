@@ -103,6 +103,7 @@ func.func private @cc_format(i64, i64) -> i64
 
 // Arrays
 func.func private @cc_make_array(i64) -> i64
+func.func private @cc_make_array_with_contents(i64, i64) -> i64
 func.func private @cc_aref(i64, i64) -> i64
 func.func private @cc_set_aref(i64, i64, i64) -> i64
 
@@ -189,6 +190,7 @@ func.func private @cc_if(i64, i64, i64) -> i64
 // Function objects
 func.func private @cc_make_lambda_ref_str(!llvm.ptr) -> i64
 func.func private @cc_make_lambda_ref_id(i64) -> i64
+func.func private @cc_make_closure(i64, i64) -> i64
 func.func private @cc_funcall(i64, i64) -> i64
 func.func private @cc_funcall_stack(i64)
 func.func private @cc_apply(i64, i64) -> i64

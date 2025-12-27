@@ -22,7 +22,16 @@ impl HashTable {
     pub fn get(&self, key: LispObject) -> Option<LispObject> {
         let hash = Self::hash_object(key);
         let table = self.table.read().unwrap();
-        table.get(&hash).map(|(_, v)| *v)
+        if let Some((stored_key, value)) = table.get(&hash) {
+            // Check if keys are actually equal (in case of hash collision)
+            if Self::keys_equal(*stored_key, key) {
+                Some(*value)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     /// Put a value in the hash table
@@ -52,9 +61,49 @@ impl HashTable {
         LispObject::from_hash_table_ptr(ptr)
     }
 
+    /// Check if two keys are equal (using EQUAL semantics)
+    fn keys_equal(a: LispObject, b: LispObject) -> bool {
+        // If pointers are the same, they're equal
+        if a.raw() == b.raw() {
+            return true;
+        }
+
+        // For strings, compare content
+        if let (Some(a_ptr), Some(b_ptr)) = (
+            a.as_general_ptr::<crate::string::RString>(),
+            b.as_general_ptr::<crate::string::RString>()
+        ) {
+            let a_str = unsafe { &*a_ptr }.as_str();
+            let b_str = unsafe { &*b_ptr }.as_str();
+            return a_str == b_str;
+        }
+
+        // For fixnums, compare values
+        if let (Some(a_num), Some(b_num)) = (a.as_fixnum(), b.as_fixnum()) {
+            return a_num == b_num;
+        }
+
+        // Otherwise, not equal
+        false
+    }
+
     /// Simple hash function for LispObject
     fn hash_object(obj: LispObject) -> u64 {
-        obj.raw() as u64
+        // For strings, hash the content, not the pointer
+        if let Some(str_ptr) = obj.as_general_ptr::<crate::string::RString>() {
+            let rstring = unsafe { &*str_ptr };
+            let s = rstring.as_str();
+            // Simple hash function for strings (FNV-1a)
+            let mut hash = 0xcbf29ce484222325u64;
+            for byte in s.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash
+        } else {
+            // For other objects, use raw value
+            obj.raw() as u64
+        }
     }
 }
 

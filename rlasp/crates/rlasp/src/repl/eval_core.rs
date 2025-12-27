@@ -237,6 +237,30 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
 
             Ok(final_result)
         }
+        ASTNode::Block { name, body } => {
+            // Convert to arguments format expected by eval_block
+            let mut args = Vec::new();
+            if let Some(block_name) = name {
+                args.push(ASTNode::Variable(block_name.clone()));
+            } else {
+                args.push(ASTNode::Constant(ConstantValue::Nil));
+            }
+            args.extend_from_slice(body);
+            eval_block(&args, env)
+        }
+        ASTNode::ReturnFrom { block_name, value } => {
+            // Convert to arguments format expected by eval_return_from
+            let mut args = Vec::new();
+            if let Some(name) = block_name {
+                args.push(ASTNode::Variable(name.clone()));
+            } else {
+                args.push(ASTNode::Constant(ConstantValue::Nil));
+            }
+            if let Some(val) = value {
+                args.push((**val).clone());
+            }
+            eval_return_from(&args, env)
+        }
         _ => Ok(EvalResult::Nil), // Other forms not yet implemented
     }
 }
@@ -2125,8 +2149,29 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 }
             }
             "read-from-string" => {
-                // Parse string into lisp object - stub returns nil
-                Ok(EvalResult::Nil)
+                // Parse string into lisp object
+                if args.is_empty() {
+                    return Err("read-from-string requires a string argument".to_string());
+                }
+                let string_arg = eval_with_env(&args[0], env)?;
+                match string_arg {
+                    EvalResult::String(s) => {
+                        // Use the reader to parse the string
+                        use rlasp_reader::reader::read_from_string;
+                        match read_from_string(&s) {
+                            Ok(expr) => {
+                                // Convert LispObject to ASTNode and then to EvalResult
+                                use crate::repl::lisp_to_ast::lisp_to_ast;
+                                match lisp_to_ast(expr) {
+                                    Ok(ast) => ast_to_result(&ast),
+                                    Err(e) => Err(format!("Failed to convert to AST: {}", e)),
+                                }
+                            }
+                            Err(e) => Err(format!("Failed to read from string: {:?}", e)),
+                        }
+                    }
+                    _ => Err("read-from-string requires a string argument".to_string()),
+                }
             }
             "proclaim" => Ok(EvalResult::Nil), // Stub
             "trace" => Ok(EvalResult::Nil), // Stub

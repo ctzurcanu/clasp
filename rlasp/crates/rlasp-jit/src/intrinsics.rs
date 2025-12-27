@@ -8,6 +8,7 @@ use rlasp_runtime::eval_stack::{
     stack_push_fixnum, stack_push_pointer, stack_push_nil,
     stack_pop_fixnum, stack_pop_pointer
 };
+use rlasp_runtime::string::RString;
 
 /// Box a fixnum (i64 → LispObject)
 #[no_mangle]
@@ -2910,6 +2911,37 @@ pub extern "C" fn cc_make_lambda_ref_id(id: i64) -> usize {
     LispObject::fixnum(func_id).raw()
 }
 
+/// Create a closure from lambda ID and captured variables
+/// Stack: [var_n] ... [var_1] [var_0] -> [closure]
+/// Pops num_captured variables from stack and creates a closure object
+#[no_mangle]
+pub extern "C" fn cc_make_closure(lambda_id: i64, num_captured: i64) -> usize {
+    use rlasp_runtime::Closure;
+
+    // Register the lambda name in the ID map
+    let name = format!("__lambda_{}", lambda_id);
+    let func_id = lambda_id + 1000000;
+    {
+        let mut id_map = get_id_map().lock().unwrap();
+        id_map.insert(func_id, name);
+    }
+
+    // Pop captured variables from stack
+    let mut captured_vars = Vec::new();
+    for _ in 0..num_captured {
+        let var = stack_pop_pointer();
+        captured_vars.push(unsafe { LispObject::from_raw(var) });
+    }
+    // Reverse to get correct order (stack is LIFO)
+    captured_vars.reverse();
+
+    // Create closure object
+    let closure_ptr = Closure::new(lambda_id, &captured_vars);
+
+    // Return as General pointer
+    LispObject::from_general_ptr(closure_ptr).raw()
+}
+
 /// Apply a function to a list of arguments
 /// (apply func args) - calls func with args as individual arguments
 #[no_mangle]
@@ -2943,8 +2975,45 @@ pub extern "C" fn cc_apply(args_and_env: usize) -> usize {
 /// Function pushes result to stack
 #[no_mangle]
 pub extern "C" fn cc_funcall_stack(func_ref: usize) {
-    // Try to extract function name from symbol
+    use rlasp_runtime::{Closure, TypeHeader, ObjectType};
+
     let obj = unsafe { LispObject::from_raw(func_ref) };
+
+    // Check if it's a closure
+    if let Some(closure_ptr) = obj.as_general_ptr::<Closure>() {
+        let closure = unsafe { &*closure_ptr };
+
+        // Verify it's actually a closure
+        if let Some(obj_type) = unsafe { TypeHeader::from_ptr(closure_ptr) } {
+            if obj_type == ObjectType::Closure {
+                // Push captured variables onto the stack (in reverse order)
+                let captured = closure.captured_vars();
+                for var in captured.iter().rev() {
+                    stack_push_pointer(var.raw());
+                }
+
+                // Look up the lambda function by ID
+                let lambda_id = closure.function_id();
+                let name = format!("__lambda_{}", lambda_id);
+
+                let func_address = {
+                    let registry = get_registry().lock().unwrap();
+                    registry.get(&name).map(|entry| entry.address)
+                };
+
+                if let Some(address) = func_address {
+                    unsafe {
+                        // Call lambda function
+                        let f: extern "C" fn() = std::mem::transmute(address);
+                        f();
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    // Try to extract function name from symbol or fixnum
     let name_opt = if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
         let symbol = unsafe { &*symbol_ptr };
         Some(symbol.name().to_string())
@@ -2957,9 +3026,9 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize) {
     };
 
     // Look up function address (release lock before calling)
-    let func_address = if let Some(name) = name_opt {
+    let func_address = if let Some(ref name) = name_opt {
         let registry = get_registry().lock().unwrap();
-        registry.get(&name).map(|entry| entry.address)
+        registry.get(name).map(|entry| entry.address)
     } else {
         None
     };
@@ -2969,6 +3038,72 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize) {
             // Call function with stack-based calling convention: () -> ()
             let f: extern "C" fn() = std::mem::transmute(address);
             f();
+        }
+    } else if let Some(name) = name_opt {
+        // Try built-in functions
+        match name.as_str() {
+            "+" => {
+                // Pop two arguments
+                let b = stack_pop_pointer();
+                let a = stack_pop_pointer();
+                let a_obj = unsafe { LispObject::from_raw(a) };
+                let b_obj = unsafe { LispObject::from_raw(b) };
+
+                // Add the numbers
+                if let (Some(a_num), Some(b_num)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+                    let result = LispObject::fixnum(a_num + b_num);
+                    stack_push_pointer(result.raw());
+                } else {
+                    stack_push_nil();
+                }
+            }
+            "-" => {
+                let b = stack_pop_pointer();
+                let a = stack_pop_pointer();
+                let a_obj = unsafe { LispObject::from_raw(a) };
+                let b_obj = unsafe { LispObject::from_raw(b) };
+
+                if let (Some(a_num), Some(b_num)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+                    let result = LispObject::fixnum(a_num - b_num);
+                    stack_push_pointer(result.raw());
+                } else {
+                    stack_push_nil();
+                }
+            }
+            "*" => {
+                let b = stack_pop_pointer();
+                let a = stack_pop_pointer();
+                let a_obj = unsafe { LispObject::from_raw(a) };
+                let b_obj = unsafe { LispObject::from_raw(b) };
+
+                if let (Some(a_num), Some(b_num)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+                    let result = LispObject::fixnum(a_num * b_num);
+                    stack_push_pointer(result.raw());
+                } else {
+                    stack_push_nil();
+                }
+            }
+            "/" => {
+                let b = stack_pop_pointer();
+                let a = stack_pop_pointer();
+                let a_obj = unsafe { LispObject::from_raw(a) };
+                let b_obj = unsafe { LispObject::from_raw(b) };
+
+                if let (Some(a_num), Some(b_num)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+                    if b_num != 0 {
+                        let result = LispObject::fixnum(a_num / b_num);
+                        stack_push_pointer(result.raw());
+                    } else {
+                        stack_push_nil();
+                    }
+                } else {
+                    stack_push_nil();
+                }
+            }
+            _ => {
+                // Function not found, push nil
+                stack_push_nil();
+            }
         }
     } else {
         // Function not found or invalid reference, push nil
@@ -3083,16 +3218,13 @@ pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
         let cons = unsafe { &*cons_ptr };
         let string_obj = cons.car();
 
-        // Extract the C string from the LispObject
-        // String objects are stored as general pointers
-        // We need to extract the actual string content
-        // For now, try to interpret it as a raw pointer to a C string
-        if let Some(str_ptr) = string_obj.as_general_ptr::<i8>() {
-            let c_str = unsafe { std::ffi::CStr::from_ptr(str_ptr) };
-            let rust_str = c_str.to_string_lossy();
+        // Extract the string from the RString object
+        if let Some(str_ptr) = string_obj.as_general_ptr::<RString>() {
+            let rstring = unsafe { &*str_ptr };
+            let rust_str = rstring.as_str();
 
             // Parse the string using the reader
-            match read_from_string(&rust_str) {
+            match read_from_string(rust_str) {
                 Ok(obj) => obj.raw(),
                 Err(_) => LispObject::nil().raw(),
             }

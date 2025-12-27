@@ -307,10 +307,13 @@ impl Reader {
                 self.read_vector()
             }
             '\'' => {
-                // Function #'foo
+                // Function #'foo -> (function foo)
                 self.advance();
                 let form = self.read()?;
-                Ok(ASTNode::variable("function".to_string()))
+                Ok(ASTNode::Call {
+                    function: Box::new(ASTNode::variable("function".to_string())),
+                    args: vec![form],
+                })
             }
             '+' => {
                 // Reader conditional #+feature form

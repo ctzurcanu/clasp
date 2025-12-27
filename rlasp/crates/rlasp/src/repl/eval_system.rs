@@ -322,16 +322,24 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
         EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
         EvalResult::Symbol(name) => Ok(ASTNode::variable(name.clone())),
         EvalResult::Cons(car, cdr) => {
-            // When converting an evaluated list back to AST, we need to quote it
-            // so it's not re-evaluated as a function call
-            // Build the list as nested Calls for the quote content
+            // Convert list to AST as a function call
+            // This is used for macro expansion where the result should be evaluated as code
             let car_ast = result_to_ast(&car.borrow())?;
-            let cdr_ast = result_to_cons_ast(&cdr.borrow())?;
 
-            Ok(ASTNode::Quote(Box::new(ASTNode::Call {
+            // Convert cdr to a list of arguments
+            let args = match &*cdr.borrow() {
+                EvalResult::Nil => vec![],
+                EvalResult::Cons(_, _) => {
+                    // Convert the rest of the list to a vector of AST nodes
+                    cons_to_list(&cdr.borrow())?
+                }
+                other => vec![result_to_ast(other)?],
+            };
+
+            Ok(ASTNode::Call {
                 function: Box::new(car_ast),
-                args: vec![cdr_ast],
-            })))
+                args,
+            })
         }
         EvalResult::Lambda { params, defaults, supplied_p_vars, body, .. } => {
             Ok(ASTNode::lambda_with_supplied_p(params.clone(), defaults.clone(), supplied_p_vars.clone(), body.clone()))

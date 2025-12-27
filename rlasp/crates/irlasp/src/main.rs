@@ -1020,6 +1020,9 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         if let Some(f) = module.get_function("cc_make_lambda_ref_id") {
             execution_engine.add_global_mapping(&f, cc_make_lambda_ref_id as usize);
         }
+        if let Some(f) = module.get_function("cc_make_closure") {
+            execution_engine.add_global_mapping(&f, cc_make_closure as usize);
+        }
         if let Some(f) = module.get_function("cc_funcall_stack") {
             execution_engine.add_global_mapping(&f, cc_funcall_stack as usize);
         }
@@ -1141,6 +1144,12 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         // Arrays
         if let Some(f) = module.get_function("cc_make_array") {
             execution_engine.add_global_mapping(&f, cc_make_array as usize);
+        }
+        if let Some(f) = module.get_function("cc_make_array_with_contents") {
+            execution_engine.add_global_mapping(&f, cc_make_array_with_contents as usize);
+        }
+        if let Some(f) = module.get_function("cc_aref") {
+            execution_engine.add_global_mapping(&f, cc_aref as usize);
         }
         if let Some(f) = module.get_function("cc_set_aref") {
             execution_engine.add_global_mapping(&f, cc_set_aref as usize);
