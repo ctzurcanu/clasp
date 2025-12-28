@@ -594,8 +594,8 @@ impl Lexer {
     }
 
     fn read_atom(&mut self, start_pos: usize) -> ReaderResult<Token> {
-        let text = self.read_atom_text();
-        Ok(Token::new(TokenKind::Symbol(text), start_pos))
+        // Use the same logic as read_number_or_symbol to handle .5 style floats
+        self.read_number_or_symbol(start_pos)
     }
 
     fn read_atom_text(&mut self) -> String {

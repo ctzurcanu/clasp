@@ -163,9 +163,10 @@ pub enum ASTNode {
         lambda_list: Vec<String>,
     },
 
-    /// Define a method: (defmethod name (specialized-lambda-list) body...)
+    /// Define a method: (defmethod name [:qualifier] (specialized-lambda-list) body...)
     Defmethod {
         generic_name: String,
+        qualifier: Option<String>,  // :before, :after, :around, or None for primary
         specializers: Vec<String>,  // Class names or T for unspecialized
         params: Vec<String>,  // Parameter names
         body: Vec<ASTNode>,

@@ -182,51 +182,157 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             env.insert(var.clone(), val.clone());
             Ok(val)
         }
-        ASTNode::Defgeneric { name, lambda_list } => {
-            // Define a generic function - for now, create a placeholder lambda
-            let lambda = EvalResult::Lambda {
-                params: lambda_list.clone(),
-                defaults: HashMap::new(),
-                supplied_p_vars: HashMap::new(),
-                body: vec![ASTNode::nil()],  // Returns nil by default
-                env: Rc::new(RefCell::new(env.clone())),
+        ASTNode::Defgeneric { name, lambda_list: _ } => {
+            // Create or get existing generic function
+            use super::eval_types::{GenericFunction as GF};
+            let gf = match env.get(name) {
+                Some(EvalResult::GenericFunction(existing)) => existing.clone(),
+                _ => Rc::new(RefCell::new(GF {
+                    name: name.clone(),
+                    methods: Vec::new(),
+                })),
             };
-            env.insert(name.clone(), lambda);
+            env.insert(name.clone(), EvalResult::GenericFunction(gf));
             Ok(EvalResult::Symbol(name.clone()))
         }
-        ASTNode::Defmethod { generic_name, specializers: _, params, body } => {
-            // Define a method - replace the generic function with the actual implementation
-            let lambda = EvalResult::Lambda {
+        ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
+            // Add method to generic function with specializers
+            use super::eval_types::{GenericFunction as GF, Method};
+
+            // Get or create generic function
+            let gf = match env.get(generic_name) {
+                Some(EvalResult::GenericFunction(existing)) => existing.clone(),
+                _ => {
+                    let new_gf = Rc::new(RefCell::new(GF {
+                        name: generic_name.clone(),
+                        methods: Vec::new(),
+                    }));
+                    env.insert(generic_name.clone(), EvalResult::GenericFunction(new_gf.clone()));
+                    new_gf
+                }
+            };
+
+            // Create method with specializers and qualifier
+            let method = Method {
+                qualifier: qualifier.clone(),
+                specializers: specializers.clone(),
                 params: params.clone(),
-                defaults: HashMap::new(),
-                supplied_p_vars: HashMap::new(),
                 body: body.clone(),
                 env: Rc::new(RefCell::new(env.clone())),
             };
-            env.insert(generic_name.clone(), lambda);
+
+            // Add method to generic function
+            gf.borrow_mut().methods.push(method);
+
             Ok(EvalResult::Symbol(generic_name.clone()))
         }
-        ASTNode::Defclass { name, superclasses: _, slots } => {
-            // Define accessors for each slot
+        ASTNode::Defclass { name, superclasses, slots } => {
+            // Register class hierarchy for method dispatch
+            use super::eval_types::register_class_hierarchy;
+            let super_names: Vec<String> = superclasses.iter()
+                .map(|s| s.to_uppercase())
+                .collect();
+            register_class_hierarchy(name, super_names);
+
+            // Store class definition for make-instance
+            // Create accessors for each slot based on :accessor, :reader, :writer options
             for slot in slots {
                 let slot_name = &slot.name;
-                // Create getter: (lambda (obj) (gethash 'slot-name obj))
-                let getter = EvalResult::Lambda {
-                    params: vec!["obj".to_string()],
-                    defaults: HashMap::new(),
-                    supplied_p_vars: HashMap::new(),
-                    body: vec![ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("gethash".to_string())),
-                        args: vec![
-                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                            ASTNode::Variable("obj".to_string()),
-                        ],
-                    }],
-                    env: Rc::new(RefCell::new(env.clone())),
-                };
-                // Register the accessor with the slot name
-                env.insert(slot_name.clone(), getter);
+
+                // Create reader (getter) if :accessor or :reader specified
+                if let Some(ref accessor_name) = slot.accessor {
+                    let getter = EvalResult::Lambda {
+                        params: vec!["obj".to_string()],
+                        defaults: HashMap::new(),
+                        supplied_p_vars: HashMap::new(),
+                        body: vec![ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
+                            args: vec![
+                                ASTNode::Variable("obj".to_string()),
+                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                            ],
+                        }],
+                        env: Rc::new(RefCell::new(env.clone())),
+                    };
+                    env.insert(accessor_name.clone(), getter);
+
+                    // Also create setf function for accessor
+                    let setter_name = format!("(setf {})", accessor_name);
+                    let setter = EvalResult::Lambda {
+                        params: vec!["new-value".to_string(), "obj".to_string()],
+                        defaults: HashMap::new(),
+                        supplied_p_vars: HashMap::new(),
+                        body: vec![ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("set-slot-value".to_string())),
+                            args: vec![
+                                ASTNode::Variable("obj".to_string()),
+                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                                ASTNode::Variable("new-value".to_string()),
+                            ],
+                        }],
+                        env: Rc::new(RefCell::new(env.clone())),
+                    };
+                    env.insert(setter_name, setter);
+                }
+
+                if let Some(ref reader_name) = slot.reader {
+                    let getter = EvalResult::Lambda {
+                        params: vec!["obj".to_string()],
+                        defaults: HashMap::new(),
+                        supplied_p_vars: HashMap::new(),
+                        body: vec![ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
+                            args: vec![
+                                ASTNode::Variable("obj".to_string()),
+                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                            ],
+                        }],
+                        env: Rc::new(RefCell::new(env.clone())),
+                    };
+                    env.insert(reader_name.clone(), getter);
+                }
+
+                if let Some(ref writer_name) = slot.writer {
+                    let setter = EvalResult::Lambda {
+                        params: vec!["new-value".to_string(), "obj".to_string()],
+                        defaults: HashMap::new(),
+                        supplied_p_vars: HashMap::new(),
+                        body: vec![ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("set-slot-value".to_string())),
+                            args: vec![
+                                ASTNode::Variable("obj".to_string()),
+                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                                ASTNode::Variable("new-value".to_string()),
+                            ],
+                        }],
+                        env: Rc::new(RefCell::new(env.clone())),
+                    };
+                    env.insert(writer_name.clone(), setter);
+                }
+
+                // If no accessor/reader specified, create one with slot name
+                if slot.accessor.is_none() && slot.reader.is_none() {
+                    let getter = EvalResult::Lambda {
+                        params: vec!["obj".to_string()],
+                        defaults: HashMap::new(),
+                        supplied_p_vars: HashMap::new(),
+                        body: vec![ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
+                            args: vec![
+                                ASTNode::Variable("obj".to_string()),
+                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                            ],
+                        }],
+                        env: Rc::new(RefCell::new(env.clone())),
+                    };
+                    env.insert(slot_name.clone(), getter);
+                }
             }
+
+            // Store class info for make-instance
+            let class_info = EvalResult::Symbol(format!("CLASS:{}", name));
+            env.insert(format!("*class-{}*", name.to_uppercase()), class_info);
+
             Ok(EvalResult::Symbol(name.clone()))
         }
         ASTNode::HashTable { entries } => {
@@ -671,6 +777,7 @@ fn eval_symbol_macrolet(
 }
 
 fn expand_backquote(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    #[cfg(debug_assertions)]
     if matches!(ast, ASTNode::Quote(_)) {
         eprintln!("DEBUG expand_backquote: processing Quote node");
     }
@@ -2306,7 +2413,14 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             }
             "slot-value" => {
                 // (slot-value object slot-name) - CLOS slot access
-                Ok(EvalResult::Nil)
+                // Delegate to proper CLOS implementation
+                let eval_args: Result<Vec<EvalResult>, String> = args.iter()
+                    .map(|a| eval_with_env(a, env))
+                    .collect();
+                match eval_args {
+                    Ok(evaluated) => super::eval_clos::call_clos_builtin("slot-value", &evaluated),
+                    Err(e) => Err(e),
+                }
             }
             "ensure-generic-function" => {
                 // (ensure-generic-function name &rest options)
@@ -2940,6 +3054,120 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                         } else {
                             Ok(EvalResult::Nil)
                         }
+                    }
+                    EvalResult::GenericFunction(gf) => {
+                        // CLOS generic function dispatch with standard method combination
+                        use super::eval_types::specializer_matches;
+
+                        // Evaluate arguments first
+                        let eval_args: Result<Vec<EvalResult>, String> = args.iter()
+                            .map(|a| eval_with_env(a, env))
+                            .collect();
+                        let eval_args = eval_args?;
+
+                        // Find all applicable methods by checking specializers
+                        let gf_ref = gf.borrow();
+                        let mut before_methods = Vec::new();
+                        let mut primary_methods = Vec::new();
+                        let mut after_methods = Vec::new();
+                        let mut around_methods = Vec::new();
+
+                        for method in &gf_ref.methods {
+                            // Check if all specializers match
+                            let matches = method.specializers.iter()
+                                .zip(eval_args.iter())
+                                .all(|(spec, arg)| specializer_matches(spec, arg));
+
+                            if matches {
+                                match method.qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
+                                    Some(":BEFORE") => before_methods.push(method),
+                                    Some(":AFTER") => after_methods.push(method),
+                                    Some(":AROUND") => around_methods.push(method),
+                                    _ => primary_methods.push(method),
+                                }
+                            }
+                        }
+
+                        // Standard method combination:
+                        // 1. :around wraps everything (TODO: implement call-next-method in evaluator)
+                        // 2. :before methods called first (most-specific-first)
+                        // 3. primary method (most specific)
+                        // 4. :after methods called last (least-specific-first)
+
+                        // Sort primary methods by specificity (most specific first)
+                        // More specific = specializer matches the actual class rather than a superclass
+                        primary_methods.sort_by(|a, b| {
+                            let a_specificity: usize = a.specializers.iter()
+                                .zip(eval_args.iter())
+                                .map(|(spec, arg)| {
+                                    let arg_class = super::eval_types::class_of(arg);
+                                    if spec.eq_ignore_ascii_case(&arg_class) {
+                                        2  // Exact match = most specific
+                                    } else if spec == "T" {
+                                        0  // T = least specific
+                                    } else {
+                                        1  // Superclass match
+                                    }
+                                })
+                                .sum();
+                            let b_specificity: usize = b.specializers.iter()
+                                .zip(eval_args.iter())
+                                .map(|(spec, arg)| {
+                                    let arg_class = super::eval_types::class_of(arg);
+                                    if spec.eq_ignore_ascii_case(&arg_class) {
+                                        2
+                                    } else if spec == "T" {
+                                        0
+                                    } else {
+                                        1
+                                    }
+                                })
+                                .sum();
+                            b_specificity.cmp(&a_specificity) // Most specific first
+                        });
+
+                        // Execute :before methods
+                        for method in &before_methods {
+                            let mut method_env = method.env.borrow().clone();
+                            for (param, arg) in method.params.iter().zip(eval_args.iter()) {
+                                method_env.insert(param.clone(), arg.clone());
+                            }
+                            for expr in &method.body {
+                                eval_with_env(expr, &mut method_env)?;
+                            }
+                        }
+
+                        // Execute primary method
+                        let result = if let Some(method) = primary_methods.first() {
+                            let mut method_env = method.env.borrow().clone();
+                            for (param, arg) in method.params.iter().zip(eval_args.iter()) {
+                                method_env.insert(param.clone(), arg.clone());
+                            }
+                            let mut result = EvalResult::Nil;
+                            for expr in &method.body {
+                                result = eval_with_env(expr, &mut method_env)?;
+                            }
+                            result
+                        } else if before_methods.is_empty() && after_methods.is_empty() {
+                            // No matching method found at all
+                            return Err(format!("No applicable method for generic function {} with args {:?}",
+                                gf_ref.name, eval_args.iter().map(|a| super::eval_types::class_of(a)).collect::<Vec<_>>()));
+                        } else {
+                            EvalResult::Nil
+                        };
+
+                        // Execute :after methods (reverse order - least-specific-first)
+                        for method in after_methods.iter().rev() {
+                            let mut method_env = method.env.borrow().clone();
+                            for (param, arg) in method.params.iter().zip(eval_args.iter()) {
+                                method_env.insert(param.clone(), arg.clone());
+                            }
+                            for expr in &method.body {
+                                eval_with_env(expr, &mut method_env)?;
+                            }
+                        }
+
+                        Ok(result)
                     }
                     _ => Err(format!("Unknown function: {}", name)),
                 }

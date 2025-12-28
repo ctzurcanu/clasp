@@ -2,6 +2,11 @@
 name = "rlasp-runtime"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+boehm-gc = []
 
 [dependencies]
 parking_lot = { workspace = true }
@@ -12,7 +17,10 @@ malachite-base = { workspace = true }
 malachite-q = { workspace = true }
 num-complex = { workspace = true }
 thiserror = { workspace = true }
-# bdwgc-alloc = { workspace = true }  # Uncomment for Boehm GC
+libc = { workspace = true }
+
+[build-dependencies]
+pkg-config = "0.3"
 
 [lib]
 name = "rlasp_runtime"

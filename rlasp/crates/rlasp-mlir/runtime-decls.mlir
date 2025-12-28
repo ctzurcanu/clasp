@@ -147,6 +147,8 @@ func.func private @cc_assoc(i64, i64) -> i64
 
 // Symbols
 func.func private @cc_make_symbol(!llvm.ptr, i64) -> i64
+func.func private @cc_symbol_value(i64) -> i64
+func.func private @cc_set_symbol_value(i64, i64) -> i64
 
 // Reduction
 func.func private @cc_reduce(i64, i64) -> i64
@@ -169,7 +171,7 @@ func.func private @cc_read_from_string(i64) -> i64
 func.func private @cc_eval(i64) -> i64
 func.func private @cc_compile(i64) -> i64
 
-// CLOS
+// CLOS - Object System
 func.func private @cc_defclass(i64, i64, i64) -> i64
 func.func private @cc_defgeneric(i64, i64) -> i64
 func.func private @cc_defmethod(i64, i64, i64, i64) -> i64
@@ -178,6 +180,21 @@ func.func private @cc_slot_value(i64, i64) -> i64
 func.func private @cc_set_slot_value(i64, i64, i64) -> i64
 func.func private @cc_call_generic(i64, i64) -> i64
 func.func private @cc_get_class_def(i64) -> i64
+func.func private @cc_defmethod_qualified(i64, i64, i64, i64, i64) -> i64
+func.func private @cc_call_next_method() -> i64
+func.func private @cc_call_next_method_with_args(i64) -> i64
+func.func private @cc_next_method_p() -> i64
+
+// CLOS - MOP Introspection
+func.func private @cc_find_class(i64) -> i64
+func.func private @cc_class_of(i64) -> i64
+func.func private @cc_class_name(i64) -> i64
+func.func private @cc_class_slots(i64) -> i64
+func.func private @cc_class_direct_slots(i64) -> i64
+func.func private @cc_class_direct_superclasses(i64) -> i64
+func.func private @cc_class_precedence_list(i64) -> i64
+func.func private @cc_typep(i64, i64) -> i64
+func.func private @cc_subtypep(i64, i64) -> i64
 
 // Mutation
 func.func private @cc_set_car(i64, i64) -> i64

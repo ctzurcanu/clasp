@@ -1,8 +1,12 @@
-//! Global evaluation stack for function calls
+//! Thread-local evaluation stack for function calls
 //! Two-stack architecture: type stack (4 bytes per entry) + value stack (variable bytes)
+//!
+//! Common Lisp Compatibility:
+//! - Each thread has its own evaluation stack (per CL spec)
+//! - No mutex contention for single-threaded evaluation
+//! - Supports CL's dynamic extent and thread-local bindings
 
-use std::sync::Mutex;
-use lazy_static::lazy_static;
+use std::cell::RefCell;
 
 /// Type entry in the type stack (4 bytes)
 #[repr(C, packed)]
@@ -196,45 +200,67 @@ impl EvalStack {
     }
 }
 
-lazy_static! {
-    /// Global evaluation stack
-    pub static ref EVAL_STACK: Mutex<EvalStack> = Mutex::new(EvalStack::new());
+// Thread-local evaluation stack - CL compatible (each thread has its own stack)
+thread_local! {
+    /// Thread-local evaluation stack
+    ///
+    /// Per Common Lisp spec, each thread has its own dynamic environment.
+    /// This eliminates mutex contention and provides proper isolation.
+    static EVAL_STACK: RefCell<EvalStack> = RefCell::new(EvalStack::new());
 }
 
-/// External C ABI functions for MLIR/JIT
+/// Access the current thread's evaluation stack
+///
+/// This is the primary way to interact with the stack from Rust code.
+/// For FFI, use the stack_* functions below.
+pub fn with_stack<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut EvalStack) -> R,
+{
+    EVAL_STACK.with(|stack| f(&mut stack.borrow_mut()))
+}
+
+/// Get current stack depth without borrowing
+pub fn current_depth() -> usize {
+    EVAL_STACK.with(|stack| stack.borrow().depth())
+}
+
+// === External C ABI functions for MLIR/JIT ===
+// These access the current thread's stack
+
 #[no_mangle]
 pub extern "C" fn stack_push_fixnum(value: i64) {
-    EVAL_STACK.lock().unwrap().push_fixnum(value);
+    EVAL_STACK.with(|stack| stack.borrow_mut().push_fixnum(value));
 }
 
 #[no_mangle]
 pub extern "C" fn stack_push_pointer(ptr: usize) {
-    EVAL_STACK.lock().unwrap().push_pointer(ptr);
+    EVAL_STACK.with(|stack| stack.borrow_mut().push_pointer(ptr));
 }
 
 #[no_mangle]
 pub extern "C" fn stack_push_nil() {
-    EVAL_STACK.lock().unwrap().push_nil();
+    EVAL_STACK.with(|stack| stack.borrow_mut().push_nil());
 }
 
 #[no_mangle]
 pub extern "C" fn stack_pop_fixnum() -> i64 {
-    EVAL_STACK.lock().unwrap().pop_fixnum().unwrap_or(0)
+    EVAL_STACK.with(|stack| stack.borrow_mut().pop_fixnum().unwrap_or(0))
 }
 
 #[no_mangle]
 pub extern "C" fn stack_pop_pointer() -> usize {
-    EVAL_STACK.lock().unwrap().pop_pointer().unwrap_or(0)
+    EVAL_STACK.with(|stack| stack.borrow_mut().pop_pointer().unwrap_or(0))
 }
 
 #[no_mangle]
 pub extern "C" fn stack_depth() -> i64 {
-    EVAL_STACK.lock().unwrap().depth() as i64
+    EVAL_STACK.with(|stack| stack.borrow().depth() as i64)
 }
 
 #[no_mangle]
 pub extern "C" fn stack_clear() {
-    EVAL_STACK.lock().unwrap().clear();
+    EVAL_STACK.with(|stack| stack.borrow_mut().clear());
 }
 
 #[cfg(test)]

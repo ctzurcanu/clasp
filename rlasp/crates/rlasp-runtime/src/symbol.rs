@@ -35,11 +35,19 @@ pub struct Symbol {
 
     /// Property list
     plist: RwLock<HashMap<String, LispObject>>,
+
+    /// Whether this symbol is interned in a package
+    is_interned: bool,
 }
 
 impl Symbol {
-    /// Create a new symbol
+    /// Create a new symbol (interned by default)
     pub fn new(name: impl Into<Arc<str>>) -> Self {
+        Self::with_interned(name, true)
+    }
+
+    /// Create a new symbol with explicit interned flag
+    fn with_interned(name: impl Into<Arc<str>>, is_interned: bool) -> Self {
         Self {
             header: crate::header::TypeHeader::new(crate::header::ObjectType::Symbol),
             name: name.into(),
@@ -48,7 +56,14 @@ impl Symbol {
             value: AtomicUsize::new(LispObject::nil_placeholder().raw()),
             function: AtomicUsize::new(LispObject::nil_placeholder().raw()),
             plist: RwLock::new(HashMap::new()),
+            is_interned,
         }
+    }
+
+    /// Check if this symbol is interned
+    #[inline]
+    pub fn is_interned(&self) -> bool {
+        self.is_interned
     }
 
     /// Get symbol name
@@ -99,6 +114,13 @@ impl Symbol {
         let ptr = Box::into_raw(symbol);
         LispObject::from_general_ptr(ptr)
     }
+
+    /// Allocate an uninterned symbol (not in any package's symbol table)
+    pub fn allocate_uninterned(name: impl Into<Arc<str>>) -> LispObject {
+        let symbol = Box::new(Symbol::with_interned(name, false));
+        let ptr = Box::into_raw(symbol);
+        LispObject::from_general_ptr(ptr)
+    }
 }
 
 impl std::fmt::Debug for Symbol {
@@ -109,7 +131,11 @@ impl std::fmt::Debug for Symbol {
 
 impl std::fmt::Display for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.name)
+        if self.is_interned {
+            write!(f, "{}", self.name)
+        } else {
+            write!(f, "#:{}", self.name)
+        }
     }
 }
 

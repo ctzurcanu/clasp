@@ -11,6 +11,68 @@ use malachite::Rational;
 thread_local! {
     pub(super) static RETURN_VALUE: RefCell<Option<EvalResult>> = RefCell::new(None);
     pub(super) static GENSYM_COUNTER: RefCell<u64> = RefCell::new(0);
+    /// Class registry: maps class name -> list of superclass names
+    pub static CLASS_HIERARCHY: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Register a class with its superclasses
+pub fn register_class_hierarchy(class_name: &str, superclasses: Vec<String>) {
+    CLASS_HIERARCHY.with(|h| {
+        h.borrow_mut().insert(class_name.to_uppercase(), superclasses);
+    });
+}
+
+/// Check if a class is a subclass of another (including itself)
+pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
+    let class_upper = class_name.to_uppercase();
+    let super_upper = superclass_name.to_uppercase();
+
+    // T matches everything
+    if super_upper == "T" {
+        return true;
+    }
+
+    // Same class
+    if class_upper == super_upper {
+        return true;
+    }
+
+    // Check hierarchy
+    CLASS_HIERARCHY.with(|h| {
+        let h = h.borrow();
+        if let Some(supers) = h.get(&class_upper) {
+            for s in supers {
+                if is_subclass(s, &super_upper) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// CLOS Instance: object with class metadata
+#[derive(Clone)]
+pub struct Instance {
+    pub class_name: String,
+    pub slots: Rc<RefCell<HashMap<String, EvalResult>>>,
+}
+
+/// CLOS Method: function with specializers for dispatch
+#[derive(Clone)]
+pub struct Method {
+    pub qualifier: Option<String>,  // :before, :after, :around, or None for primary
+    pub specializers: Vec<String>,  // Class names for each parameter
+    pub params: Vec<String>,
+    pub body: Vec<ASTNode>,
+    pub env: Rc<RefCell<HashMap<String, EvalResult>>>,
+}
+
+/// CLOS Generic Function: collection of methods with dispatch
+#[derive(Clone)]
+pub struct GenericFunction {
+    pub name: String,
+    pub methods: Vec<Method>,
 }
 
 #[derive(Clone)]
@@ -45,6 +107,8 @@ pub enum EvalResult {
     MultipleValues(Vec<EvalResult>),  // Multiple return values
     ForeignLibrary(Rc<rlasp_ffi::Library>),  // FFI library (wrapped in Rc since Library may not be Clone)
     ForeignFunction(Rc<rlasp_ffi::ForeignFunction>),  // FFI function (wrapped in Rc)
+    Instance(Instance),  // CLOS instance with class metadata
+    GenericFunction(Rc<RefCell<GenericFunction>>),  // CLOS generic function with methods
 }
 
 // Special error type for non-local exits (return, return-from)
@@ -88,6 +152,8 @@ impl std::fmt::Display for EvalResult {
             }
             EvalResult::ForeignLibrary(_) => write!(f, "#<FOREIGN-LIBRARY>"),
             EvalResult::ForeignFunction(_) => write!(f, "#<FOREIGN-FUNCTION>"),
+            EvalResult::Instance(inst) => write!(f, "#<{} instance>", inst.class_name),
+            EvalResult::GenericFunction(gf) => write!(f, "#<GENERIC-FUNCTION {}>", gf.borrow().name),
         }
     }
 }
@@ -146,4 +212,39 @@ pub(super) fn primary_value(val: EvalResult) -> EvalResult {
         }
         other => other,
     }
+}
+
+/// Get the class name of a value for CLOS method dispatch
+pub fn class_of(val: &EvalResult) -> String {
+    match val {
+        EvalResult::Instance(inst) => inst.class_name.clone(),
+        EvalResult::Fixnum(_) => "FIXNUM".to_string(),
+        EvalResult::Bignum(_) => "BIGNUM".to_string(),
+        EvalResult::Ratio(_) => "RATIO".to_string(),
+        EvalResult::Float(_) => "FLOAT".to_string(),
+        EvalResult::Complex(_, _) => "COMPLEX".to_string(),
+        EvalResult::Nil => "NULL".to_string(),
+        EvalResult::Bool(_) | EvalResult::Boolean(_) => "BOOLEAN".to_string(),
+        EvalResult::String(_) => "STRING".to_string(),
+        EvalResult::Symbol(_) => "SYMBOL".to_string(),
+        EvalResult::Character(_) => "CHARACTER".to_string(),
+        EvalResult::Cons(_, _) => "CONS".to_string(),
+        EvalResult::Lambda { .. } => "FUNCTION".to_string(),
+        EvalResult::Macro { .. } => "MACRO".to_string(),
+        EvalResult::HashTable(_) => "HASH-TABLE".to_string(),
+        EvalResult::Array(_) => "ARRAY".to_string(),
+        EvalResult::GenericFunction(_) => "GENERIC-FUNCTION".to_string(),
+        _ => "T".to_string(),
+    }
+}
+
+/// Check if a value matches a specializer for method dispatch
+/// T matches everything, otherwise check class hierarchy
+pub fn specializer_matches(specializer: &str, val: &EvalResult) -> bool {
+    if specializer == "T" || specializer.is_empty() {
+        return true;
+    }
+    let val_class = class_of(val);
+    // Check if val's class is a subclass of specializer
+    is_subclass(&val_class, specializer)
 }

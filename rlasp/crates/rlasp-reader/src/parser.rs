@@ -5,12 +5,92 @@
 use crate::error::{ReaderError, ReaderResult};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
-use rlasp_runtime::LispObject;
+use rlasp_runtime::{LispObject, RString, RVector, Symbol};
+use std::collections::HashMap;
+
+/// Default features available in rlasp
+const DEFAULT_FEATURES: &[&str] = &[
+    "RLASP",
+    "COMMON-LISP",
+    "ANSI-CL",
+    "IEEE-FLOATING-POINT",
+    "UNIX",
+];
+
+/// Check if a feature is present
+fn feature_present(feature: &str) -> bool {
+    let feature_upper = feature.to_uppercase();
+    DEFAULT_FEATURES.iter().any(|f| f.eq_ignore_ascii_case(&feature_upper))
+}
+
+/// Evaluate a feature expression
+/// Supports: symbol, (and ...), (or ...), (not ...)
+fn evaluate_feature_expr(expr: LispObject) -> bool {
+    // Symbol - check if feature is present
+    if let Some(sym_ptr) = expr.as_general_ptr::<Symbol>() {
+        let sym = unsafe { &*sym_ptr };
+        return feature_present(sym.name());
+    }
+
+    // List - check for (and ...), (or ...), (not ...)
+    if let Some(cons_ptr) = expr.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        let car = cons.car();
+
+        // Get operator name
+        if let Some(op_ptr) = car.as_general_ptr::<Symbol>() {
+            let op = unsafe { &*op_ptr };
+            let op_name = op.name().to_uppercase();
+
+            match op_name.as_str() {
+                "AND" => {
+                    // All sub-expressions must be true
+                    let mut current = cons.cdr();
+                    while let Some(c) = current.as_cons_ptr() {
+                        let c = unsafe { &*c };
+                        if !evaluate_feature_expr(c.car()) {
+                            return false;
+                        }
+                        current = c.cdr();
+                    }
+                    return true;
+                }
+                "OR" => {
+                    // Any sub-expression must be true
+                    let mut current = cons.cdr();
+                    while let Some(c) = current.as_cons_ptr() {
+                        let c = unsafe { &*c };
+                        if evaluate_feature_expr(c.car()) {
+                            return true;
+                        }
+                        current = c.cdr();
+                    }
+                    return false;
+                }
+                "NOT" => {
+                    // Negate the sub-expression
+                    let cdr = cons.cdr();
+                    if let Some(c) = cdr.as_cons_ptr() {
+                        let c = unsafe { &*c };
+                        return !evaluate_feature_expr(c.car());
+                    }
+                    return true; // (not) with no arg is true
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Unknown expression type - treat as false
+    false
+}
 
 /// Parser for s-expressions
 pub struct Parser {
     lexer: Lexer,
     current_token: Token,
+    /// Label map for circular references (#n= / #n#)
+    label_map: HashMap<u8, LispObject>,
 }
 
 impl Parser {
@@ -21,6 +101,7 @@ impl Parser {
         Ok(Parser {
             lexer,
             current_token,
+            label_map: HashMap::new(),
         })
     }
 
@@ -88,8 +169,8 @@ impl Parser {
             TokenKind::String(s) => {
                 let val = s.clone();
                 self.advance()?;
-                // Create string as symbol with special marker
-                // TODO: Implement proper String type in runtime
+                // For now, represent strings as symbols with quote markers
+                // TODO: Use RString::allocate(val) once evaluator handles RString
                 let marker = format!("\"{}\"", val);
                 Ok(rlasp_runtime::Symbol::allocate(marker.as_str()))
             }
@@ -197,24 +278,33 @@ impl Parser {
             TokenKind::HashPlus => {
                 // Feature conditional: #+(feature) form
                 // Include form only if feature is present
-                // Since we don't have a feature system, assume features are absent
-                // So skip the form and return nil
                 self.advance()?; // skip #+
-                let _ = self.read_expr()?; // skip feature expression
-                let _ = self.read_expr()?; // skip the conditional form
-                // Return nil since we're skipping this form
-                Ok(LispObject::nil())
+                let feature_expr = self.read_expr()?; // read feature expression
+                let form = self.read_expr()?; // read the conditional form
+
+                if evaluate_feature_expr(feature_expr) {
+                    Ok(form) // Feature present - include the form
+                } else {
+                    // Feature absent - skip this form, read next expression
+                    // Return a special "skip" value or continue reading
+                    // For now, return nil and let caller handle
+                    Ok(LispObject::nil())
+                }
             }
 
             TokenKind::HashMinus => {
                 // Negative feature conditional: #-(feature) form
                 // Include form only if feature is absent
-                // Since we don't have a feature system, assume features are absent
-                // So include the form
                 self.advance()?; // skip #-
-                let _ = self.read_expr()?; // skip feature expression
-                // Read and return the conditional form
-                self.read_expr()
+                let feature_expr = self.read_expr()?; // read feature expression
+                let form = self.read_expr()?; // read the conditional form
+
+                if !evaluate_feature_expr(feature_expr) {
+                    Ok(form) // Feature absent - include the form
+                } else {
+                    // Feature present - skip this form
+                    Ok(LispObject::nil())
+                }
             }
 
             TokenKind::HashDot => {
@@ -235,9 +325,7 @@ impl Parser {
                 if let TokenKind::Symbol(name) = &self.current_token.kind {
                     let name = name.clone();
                     self.advance()?;
-                    // For now, treat uninterned symbols like normal symbols
-                    // In a full implementation, these would be gensyms or truly uninterned
-                    Ok(rlasp_runtime::Symbol::allocate(name.as_str()))
+                    Ok(Symbol::allocate_uninterned(name.as_str()))
                 } else {
                     Err(ReaderError::InvalidSyntax {
                         msg: "#: must be followed by a symbol name".to_string(),
@@ -293,15 +381,10 @@ impl Parser {
                             }),
                         }
                     }
-                    // Return as (vector 0 1 0 1 ...)
-                    let vector_sym = rlasp_runtime::Symbol::allocate("vector");
-                    let mut all_elements = vec![vector_sym];
-                    all_elements.extend(elements);
-                    return Ok(rlasp_runtime::Cons::list(&all_elements));
+                    return Ok(RVector::allocate(elements));
                 }
                 // Empty bit vector #*
-                let vector_sym = rlasp_runtime::Symbol::allocate("vector");
-                Ok(rlasp_runtime::Cons::list(&[vector_sym]))
+                Ok(RVector::allocate(Vec::new()))
             }
 
             TokenKind::HashDigit(_dim) => {
@@ -320,32 +403,29 @@ impl Parser {
 
             TokenKind::HashEquals(label) => {
                 // Circular reference label definition: #n=expr
-                // For now, just read the expression and ignore the label
-                // A full implementation would store the expression with the label
+                // Store the expression with the label for later reference
                 let label_num = *label;
                 self.advance()?; // skip #n=
                 let expr = self.read_expr()?;
-                // Return as: (label-def n expr)
-                let label_def_sym = rlasp_runtime::Symbol::allocate("label-def");
-                Ok(rlasp_runtime::Cons::list(&[
-                    label_def_sym,
-                    LispObject::fixnum(label_num as i64),
-                    expr,
-                ]))
+                // Store in label map for later #n# references
+                self.label_map.insert(label_num, expr);
+                Ok(expr)
             }
 
             TokenKind::HashRef(label) => {
                 // Circular reference: #n#
                 // References a previously defined label
-                // For now, return a symbolic reference
                 let label_num = *label;
                 self.advance()?; // skip #n#
-                // Return as: (label-ref n)
-                let label_ref_sym = rlasp_runtime::Symbol::allocate("label-ref");
-                Ok(rlasp_runtime::Cons::list(&[
-                    label_ref_sym,
-                    LispObject::fixnum(label_num as i64),
-                ]))
+                // Look up in label map
+                if let Some(&expr) = self.label_map.get(&label_num) {
+                    Ok(expr)
+                } else {
+                    Err(ReaderError::InvalidSyntax {
+                        msg: format!("Undefined label reference #{}#", label_num),
+                        pos: self.current_token.pos,
+                    })
+                }
             }
 
             TokenKind::SingleColon => {
@@ -585,12 +665,7 @@ impl Parser {
 
         self.advance()?; // skip )
 
-        // For now, represent vectors as lists with a 'vector tag
-        // TODO: Implement proper vector type
-        let vector_sym = rlasp_runtime::Symbol::allocate("vector");
-        let mut all_elements = vec![vector_sym];
-        all_elements.extend(elements);
-        Ok(rlasp_runtime::Cons::list(&all_elements))
+        Ok(RVector::allocate(elements))
     }
 
     fn advance(&mut self) -> ReaderResult<()> {

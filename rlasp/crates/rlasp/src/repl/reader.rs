@@ -75,6 +75,10 @@ impl Reader {
                 // Negative number
                 self.read_number()
             }
+            _ if ch == '.' && self.pos + 1 < self.input.len() && self.input[self.pos + 1].is_ascii_digit() => {
+                // Float starting with decimal point (e.g., .5)
+                self.read_number()
+            }
             _ if ch.is_alphabetic() || "+-*/<>=!?&%".contains(ch) => self.read_symbol(),
             _ => Err(ReadError::UnexpectedChar(ch)),
         }
@@ -196,6 +200,11 @@ impl Reader {
         if self.peek() == '-' {
             num_str.push('-');
             self.advance();
+        }
+
+        // Handle floats starting with . (e.g., .5)
+        if self.peek() == '.' {
+            num_str.push('0'); // Prepend 0 for parsing
         }
 
         while !self.is_eof() && (self.peek().is_ascii_digit() || self.peek() == '.') {

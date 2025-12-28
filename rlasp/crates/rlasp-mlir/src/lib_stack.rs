@@ -6,6 +6,14 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use rlasp::ir::{ASTNode, ConstantValue};
 
+/// Debug print macro - only prints in debug builds
+macro_rules! debug_println {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        eprintln!($($arg)*);
+    };
+}
+
 /// MLIR code generator with stack-based calling convention
 pub struct StackMLIRCodegen {
     module_name: String,
@@ -17,13 +25,14 @@ pub struct StackMLIRCodegen {
     symbol_table: HashMap<String, String>,  // Maps var names to SSA values
     local_function_map: HashMap<String, String>,  // Maps local function names to unique mangled names
     special_param_functions: HashSet<String>,  // Functions that use &optional, &key, or supplied-p
+    generic_functions: HashSet<String>,  // Generic function names for runtime dispatch
     function_counter: usize,
     loop_carried_vars: Option<Vec<String>>,  // Variables that must be threaded through loops (None when not in loop)
 }
 
 impl StackMLIRCodegen {
     pub fn new(module_name: &str) -> Self {
-        eprintln!("[DEBUG] Using StackMLIRCodegen for module: {}", module_name);
+        debug_println!("[DEBUG] Using StackMLIRCodegen for module: {}", module_name);
         let mut codegen = Self {
             module_name: module_name.to_string(),
             output: String::new(),
@@ -34,6 +43,7 @@ impl StackMLIRCodegen {
             symbol_table: HashMap::new(),
             local_function_map: HashMap::new(),
             special_param_functions: HashSet::new(),
+            generic_functions: HashSet::new(),
             function_counter: 0,
             loop_carried_vars: None,
         };
@@ -41,6 +51,12 @@ impl StackMLIRCodegen {
         codegen.writeln("module {");
         codegen.indent();
         codegen
+    }
+
+    /// Register a generic function name for runtime dispatch
+    /// This should be called before compiling functions that call the generic
+    pub fn register_generic_function(&mut self, name: &str) {
+        self.generic_functions.insert(name.to_string());
     }
 
     fn writeln(&mut self, s: &str) {
@@ -64,6 +80,12 @@ impl StackMLIRCodegen {
         let id = self.next_ssa_id;
         self.next_ssa_id += 1;
         format!("%{}", id)
+    }
+
+    fn fresh_id(&mut self) -> usize {
+        let id = self.function_counter;
+        self.function_counter += 1;
+        id
     }
 
     /// Create a string constant and return its name (@strN)
@@ -295,16 +317,16 @@ impl StackMLIRCodegen {
 
             // Variables - look up value and push to stack
             ASTNode::Variable(name) => {
-                eprintln!("DEBUG: Compiling variable: '{}'", name);
+                debug_println!("DEBUG: Compiling variable: '{}'", name);
                 // Special handling for T and NIL constants
                 if name == "t" {
-                    eprintln!("DEBUG: Recognized as T constant");
+                    debug_println!("DEBUG: Recognized as T constant");
                     let t_val = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", t_val));
                     return Ok(());
                 } else if name == "nil" {
-                    eprintln!("DEBUG: Recognized as NIL constant");
+                    debug_println!("DEBUG: Recognized as NIL constant");
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                     return Ok(());
                 } else if name == "internal-time-units-per-second" {
@@ -320,7 +342,7 @@ impl StackMLIRCodegen {
                 // Handle keywords - they evaluate to themselves
                 // Keywords are symbols in the KEYWORD package
                 if name.starts_with(':') {
-                    eprintln!("DEBUG: Recognized as keyword: {}", name);
+                    debug_println!("DEBUG: Recognized as keyword: {}", name);
                     // Create a symbol for the keyword (without the ':' prefix)
                     let keyword_name = &name[1..];
                     let keyword_sym = self.create_symbol_constant(keyword_name);
@@ -334,7 +356,7 @@ impl StackMLIRCodegen {
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", ssa_val));
                 } else {
                     // Unbound variable - push nil
-                    eprintln!("DEBUG: Unbound variable, pushing nil");
+                    debug_println!("DEBUG: Unbound variable, pushing nil");
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 }
                 Ok(())
@@ -608,6 +630,23 @@ impl StackMLIRCodegen {
                 // Now bind all variables to their values
                 for ((var, _), val_ssa) in bindings.iter().zip(binding_ssas.iter()) {
                     self.symbol_table.insert(var.clone(), val_ssa.clone());
+
+                    // If this is a special variable (surrounded by *), also set dynamic binding
+                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                        // Create symbol for the variable name
+                        let sym_const = self.create_string_constant(var);
+                        let sym_ptr = self.fresh_ssa();
+                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", sym_ptr, sym_const));
+                        let len_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, var.len()));
+                        let sym_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64",
+                            sym_ssa, sym_ptr, len_ssa));
+                        // Set the dynamic binding
+                        let _result = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _result, sym_ssa, val_ssa));
+                    }
                 }
 
                 // Evaluate body
@@ -655,7 +694,24 @@ impl StackMLIRCodegen {
                     self.compile_expr(value)?;
                     let val_ssa = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
-                    self.symbol_table.insert(var.clone(), val_ssa);
+                    self.symbol_table.insert(var.clone(), val_ssa.clone());
+
+                    // If this is a special variable (surrounded by *), also set dynamic binding
+                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                        // Create symbol for the variable name
+                        let sym_const = self.create_string_constant(var);
+                        let sym_ptr = self.fresh_ssa();
+                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", sym_ptr, sym_const));
+                        let len_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, var.len()));
+                        let sym_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64",
+                            sym_ssa, sym_ptr, len_ssa));
+                        // Set the dynamic binding
+                        let _result = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _result, sym_ssa, val_ssa));
+                    }
                 }
 
                 // Evaluate body
@@ -1089,7 +1145,7 @@ impl StackMLIRCodegen {
 
             // Loop - complex iteration with accumulation
             ASTNode::Loop { var, start, limit, when_condition, collect, sum, else_collect, else_sum } => {
-                eprintln!("DEBUG: Compiling ASTNode::Loop");
+                debug_println!("DEBUG: Compiling ASTNode::Loop");
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
 
@@ -1464,17 +1520,21 @@ impl StackMLIRCodegen {
 
             // CLOS - Defgeneric
             ASTNode::Defgeneric { name, lambda_list } => {
+                // Register this as a generic function for runtime dispatch
+                self.generic_functions.insert(name.to_string());
+
                 // Define a new generic function
                 let param_count = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant {} : i64", param_count, lambda_list.len()));
                 let param_count_boxed = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", param_count_boxed, param_count));
 
-                // Call runtime to create generic function (pass nil for name)
-                let name_nil = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant 0 : i64", name_nil));
+                // Create the generic function name as a symbol
+                let name_sym = self.create_symbol_constant(name);
+
+                // Call runtime to create generic function with its name
                 let generic_obj = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_defgeneric({}, {}) : (i64, i64) -> i64", generic_obj, name_nil, param_count_boxed));
+                self.writeln(&format!("{} = func.call @cc_defgeneric({}, {}) : (i64, i64) -> i64", generic_obj, name_sym, param_count_boxed));
 
                 // Push generic function object to stack
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", generic_obj));
@@ -1482,10 +1542,18 @@ impl StackMLIRCodegen {
             }
 
             // CLOS - Defmethod
-            ASTNode::Defmethod { generic_name, specializers, params, body } => {
-                // Simplified implementation: compile the method as a regular function
-                // with the generic function's name. This won't support multiple methods
-                // with different specializers, but works for single-method generics.
+            ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
+                // Compile the method as a function and register with the generic function
+
+                // Generate unique method function name
+                let qualifier_suffix = match qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
+                    Some(":BEFORE") => "_before",
+                    Some(":AFTER") => "_after",
+                    Some(":AROUND") => "_around",
+                    _ => "_primary",
+                };
+                let method_id = self.fresh_id();
+                let method_name = format!("{}_{}{}", generic_name, method_id, qualifier_suffix);
 
                 // Save current state
                 let saved_symbols = self.symbol_table.clone();
@@ -1494,7 +1562,7 @@ impl StackMLIRCodegen {
 
                 // Generate method as a function
                 self.indent_level = 1;
-                self.writeln(&format!("func.func @\"{}\"() {{", generic_name));
+                self.writeln(&format!("func.func @\"{}\"() {{", method_name));
                 self.indent();
 
                 self.symbol_table.clear();
@@ -1532,8 +1600,64 @@ impl StackMLIRCodegen {
                 self.indent_level = saved_indent;
                 self.symbol_table = saved_symbols;
 
-                // Push method object to stack
-                self.writeln("func.call @stack_push_nil() : () -> ()");
+                // Get a lambda reference for the method by name
+                // Create a string constant with the method function name
+                let str_name = format!("@method_name_{}", method_id);
+                self.pending_string_constants.push((str_name.clone(), method_name.clone()));
+                let name_ptr = self.fresh_ssa();
+                self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", name_ptr, str_name));
+                let func_ptr_int = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", func_ptr_int, name_ptr));
+
+                // Create generic name as symbol
+                let name_sym = self.create_symbol_constant(generic_name);
+
+                // Create specializers list
+                let specs_nil: String;
+                if specializers.is_empty() {
+                    let nil_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_val));
+                    specs_nil = nil_val;
+                } else {
+                    // Create list of specializer symbols
+                    let mut current = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", current));
+                    for spec in specializers.iter().rev() {
+                        let spec_sym = self.create_symbol_constant(spec);
+                        let new_cons = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_cons, spec_sym, current));
+                        current = new_cons;
+                    }
+                    specs_nil = current;
+                }
+
+                // Arity (number of parameters)
+                let arity = params.len();
+                let arity_const = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", arity_const, arity));
+                let arity_boxed = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", arity_boxed, arity_const));
+
+                // Qualifier code: 0=primary, 1=before, 2=after, 3=around
+                let qualifier_code = match qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
+                    Some(":BEFORE") => 1,
+                    Some(":AFTER") => 2,
+                    Some(":AROUND") => 3,
+                    _ => 0,
+                };
+                let qualifier_const = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", qualifier_const, qualifier_code));
+                let qualifier_boxed = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", qualifier_boxed, qualifier_const));
+
+                // Register method with generic function
+                // Signature: (generic_name, specializers, function_ptr, arity, qualifier)
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_defmethod_qualified({}, {}, {}, {}, {}) : (i64, i64, i64, i64, i64) -> i64",
+                    result, name_sym, specs_nil, func_ptr_int, arity_boxed, qualifier_boxed));
+
+                // Push result to stack
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
 
@@ -1791,39 +1915,17 @@ impl StackMLIRCodegen {
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
 
-                // Pop as pointer
-                let right_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
-                let left_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
-
-                // Unbox
+                // Pop both values
                 let right = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right));
                 let left = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left));
 
-                // Compare and convert to Lisp boolean (nil or t)
-                let cmp = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi slt, {}, {} : i64", cmp, left, right));
-
-                // Convert i1 to Lisp boolean
+                // Use cc_lt for proper numeric comparison (handles fixnum/float coercion)
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = func.call @cc_lt({}, {}) : (i64, i64) -> i64", result, left, right));
 
-                // Push result as pointer
+                // Push result
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -1835,37 +1937,17 @@ impl StackMLIRCodegen {
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
 
-                // Pop as pointer
-                let right_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
-                let left_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
-
-                // Unbox
+                // Pop both values
                 let right = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right));
                 let left = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left));
 
-                // Compare and convert to Lisp boolean (nil or t)
-                let cmp = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi sgt, {}, {} : i64", cmp, left, right));
+                // Use cc_gt for proper numeric comparison (handles fixnum/float coercion)
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = func.call @cc_gt({}, {}) : (i64, i64) -> i64", result, left, right));
 
-                // Push result as pointer
+                // Push result
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -1877,39 +1959,17 @@ impl StackMLIRCodegen {
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
 
-                // Pop as pointer
-                let right_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
-                let left_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
-
-                // Unbox
+                // Pop both values
                 let right = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right));
                 let left = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left));
 
-                // Compare and convert to Lisp boolean (nil or t)
-                let cmp = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi eq, {}, {} : i64", cmp, left, right));
-
-                // Convert i1 to Lisp boolean: use scf.if to select nil or t
+                // Use cc_eq for proper numeric comparison (handles fixnum/float coercion)
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = func.call @cc_eq({}, {}) : (i64, i64) -> i64", result, left, right));
 
-                // Push result as pointer
+                // Push result
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -1921,37 +1981,17 @@ impl StackMLIRCodegen {
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
 
-                // Pop as pointer
-                let right_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
-                let left_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
-
-                // Unbox
+                // Pop both values
                 let right = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right));
                 let left = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left));
 
-                // Compare and convert to Lisp boolean (nil or t)
-                let cmp = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi sle, {}, {} : i64", cmp, left, right));
+                // Use cc_le for proper numeric comparison (handles fixnum/float coercion)
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = func.call @cc_le({}, {}) : (i64, i64) -> i64", result, left, right));
 
-                // Push result as pointer
+                // Push result
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -1963,37 +2003,17 @@ impl StackMLIRCodegen {
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
 
-                // Pop as pointer
-                let right_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right_boxed));
-                let left_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left_boxed));
-
-                // Unbox
+                // Pop both values
                 let right = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", right, right_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", right));
                 let left = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", left, left_boxed));
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", left));
 
-                // Compare and convert to Lisp boolean (nil or t)
-                let cmp = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi sge, {}, {} : i64", cmp, left, right));
+                // Use cc_ge for proper numeric comparison (handles fixnum/float coercion)
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = scf.if {} -> i64 {{", result, cmp));
-                self.indent();
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                self.writeln(&format!("scf.yield {} : i64", t_val));
-                self.dedent();
-                self.writeln("} else {");
-                self.indent();
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                self.writeln(&format!("scf.yield {} : i64", nil_val));
-                self.dedent();
-                self.writeln("}");
+                self.writeln(&format!("{} = func.call @cc_ge({}, {}) : (i64, i64) -> i64", result, left, right));
 
-                // Push result as pointer
+                // Push result
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -3364,13 +3384,13 @@ impl StackMLIRCodegen {
             }
 
             "print" => {
-                eprintln!("DEBUG: Compiling print function");
+                debug_println!("DEBUG: Compiling print function");
                 if args.len() != 1 {
                     anyhow::bail!("print requires exactly 1 argument");
                 }
-                eprintln!("DEBUG: Compiling print argument");
+                debug_println!("DEBUG: Compiling print argument");
                 self.compile_expr(&args[0])?;
-                eprintln!("DEBUG: Argument compiled");
+                debug_println!("DEBUG: Argument compiled");
                 let val = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
                 let result = self.fresh_ssa();
@@ -4406,11 +4426,27 @@ impl StackMLIRCodegen {
             "package-name" | "package-nicknames" | "package-use-list" | "package-used-by-list" |
             "package-shadowing-symbols" | "list-all-packages" |
             // Symbols
-            "gensym" | "gentemp" | "symbol-name" | "symbol-package" | "symbol-value" |
+            "gensym" | "gentemp" | "symbol-name" | "symbol-package" |
             "symbol-function" | "symbol-plist" | "get" | "remprop" | "make-symbol" | "copy-symbol" |
             "keywordp" => {
                 // Stub: push NIL for unimplemented functions
                 self.writeln("func.call @stack_push_nil() : () -> ()");
+                Ok(())
+            }
+
+            "symbol-value" => {
+                // (symbol-value 'symbol) - get the value of a dynamic/special variable
+                if args.len() != 1 {
+                    anyhow::bail!("symbol-value requires exactly 1 argument");
+                }
+                // Compile the symbol argument
+                self.compile_expr(&args[0])?;
+                let sym_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", sym_ssa));
+                // Call cc_symbol_value
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_symbol_value({}) : (i64) -> i64", result, sym_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
 
@@ -4769,6 +4805,161 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            // MOP Introspection functions
+            "find-class" => {
+                if args.len() != 1 {
+                    anyhow::bail!("find-class requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let class_name = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class_name));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_find_class({}) : (i64) -> i64", result, class_name));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "class-of" => {
+                if args.len() != 1 {
+                    anyhow::bail!("class-of requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let obj = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", obj));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_class_of({}) : (i64) -> i64", result, obj));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "class-name" => {
+                if args.len() != 1 {
+                    anyhow::bail!("class-name requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let class = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_class_name({}) : (i64) -> i64", result, class));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "class-slots" => {
+                if args.len() != 1 {
+                    anyhow::bail!("class-slots requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let class = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_class_slots({}) : (i64) -> i64", result, class));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "class-direct-slots" => {
+                if args.len() != 1 {
+                    anyhow::bail!("class-direct-slots requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let class = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_class_direct_slots({}) : (i64) -> i64", result, class));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "class-direct-superclasses" => {
+                if args.len() != 1 {
+                    anyhow::bail!("class-direct-superclasses requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let class = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_class_direct_superclasses({}) : (i64) -> i64", result, class));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "class-precedence-list" => {
+                if args.len() != 1 {
+                    anyhow::bail!("class-precedence-list requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let class = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_class_precedence_list({}) : (i64) -> i64", result, class));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "typep" => {
+                if args.len() != 2 {
+                    anyhow::bail!("typep requires exactly 2 arguments");
+                }
+                self.compile_expr(&args[0])?;
+                self.compile_expr(&args[1])?;
+                let type_name = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", type_name));
+                let obj = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", obj));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_typep({}, {}) : (i64, i64) -> i64", result, obj, type_name));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "subtypep" => {
+                if args.len() != 2 {
+                    anyhow::bail!("subtypep requires exactly 2 arguments");
+                }
+                self.compile_expr(&args[0])?;
+                self.compile_expr(&args[1])?;
+                let type2 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", type2));
+                let type1 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", type1));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_subtypep({}, {}) : (i64, i64) -> i64", result, type1, type2));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            // Method combination support
+            "call-next-method" => {
+                // call-next-method with no arguments uses original args
+                let result = self.fresh_ssa();
+                if args.is_empty() {
+                    self.writeln(&format!("{} = func.call @cc_call_next_method() : () -> i64", result));
+                } else {
+                    // call-next-method with new arguments
+                    // First collect the new arguments into a list
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    let argc = args.len();
+                    let argc_ssa = self.fresh_ssa();
+                    let tagged_argc = (argc as i64) << 2;
+                    self.writeln(&format!("{} = arith.constant {} : i64", argc_ssa, tagged_argc));
+                    let new_args = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_collect_args({}) : (i64) -> i64", new_args, argc_ssa));
+                    self.writeln(&format!("{} = func.call @cc_call_next_method_with_args({}) : (i64) -> i64", result, new_args));
+                }
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "next-method-p" => {
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_next_method_p() : () -> i64", result));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
             _ => {
                 // User-defined function call
                 // Strip package qualifier from function name (e.g., "pkg:func" -> "func")
@@ -4783,6 +4974,22 @@ impl StackMLIRCodegen {
                     .get(unqualified_name)
                     .cloned()
                     .unwrap_or_else(|| unqualified_name.to_string());
+
+                // Check if this is a generic function - use runtime dispatch
+                if self.generic_functions.contains(&actual_func_name) {
+                    // Push all arguments to stack
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+
+                    // Create the generic function name symbol
+                    let gf_name_sym = self.create_symbol_constant(&actual_func_name);
+
+                    // Call cc_funcall_stack with the generic function name
+                    // It will pop args from stack, dispatch to the correct method, and push result
+                    self.writeln(&format!("func.call @cc_funcall_stack({}) : (i64) -> ()", gf_name_sym));
+                    return Ok(());
+                }
 
                 // Check if the function has special parameters
                 if self.special_param_functions.contains(&actual_func_name) {
@@ -4907,7 +5114,7 @@ impl StackMLIRCodegen {
         }
 
         // Compile function body - catch errors to ensure proper cleanup
-        println!("COMPILE_FUNCTION_DEBUG: name={}", name);
+        debug_println!("COMPILE_FUNCTION_DEBUG: name={}", name);
         let compile_result = self.compile_expr(body);
 
         // Always restore symbol table and close function properly
@@ -5035,8 +5242,26 @@ impl StackMLIRCodegen {
         // Emit all pending string constants as global LLVM constants
         let string_constants = self.pending_string_constants.clone();
         for (name, value) in string_constants {
+            // Escape special characters for MLIR string literals
+            let mut escaped = String::new();
+            for c in value.chars() {
+                match c {
+                    '"' => escaped.push_str("\\22"),   // Double quote
+                    '\\' => escaped.push_str("\\5C"),  // Backslash
+                    '\n' => escaped.push_str("\\0A"),  // Newline
+                    '\r' => escaped.push_str("\\0D"),  // Carriage return
+                    '\t' => escaped.push_str("\\09"),  // Tab
+                    c if c.is_ascii() && !c.is_ascii_control() => escaped.push(c),
+                    c => {
+                        // Escape non-ASCII and control chars as hex
+                        for byte in c.to_string().as_bytes() {
+                            escaped.push_str(&format!("\\{:02X}", byte));
+                        }
+                    }
+                }
+            }
             // Create a null-terminated C string
-            let c_str = format!("{}\\00", value);
+            let c_str = format!("{}\\00", escaped);
             let len = value.len() + 1;
             // name already includes @, so don't add another one
             self.writeln(&format!("llvm.mlir.global private constant {}(\"{}\") : !llvm.array<{} x i8>",

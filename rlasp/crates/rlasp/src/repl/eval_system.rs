@@ -1582,16 +1582,9 @@ pub(super) fn eval_class_of(args: &[ASTNode], env: &mut HashMap<String, EvalResu
         return Err("class-of requires an argument".to_string());
     }
     let obj = eval_with_env(&args[0], env)?;
-    let class = match obj {
-        EvalResult::Fixnum(_) => "FIXNUM",
-        EvalResult::Float(_) => "FLOAT",
-        EvalResult::Complex(_, _) => "COMPLEX",
-        EvalResult::String(_) => "STRING",
-        EvalResult::Symbol(_) => "SYMBOL",
-        EvalResult::Cons(_, _) => "CONS",
-        _ => "T",
-    };
-    Ok(EvalResult::Symbol(class.to_string()))
+    // Use the proper class_of function from eval_types
+    let class = super::eval_types::class_of(&obj);
+    Ok(EvalResult::Symbol(class))
 }
 
 pub(super) fn eval_call_next_method(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1905,6 +1898,11 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
                 return eval_type_of(&[result_to_ast(&vals[0])?], env);
             }
         }
+        EvalResult::Instance(ref inst) => {
+            // Return the class name for instances
+            return Ok(EvalResult::Symbol(inst.class_name.clone()));
+        }
+        EvalResult::GenericFunction(_) => "GENERIC-FUNCTION",
     };
     Ok(EvalResult::Symbol(type_name.to_string()))
 }

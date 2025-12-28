@@ -883,6 +883,29 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         .map(|expr| expand_global_macros(expr, &macros))
         .collect();
 
+    // Pre-pass: register generic function names before compiling defuns
+    // This ensures that when defuns call generic functions, they use runtime dispatch
+    fn collect_generic_function_names(expr: &rlasp::ir::ASTNode, names: &mut Vec<String>) {
+        match expr {
+            rlasp::ir::ASTNode::Defgeneric { name, .. } => {
+                names.push(name.clone());
+            }
+            rlasp::ir::ASTNode::Progn { exprs } => {
+                for e in exprs {
+                    collect_generic_function_names(e, names);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut generic_names = Vec::new();
+    for form in &expanded_toplevel {
+        collect_generic_function_names(form, &mut generic_names);
+    }
+    for name in &generic_names {
+        codegen.register_generic_function(name);
+    }
+
     // Second pass: compile all expanded defuns to MLIR
     for (name, params, defaults, supplied_p_vars, body) in &expanded_defuns {
         // Compile function body
@@ -1223,6 +1246,12 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         if let Some(f) = module.get_function("cc_eq") {
             execution_engine.add_global_mapping(&f, cc_eq as usize);
         }
+        if let Some(f) = module.get_function("cc_le") {
+            execution_engine.add_global_mapping(&f, cc_le as usize);
+        }
+        if let Some(f) = module.get_function("cc_ge") {
+            execution_engine.add_global_mapping(&f, cc_ge as usize);
+        }
 
         // Type predicates
         if let Some(f) = module.get_function("cc_numberp") {
@@ -1404,6 +1433,17 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
             execution_engine.add_global_mapping(&f, cc_copy_seq as usize);
         }
 
+        // Symbols
+        if let Some(f) = module.get_function("cc_make_symbol") {
+            execution_engine.add_global_mapping(&f, cc_make_symbol as usize);
+        }
+        if let Some(f) = module.get_function("cc_symbol_value") {
+            execution_engine.add_global_mapping(&f, cc_symbol_value as usize);
+        }
+        if let Some(f) = module.get_function("cc_set_symbol_value") {
+            execution_engine.add_global_mapping(&f, cc_set_symbol_value as usize);
+        }
+
         // Sequence operations
         if let Some(f) = module.get_function("cc_find") {
             execution_engine.add_global_mapping(&f, cc_find as usize);
@@ -1472,6 +1512,47 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         }
         if let Some(f) = module.get_function("cc_call_generic") {
             execution_engine.add_global_mapping(&f, cc_call_generic as usize);
+        }
+        if let Some(f) = module.get_function("cc_defmethod_qualified") {
+            execution_engine.add_global_mapping(&f, cc_defmethod_qualified as usize);
+        }
+        if let Some(f) = module.get_function("cc_call_next_method") {
+            execution_engine.add_global_mapping(&f, cc_call_next_method as usize);
+        }
+        if let Some(f) = module.get_function("cc_call_next_method_with_args") {
+            execution_engine.add_global_mapping(&f, cc_call_next_method_with_args as usize);
+        }
+        if let Some(f) = module.get_function("cc_next_method_p") {
+            execution_engine.add_global_mapping(&f, cc_next_method_p as usize);
+        }
+
+        // MOP Introspection
+        if let Some(f) = module.get_function("cc_find_class") {
+            execution_engine.add_global_mapping(&f, cc_find_class as usize);
+        }
+        if let Some(f) = module.get_function("cc_class_of") {
+            execution_engine.add_global_mapping(&f, cc_class_of as usize);
+        }
+        if let Some(f) = module.get_function("cc_class_name") {
+            execution_engine.add_global_mapping(&f, cc_class_name as usize);
+        }
+        if let Some(f) = module.get_function("cc_class_slots") {
+            execution_engine.add_global_mapping(&f, cc_class_slots as usize);
+        }
+        if let Some(f) = module.get_function("cc_class_direct_slots") {
+            execution_engine.add_global_mapping(&f, cc_class_direct_slots as usize);
+        }
+        if let Some(f) = module.get_function("cc_class_direct_superclasses") {
+            execution_engine.add_global_mapping(&f, cc_class_direct_superclasses as usize);
+        }
+        if let Some(f) = module.get_function("cc_class_precedence_list") {
+            execution_engine.add_global_mapping(&f, cc_class_precedence_list as usize);
+        }
+        if let Some(f) = module.get_function("cc_typep") {
+            execution_engine.add_global_mapping(&f, cc_typep as usize);
+        }
+        if let Some(f) = module.get_function("cc_subtypep") {
+            execution_engine.add_global_mapping(&f, cc_subtypep as usize);
         }
 
         // Additional runtime intrinsics
@@ -1570,6 +1651,24 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
                 let name_cstr = CString::new(func_name).unwrap();
                 cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
                 println!("[Registered lambda '{}' with arity uniform]", func_name);
+            }
+        }
+
+        // Register method functions for CLOS dispatch
+        // These are functions ending with _primary, _before, _after, or _around
+        for func_val in module.get_functions() {
+            let func_name = func_val.get_name().to_str().unwrap();
+            let is_method = func_name.ends_with("_primary")
+                || func_name.ends_with("_before")
+                || func_name.ends_with("_after")
+                || func_name.ends_with("_around");
+            if is_method {
+                let func_ptr = execution_engine.get_function_address(func_name)
+                    .map_err(|e| format!("Failed to get address for {}: {:?}", func_name, e))?;
+                let name_cstr = CString::new(func_name).unwrap();
+                // Methods use uniform stack-based calling convention
+                cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                println!("[Registered method '{}']", func_name);
             }
         }
     }

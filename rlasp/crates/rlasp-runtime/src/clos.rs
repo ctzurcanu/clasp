@@ -1,22 +1,88 @@
 //! CLOS - Common Lisp Object System
+//!
+//! Implements:
+//! - Class definition with superclass inheritance
+//! - Class Precedence List (CPL) using C3 linearization
+//! - Slot inheritance from superclasses
+//! - Instance creation and slot access
 
 use crate::object::LispObject;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
+
+/// Global class registry for CPL computation and class lookup
+static mut CLASS_TABLE: Option<Mutex<HashMap<String, *const Class>>> = None;
+
+fn get_class_table() -> &'static Mutex<HashMap<String, *const Class>> {
+    unsafe {
+        CLASS_TABLE.get_or_insert_with(|| Mutex::new(HashMap::new()))
+    }
+}
+
+/// Register a class in the global table
+pub fn register_class(name: &str, class_ptr: *const Class) {
+    let mut table = get_class_table().lock().unwrap();
+    table.insert(name.to_string(), class_ptr);
+}
+
+/// Look up a class by name
+pub fn find_class(name: &str) -> Option<*const Class> {
+    let table = get_class_table().lock().unwrap();
+    table.get(name).copied()
+}
 
 /// Class definition
 #[repr(C)]
 pub struct Class {
     name: String,
-    slots: Vec<String>,
+    /// Direct slots defined by this class
+    direct_slots: Vec<String>,
+    /// All slots including inherited ones
+    all_slots: Vec<String>,
+    /// Direct superclass names
+    direct_superclasses: Vec<String>,
+    /// Class Precedence List (computed via C3 linearization)
+    class_precedence_list: Vec<String>,
+    /// Methods defined on this class
     methods: Arc<RwLock<HashMap<String, usize>>>,
 }
 
 impl Class {
+    /// Create a new class without superclasses (used for built-in types)
     pub fn new(name: String, slots: Vec<String>) -> Self {
+        let cpl = vec![name.clone(), "T".to_string()];
         Self {
-            name,
-            slots,
+            name: name.clone(),
+            direct_slots: slots.clone(),
+            all_slots: slots,
+            direct_superclasses: vec!["T".to_string()],
+            class_precedence_list: cpl,
+            methods: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a class with superclasses (full MOP constructor)
+    pub fn new_with_superclasses(
+        name: String,
+        direct_slots: Vec<String>,
+        superclass_names: Vec<String>,
+    ) -> Self {
+        // Compute CPL using C3 linearization
+        let cpl = compute_cpl(&name, &superclass_names);
+
+        // Compute all slots by inheriting from superclasses
+        let all_slots = compute_all_slots(&direct_slots, &superclass_names);
+
+        Self {
+            name: name.clone(),
+            direct_slots,
+            all_slots,
+            direct_superclasses: if superclass_names.is_empty() {
+                vec!["T".to_string()]
+            } else {
+                superclass_names
+            },
+            class_precedence_list: cpl,
             methods: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -25,8 +91,29 @@ impl Class {
         &self.name
     }
 
+    /// Get all slots (direct + inherited)
     pub fn slots(&self) -> &[String] {
-        &self.slots
+        &self.all_slots
+    }
+
+    /// Get only the direct slots defined by this class
+    pub fn direct_slots(&self) -> &[String] {
+        &self.direct_slots
+    }
+
+    /// Get direct superclass names
+    pub fn direct_superclasses(&self) -> &[String] {
+        &self.direct_superclasses
+    }
+
+    /// Get the class precedence list
+    pub fn class_precedence_list(&self) -> &[String] {
+        &self.class_precedence_list
+    }
+
+    /// Check if this class is a subclass of another
+    pub fn is_subclass_of(&self, other_name: &str) -> bool {
+        self.class_precedence_list.iter().any(|n| n.eq_ignore_ascii_case(other_name))
     }
 
     pub fn add_method(&self, name: String, func_ptr: usize) {
@@ -39,11 +126,134 @@ impl Class {
         methods.get(name).copied()
     }
 
+    /// Allocate a class without superclasses
     pub fn allocate(name: String, slots: Vec<String>) -> LispObject {
-        let class = Box::new(Class::new(name, slots));
+        let class = Box::new(Class::new(name.clone(), slots));
         let ptr = Box::into_raw(class);
+        // Register in global table
+        register_class(&name, ptr);
         LispObject::from_class_ptr(ptr)
     }
+
+    /// Allocate a class with superclasses
+    pub fn allocate_with_superclasses(
+        name: String,
+        slots: Vec<String>,
+        superclasses: Vec<String>,
+    ) -> LispObject {
+        let class = Box::new(Class::new_with_superclasses(name.clone(), slots, superclasses));
+        let ptr = Box::into_raw(class);
+        // Register in global table
+        register_class(&name, ptr);
+        LispObject::from_class_ptr(ptr)
+    }
+}
+
+//============================================================================
+// C3 Linearization for Class Precedence List
+//============================================================================
+
+/// Compute Class Precedence List using C3 linearization algorithm
+/// This is the algorithm used by Python (MRO) and Common Lisp CLOS
+fn compute_cpl(class_name: &str, direct_superclasses: &[String]) -> Vec<String> {
+    // Start with the class itself
+    let mut result = vec![class_name.to_string()];
+
+    if direct_superclasses.is_empty() {
+        // No superclasses, just append T
+        result.push("T".to_string());
+        return result;
+    }
+
+    // Get CPLs of all direct superclasses
+    let mut superclass_cpls: Vec<Vec<String>> = Vec::new();
+    for superclass_name in direct_superclasses {
+        if let Some(class_ptr) = find_class(superclass_name) {
+            let class = unsafe { &*class_ptr };
+            superclass_cpls.push(class.class_precedence_list.clone());
+        } else {
+            // Superclass not found, use default [superclass, T]
+            superclass_cpls.push(vec![superclass_name.clone(), "T".to_string()]);
+        }
+    }
+
+    // Add the list of direct superclasses in order
+    superclass_cpls.push(direct_superclasses.iter().cloned().collect());
+
+    // C3 merge
+    while !superclass_cpls.iter().all(|l| l.is_empty()) {
+        // Find a good head (first element not in tail of any other list)
+        let mut found_head = None;
+        for (i, list) in superclass_cpls.iter().enumerate() {
+            if let Some(head) = list.first() {
+                // Check if head is in the tail of any other list
+                let in_tail = superclass_cpls.iter().any(|other| {
+                    other.len() > 1 && other[1..].contains(head)
+                });
+
+                if !in_tail && !result.contains(head) {
+                    found_head = Some((i, head.clone()));
+                    break;
+                }
+            }
+        }
+
+        if let Some((_, head)) = found_head {
+            result.push(head.clone());
+
+            // Remove head from all lists
+            for list in &mut superclass_cpls {
+                if list.first() == Some(&head) {
+                    list.remove(0);
+                }
+            }
+        } else {
+            // No good head found - inconsistent hierarchy
+            // Fall back to simple merge
+            for list in &superclass_cpls {
+                for item in list {
+                    if !result.contains(item) {
+                        result.push(item.clone());
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // Ensure T is at the end
+    if result.last() != Some(&"T".to_string()) {
+        result.retain(|x| x != "T");
+        result.push("T".to_string());
+    }
+
+    result
+}
+
+/// Compute all slots by inheriting from superclasses
+fn compute_all_slots(direct_slots: &[String], superclass_names: &[String]) -> Vec<String> {
+    let mut all_slots: Vec<String> = Vec::new();
+
+    // First, collect slots from superclasses (in CPL order)
+    for superclass_name in superclass_names {
+        if let Some(class_ptr) = find_class(superclass_name) {
+            let class = unsafe { &*class_ptr };
+            for slot in &class.all_slots {
+                if !all_slots.contains(slot) {
+                    all_slots.push(slot.clone());
+                }
+            }
+        }
+    }
+
+    // Then add direct slots (they override/shadow inherited ones with same name)
+    for slot in direct_slots {
+        if !all_slots.contains(slot) {
+            all_slots.push(slot.clone());
+        }
+    }
+
+    all_slots
 }
 
 /// Instance of a class

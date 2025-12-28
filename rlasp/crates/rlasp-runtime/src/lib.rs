@@ -12,6 +12,7 @@ pub mod number;
 pub mod gc;
 pub mod package;
 pub mod string;
+pub mod vector;
 pub mod hash_table;
 pub mod clos;
 pub mod eval_stack;
@@ -26,7 +27,29 @@ pub use symbol::{Symbol, NIL_SYMBOL, T_SYMBOL};
 pub use number::{Number, NumberValue};
 pub use package::{Package, PackageManager, PACKAGE_MANAGER};
 pub use string::RString;
+pub use vector::RVector;
 pub use hash_table::HashTable;
 pub use clos::{Class, Instance};
 pub use closure::Closure;
 pub use error::{LispError, ErrorKind};
+
+// Re-export GC functions
+pub use gc::{init_gc, global_gc, is_gc_initialized, GCAllocator};
+
+#[cfg(feature = "boehm-gc")]
+pub use gc::BoehmGC;
+
+/// Initialize the rlasp runtime
+///
+/// This must be called before using any runtime functions.
+/// It initializes the GC (Boehm GC if feature enabled, otherwise NoGC).
+pub fn init_runtime() {
+    if !gc::is_gc_initialized() {
+        gc::init_gc();
+    }
+}
+
+/// Check if we're using Boehm GC
+pub fn using_boehm_gc() -> bool {
+    cfg!(feature = "boehm-gc")
+}

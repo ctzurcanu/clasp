@@ -920,10 +920,10 @@ impl MLIRCodegen {
                 Ok(result)
             }
 
-            rlasp::ir::ASTNode::Defmethod { generic_name, specializers, params, body } => {
+            rlasp::ir::ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
                 // Generate defmethod:
                 // 1. Create a method function
-                // 2. Register it with cc_defmethod
+                // 2. Register it with cc_defmethod_qualified
 
                 let method_fn_name = format!("{}$method${}", generic_name, self.function_counter);
                 self.function_counter += 1;
@@ -961,10 +961,20 @@ impl MLIRCodegen {
                 let tagged_arity = arity_val << 2;
                 self.writeln(&format!("{} = arith.constant {} : i64", arity, tagged_arity));
 
-                // Call cc_defmethod
+                // Convert qualifier to numeric code: 0=primary, 1=before, 2=after, 3=around
+                let qualifier_code = match qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
+                    Some(":BEFORE") => 1,
+                    Some(":AFTER") => 2,
+                    Some(":AROUND") => 3,
+                    _ => 0, // Primary
+                };
+                let qualifier_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", qualifier_ssa, qualifier_code));
+
+                // Call cc_defmethod_qualified
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_defmethod({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
-                    result, generic_name_ssa, spec_list, func_ptr, arity));
+                self.writeln(&format!("{} = func.call @cc_defmethod_qualified({}, {}, {}, {}, {}) : (i64, i64, i64, i64, i64) -> i64",
+                    result, generic_name_ssa, spec_list, func_ptr, arity, qualifier_ssa));
 
                 Ok(result)
             }

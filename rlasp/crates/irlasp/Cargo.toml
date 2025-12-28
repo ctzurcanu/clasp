@@ -3,6 +3,10 @@ name = "irlasp"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+boehm-gc = ["rlasp-runtime/boehm-gc"]
+
 [dependencies]
 rlasp = { path = "../rlasp" }
 rlasp-jit = { path = "../rlasp-jit" }

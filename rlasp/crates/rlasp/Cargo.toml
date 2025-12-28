@@ -3,6 +3,10 @@ name = "rlasp"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+boehm-gc = ["rlasp-runtime/boehm-gc"]
+
 [dependencies]
 # Internal crates
 rlasp-runtime = { path = "../rlasp-runtime" }

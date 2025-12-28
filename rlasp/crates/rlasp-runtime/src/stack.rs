@@ -2,9 +2,13 @@
 //!
 //! Stack 1 (Metadata): 4 bytes per entry (2 bytes length + 2 bytes type)
 //! Stack 2 (Data): Variable-length raw data
+//!
+//! Common Lisp Compatibility:
+//! - Each thread has its own stacks (per CL spec)
+//! - No mutex contention for single-threaded evaluation
+//! - Supports CL's dynamic extent and thread-local bindings
 
-use std::sync::Mutex;
-use lazy_static::lazy_static;
+use std::cell::RefCell;
 
 /// Type discriminant (2 bytes)
 #[repr(u16)]
@@ -119,9 +123,12 @@ impl DataStack {
     }
 }
 
-lazy_static! {
-    static ref METADATA_STACK: Mutex<MetadataStack> = Mutex::new(MetadataStack::new());
-    static ref DATA_STACK: Mutex<DataStack> = Mutex::new(DataStack::new());
+// Thread-local stacks - CL compatible (each thread has its own stacks)
+thread_local! {
+    /// Thread-local metadata stack
+    static METADATA_STACK: RefCell<MetadataStack> = RefCell::new(MetadataStack::new());
+    /// Thread-local data stack
+    static DATA_STACK: RefCell<DataStack> = RefCell::new(DataStack::new());
 }
 
 /// Object handle combining metadata index and data offset
@@ -157,43 +164,65 @@ impl ObjectHandle {
     }
 
     pub fn get_type(&self) -> Option<TypeTag> {
-        let meta_stack = METADATA_STACK.lock().unwrap();
-        meta_stack.get(self.metadata_index).map(|entry| {
-            // Safe because TypeTag is repr(u16)
-            unsafe { std::mem::transmute::<u16, TypeTag>(entry.type_tag) }
+        METADATA_STACK.with(|meta_stack| {
+            meta_stack.borrow().get(self.metadata_index).map(|entry| {
+                // Safe because TypeTag is repr(u16)
+                unsafe { std::mem::transmute::<u16, TypeTag>(entry.type_tag) }
+            })
         })
     }
 
     pub fn get_data(&self) -> Option<Vec<u8>> {
-        let meta_stack = METADATA_STACK.lock().unwrap();
-        let data_stack = DATA_STACK.lock().unwrap();
+        METADATA_STACK.with(|meta_stack| {
+            DATA_STACK.with(|data_stack| {
+                let meta = meta_stack.borrow();
+                let data = data_stack.borrow();
 
-        if let Some(entry) = meta_stack.get(self.metadata_index) {
-            if entry.length == 0 {
-                return Some(Vec::new());
-            }
-            data_stack.get_slice(self.data_offset, entry.length)
-                .map(|slice| slice.to_vec())
-        } else {
-            None
-        }
+                if let Some(entry) = meta.get(self.metadata_index) {
+                    if entry.length == 0 {
+                        return Some(Vec::new());
+                    }
+                    data.get_slice(self.data_offset, entry.length)
+                        .map(|slice| slice.to_vec())
+                } else {
+                    None
+                }
+            })
+        })
     }
 }
 
 /// Allocate an object with metadata and data
 pub fn allocate_object(type_tag: TypeTag, data: &[u8]) -> ObjectHandle {
-    let mut meta_stack = METADATA_STACK.lock().unwrap();
-    let mut data_stack = DATA_STACK.lock().unwrap();
+    METADATA_STACK.with(|meta_stack| {
+        DATA_STACK.with(|data_stack| {
+            let data_offset = if data.is_empty() {
+                0
+            } else {
+                data_stack.borrow_mut().allocate(data)
+            };
 
-    let data_offset = if data.is_empty() {
-        0
-    } else {
-        data_stack.allocate(data)
-    };
+            let metadata_index = meta_stack.borrow_mut().allocate(data.len() as u16, type_tag);
 
-    let metadata_index = meta_stack.allocate(data.len() as u16, type_tag);
+            ObjectHandle::new(metadata_index, data_offset)
+        })
+    })
+}
 
-    ObjectHandle::new(metadata_index, data_offset)
+/// Access the current thread's metadata stack
+pub fn with_metadata_stack<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut MetadataStack) -> R,
+{
+    METADATA_STACK.with(|stack| f(&mut stack.borrow_mut()))
+}
+
+/// Access the current thread's data stack
+pub fn with_data_stack<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut DataStack) -> R,
+{
+    DATA_STACK.with(|stack| f(&mut stack.borrow_mut()))
 }
 
 #[cfg(test)]

@@ -1104,10 +1104,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         });
                     }
                     "defmethod" => {
-                        // (defmethod name (specialized-lambda-list) body...)
+                        // (defmethod name [:qualifier] (specialized-lambda-list) body...)
                         let args = cdr_to_vec(cdr)?;
-                        if args.len() < 3 {
-                            return Err("defmethod requires name, specialized-lambda-list, and body".to_string());
+                        if args.len() < 2 {
+                            return Err("defmethod requires at least name and specialized-lambda-list".to_string());
                         }
 
                         // Parse method name
@@ -1116,8 +1116,26 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             _ => return Err("defmethod name must be a symbol".to_string()),
                         };
 
+                        // Check for optional qualifier (:before, :after, :around)
+                        let (qualifier, lambda_list_idx) = match &args[1] {
+                            ASTNode::Variable(kw) if kw.starts_with(':') => {
+                                // It's a qualifier
+                                let q = kw.to_uppercase();
+                                if q == ":BEFORE" || q == ":AFTER" || q == ":AROUND" {
+                                    (Some(q), 2)
+                                } else {
+                                    (None, 1) // Not a recognized qualifier, treat as lambda-list
+                                }
+                            }
+                            _ => (None, 1), // No qualifier
+                        };
+
+                        if args.len() <= lambda_list_idx {
+                            return Err("defmethod requires specialized-lambda-list".to_string());
+                        }
+
                         // Parse specialized lambda list
-                        let (specializers, params) = match &args[1] {
+                        let (specializers, params) = match &args[lambda_list_idx] {
                             ASTNode::Constant(ConstantValue::Nil) => (vec![], vec![]),
                             ASTNode::Call { function, args: param_specs } => {
                                 let mut all_param_specs = vec![*function.clone()];
@@ -1154,10 +1172,11 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         };
 
                         // Parse body
-                        let body: Vec<ASTNode> = args[2..].to_vec();
+                        let body: Vec<ASTNode> = args[(lambda_list_idx + 1)..].to_vec();
 
                         return Ok(ASTNode::Defmethod {
                             generic_name,
+                            qualifier,
                             specializers,
                             params,
                             body,

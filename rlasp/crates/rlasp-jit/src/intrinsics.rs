@@ -898,7 +898,28 @@ pub extern "C" fn cc_lt(a: usize, b: usize) -> usize {
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
+    // Try fixnum-fixnum first (no precision loss)
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+        return if a_val < b_val {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    // Fall back to float comparison for mixed types
+    let a_f64 = if let Some(fix) = a_obj.as_fixnum() {
+        Some(fix as f64)
+    } else {
+        a_obj.as_float()
+    };
+    let b_f64 = if let Some(fix) = b_obj.as_fixnum() {
+        Some(fix as f64)
+    } else {
+        b_obj.as_float()
+    };
+
+    if let (Some(a_val), Some(b_val)) = (a_f64, b_f64) {
         if a_val < b_val {
             LispObject::t().raw()
         } else {
@@ -915,15 +936,41 @@ pub extern "C" fn cc_gt(a: usize, b: usize) -> usize {
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
+    // Try fixnum-fixnum comparison first
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        if a_val > b_val {
+        return if a_val > b_val {
             LispObject::t().raw()
         } else {
             LispObject::nil().raw()
-        }
-    } else {
-        LispObject::nil().raw()
+        };
     }
+
+    // Try float-float comparison
+    if let (Some(a_val), Some(b_val)) = (a_obj.as_float(), b_obj.as_float()) {
+        return if a_val > b_val {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    // Mixed: fixnum and float - coerce fixnum to float
+    if let (Some(a_fix), Some(b_flt)) = (a_obj.as_fixnum(), b_obj.as_float()) {
+        return if (a_fix as f64) > b_flt {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+    if let (Some(a_flt), Some(b_fix)) = (a_obj.as_float(), b_obj.as_fixnum()) {
+        return if a_flt > (b_fix as f64) {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    LispObject::nil().raw()
 }
 
 /// Equal comparison (= a b)
@@ -932,14 +979,51 @@ pub extern "C" fn cc_eq(a: usize, b: usize) -> usize {
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
+    // Try fixnum-fixnum comparison first
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
-        if a_val == b_val {
+        return if a_val == b_val {
             LispObject::t().raw()
         } else {
             LispObject::nil().raw()
-        }
+        };
+    }
+
+    // Try float-float comparison
+    if let (Some(a_val), Some(b_val)) = (a_obj.as_float(), b_obj.as_float()) {
+        return if a_val == b_val {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    // Mixed: fixnum and float - coerce fixnum to float
+    if let (Some(a_fix), Some(b_flt)) = (a_obj.as_fixnum(), b_obj.as_float()) {
+        return if (a_fix as f64) == b_flt {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+    if let (Some(a_flt), Some(b_fix)) = (a_obj.as_float(), b_obj.as_fixnum()) {
+        return if a_flt == (b_fix as f64) {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    LispObject::nil().raw()
+}
+
+/// Helper: convert LispObject to f64 for numeric comparison
+fn to_f64_for_compare(obj: LispObject) -> Option<f64> {
+    if let Some(fix) = obj.as_fixnum() {
+        Some(fix as f64)
+    } else if let Some(flt) = obj.as_float() {
+        Some(flt)
     } else {
-        LispObject::nil().raw()
+        None
     }
 }
 
@@ -949,7 +1033,17 @@ pub extern "C" fn cc_le(a: usize, b: usize) -> usize {
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
+    // Try fixnum-fixnum first (no precision loss)
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+        return if a_val <= b_val {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    // Fall back to float comparison for mixed types
+    if let (Some(a_val), Some(b_val)) = (to_f64_for_compare(a_obj), to_f64_for_compare(b_obj)) {
         if a_val <= b_val {
             LispObject::t().raw()
         } else {
@@ -966,7 +1060,17 @@ pub extern "C" fn cc_ge(a: usize, b: usize) -> usize {
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
+    // Try fixnum-fixnum first (no precision loss)
     if let (Some(a_val), Some(b_val)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+        return if a_val >= b_val {
+            LispObject::t().raw()
+        } else {
+            LispObject::nil().raw()
+        };
+    }
+
+    // Fall back to float comparison for mixed types
+    if let (Some(a_val), Some(b_val)) = (to_f64_for_compare(a_obj), to_f64_for_compare(b_obj)) {
         if a_val >= b_val {
             LispObject::t().raw()
         } else {
@@ -2423,6 +2527,68 @@ pub extern "C" fn cc_make_symbol(name_ptr: *const i8, len: i64) -> usize {
     rlasp_runtime::Symbol::allocate(name_str).raw()
 }
 
+// Thread-local storage for dynamic variable bindings
+// Uses symbol name as key since symbols aren't interned
+use std::cell::RefCell;
+use std::collections::HashMap as StdHashMap;
+
+thread_local! {
+    static DYNAMIC_BINDINGS: RefCell<StdHashMap<String, usize>> = RefCell::new(StdHashMap::new());
+}
+
+/// Get the value of a dynamic/special variable
+/// Uses name-based lookup since symbols aren't interned
+#[no_mangle]
+pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
+    use rlasp_runtime::Symbol;
+
+    let sym_obj = unsafe { LispObject::from_raw(symbol) };
+
+    // Try to get symbol name
+    let name = if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
+        let sym = unsafe { &*sym_ptr };
+        sym.name().to_string()
+    } else {
+        // Not a symbol - return nil
+        return LispObject::nil().raw();
+    };
+
+    // Look up in dynamic bindings by name
+    DYNAMIC_BINDINGS.with(|bindings| {
+        if let Some(&value) = bindings.borrow().get(&name) {
+            value
+        } else {
+            // Not bound - return nil
+            LispObject::nil().raw()
+        }
+    })
+}
+
+/// Set the value of a dynamic/special variable
+/// Uses name-based storage since symbols aren't interned
+#[no_mangle]
+pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
+    use rlasp_runtime::Symbol;
+
+    let sym_obj = unsafe { LispObject::from_raw(symbol) };
+
+    // Try to get symbol name
+    let name = if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
+        let sym = unsafe { &*sym_ptr };
+        sym.name().to_string()
+    } else {
+        // Not a symbol - return value anyway
+        return value;
+    };
+
+    // Store in dynamic bindings by name
+    DYNAMIC_BINDINGS.with(|bindings| {
+        bindings.borrow_mut().insert(name, value);
+    });
+
+    value
+}
+
 /// Box a function pointer as a LispObject
 #[no_mangle]
 pub extern "C" fn cc_box_function_ptr(fn_ptr: i64) -> usize {
@@ -3447,12 +3613,12 @@ static mut FUNCTION_ID_MAP: Option<Mutex<HashMap<i64, String>>> = None;
 static INIT_ID_MAP: Once = Once::new();
 
 #[derive(Clone)]
-struct FunctionEntry {
-    address: usize,
-    arity: usize,
+pub struct FunctionEntry {
+    pub address: usize,
+    pub arity: usize,
 }
 
-fn get_registry() -> &'static Mutex<HashMap<String, FunctionEntry>> {
+pub fn get_registry() -> &'static Mutex<HashMap<String, FunctionEntry>> {
     unsafe {
         INIT_REGISTRY.call_once(|| {
             FUNCTION_REGISTRY = Some(Mutex::new(HashMap::new()));
@@ -3509,7 +3675,7 @@ pub extern "C" fn cc_make_lambda_ref(name_ptr: *const i8) -> usize {
 }
 
 /// Extract function name from a function reference LispObject
-fn extract_function_name(func_ref: usize) -> Option<String> {
+pub fn extract_function_name(func_ref: usize) -> Option<String> {
     let obj = unsafe { LispObject::from_raw(func_ref) };
 
     // Function references are stored as fixnums (function IDs)
@@ -3863,8 +4029,17 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize) {
                 }
             }
             _ => {
-                // Function not found, push nil
-                stack_push_nil();
+                // Try generic function dispatch
+                use crate::intrinsics_clos::{get_generic_registry, execute_stack_based_dispatch};
+                let registry = get_generic_registry().lock().unwrap();
+                if registry.contains_key(&name) {
+                    // It's a generic function - dispatch using CLOS
+                    drop(registry); // Release lock before calling
+                    execute_stack_based_dispatch(&name);
+                } else {
+                    // Function not found, push nil
+                    stack_push_nil();
+                }
             }
         }
     } else {
