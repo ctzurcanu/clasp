@@ -1,0 +1,1 @@
+(print (cond ((numberp "42") "its a number") (t "not a number")))

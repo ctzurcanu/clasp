@@ -64,3 +64,5 @@ DO NOT use stubs, mocks, hardcoded helpers: only full implementation
 begin with /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/tests/benchmark-feat.lisp
 
 ../target/release/irlasp -m mlir tests/benchmark-feat.lisp
+
+mlir-opt is at /opt/homebrew/Cellar/llvm/21.1.8/bin/mlir-opt

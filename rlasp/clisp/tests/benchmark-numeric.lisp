@@ -275,7 +275,7 @@
   (time-it (factorial-bignum 20))
   (time-it (factorial-bignum 30))
   (time-it (fibonacci-bignum 90))
-  (time-it (fibonacci-bignum 100))
+  (time-it (fibonacci-bignum 450))
   (time-it (power-bignum 2 100))
   (time-it (power-bignum 13 30))
   (time-it (bignum-sum 10))

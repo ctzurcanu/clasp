@@ -19,6 +19,7 @@ func.func private @cc_box_fixnum(i64) -> i64
 func.func private @cc_unbox_fixnum(i64) -> i64
 func.func private @cc_box_float(f64) -> i64
 func.func private @cc_unbox_float(i64) -> f64
+func.func private @cc_parse_bignum(!llvm.ptr, i64) -> i64
 
 // ==============================================================================
 // LEGACY RUNTIME FUNCTIONS (will be migrated to stack-based)
@@ -83,6 +84,7 @@ func.func private @cc_symbolp(i64) -> i64
 func.func private @cc_arrayp(i64) -> i64
 func.func private @cc_vectorp(i64) -> i64
 func.func private @cc_hash_table_p(i64) -> i64
+func.func private @cc_errorp(i64) -> i64
 func.func private @cc_plusp(i64) -> i64
 func.func private @cc_minusp(i64) -> i64
 func.func private @cc_equal(i64, i64) -> i64

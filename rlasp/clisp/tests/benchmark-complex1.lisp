@@ -134,7 +134,10 @@
   (time-it "Symbols"          #'symbol-test)
   (time-it "Closures"         #'closure-test)
   (time-it "Multiple values"  #'mv-test)
-  (time-it "CLOS"             #'clos-test)
+ 
   (time-it "Conditions"       #'condition-test)
   (time-it "Eval"             #'eval-test)
+  (time-it "CLOS"             #'clos-test)
   (format t "~&Done.~%"))
+
+(run-benchmarks)

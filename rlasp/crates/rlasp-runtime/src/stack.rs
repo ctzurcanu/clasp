@@ -20,6 +20,7 @@ pub enum TypeTag {
     Ratio = 7,
     Complex = 8,
     String = 9,
+    Error = 10,
 }
 
 /// Metadata entry: 4 bytes total

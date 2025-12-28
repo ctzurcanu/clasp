@@ -1084,6 +1084,9 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         if let Some(f) = module.get_function("cc_unbox_float") {
             execution_engine.add_global_mapping(&f, cc_unbox_float as usize);
         }
+        if let Some(f) = module.get_function("cc_parse_bignum") {
+            execution_engine.add_global_mapping(&f, cc_parse_bignum as usize);
+        }
 
         // Cons operations
         if let Some(f) = module.get_function("cc_cons") {
@@ -1257,6 +1260,9 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         }
         if let Some(f) = module.get_function("cc_hash_table_p") {
             execution_engine.add_global_mapping(&f, cc_hash_table_p as usize);
+        }
+        if let Some(f) = module.get_function("cc_errorp") {
+            execution_engine.add_global_mapping(&f, cc_errorp as usize);
         }
         if let Some(f) = module.get_function("cc_plusp") {
             execution_engine.add_global_mapping(&f, cc_plusp as usize);

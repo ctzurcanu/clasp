@@ -19,6 +19,7 @@ pub enum EvalResult {
     Bignum(Integer),
     Ratio(Rational),
     Float(f64),
+    Complex(f64, f64),  // Complex number (real, imaginary)
     Bool(bool),
     Boolean(bool),  // CL boolean type
     Nil,
@@ -55,16 +56,17 @@ pub(super) enum NonLocalExit {
 impl std::fmt::Display for EvalResult {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            EvalResult::Fixnum(n) => write!(f, "(fixnum {})", n),
-            EvalResult::Bignum(n) => write!(f, "(bignum {})", n),
-            EvalResult::Ratio(r) => write!(f, "(ratio {} {})", r.numerator_ref(), r.denominator_ref()),
-            EvalResult::Float(fl) => write!(f, "(float {})", fl),
+            EvalResult::Fixnum(n) => write!(f, "{}", n),
+            EvalResult::Bignum(n) => write!(f, "{}", n),
+            EvalResult::Ratio(r) => write!(f, "{}/{}", r.numerator_ref(), r.denominator_ref()),
+            EvalResult::Float(fl) => write!(f, "{}", fl),
+            EvalResult::Complex(re, im) => write!(f, "#C({} {})", re, im),
             EvalResult::Bool(true) | EvalResult::Boolean(true) => write!(f, "T"),
             EvalResult::Bool(false) | EvalResult::Boolean(false) => write!(f, "NIL"),
             EvalResult::Nil => write!(f, "NIL"),
-            EvalResult::String(s) => write!(f, "(string \"{}\")", s),
-            EvalResult::Symbol(s) => write!(f, "(symbol {})", s),
-            EvalResult::Character(c) => write!(f, "(character #\\{})", c),
+            EvalResult::String(s) => write!(f, "\"{}\"", s),
+            EvalResult::Symbol(s) => write!(f, "{}", s),
+            EvalResult::Character(c) => write!(f, "#\\{}", c),
             EvalResult::Cons(car, cdr) => {
                 write!(f, "(")?;
                 self.fmt_list(f)?;

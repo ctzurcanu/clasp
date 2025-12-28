@@ -327,6 +327,7 @@ fn get_intrinsic_declarations() -> &'static str {
 declare i64 @cc_unbox_fixnum(i64)
 declare i64 @cc_box_float(double)
 declare double @cc_unbox_float(i64)
+declare i64 @cc_parse_bignum(ptr, i64)
 declare i64 @cc_cons(i64, i64)
 declare i64 @cc_car(i64)
 declare i64 @cc_cdr(i64)

@@ -128,10 +128,12 @@ impl LispObject {
         }
     }
 
-    /// Try to convert to f64
+    /// Try to get float value - only returns Some if value IS a float
+    /// Does NOT convert other types (bignums, ratios) to float
     pub fn as_float(self) -> Option<f64> {
-        if let Some(n) = self.as_fixnum() {
-            return Some(n as f64);
+        // Fixnums are not floats
+        if self.as_fixnum().is_some() {
+            return None;
         }
 
         // First check if it's actually a number
@@ -147,14 +149,7 @@ impl LispObject {
             }
             match &num.value {
                 NumberValue::Float(f) => Some(*f),
-                NumberValue::Bignum(b) => {
-                    // Convert Malachite Integer to f64 (approximate)
-                    b.to_string().parse().ok()
-                }
-                NumberValue::Ratio(r) => {
-                    // Convert Malachite Rational to f64 (approximate)
-                    r.to_string().parse().ok()
-                }
+                // Bignums and Ratios are NOT floats - don't convert them
                 _ => None,
             }
         } else {

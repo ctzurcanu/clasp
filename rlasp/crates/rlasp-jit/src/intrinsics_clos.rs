@@ -39,15 +39,11 @@ fn get_generic_registry() -> &'static Mutex<HashMap<String, GenericFunction>> {
 /// Arguments: class_name (symbol), slot_names (list), superclasses (list - currently ignored)
 #[no_mangle]
 pub extern "C" fn cc_defclass(class_name: usize, slot_names: usize, _superclasses: usize) -> usize {
-    eprintln!("cc_defclass: start");
     // Extract class name from symbol
     let class_name_str = extract_string_from_cons_list(class_name);
-    eprintln!("cc_defclass: extracted class name: {}", class_name_str);
 
     // Extract slot names from list
-    eprintln!("cc_defclass: extracting slots");
     let slots = extract_string_list(slot_names);
-    eprintln!("cc_defclass: extracted slots: {:?}", slots);
 
     // Create and register the class
     let class_obj = Class::allocate(class_name_str.clone(), slots);
@@ -76,15 +72,10 @@ pub extern "C" fn cc_defgeneric(name: usize, _lambda_list: usize) -> usize {
 /// Define a method for a generic function
 #[no_mangle]
 pub extern "C" fn cc_defmethod(generic_name: usize, specializers: usize, function_ptr: usize, _arity: usize) -> usize {
-    eprintln!("cc_defmethod: start");
     let name_str = extract_string_from_cons_list(generic_name);
-    eprintln!("cc_defmethod: extracted name: {}", name_str);
     let spec_list = extract_string_list(specializers);
-    eprintln!("cc_defmethod: extracted specializers: {:?}", spec_list);
 
-    eprintln!("cc_defmethod: acquiring lock");
     let mut registry = get_generic_registry().lock().unwrap();
-    eprintln!("cc_defmethod: lock acquired");
     let gf = registry.entry(name_str).or_insert_with(|| GenericFunction {
         methods: Vec::new(),
     });
@@ -94,24 +85,15 @@ pub extern "C" fn cc_defmethod(generic_name: usize, specializers: usize, functio
     LispObject::t().raw()
 }
 
-/// Make an instance of a class - stack-based
-/// Pops: initargs, then class_name. Pushes: instance object
+/// Make an instance of a class
+/// Arguments: class_name (symbol), initargs (list of key-value pairs)
+/// Returns: instance object
 #[no_mangle]
-pub extern "C" fn cc_make_instance() {
-    let initargs = stack_pop_pointer();
-    let class_name = stack_pop_pointer();
-
+pub extern "C" fn cc_make_instance(class_name: usize, initargs: usize) -> usize {
     let class_name_str = extract_string_from_cons_list(class_name);
-    eprintln!("cc_make_instance: class_name_str = '{}'", class_name_str);
 
     let registry = get_class_registry().lock().unwrap();
-    eprintln!("cc_make_instance: registry has {} classes", registry.len());
-    for key in registry.keys() {
-        eprintln!("cc_make_instance: registry contains class '{}'", key);
-    }
     if let Some(&class_ptr) = registry.get(&class_name_str) {
-        eprintln!("cc_make_instance: found class");
-
         let instance_obj = Instance::allocate(class_ptr);
 
         // Initialize slots from initargs
@@ -121,11 +103,8 @@ pub extern "C" fn cc_make_instance() {
 
             // Parse initargs: (:slot-name value :slot-name value ...)
             let mut current = unsafe { LispObject::from_raw(initargs) };
-            eprintln!("cc_make_instance: processing initargs");
 
             while let Some(cons_ptr) = current.as_cons_ptr() {
-                eprintln!("cc_make_instance: found cons in initargs");
-
                 let cons = unsafe { &*cons_ptr };
                 let key = cons.car();
 
@@ -175,41 +154,28 @@ pub extern "C" fn cc_make_instance() {
             }
         }
 
-        stack_push_pointer(instance_obj.raw());
+        return instance_obj.raw();
     } else {
-        eprintln!("cc_make_instance: class '{}' not found in registry", class_name_str);
-        stack_push_nil();
+        return LispObject::nil().raw();
     }
 }
 
-/// Get slot value from an instance - stack-based
-/// Pops: slot_name, then instance. Pushes: slot value
+/// Get slot value from an instance
+/// Arguments: instance, slot_name (symbol)
+/// Returns: slot value
 #[no_mangle]
-pub extern "C" fn cc_slot_value() {
-    let slot_name = stack_pop_pointer();
-    let instance = stack_pop_pointer();
-
+pub extern "C" fn cc_slot_value(instance: usize, slot_name: usize) -> usize {
     let inst_obj = unsafe { LispObject::from_raw(instance) };
     let slot_name_str = extract_string_from_cons_list(slot_name);
-    eprintln!("cc_slot_value: slot_name_str = '{}'", slot_name_str);
 
     if let Some(inst_ptr) = inst_obj.as_instance_ptr() {
         let inst = unsafe { &*inst_ptr };
-        eprintln!("cc_slot_value: instance found");
-        eprintln!("cc_slot_value: instance has {} slots", inst.slots_count());
-        inst.debug_print_slots();
         if let Some(value) = inst.get_slot(&slot_name_str) {
-            eprintln!("cc_slot_value: slot '{}' found, value = {:?}", slot_name_str, value);
-            stack_push_pointer(value.raw());
-            return;
-        } else {
-            eprintln!("cc_slot_value: slot '{}' not found", slot_name_str);
+            return value.raw();
         }
-    } else {
-        eprintln!("cc_slot_value: not an instance");
     }
 
-    stack_push_nil();
+    LispObject::nil().raw()
 }
 
 /// Set slot value in an instance

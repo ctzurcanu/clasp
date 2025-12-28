@@ -590,6 +590,15 @@ pub(super) fn eval_symbolp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
 }
 
+pub(super) fn eval_errorp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("errorp requires 1 argument".to_string());
+    }
+    // No error type in EvalResult yet, always return NIL
+    let _ = eval_with_env(&args[0], env)?;
+    Ok(EvalResult::Nil)
+}
+
 pub(super) fn eval_gensym(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.len() > 1 {
         return Err("gensym requires 0 or 1 arguments".to_string());
@@ -1575,7 +1584,8 @@ pub(super) fn eval_class_of(args: &[ASTNode], env: &mut HashMap<String, EvalResu
     let obj = eval_with_env(&args[0], env)?;
     let class = match obj {
         EvalResult::Fixnum(_) => "FIXNUM",
-        EvalResult::Float(_) | EvalResult::Float(_) => "FLOAT",
+        EvalResult::Float(_) => "FLOAT",
+        EvalResult::Complex(_, _) => "COMPLEX",
         EvalResult::String(_) => "STRING",
         EvalResult::Symbol(_) => "SYMBOL",
         EvalResult::Cons(_, _) => "CONS",
@@ -1873,7 +1883,8 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::Fixnum(_) => "FIXNUM",
         EvalResult::Bignum(_) => "BIGNUM",
         EvalResult::Ratio(_) => "RATIO",
-        EvalResult::Float(_) | EvalResult::Float(_) => "FLOAT",
+        EvalResult::Float(_) => "FLOAT",
+        EvalResult::Complex(_, _) => "COMPLEX",
         EvalResult::Character(_) => "CHARACTER",
         EvalResult::String(_) => "STRING",
         EvalResult::Symbol(_) => "SYMBOL",
@@ -2064,6 +2075,9 @@ pub(super) fn eval_aref(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 }
 
 pub(super) fn eval_truncate(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    use malachite::Integer;
+    use malachite::num::conversion::traits::ExactFrom;
+
     // (truncate number &optional divisor)
     // Returns quotient and remainder as multiple values
     if args.is_empty() {
@@ -2077,6 +2091,84 @@ pub(super) fn eval_truncate(args: &[ASTNode], env: &mut HashMap<String, EvalResu
         EvalResult::Fixnum(1)
     };
 
+    // Handle bignum division with malachite
+    match (&number, &divisor) {
+        // Bignum / Bignum
+        (EvalResult::Bignum(n), EvalResult::Bignum(d)) => {
+            if *d == Integer::from(0) {
+                return Err("truncate: division by zero".to_string());
+            }
+            let quotient = n / d;
+            let remainder = n - (&quotient * d);
+            // Try to convert quotient to fixnum if it fits
+            let q_result = if let Ok(q) = i64::try_from(&quotient) {
+                EvalResult::Fixnum(q)
+            } else {
+                EvalResult::Bignum(quotient)
+            };
+            let r_result = if let Ok(r) = i64::try_from(&remainder) {
+                EvalResult::Fixnum(r)
+            } else {
+                EvalResult::Bignum(remainder)
+            };
+            return Ok(EvalResult::MultipleValues(vec![q_result, r_result]));
+        }
+        // Bignum / Fixnum
+        (EvalResult::Bignum(n), EvalResult::Fixnum(d)) if *d != 0 => {
+            let d_big = Integer::from(*d);
+            let quotient = n / &d_big;
+            let remainder = n - (&quotient * &d_big);
+            let q_result = if let Ok(q) = i64::try_from(&quotient) {
+                EvalResult::Fixnum(q)
+            } else {
+                EvalResult::Bignum(quotient)
+            };
+            let r_result = if let Ok(r) = i64::try_from(&remainder) {
+                EvalResult::Fixnum(r)
+            } else {
+                EvalResult::Bignum(remainder)
+            };
+            return Ok(EvalResult::MultipleValues(vec![q_result, r_result]));
+        }
+        // Fixnum / Bignum
+        (EvalResult::Fixnum(n), EvalResult::Bignum(d)) => {
+            if *d == Integer::from(0) {
+                return Err("truncate: division by zero".to_string());
+            }
+            let n_big = Integer::from(*n);
+            let quotient = &n_big / d;
+            let remainder = &n_big - (&quotient * d);
+            let q_result = if let Ok(q) = i64::try_from(&quotient) {
+                EvalResult::Fixnum(q)
+            } else {
+                EvalResult::Bignum(quotient)
+            };
+            let r_result = if let Ok(r) = i64::try_from(&remainder) {
+                EvalResult::Fixnum(r)
+            } else {
+                EvalResult::Bignum(remainder)
+            };
+            return Ok(EvalResult::MultipleValues(vec![q_result, r_result]));
+        }
+        // Ratio handling - convert to float for truncation
+        (EvalResult::Ratio(r), EvalResult::Fixnum(d)) if *d != 0 => {
+            let num_val = f64::exact_from(r);
+            let div_val = *d as f64;
+            let quotient = (num_val / div_val).trunc();
+            let remainder = num_val - (quotient * div_val);
+            return Ok(EvalResult::MultipleValues(vec![
+                EvalResult::Fixnum(quotient as i64),
+                if remainder.fract() == 0.0 {
+                    EvalResult::Fixnum(remainder as i64)
+                } else {
+                    EvalResult::Float(remainder)
+                }
+            ]));
+        }
+        _ => {}
+    }
+
+    // Fallback to float-based truncation for other numeric types
     let (num_val, div_val) = match (&number, &divisor) {
         (EvalResult::Fixnum(n), EvalResult::Fixnum(d)) if *d != 0 => (*n as f64, *d as f64),
         (EvalResult::Float(n), EvalResult::Fixnum(d)) if *d != 0 => (*n, *d as f64),

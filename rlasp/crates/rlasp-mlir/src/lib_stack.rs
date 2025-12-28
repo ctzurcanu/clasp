@@ -463,10 +463,10 @@ impl StackMLIRCodegen {
                 } else {
                     for (i, expr) in exprs.iter().enumerate() {
                         self.compile_expr(expr)?;
-                        // Pop all but the last result
+                        // Pop all but the last result to keep stack clean
                         if i < exprs.len() - 1 {
-                            // TODO: Should we pop intermediate results or leave them?
-                            // For now, assume they stay on stack (caller can clean up)
+                            let discard = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
                         }
                     }
                 }
@@ -543,13 +543,13 @@ impl StackMLIRCodegen {
                     // Evaluate test
                     self.compile_expr(test)?;
 
-                    // Pop and check
+                    // Pop and check against NIL (not 0 - NIL has a distinct representation)
                     let cond_val = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cond_val));
-                    let zero = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+                    let nil_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
                     let cond_bool = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, zero));
+                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, nil_val));
 
                     self.writeln(&format!("scf.if {} {{", cond_bool));
                     self.indent();
@@ -1039,11 +1039,11 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = scf.while (%arg0 = {}) : (i64) -> (i64) {{", final_list, list_val));
                 self.indent();
 
-                // Loop condition: current != nil (0)
-                let zero = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+                // Loop condition: current != nil
+                let nil_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
                 let cond = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi ne, %arg0, {} : i64", cond, zero));
+                self.writeln(&format!("{} = arith.cmpi ne, %arg0, {} : i64", cond, nil_val));
                 self.writeln(&format!("scf.condition({}) %arg0 : i64", cond));
 
                 self.dedent();
@@ -1160,10 +1160,10 @@ impl StackMLIRCodegen {
                     self.compile_expr(cond_expr)?;
                     let cond_val = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cond_val));
-                    let zero = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+                    let nil_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
                     let cond_bool = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, zero));
+                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, nil_val));
                     Some(cond_bool)
                 } else {
                     None
@@ -1380,9 +1380,25 @@ impl StackMLIRCodegen {
             // CLOS - Defclass
             ASTNode::Defclass { name, superclasses, slots } => {
                 // Define a new class using runtime system
+
+                // Build slot names list (list of symbols for each slot name)
+                self.writeln("func.call @stack_push_nil() : () -> ()");
+                for slot in slots.iter().rev() {
+                    // Create a symbol for the slot name
+                    let slot_name_sym = self.create_symbol_constant(&slot.name);
+
+                    let list_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", list_val));
+                    let new_list = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_list, slot_name_sym, list_val));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", new_list));
+                }
+                let slots_list = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", slots_list));
+
                 // Build superclasses list
                 self.writeln("func.call @stack_push_nil() : () -> ()");
-                for super_name in superclasses.iter().rev() {
+                for _super_name in superclasses.iter().rev() {
                     // TODO: look up superclass object
                     // For now, push nil for each superclass
                     self.writeln("func.call @stack_push_nil() : () -> ()");
@@ -1398,21 +1414,15 @@ impl StackMLIRCodegen {
                 let supers_list = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", supers_list));
 
-                // Build slots list (simplified - just count for now)
-                let slot_count = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant {} : i64", slot_count, slots.len()));
-                let slot_count_boxed = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", slot_count_boxed, slot_count));
-
                 // Create a symbol for the class name
                 let class_name_sym = self.create_symbol_constant(name);
 
-                // Call runtime to create class
+                // Call runtime to create class: cc_defclass(class_name, slot_names, superclasses)
                 let class_obj = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_defclass({}, {}, {}) : (i64, i64, i64) -> i64", class_obj, class_name_sym, supers_list, slot_count_boxed));
+                self.writeln(&format!("{} = func.call @cc_defclass({}, {}, {}) : (i64, i64, i64) -> i64", class_obj, class_name_sym, slots_list, supers_list));
 
                 // Generate accessor functions for slots
-                for (slot_idx, slot) in slots.iter().enumerate() {
+                for (_slot_idx, slot) in slots.iter().enumerate() {
                     if let Some(accessor_name) = &slot.accessor {
                         // Generate an accessor function
                         // (defun <accessor-name> (object) (slot-value object '<slot-name>))
@@ -1426,15 +1436,12 @@ impl StackMLIRCodegen {
                         let obj = self.fresh_ssa();
                         self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", obj));
 
-                        // Get slot index
-                        let slot_idx_ssa = self.fresh_ssa();
-                        self.writeln(&format!("{} = arith.constant {} : i64", slot_idx_ssa, slot_idx));
-                        let slot_idx_boxed = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", slot_idx_boxed, slot_idx_ssa));
+                        // Create slot name symbol
+                        let slot_name_sym = self.create_symbol_constant(&slot.name);
 
                         // Call runtime to get slot value
                         let slot_val = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_slot_value({}, {}) : (i64, i64) -> i64", slot_val, obj, slot_idx_boxed));
+                        self.writeln(&format!("{} = func.call @cc_slot_value({}, {}) : (i64, i64) -> i64", slot_val, obj, slot_name_sym));
 
                         // Push result to stack
                         self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", slot_val));
@@ -3693,6 +3700,118 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            "typecase" => {
+                // (typecase keyform (type1 body1...) (type2 body2...) ... [(otherwise body...)])
+                if args.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    return Ok(());
+                }
+
+                // Evaluate keyform once
+                self.compile_expr(&args[0])?;
+                let keyform_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", keyform_val));
+
+                let typecase_id = self.function_counter;
+                self.function_counter += 1;
+
+                // Process each type clause
+                for (i, clause) in args[1..].iter().enumerate() {
+                    match clause {
+                        ASTNode::Call { function: _, args: clause_args } if !clause_args.is_empty() => {
+                            // First element is the type specifier
+                            let type_spec = match &clause_args[0] {
+                                ASTNode::Variable(s) => s.as_str(),
+                                _ => "otherwise",
+                            };
+
+                            let then_block = format!("typecase_then_{}_{}", typecase_id, i);
+                            let next_block = if i < args.len() - 2 {
+                                format!("typecase_next_{}_{}", typecase_id, i + 1)
+                            } else {
+                                format!("typecase_end_{}", typecase_id)
+                            };
+
+                            if type_spec == "otherwise" || type_spec == "t" {
+                                // Default case - always matches
+                                self.writeln(&format!("cf.br ^{}", then_block));
+                            } else {
+                                // Call the appropriate type predicate
+                                let predicate = match type_spec {
+                                    "error" => "cc_errorp",
+                                    "number" => "cc_numberp",
+                                    "integer" => "cc_integerp",
+                                    "float" => "cc_floatp",
+                                    "rational" => "cc_rationalp",
+                                    "complex" => "cc_complexp",
+                                    "real" => "cc_realp",
+                                    "character" => "cc_characterp",
+                                    "string" => "cc_stringp",
+                                    "symbol" => "cc_symbolp",
+                                    "array" => "cc_arrayp",
+                                    "vector" => "cc_vectorp",
+                                    "hash-table" => "cc_hash_table_p",
+                                    "function" => "cc_functionp",
+                                    "null" | "nil" => "cc_null",
+                                    "cons" | "list" => "cc_is_cons",
+                                    _ => {
+                                        // Unknown type, skip to next
+                                        self.writeln(&format!("cf.br ^{}", next_block));
+                                        if i < args.len() - 2 {
+                                            self.writeln(&format!("^{}:", next_block));
+                                        }
+                                        continue;
+                                    }
+                                };
+
+                                let type_result = self.fresh_ssa();
+                                if predicate == "cc_is_cons" {
+                                    // cc_is_cons returns i32, need to extend to i64
+                                    let i32_result = self.fresh_ssa();
+                                    self.writeln(&format!("{} = func.call @{}({}) : (i64) -> i32", i32_result, predicate, keyform_val));
+                                    self.writeln(&format!("{} = arith.extsi {} : i32 to i64", type_result, i32_result));
+                                } else {
+                                    self.writeln(&format!("{} = func.call @{}({}) : (i64) -> i64", type_result, predicate, keyform_val));
+                                }
+
+                                let nil_val = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                                let is_match = self.fresh_ssa();
+                                self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", is_match, type_result, nil_val));
+
+                                self.writeln(&format!("cf.cond_br {}, ^{}, ^{}", is_match, then_block, next_block));
+                            }
+
+                            // Then block - execute body
+                            self.writeln(&format!("^{}:", then_block));
+                            if clause_args.len() > 1 {
+                                for (j, expr) in clause_args[1..].iter().enumerate() {
+                                    self.compile_expr(expr)?;
+                                    if j < clause_args.len() - 2 {
+                                        let _discard = self.fresh_ssa();
+                                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
+                                    }
+                                }
+                            } else {
+                                // No body, push nil
+                                self.writeln("func.call @stack_push_nil() : () -> ()");
+                            }
+                            self.writeln(&format!("cf.br ^typecase_end_{}", typecase_id));
+
+                            // Next test block
+                            if i < args.len() - 2 && type_spec != "otherwise" && type_spec != "t" {
+                                self.writeln(&format!("^{}:", next_block));
+                            }
+                        }
+                        _ => anyhow::bail!("typecase clause must be a list"),
+                    }
+                }
+
+                // End block - push nil if no clause matched
+                self.writeln(&format!("^typecase_end_{}:", typecase_id));
+                Ok(())
+            }
+
             "dotimes" => {
                 // (dotimes (var count [result]) body...)
                 if args.is_empty() {
@@ -4274,8 +4393,8 @@ impl StackMLIRCodegen {
             "multiple-value-bind" | "multiple-value-call" | "multiple-value-prog1" | "multiple-value-setq" |
             "catch" | "throw" | "unwind-protect" | "return" |
             "tagbody" | "go" | "prog" | "prog*" | "prog1" | "prog2" |
-            // Evaluation and compilation
-            "eval" | "compile" | "compile-file" | "load" | "require" | "provide" |
+            // Evaluation and compilation stubs (eval handled separately below)
+            "compile" | "compile-file" | "load" | "require" | "provide" |
             "constantp" | "macro-function" | "macroexpand" | "macroexpand-1" |
             // Declarations (typically ignored at runtime)
             "declare" | "ignore" | "ignorable" | "type" | "ftype" | "inline" | "notinline" |
@@ -4289,7 +4408,35 @@ impl StackMLIRCodegen {
             // Symbols
             "gensym" | "gentemp" | "symbol-name" | "symbol-package" | "symbol-value" |
             "symbol-function" | "symbol-plist" | "get" | "remprop" | "make-symbol" | "copy-symbol" |
-            "keywordp" |
+            "keywordp" => {
+                // Stub: push NIL for unimplemented functions
+                self.writeln("func.call @stack_push_nil() : () -> ()");
+                Ok(())
+            }
+
+            // Eval - evaluate a form at runtime
+            "eval" => {
+                if args.len() != 1 {
+                    anyhow::bail!("eval requires exactly 1 argument");
+                }
+                // Compile the argument (the form to evaluate)
+                self.compile_expr(&args[0])?;
+                let form = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", form));
+
+                // Build args list: (form . nil)
+                self.writeln("func.call @stack_push_nil() : () -> ()");
+                let nil_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", nil_val));
+                let args_list = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", args_list, form, nil_val));
+
+                // Call cc_eval with the args list
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_eval({}) : (i64) -> i64", result, args_list));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
 
             // Time functions
             "get-internal-real-time" => {
@@ -4347,7 +4494,7 @@ impl StackMLIRCodegen {
             "with-simple-restart" | "invoke-restart" | "find-restart" | "compute-restarts" |
             "restart-name" | "abort" | "continue" | "muffle-warning" | "store-value" | "use-value" |
             // Misc
-            "q" | "quote" | "cond" | "case" | "typecase" | "etypecase" | "ctypecase" |
+            "q" | "quote" | "cond" | "case" | "etypecase" | "ctypecase" |
             "identity" | "complement" | "constantly" |
             "special-operator-p" | "trace" | "untrace" | "step" | "time" | "describe" |
             "inspect" | "room" | "ed" | "apropos" | "apropos-list" | "dribble" |

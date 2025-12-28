@@ -16,6 +16,7 @@ pub mod hash_table;
 pub mod clos;
 pub mod eval_stack;
 pub mod closure;
+pub mod error;
 
 pub use stack::{TypeTag, ObjectHandle, allocate_object};
 pub use header::{TypeHeader, ObjectType};
@@ -28,3 +29,4 @@ pub use string::RString;
 pub use hash_table::HashTable;
 pub use clos::{Class, Instance};
 pub use closure::Closure;
+pub use error::{LispError, ErrorKind};

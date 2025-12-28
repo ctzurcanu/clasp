@@ -1,6 +1,6 @@
 /// Core evaluation logic and module coordinator
 
-use super::eval_types::EvalResult;
+use super::eval_types::{EvalResult, RETURN_VALUE};
 use super::eval_arithmetic::*;
 use super::eval_list::*;
 use super::eval_control::*;
@@ -9,6 +9,37 @@ use crate::ir::{ASTNode, ConstantValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
+
+// Inline helper to decode return values (since decode_return_value is private in eval_control)
+fn decode_return_value_inline(encoded: &str) -> Result<EvalResult, String> {
+    if encoded == "NIL" {
+        Ok(EvalResult::Nil)
+    } else if encoded.starts_with("FIXNUM:") {
+        let num_str = &encoded[7..];
+        num_str.parse::<i64>()
+            .map(EvalResult::Fixnum)
+            .map_err(|_| "Failed to parse fixnum".to_string())
+    } else if encoded.starts_with("FLOAT:") {
+        let num_str = &encoded[6..];
+        num_str.parse::<f64>()
+            .map(EvalResult::Float)
+            .map_err(|_| "Failed to parse float".to_string())
+    } else if encoded.starts_with("BOOL:") {
+        let bool_str = &encoded[5..];
+        Ok(EvalResult::Bool(bool_str == "true"))
+    } else if encoded.starts_with("STRING:") {
+        Ok(EvalResult::String(encoded[7..].to_string()))
+    } else if encoded.starts_with("SYMBOL:") {
+        Ok(EvalResult::Symbol(encoded[7..].to_string()))
+    } else if encoded == "COMPLEX" {
+        RETURN_VALUE.with(|rv| {
+            rv.borrow_mut().take()
+                .ok_or_else(|| "return value not found".to_string())
+        })
+    } else {
+        Err(format!("Unknown return encoding: {}", encoded))
+    }
+}
 
 /// Main evaluation entry point
 pub fn eval(ast: &ASTNode) -> Result<EvalResult, String> {
@@ -101,6 +132,17 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 eval_with_env(then_branch, env)
             }
         }
+        ASTNode::Cond { clauses } => {
+            // Evaluate cond: test each clause in order, return result of first true test
+            for (test, result) in clauses {
+                let test_result = eval_with_env(test, env)?;
+                let is_nil = matches!(test_result, EvalResult::Nil | EvalResult::Bool(false));
+                if !is_nil {
+                    return eval_with_env(result, env);
+                }
+            }
+            Ok(EvalResult::Nil)
+        }
         ASTNode::Progn { exprs } => {
             let mut result = EvalResult::Nil;
             for expr in exprs {
@@ -140,6 +182,53 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             env.insert(var.clone(), val.clone());
             Ok(val)
         }
+        ASTNode::Defgeneric { name, lambda_list } => {
+            // Define a generic function - for now, create a placeholder lambda
+            let lambda = EvalResult::Lambda {
+                params: lambda_list.clone(),
+                defaults: HashMap::new(),
+                supplied_p_vars: HashMap::new(),
+                body: vec![ASTNode::nil()],  // Returns nil by default
+                env: Rc::new(RefCell::new(env.clone())),
+            };
+            env.insert(name.clone(), lambda);
+            Ok(EvalResult::Symbol(name.clone()))
+        }
+        ASTNode::Defmethod { generic_name, specializers: _, params, body } => {
+            // Define a method - replace the generic function with the actual implementation
+            let lambda = EvalResult::Lambda {
+                params: params.clone(),
+                defaults: HashMap::new(),
+                supplied_p_vars: HashMap::new(),
+                body: body.clone(),
+                env: Rc::new(RefCell::new(env.clone())),
+            };
+            env.insert(generic_name.clone(), lambda);
+            Ok(EvalResult::Symbol(generic_name.clone()))
+        }
+        ASTNode::Defclass { name, superclasses: _, slots } => {
+            // Define accessors for each slot
+            for slot in slots {
+                let slot_name = &slot.name;
+                // Create getter: (lambda (obj) (gethash 'slot-name obj))
+                let getter = EvalResult::Lambda {
+                    params: vec!["obj".to_string()],
+                    defaults: HashMap::new(),
+                    supplied_p_vars: HashMap::new(),
+                    body: vec![ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("gethash".to_string())),
+                        args: vec![
+                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                            ASTNode::Variable("obj".to_string()),
+                        ],
+                    }],
+                    env: Rc::new(RefCell::new(env.clone())),
+                };
+                // Register the accessor with the slot name
+                env.insert(slot_name.clone(), getter);
+            }
+            Ok(EvalResult::Symbol(name.clone()))
+        }
         ASTNode::HashTable { entries } => {
             // Create a hash table from the entries
             let mut table = std::collections::HashMap::new();
@@ -163,13 +252,36 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             let old_val = env.get(var).cloned();
 
             // Iterate from 0 to n-1
-            for i in 0..n {
+            'outer: for i in 0..n {
                 // Bind var to current index
                 env.insert(var.clone(), EvalResult::Fixnum(i as i64));
 
                 // Execute body forms
                 for form in body {
-                    eval_with_env(form, env)?;
+                    match eval_with_env(form, env) {
+                        Ok(_) => {},
+                        // Handle (return ...) which becomes (return-from nil ...)
+                        Err(e) if e.starts_with("RETURN-FROM:nil:") => {
+                            // Restore old value
+                            if let Some(val) = old_val {
+                                env.insert(var.clone(), val);
+                            } else {
+                                env.remove(var);
+                            }
+                            // Decode and return the value
+                            let value_part = &e["RETURN-FROM:nil:".len()..];
+                            return decode_return_value_inline(value_part);
+                        }
+                        Err(e) => {
+                            // Restore old value before propagating error
+                            if let Some(val) = old_val {
+                                env.insert(var.clone(), val);
+                            } else {
+                                env.remove(var);
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
             }
 
@@ -217,7 +329,30 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
 
                 // Execute body forms
                 for form in body {
-                    eval_with_env(form, env)?;
+                    match eval_with_env(form, env) {
+                        Ok(_) => {},
+                        // Handle (return ...) which becomes (return-from nil ...)
+                        Err(e) if e.starts_with("RETURN-FROM:nil:") => {
+                            // Restore old value
+                            if let Some(val) = old_val {
+                                env.insert(var.clone(), val);
+                            } else {
+                                env.remove(var);
+                            }
+                            // Decode and return the value
+                            let value_part = &e["RETURN-FROM:nil:".len()..];
+                            return decode_return_value_inline(value_part);
+                        }
+                        Err(e) => {
+                            // Restore old value before propagating error
+                            if let Some(val) = old_val {
+                                env.insert(var.clone(), val);
+                            } else {
+                                env.remove(var);
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
             }
 
@@ -1007,31 +1142,6 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                         };
                     }
                 }
-                "defgeneric" => {
-                    // (defgeneric name lambda-list &rest options)
-                    // For now, just define it as a stub function
-                    if args.len() >= 2 {
-                        if let ASTNode::Variable(name) = &args[0] {
-                            // defgeneric just reserves the name
-                            return ASTNode::setq(name.clone(), ASTNode::lambda(vec![], vec![]));
-                        }
-                    }
-                    return ASTNode::nil();
-                }
-                "defmethod" => {
-                    // (defmethod name [qualifiers] lambda-list body...)
-                    // Simplified: treat as defun
-                    if args.len() >= 3 {
-                        if let ASTNode::Variable(name) = &args[0] {
-                            // args[1] is lambda-list with specializers
-                            // Extract just parameter names for now
-                            let body = args[2..].to_vec();
-                            // Simplified lambda list extraction
-                            return ASTNode::setq(name.clone(), ASTNode::lambda(vec![], body));
-                        }
-                    }
-                    return ASTNode::nil();
-                }
                 "deftype" => {
                     // (deftype name lambda-list body...)
                     // For now, just return nil (type definitions don't affect runtime)
@@ -1248,6 +1358,82 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                         return ASTNode::nil();
                     }
                     return expand_cond_clauses(args);
+                }
+                "typecase" => {
+                    // (typecase keyform (type1 result1...) (type2 result2...) ...)
+                    // => (let ((temp keyform)) (cond ((predicate temp) result1...) ...))
+                    if args.is_empty() {
+                        return ASTNode::nil();
+                    }
+
+                    let keyform = args[0].clone();
+                    let temp_var = "__typecase_temp".to_string();
+
+                    let mut cond_clauses = Vec::new();
+
+                    for clause in &args[1..] {
+                        if let ASTNode::Call { function: type_spec_box, args: forms } = clause {
+                            // In (type-name form1 form2 ...), type_spec is in function position
+                            if let ASTNode::Variable(type_name) = &**type_spec_box {
+                                let type_name_str = type_name.as_str();
+
+                                // Special cases: otherwise/t always match
+                                if type_name_str == "otherwise" || type_name_str == "t" {
+                                    cond_clauses.push(ASTNode::Call {
+                                        function: Box::new(ASTNode::Variable("t".to_string())),
+                                        args: forms.clone(),
+                                    });
+                                    continue;
+                                }
+
+                                // Map type names to predicates
+                                let predicate = match type_name_str {
+                                    "error" => "errorp",
+                                    "number" => "numberp",
+                                    "integer" => "integerp",
+                                    "float" => "floatp",
+                                    "rational" => "rationalp",
+                                    "complex" => "complexp",
+                                    "real" => "realp",
+                                    "character" => "characterp",
+                                    "string" => "stringp",
+                                    "symbol" => "symbolp",
+                                    "array" | "simple-array" => "arrayp",
+                                    "vector" | "simple-vector" => "vectorp",
+                                    "hash-table" => "hash-table-p",
+                                    "function" => "functionp",
+                                    "null" | "nil" => "null",
+                                    "cons" => "consp",
+                                    "list" => "listp",
+                                    "atom" => "atom",
+                                    _ => {
+                                        // Unknown type, skip
+                                        continue;
+                                    }
+                                };
+
+                                let test = ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable(predicate.to_string())),
+                                    args: vec![ASTNode::Variable(temp_var.clone())],
+                                };
+
+                                cond_clauses.push(ASTNode::Call {
+                                    function: Box::new(test),
+                                    args: forms.clone(),
+                                });
+                            }
+                        }
+                    }
+
+                    let cond_expr = ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("cond".to_string())),
+                        args: cond_clauses,
+                    };
+
+                    return ASTNode::let_bindings(
+                        vec![(temp_var, keyform)],
+                        vec![cond_expr],
+                    );
                 }
                 "declare" => {
                     // (declare ...) - just ignore declarations for now
@@ -1766,6 +1952,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "stringp" => eval_stringp(args, env),
             "symbolp" => eval_symbolp(args, env),
             "functionp" => eval_functionp(args, env),
+            "errorp" => eval_errorp(args, env),
             "string" => {
                 // Convert to string
                 if args.is_empty() {
@@ -2211,8 +2398,6 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
 
             // Common Lisp definition forms
             "deftype" => Ok(EvalResult::Nil), // Stub - type definitions
-            "defmethod" => Ok(EvalResult::Nil), // Stub - CLOS methods
-            "defgeneric" => Ok(EvalResult::Nil), // Stub - CLOS generics
             "defsetf" => Ok(EvalResult::Nil), // Stub - setf expanders
             "defalias" => Ok(EvalResult::Nil), // Stub - function aliases
             "defconstant-equal" => Ok(EvalResult::Nil), // Stub - core:defconstant-equal

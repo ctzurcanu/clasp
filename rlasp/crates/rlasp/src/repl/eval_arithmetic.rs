@@ -9,8 +9,60 @@ use std::cell::RefCell;
 use malachite::Integer;
 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
+// Helper to convert numeric EvalResult to (real, imag) complex pair
+fn to_complex(val: &EvalResult) -> Option<(f64, f64)> {
+    match val {
+        EvalResult::Fixnum(n) => Some((*n as f64, 0.0)),
+        EvalResult::Float(f) => Some((*f, 0.0)),
+        EvalResult::Complex(re, im) => Some((*re, *im)),
+        EvalResult::Bignum(b) => {
+            use malachite::num::conversion::traits::ConvertibleFrom;
+            if f64::convertible_from(b) {
+                use malachite::num::conversion::traits::RoundingFrom;
+                use malachite::rounding_modes::RoundingMode;
+                Some((f64::rounding_from(b, RoundingMode::Nearest).0, 0.0))
+            } else {
+                None
+            }
+        }
+        EvalResult::Ratio(r) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            Some((f64::rounding_from(r, RoundingMode::Nearest).0, 0.0))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn eval_add_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     use malachite::Rational;
+
+    // First pass: check if any complex numbers
+    let mut has_complex = false;
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        let val = primary_value(eval_with_env(arg, env)?);
+        if matches!(val, EvalResult::Complex(_, _)) {
+            has_complex = true;
+        }
+        evaluated_args.push(val);
+    }
+
+    // If any complex, do complex arithmetic
+    if has_complex {
+        let mut sum_re = 0.0;
+        let mut sum_im = 0.0;
+        for val in &evaluated_args {
+            match to_complex(val) {
+                Some((re, im)) => {
+                    sum_re += re;
+                    sum_im += im;
+                }
+                None => return Err("+ requires numeric arguments".to_string()),
+            }
+        }
+        return Ok(EvalResult::Complex(sum_re, sum_im));
+    }
 
     let mut sum_bigint = Integer::from(0);
     let mut sum_ratio = Rational::from(0);
@@ -18,8 +70,7 @@ pub(super) fn eval_add_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
     let mut has_float = false;
     let mut has_ratio = false;
 
-    for arg in args {
-        let val = primary_value(eval_with_env(arg, env)?);
+    for val in evaluated_args {
         match val {
             EvalResult::Fixnum(n) => {
                 sum_bigint += Integer::from(n);
@@ -77,17 +128,51 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
         return Err("- requires at least one argument".to_string());
     }
 
-    let first = primary_value(eval_with_env(&args[0], env)?);
+    // First pass: evaluate all args and check for complex
+    let mut has_complex = false;
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        let val = primary_value(eval_with_env(arg, env)?);
+        if matches!(val, EvalResult::Complex(_, _)) {
+            has_complex = true;
+        }
+        evaluated_args.push(val);
+    }
+
+    // Complex arithmetic
+    if has_complex {
+        let first = to_complex(&evaluated_args[0])
+            .ok_or_else(|| "- requires numeric arguments".to_string())?;
+        let mut result_re = first.0;
+        let mut result_im = first.1;
+
+        if evaluated_args.len() == 1 {
+            return Ok(EvalResult::Complex(-result_re, -result_im));
+        }
+
+        for val in &evaluated_args[1..] {
+            match to_complex(val) {
+                Some((re, im)) => {
+                    result_re -= re;
+                    result_im -= im;
+                }
+                None => return Err("- requires numeric arguments".to_string()),
+            }
+        }
+        return Ok(EvalResult::Complex(result_re, result_im));
+    }
+
+    let first = evaluated_args.remove(0);
     let (mut result_bigint, mut result_ratio, mut result_float, mut has_float, mut has_ratio) = match first {
         EvalResult::Fixnum(n) => (Integer::from(n), Rational::from(n), n as f64, false, false),
-        EvalResult::Bignum(b) => (b.clone(), Rational::from(b), 0.0, false, false),
+        EvalResult::Bignum(b) => (b.clone(), Rational::from(b.clone()), 0.0, false, false),
         EvalResult::Ratio(r) => (Integer::from(0), r, 0.0, false, true),
         EvalResult::Float(f) => (Integer::from(0), Rational::from(0), f, true, false),
-        EvalResult::Nil => (Integer::from(0), Rational::from(0), 0.0, false, false), // Treat nil as 0
+        EvalResult::Nil => (Integer::from(0), Rational::from(0), 0.0, false, false),
         _ => return Err("- requires numeric arguments".to_string()),
     };
 
-    if args.len() == 1 {
+    if evaluated_args.is_empty() {
         return if has_float {
             Ok(EvalResult::Float(-result_float))
         } else if has_ratio {
@@ -112,8 +197,7 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
         };
     }
 
-    for arg in &args[1..] {
-        let val = primary_value(eval_with_env(arg, env)?);
+    for val in evaluated_args {
         match val {
             EvalResult::Fixnum(n) => {
                 result_bigint -= Integer::from(n);
@@ -132,9 +216,7 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 has_float = true;
                 result_float -= f;
             }
-            EvalResult::Nil => {
-                // Treat nil as 0 - don't subtract anything
-            }
+            EvalResult::Nil => {}
             _ => return Err("- requires numeric arguments".to_string()),
         }
     }
@@ -153,7 +235,6 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
             Ok(EvalResult::Ratio(result_ratio))
         }
     } else {
-        // Try to fit in Fixnum, otherwise return Bignum
         if i64::convertible_from(&result_bigint) {
             Ok(EvalResult::Fixnum(i64::exact_from(&result_bigint)))
         } else {
@@ -165,14 +246,44 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
 pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     use malachite::Rational;
 
+    // First pass: evaluate all args and check for complex
+    let mut has_complex = false;
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        let val = primary_value(eval_with_env(arg, env)?);
+        if matches!(val, EvalResult::Complex(_, _)) {
+            has_complex = true;
+        }
+        evaluated_args.push(val);
+    }
+
+    // Complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+    if has_complex {
+        let mut result_re = 1.0;
+        let mut result_im = 0.0;
+
+        for val in &evaluated_args {
+            match to_complex(val) {
+                Some((re, im)) => {
+                    // (result_re + result_im*i) * (re + im*i)
+                    let new_re = result_re * re - result_im * im;
+                    let new_im = result_re * im + result_im * re;
+                    result_re = new_re;
+                    result_im = new_im;
+                }
+                None => return Err("* requires numeric arguments".to_string()),
+            }
+        }
+        return Ok(EvalResult::Complex(result_re, result_im));
+    }
+
     let mut product_bigint = Integer::from(1);
     let mut product_ratio = Rational::from(1);
     let mut product_float: f64 = 1.0;
     let mut has_float = false;
     let mut has_ratio = false;
 
-    for arg in args {
-        let val = primary_value(eval_with_env(arg, env)?);
+    for val in evaluated_args {
         match val {
             EvalResult::Fixnum(n) => {
                 product_bigint *= Integer::from(n);
@@ -192,7 +303,6 @@ pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 product_float *= f;
             }
             EvalResult::Nil => {
-                // Treat nil as 0 for multiplication makes result 0
                 return Ok(EvalResult::Fixnum(0));
             }
             _ => return Err("* requires numeric arguments".to_string()),
@@ -213,7 +323,6 @@ pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
             Ok(EvalResult::Ratio(product_ratio))
         }
     } else {
-        // Try to fit in Fixnum, otherwise return Bignum
         if i64::convertible_from(&product_bigint) {
             Ok(EvalResult::Fixnum(i64::exact_from(&product_bigint)))
         } else {
@@ -622,7 +731,8 @@ pub(super) fn eval_numberp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         return Err("numberp requires 1 argument".to_string());
     }
     match eval_with_env(&args[0], env)? {
-        EvalResult::Fixnum(_) | EvalResult::Float(_) => Ok(EvalResult::Bool(true)),
+        EvalResult::Fixnum(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)
+            | EvalResult::Float(_) | EvalResult::Complex(_, _) => Ok(EvalResult::Bool(true)),
         _ => Ok(EvalResult::Nil),
     }
 }
@@ -845,7 +955,6 @@ pub(super) fn eval_sqrt(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 
 pub(super) fn eval_complex(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     // (complex real imaginary)
-    // Returns a list representation: (complex real imag)
     if args.len() != 2 {
         return Err("complex requires 2 arguments (real and imaginary parts)".to_string());
     }
@@ -853,18 +962,40 @@ pub(super) fn eval_complex(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     let real = primary_value(eval_with_env(&args[0], env)?);
     let imag = primary_value(eval_with_env(&args[1], env)?);
 
-    // For now, return a tagged list (complex real imag)
-    // This is evaluated as a special form
-    Ok(EvalResult::Cons(
-        Rc::new(RefCell::new(EvalResult::Symbol("complex".to_string()))),
-        Rc::new(RefCell::new(EvalResult::Cons(
-            Rc::new(RefCell::new(real)),
-            Rc::new(RefCell::new(EvalResult::Cons(
-                Rc::new(RefCell::new(imag)),
-                Rc::new(RefCell::new(EvalResult::Nil)),
-            ))),
-        ))),
-    ))
+    // Convert to f64
+    let real_f64 = match real {
+        EvalResult::Fixnum(n) => n as f64,
+        EvalResult::Float(f) => f,
+        EvalResult::Bignum(ref b) => {
+            use malachite::num::conversion::traits::ConvertibleFrom;
+            if f64::convertible_from(b) {
+                use malachite::num::conversion::traits::RoundingFrom;
+                use malachite::rounding_modes::RoundingMode;
+                f64::rounding_from(b, RoundingMode::Nearest).0
+            } else {
+                return Err("complex: real part too large for float conversion".to_string());
+            }
+        }
+        _ => return Err("complex: real part must be a number".to_string()),
+    };
+
+    let imag_f64 = match imag {
+        EvalResult::Fixnum(n) => n as f64,
+        EvalResult::Float(f) => f,
+        EvalResult::Bignum(ref b) => {
+            use malachite::num::conversion::traits::ConvertibleFrom;
+            if f64::convertible_from(b) {
+                use malachite::num::conversion::traits::RoundingFrom;
+                use malachite::rounding_modes::RoundingMode;
+                f64::rounding_from(b, RoundingMode::Nearest).0
+            } else {
+                return Err("complex: imaginary part too large for float conversion".to_string());
+            }
+        }
+        _ => return Err("complex: imaginary part must be a number".to_string()),
+    };
+
+    Ok(EvalResult::Complex(real_f64, imag_f64))
 }
 
 pub(super) fn eval_realpart(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -875,23 +1006,10 @@ pub(super) fn eval_realpart(args: &[ASTNode], env: &mut HashMap<String, EvalResu
 
     let val = primary_value(eval_with_env(&args[0], env)?);
 
-    // Check if it's a complex number (complex real imag)
     match val {
-        EvalResult::Cons(car, cdr) => {
-            let car_val = car.borrow();
-            if let EvalResult::Symbol(s) = &*car_val {
-                if s == "complex" {
-                    // Extract real part (second element)
-                    let cdr_val = cdr.borrow();
-                    if let EvalResult::Cons(real_cell, _) = &*cdr_val {
-                        return Ok(real_cell.borrow().clone());
-                    }
-                }
-            }
-            Err("realpart: argument is not a complex number".to_string())
-        }
+        EvalResult::Complex(re, _im) => Ok(EvalResult::Float(re)),
         // If it's a real number, return it as-is
-        EvalResult::Fixnum(_) | EvalResult::Float(_) => Ok(val),
+        EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_) => Ok(val),
         _ => Err("realpart requires a number".to_string()),
     }
 }
@@ -982,26 +1100,10 @@ pub(super) fn eval_imagpart(args: &[ASTNode], env: &mut HashMap<String, EvalResu
 
     let val = primary_value(eval_with_env(&args[0], env)?);
 
-    // Check if it's a complex number (complex real imag)
     match val {
-        EvalResult::Cons(car, cdr) => {
-            let car_val = car.borrow();
-            if let EvalResult::Symbol(s) = &*car_val {
-                if s == "complex" {
-                    // Extract imaginary part (third element)
-                    let cdr_val = cdr.borrow();
-                    if let EvalResult::Cons(_, imag_cons) = &*cdr_val {
-                        let imag_cons_val = imag_cons.borrow();
-                        if let EvalResult::Cons(imag_cell, _) = &*imag_cons_val {
-                            return Ok(imag_cell.borrow().clone());
-                        }
-                    }
-                }
-            }
-            Err("imagpart: argument is not a complex number".to_string())
-        }
+        EvalResult::Complex(_re, im) => Ok(EvalResult::Float(im)),
         // If it's a real number, return 0
-        EvalResult::Fixnum(_) | EvalResult::Float(_) => Ok(EvalResult::Fixnum(0)),
+        EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_) => Ok(EvalResult::Fixnum(0)),
         _ => Err("imagpart requires a number".to_string()),
     }
 }

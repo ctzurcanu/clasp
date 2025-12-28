@@ -125,6 +125,36 @@ fn encode_return_value(val: &EvalResult) -> String {
     }
 }
 
+// Decode the "RETURN:TYPE:value" format from eval_return
+fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
+    if e == "RETURN:NIL" {
+        Ok(EvalResult::Nil)
+    } else if e.starts_with("RETURN:FIXNUM:") {
+        let num_str = &e[14..];
+        num_str.parse::<i64>()
+            .map(EvalResult::Fixnum)
+            .map_err(|_| "Failed to parse fixnum".to_string())
+    } else if e.starts_with("RETURN:FLOAT:") {
+        let num_str = &e[13..];
+        num_str.parse::<f64>()
+            .map(EvalResult::Float)
+            .map_err(|_| "Failed to parse float".to_string())
+    } else if e.starts_with("RETURN:BOOL:") {
+        let bool_str = &e[12..];
+        Ok(EvalResult::Bool(bool_str == "true"))
+    } else if e.starts_with("RETURN:STRING:") {
+        Ok(EvalResult::String(e[14..].to_string()))
+    } else if e.starts_with("RETURN:SYMBOL:") {
+        Ok(EvalResult::Symbol(e[14..].to_string()))
+    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e == "RETURN:COMPLEX" {
+        RETURN_VALUE.with(|rv| {
+            rv.borrow_mut().take().ok_or_else(|| "return value not found".to_string())
+        })
+    } else {
+        Ok(EvalResult::Nil)
+    }
+}
+
 fn decode_return_value(encoded: String) -> Result<EvalResult, String> {
     if encoded == "NIL" {
         Ok(EvalResult::Nil)
@@ -483,18 +513,31 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         for form in body_forms {
             match eval_with_env(form, env) {
                 Ok(_) => {},
-                Err(e) if e.starts_with("RETURN:") => {
-                    // Restore old value and return
-                    if let Some(val) = old_val {
+                // Check RETURN-FROM:nil: FIRST (more specific pattern)
+                Err(e) if e.starts_with("RETURN-FROM:nil:") => {
+                    // Handle return-from nil format (from (return ...) which converts to (return-from nil ...))
+                    if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
                     } else {
                         env.remove(&var_name);
                     }
-                    return decode_return_value(e);
+                    let value_part = &e["RETURN-FROM:nil:".len()..];
+                    return decode_return_value(value_part.to_string());
+                }
+                // Then check RETURN: (less specific pattern)
+                Err(e) if e.starts_with("RETURN:") => {
+                    // Restore old value and return
+                    if let Some(val) = old_val.clone() {
+                        env.insert(var_name.clone(), val);
+                    } else {
+                        env.remove(&var_name);
+                    }
+                    // Decode the return value
+                    return decode_return_from_format(&e);
                 }
                 Err(e) => {
                     // Restore old value before propagating error
-                    if let Some(val) = old_val {
+                    if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
                     } else {
                         env.remove(&var_name);
