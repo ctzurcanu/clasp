@@ -1,7 +1,7 @@
 /// Convert LispObject from rlasp-reader to ASTNode for evaluation
 
 use crate::ir::{ASTNode, ConstantValue, SlotSpec};
-use rlasp_runtime::LispObject;
+use rlasp_runtime::{LispObject, RVector, header::{TypeHeader, ObjectType}};
 
 pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     // Special case: raw value 0 is ambiguous - it could be fixnum(0) or nil()
@@ -19,47 +19,60 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
     // T (represented as fixnum 1 - already checked above)
 
-    // General object - could be Symbol or Number
+    // General object - could be Symbol, Number, Vector, etc.
     if obj.is_general() {
-        // Try Number first (Float, Bignum, etc.)
-        if let Some(f) = obj.as_float() {
-            return Ok(ASTNode::float(f));
-        }
+        // Get pointer for type header checking
+        if let Some(ptr) = obj.as_general_ptr::<u8>() {
+            if !ptr.is_null() {
+                // Check type header to determine actual type
+                if let Some(obj_type) = unsafe { TypeHeader::from_ptr(ptr) } {
+                    match obj_type {
+                        ObjectType::Vector => {
+                            let vector = unsafe { &*(ptr as *const RVector) };
+                            let mut elements = Vec::new();
+                            for elem in vector.as_slice() {
+                                elements.push(lisp_to_ast(*elem)?);
+                            }
+                            return Ok(ASTNode::Vector(elements));
+                        }
+                        ObjectType::Symbol => {
+                            let symbol = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                            let name = symbol.name();
 
-        // Try Bignum
-        if let Some(num_ptr) = obj.as_general_ptr::<rlasp_runtime::Number>() {
-            if !num_ptr.is_null() {
-                let num = unsafe { &*num_ptr };
-                if let Some(bignum) = num.as_bignum() {
-                    // Convert bignum to string representation for IR
-                    return Ok(ASTNode::Constant(ConstantValue::Bignum(bignum.to_string())));
+                            // Check if it's a string disguised as a symbol (starts and ends with ")
+                            if name.starts_with('"') && name.ends_with('"') {
+                                let string_content = &name[1..name.len()-1];
+                                return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
+                            }
+
+                            // Special case: the symbol 'nil' should be treated as NIL constant
+                            if name.to_lowercase() == "nil" {
+                                return Ok(ASTNode::nil());
+                            }
+
+                            // Special case: the symbol 't' should be treated as T (true)
+                            if name.to_lowercase() == "t" {
+                                return Ok(ASTNode::Constant(ConstantValue::T));
+                            }
+
+                            return Ok(ASTNode::variable(name.to_string()));
+                        }
+                        ObjectType::Number => {
+                            // Try Float first
+                            if let Some(f) = obj.as_float() {
+                                return Ok(ASTNode::float(f));
+                            }
+                            // Try Bignum
+                            let num = unsafe { &*(ptr as *const rlasp_runtime::Number) };
+                            if let Some(bignum) = num.as_bignum() {
+                                return Ok(ASTNode::Constant(ConstantValue::Bignum(bignum.to_string())));
+                            }
+                        }
+                        _ => {
+                            // Other types - fall through to error
+                        }
+                    }
                 }
-            }
-        }
-
-        // Then try Symbol
-        if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-            if !symbol_ptr.is_null() {
-                let symbol = unsafe { &*symbol_ptr };
-                let name = symbol.name();
-
-                // Check if it's a string disguised as a symbol (starts and ends with ")
-                if name.starts_with('"') && name.ends_with('"') {
-                    let string_content = &name[1..name.len()-1];
-                    return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
-                }
-
-                // Special case: the symbol 'nil' should be treated as NIL constant
-                if name.to_lowercase() == "nil" {
-                    return Ok(ASTNode::nil());
-                }
-
-                // Special case: the symbol 't' should be treated as T (true)
-                if name.to_lowercase() == "t" {
-                    return Ok(ASTNode::Constant(ConstantValue::T));
-                }
-
-                return Ok(ASTNode::variable(name.to_string()));
             }
         }
     }
@@ -72,7 +85,7 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     // Character
     if obj.is_character() {
         if let Some(ch) = obj.as_character() {
-            return Ok(ASTNode::Constant(ConstantValue::String(ch.to_string())));
+            return Ok(ASTNode::Constant(ConstantValue::Character(ch)));
         }
     }
 
@@ -111,11 +124,12 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                 if name == "quote" {
                     // (quote x) -> Quote(x)
+                    // IMPORTANT: Convert quoted content as DATA, not as CODE
                     if cdr.is_cons() {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                             if !cdr_ptr.is_null() {
                                 let cdr_cons = unsafe { &*cdr_ptr };
-                                let quoted = lisp_to_ast(cdr_cons.car())?;
+                                let quoted = lisp_to_ast_as_data(cdr_cons.car())?;
                                 return Ok(ASTNode::Quote(Box::new(quoted)));
                             }
                         }
@@ -169,7 +183,17 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
-                let name = symbol.name();
+                let raw_name = symbol.name();
+
+                // Normalize name by stripping common package prefixes (case-insensitive)
+                let name_lower = raw_name.to_lowercase();
+                let name = if name_lower.starts_with("cl:") || name_lower.starts_with("cl::") {
+                    raw_name.splitn(2, ':').last().unwrap_or(raw_name).trim_start_matches(':')
+                } else if name_lower.starts_with("common-lisp:") || name_lower.starts_with("common-lisp::") {
+                    raw_name.splitn(2, ':').last().unwrap_or(raw_name).trim_start_matches(':')
+                } else {
+                    raw_name
+                };
 
                 match name {
                     "if" => {
@@ -215,51 +239,46 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         };
                         return Ok(ASTNode::if_then_else(negated_test, body, ASTNode::nil()));
                     }
-                    "case" => {
+                    "case" | "ecase" => {
                         // (case expr (key1 result1...) (key2 result2...) ...)
                         // => (let ((tmp expr)) (cond ((eql tmp key1) result1...) ...))
-                        let args = cdr_to_vec(cdr)?;
-                        if args.is_empty() {
+                        // Handle case clauses at raw LispObject level to avoid
+                        // interpreting key lists as function calls
+                        let raw_clauses = raw_cdr_to_vec(cdr.clone())?;
+                        if raw_clauses.is_empty() {
                             return Err("case requires at least 1 argument (keyform)".to_string());
                         }
 
-                        let keyform = args[0].clone();
+                        let keyform = lisp_to_ast(raw_clauses[0].clone())?;
                         let tmp_var = "__case_tmp".to_string();
 
-                        // Build cond clauses
+                        // Build cond clauses from raw LispObjects
                         let mut cond_clauses = Vec::new();
-                        for clause_ast in &args[1..] {
-                            match clause_ast {
-                                ASTNode::Call { function, args: clause_body } => {
-                                    let key = (**function).clone();
-                                    // Check if key is 't' or 'otherwise' (default case)
-                                    let test = if let ASTNode::Variable(k) = &key {
-                                        if k == "t" || k == "otherwise" {
-                                            ASTNode::t()
-                                        } else {
-                                            // (eql tmp key)
-                                            ASTNode::call(
-                                                ASTNode::variable("eql"),
-                                                vec![ASTNode::variable(&tmp_var), key.clone()]
-                                            )
-                                        }
-                                    } else {
-                                        // (eql tmp key)
-                                        ASTNode::call(
-                                            ASTNode::variable("eql"),
-                                            vec![ASTNode::variable(&tmp_var), key.clone()]
-                                        )
-                                    };
+                        for raw_clause in &raw_clauses[1..] {
+                            if let Some(clause_cons) = raw_clause.as_cons_ptr() {
+                                let clause_cons = unsafe { &*clause_cons };
+                                let key_obj = clause_cons.car();
+                                let body_cdr = clause_cons.cdr();
 
-                                    let result = if clause_body.len() == 1 {
-                                        clause_body[0].clone()
-                                    } else {
-                                        ASTNode::progn(clause_body.clone())
-                                    };
+                                // Convert key to test expression
+                                let test = case_key_to_test(&key_obj, &tmp_var)?;
 
-                                    cond_clauses.push((test, result));
-                                }
-                                _ => return Err("case clause must be a list".to_string()),
+                                // Convert body forms
+                                let body_forms = raw_cdr_to_vec(body_cdr)?;
+                                let body_asts: Result<Vec<_>, _> = body_forms.iter()
+                                    .map(|o| lisp_to_ast(o.clone()))
+                                    .collect();
+                                let body_asts = body_asts?;
+
+                                let result = if body_asts.len() == 1 {
+                                    body_asts[0].clone()
+                                } else if body_asts.is_empty() {
+                                    ASTNode::nil()
+                                } else {
+                                    ASTNode::progn(body_asts)
+                                };
+
+                                cond_clauses.push((test, result));
                             }
                         }
 
@@ -323,20 +342,33 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                         for clause_ast in raw_clauses {
                             // Each clause should be a list (test result)
-                            match clause_ast {
-                                ASTNode::Call { function, args } if args.len() >= 1 => {
+                            match &clause_ast {
+                                ASTNode::Call { function, args } => {
                                     // The test is the function, results are the args
-                                    // If there's only one arg, use it as result
-                                    // If there are multiple args, wrap in progn
-                                    let test = (*function).clone();
-                                    let result = if args.len() == 1 {
+                                    let test = (**function).clone();
+                                    let result = if args.is_empty() {
+                                        // (test) - result is test value itself
+                                        test.clone()
+                                    } else if args.len() == 1 {
                                         args[0].clone()
                                     } else {
-                                        ASTNode::progn(args)
+                                        ASTNode::progn(args.clone())
                                     };
                                     clauses.push((test, result));
                                 }
-                                _ => return Err("cond clause must be a list (test result...)".to_string()),
+                                ASTNode::Quote(inner) => {
+                                    // Quoted form as clause - unlikely but handle it
+                                    // Treat quote as test, and its value as result
+                                    clauses.push((clause_ast.clone(), clause_ast.clone()));
+                                }
+                                ASTNode::Constant(ConstantValue::Nil) => {
+                                    // Empty clause () - skip
+                                }
+                                _ => {
+                                    // For unsupported patterns, skip and continue
+                                    // or treat the clause as (test) where result is test
+                                    clauses.push((clause_ast.clone(), clause_ast.clone()));
+                                }
                             }
                         }
 
@@ -462,162 +494,15 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // Parse loop forms with full Common Lisp syntax:
                         // (loop for var from start below limit [when/unless/if condition] collect/sum expr [else collect/sum expr])
                         let cdr_list = cdr_to_vec(cdr)?;
-                        if cdr_list.len() < 4 {
-                            return Err("loop requires at least: for var below limit collect/sum expr".to_string());
+
+                        // Try to parse as simple for loop, fall back to Call if parsing fails
+                        if let Some(loop_ast) = try_parse_simple_loop(&cdr_list) {
+                            return Ok(loop_ast);
                         }
-
-                        // Check for "for"
-                        if let ASTNode::Variable(s) = &cdr_list[0] {
-                            if s != "for" {
-                                return Err("loop must start with 'for'".to_string());
-                            }
-                        } else {
-                            return Err("loop must start with 'for'".to_string());
-                        }
-
-                        // Get var
-                        let var = if let ASTNode::Variable(v) = &cdr_list[1] {
-                            v.clone()
-                        } else {
-                            return Err("loop var must be a symbol".to_string());
-                        };
-
-                        // Parse "from start below limit" or "below limit"
-                        let mut idx = 2;
-                        let start = if let ASTNode::Variable(s) = &cdr_list[idx] {
-                            if s == "from" {
-                                idx += 1;
-                                if idx >= cdr_list.len() {
-                                    return Err("loop 'from' requires start value".to_string());
-                                }
-                                let start_val = cdr_list[idx].clone();
-                                idx += 1;
-                                Some(Box::new(start_val))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        // Check for "below"
-                        if idx >= cdr_list.len() {
-                            return Err("loop requires 'below'".to_string());
-                        }
-                        if let ASTNode::Variable(s) = &cdr_list[idx] {
-                            if s != "below" {
-                                return Err("loop requires 'below'".to_string());
-                            }
-                        } else {
-                            return Err("loop requires 'below'".to_string());
-                        }
-                        idx += 1;
-
-                        // Get limit
-                        if idx >= cdr_list.len() {
-                            return Err("loop 'below' requires limit value".to_string());
-                        }
-                        let limit = Box::new(cdr_list[idx].clone());
-                        idx += 1;
-
-                        // Check for optional "when", "unless", or "if" condition
-                        let when_condition = if idx < cdr_list.len() {
-                            if let ASTNode::Variable(s) = &cdr_list[idx] {
-                                if s == "when" || s == "if" || s == "unless" {
-                                    idx += 1;
-                                    if idx >= cdr_list.len() {
-                                        return Err(format!("loop '{}' requires condition", s));
-                                    }
-                                    let cond = cdr_list[idx].clone();
-                                    idx += 1;
-                                    // Wrap unless in a not
-                                    if s == "unless" {
-                                        Some(Box::new(ASTNode::Call {
-                                            function: Box::new(ASTNode::Variable("not".to_string())),
-                                            args: vec![cond],
-                                        }))
-                                    } else {
-                                        Some(Box::new(cond))
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        // Check for "collect" or "sum"
-                        if idx >= cdr_list.len() {
-                            return Err("loop requires 'collect' or 'sum'".to_string());
-                        }
-                        let (collect, sum) = if let ASTNode::Variable(s) = &cdr_list[idx] {
-                            idx += 1;
-                            if s == "collect" {
-                                if idx >= cdr_list.len() {
-                                    return Err("loop 'collect' requires expression".to_string());
-                                }
-                                (Some(Box::new(cdr_list[idx].clone())), None)
-                            } else if s == "sum" {
-                                if idx >= cdr_list.len() {
-                                    return Err("loop 'sum' requires expression".to_string());
-                                }
-                                (None, Some(Box::new(cdr_list[idx].clone())))
-                            } else {
-                                return Err("loop requires 'collect' or 'sum'".to_string());
-                            }
-                        } else {
-                            return Err("loop requires 'collect' or 'sum'".to_string());
-                        };
-                        idx += 1;
-
-                        // Check for optional "else" clause
-                        let (else_collect, else_sum) = if idx < cdr_list.len() {
-                            if let ASTNode::Variable(s) = &cdr_list[idx] {
-                                if s == "else" {
-                                    idx += 1;
-                                    if idx >= cdr_list.len() {
-                                        return Err("loop 'else' requires 'collect' or 'sum'".to_string());
-                                    }
-                                    if let ASTNode::Variable(action) = &cdr_list[idx] {
-                                        idx += 1;
-                                        if action == "collect" {
-                                            if idx >= cdr_list.len() {
-                                                return Err("loop else 'collect' requires expression".to_string());
-                                            }
-                                            (Some(Box::new(cdr_list[idx].clone())), None)
-                                        } else if action == "sum" {
-                                            if idx >= cdr_list.len() {
-                                                return Err("loop else 'sum' requires expression".to_string());
-                                            }
-                                            (None, Some(Box::new(cdr_list[idx].clone())))
-                                        } else {
-                                            return Err("loop else requires 'collect' or 'sum'".to_string());
-                                        }
-                                    } else {
-                                        return Err("loop else requires 'collect' or 'sum'".to_string());
-                                    }
-                                } else {
-                                    (None, None)
-                                }
-                            } else {
-                                (None, None)
-                            }
-                        } else {
-                            (None, None)
-                        };
-
-                        return Ok(ASTNode::Loop {
-                            var,
-                            start,
-                            limit,
-                            when_condition,
-                            collect,
-                            sum,
-                            else_collect,
-                            else_sum,
+                        // Fall back to Call for complex/unsupported loop forms
+                        return Ok(ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("loop".to_string())),
+                            args: cdr_list,
                         });
                     }
                     "let" => {
@@ -669,112 +554,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // Return the expanded body as a progn
                         return Ok(ASTNode::Progn { exprs: expanded_body? });
                     }
-                    "macrolet" => {
-                        // Parse macrolet: (macrolet ((name (params...) body...) ...) body...)
-                        let args = cdr_to_vec(cdr)?;
-                        if args.len() < 2 {
-                            return Err("macrolet requires at least 2 arguments".to_string());
-                        }
-
-                        // Extract macro definitions
-                        let macros = extract_macrolet_bindings(&args[0])?;
-
-                        // Expand macros in the body
-                        let body = args[1..].to_vec();
-                        let mut expanded_body = Vec::new();
-                        for expr in body {
-                            expanded_body.push(expand_macrolet_in_ast(&expr, &macros)?);
-                        }
-
-                        return Ok(ASTNode::Progn { exprs: expanded_body });
-                    }
-                    "defun" => {
-                        let args = cdr_to_vec(cdr)?;
-                        if args.len() < 2 {
-                            return Err("defun requires at least 2 arguments (name params)".to_string());
-                        }
-                        // Extract function name (can be symbol or (setf symbol) or other forms)
-                        let name = match &args[0] {
-                            ASTNode::Variable(n) => n.clone(),
-                            ASTNode::Call { function, args: call_args } => {
-                                // Handle (setf name) form and other special forms
-                                if let ASTNode::Variable(f) = &**function {
-                                    if f == "setf" && call_args.len() >= 1 {
-                                        if let ASTNode::Variable(n) = &call_args[0] {
-                                            format!("(setf {})", n)
-                                        } else {
-                                            // Just use a generic name
-                                            format!("(setf-generic)")
-                                        }
-                                    } else {
-                                        // Other forms like (method ...) - generate unique name
-                                        format!("({})", f)
-                                    }
-                                } else {
-                                    // Generate generic name for complex forms
-                                    "(complex-defun)".to_string()
-                                }
-                            }
-                            _ => {
-                                // For any other form, generate a generic name
-                                "(generic-defun)".to_string()
-                            }
-                        };
-                        // Extract parameters and defaults
-                        let (params, defaults, supplied_p_vars) = extract_params_with_defaults(&args[1]);
-                        // Extract body (rest of the arguments, can be empty)
-                        let body = if args.len() > 2 {
-                            args[2..].to_vec()
-                        } else {
-                            vec![] // Empty body implicitly returns NIL
-                        };
-                        // Desugar to (setq name (lambda (params) body...))
-                        let lambda = ASTNode::lambda_with_supplied_p(params, defaults, supplied_p_vars, body);
-                        return Ok(ASTNode::setq(name, lambda));
-                    }
-                    "defmacro" => {
-                        let args = cdr_to_vec(cdr)?;
-                        if args.len() < 2 {
-                            return Err("defmacro requires at least 2 arguments (name params)".to_string());
-                        }
-                        // Extract macro name
-                        let name = match &args[0] {
-                            ASTNode::Variable(n) => n.clone(),
-                            _ => return Err("defmacro name must be a symbol".to_string()),
-                        };
-                        // Extract parameters (macros don't support optional/keyword params in simple form)
-                        let params = extract_params(&args[1]);
-                        // Extract body (rest of the arguments)
-                        let body = if args.len() > 2 {
-                            args[2..].to_vec()
-                        } else {
-                            vec![ASTNode::nil()] // Empty body returns NIL
-                        };
-                        // Desugar to (setq name (macro (params) body...))
-                        return Ok(ASTNode::setq(name, ASTNode::Macro { params, body }));
-                    }
-                    "defvar" | "defparameter" => {
-                        let args = cdr_to_vec(cdr)?;
-                        if args.is_empty() {
-                            return Err(format!("{} requires at least 1 argument (name [value] [doc])", name));
-                        }
-                        // Extract variable name
-                        let var_name = if let ASTNode::Variable(n) = &args[0] {
-                            n.clone()
-                        } else {
-                            return Err(format!("{} first argument must be a symbol", name));
-                        };
-                        // Extract value (second argument if present)
-                        let value = if args.len() > 1 {
-                            args[1].clone()
-                        } else {
-                            // No initial value - just declare the variable as nil
-                            ASTNode::nil()
-                        };
-                        // Ignore doc string if present (args[2])
-                        // Desugar to (setq name value)
-                        return Ok(ASTNode::setq(var_name, value));
-                    }
+                    // "macrolet" is handled in eval_core.rs to properly evaluate macro bodies
+                    // (the compile-time approach here couldn't handle (list ...) or other evaluated forms)
+                    // "defun", "defmacro", "defvar", "defparameter" - handled in eval_core.rs
+                    // to preserve forms for macros. Fall through to generic Call handling.
                     "defstruct" => {
                         let args = cdr_to_vec(cdr)?;
                         if args.is_empty() {
@@ -1183,126 +966,14 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         });
                     }
                     "define-condition" => {
-                        // (define-condition name (parent-conditions...) ((slot options...) ...) options...)
-                        // Similar to defclass but for conditions
-                        // For now, treat it exactly like defclass
+                        // Pass through to eval_conditions::eval_define_condition
                         let args = cdr_to_vec(cdr)?;
-                        if args.len() < 2 {
-                            return Err("define-condition requires at least name and parent conditions".to_string());
-                        }
-
-                        // Parse condition name (lenient - accept any form)
-                        let condition_name = match &args[0] {
-                            ASTNode::Variable(n) => n.clone(),
-                            _ => "(generic-condition)".to_string(),
-                        };
-
-                        // Parse slots (args[2] if it exists, otherwise empty)
-                        let slots_def = if args.len() > 2 { &args[2] } else { &ASTNode::Constant(ConstantValue::Nil) };
-
-                        // Parse slot definitions (same as defclass)
-                        let mut forms = Vec::new();
-
-                        match slots_def {
-                            ASTNode::Constant(ConstantValue::Nil) => {
-                                // No slots
-                            }
-                            ASTNode::Call { function, args: slot_list } => {
-                                // Process all slots
-                                let mut all_slots = vec![*function.clone()];
-                                all_slots.extend(slot_list.clone());
-
-                                for slot_def in all_slots {
-                                    match slot_def {
-                                        ASTNode::Call { function: slot_func, args: slot_options } => {
-                                            let slot_name = match &*slot_func {
-                                                ASTNode::Variable(name) => name.clone(),
-                                                _ => continue,
-                                            };
-
-                                            // Parse slot options (same as defclass)
-                                            let mut accessor: Option<String> = None;
-                                            let mut reader: Option<String> = None;
-
-                                            let mut i = 0;
-                                            while i < slot_options.len() {
-                                                if let ASTNode::Variable(option_name) = &slot_options[i] {
-                                                    if option_name.starts_with(':') {
-                                                        let option_key = option_name.as_str();
-                                                        if i + 1 < slot_options.len() {
-                                                            match option_key {
-                                                                ":accessor" => {
-                                                                    if let ASTNode::Variable(val) = &slot_options[i + 1] {
-                                                                        accessor = Some(val.clone());
-                                                                    }
-                                                                }
-                                                                ":reader" => {
-                                                                    if let ASTNode::Variable(val) = &slot_options[i + 1] {
-                                                                        reader = Some(val.clone());
-                                                                    }
-                                                                }
-                                                                _ => {}
-                                                            }
-                                                            i += 2;
-                                                        } else {
-                                                            i += 1;
-                                                        }
-                                                    } else {
-                                                        i += 1;
-                                                    }
-                                                } else {
-                                                    i += 1;
-                                                }
-                                            }
-
-                                            // Create accessor functions
-                                            if let Some(accessor_name) = accessor {
-                                                let reader_lambda = ASTNode::lambda(
-                                                    vec!["obj".to_string()],
-                                                    vec![ASTNode::Call {
-                                                        function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                                        args: vec![
-                                                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                                                            ASTNode::Variable("obj".to_string()),
-                                                        ],
-                                                    }],
-                                                );
-                                                forms.push(ASTNode::setq(accessor_name, reader_lambda));
-                                            } else if let Some(reader_name) = reader {
-                                                let reader_lambda = ASTNode::lambda(
-                                                    vec!["obj".to_string()],
-                                                    vec![ASTNode::Call {
-                                                        function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                                        args: vec![
-                                                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                                                            ASTNode::Variable("obj".to_string()),
-                                                        ],
-                                                    }],
-                                                );
-                                                forms.push(ASTNode::setq(reader_name, reader_lambda));
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-
-                        // Return all forms wrapped in progn, or nil if no forms
-                        if forms.is_empty() {
-                            return Ok(ASTNode::nil());
-                        } else {
-                            return Ok(ASTNode::progn(forms));
-                        }
+                        return Ok(ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("define-condition".to_string())),
+                            args,
+                        });
                     }
-                    "declaim" => {
-                        // (declaim declaration...)
-                        // Declarations are compile-time hints that can be ignored in interpreted mode
-                        // Common declarations: (optimize ...), (inline ...), (type ...), (ftype ...), (special ...)
-                        // For now, just return nil to allow code to parse without errors
-                        return Ok(ASTNode::nil());
-                    }
+                    // "declaim" - handled in eval_core.rs to preserve form for macros
                     "when" => {
                         let args = cdr_to_vec(cdr)?;
                         if args.is_empty() {
@@ -1423,12 +1094,16 @@ fn extract_params_with_defaults(ast: &ASTNode) -> (Vec<String>, std::collections
 }
 
 fn contains_unquote(ast: &ASTNode) -> bool {
+    // Check for unquote/unquote-splicing OUTSIDE of backquotes.
+    // Unquotes inside backquotes are expected and handled by expand_backquote,
+    // so we don't recurse into Backquote nodes.
     match ast {
         ASTNode::Unquote(_) | ASTNode::UnquoteSplicing(_) => true,
         ASTNode::Call { function, args } => {
             contains_unquote(function) || args.iter().any(|arg| contains_unquote(arg))
         }
-        ASTNode::Quote(inner) | ASTNode::Backquote(inner) => contains_unquote(inner),
+        ASTNode::Quote(inner) => contains_unquote(inner),
+        ASTNode::Backquote(_) => false, // Don't recurse into backquotes - unquotes inside are expected
         ASTNode::If { test, then_branch, else_branch } => {
             contains_unquote(test) || contains_unquote(then_branch) || contains_unquote(else_branch)
         }
@@ -1557,6 +1232,319 @@ fn expand_symbol_macros(ast: &ASTNode, bindings: &[(String, ASTNode)]) -> Result
     }
 }
 
+/// Try to parse a simple loop form (for var [from start] below/to/upto/downto/above limit collect/sum expr)
+/// Returns None if the loop form doesn't match our supported patterns
+fn try_parse_simple_loop(cdr_list: &[ASTNode]) -> Option<ASTNode> {
+    // Must have at least 4 elements: for var below limit collect/sum expr
+    if cdr_list.len() < 4 {
+        return None;
+    }
+
+    // Must start with "for"
+    let first = match &cdr_list[0] {
+        ASTNode::Variable(s) if s == "for" => s,
+        _ => return None,
+    };
+
+    // Get var
+    let var = match &cdr_list[1] {
+        ASTNode::Variable(v) => v.clone(),
+        _ => return None,
+    };
+
+    // Parse "from start below/to/upto/downto/above limit" or "below/to/... limit"
+    let mut idx = 2;
+    let start = if let ASTNode::Variable(s) = &cdr_list[idx] {
+        if s == "from" {
+            idx += 1;
+            if idx >= cdr_list.len() {
+                return None;
+            }
+            let start_val = cdr_list[idx].clone();
+            idx += 1;
+            Some(Box::new(start_val))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Check for limit keyword (below, to, upto, downto, above)
+    if idx >= cdr_list.len() {
+        return None;
+    }
+    let limit_keyword = match &cdr_list[idx] {
+        ASTNode::Variable(s) if s == "below" || s == "to" || s == "upto" || s == "downto" || s == "above" => s.clone(),
+        _ => return None,
+    };
+    idx += 1;
+
+    // Get limit
+    if idx >= cdr_list.len() {
+        return None;
+    }
+    let limit = Box::new(cdr_list[idx].clone());
+    idx += 1;
+
+    // Check for optional "when", "unless", or "if" condition
+    let when_condition = if idx < cdr_list.len() {
+        if let ASTNode::Variable(s) = &cdr_list[idx] {
+            if s == "when" || s == "if" || s == "unless" {
+                idx += 1;
+                if idx >= cdr_list.len() {
+                    return None;
+                }
+                let cond = cdr_list[idx].clone();
+                idx += 1;
+                // Wrap unless in a not
+                if s == "unless" {
+                    Some(Box::new(ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("not".to_string())),
+                        args: vec![cond],
+                    }))
+                } else {
+                    Some(Box::new(cond))
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Check for "collect" or "sum"
+    if idx >= cdr_list.len() {
+        return None;
+    }
+    let (collect, sum) = if let ASTNode::Variable(s) = &cdr_list[idx] {
+        idx += 1;
+        if s == "collect" {
+            if idx >= cdr_list.len() {
+                return None;
+            }
+            (Some(Box::new(cdr_list[idx].clone())), None)
+        } else if s == "sum" {
+            if idx >= cdr_list.len() {
+                return None;
+            }
+            (None, Some(Box::new(cdr_list[idx].clone())))
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    idx += 1;
+
+    // Check for optional "else" clause
+    let (else_collect, else_sum) = if idx < cdr_list.len() {
+        if let ASTNode::Variable(s) = &cdr_list[idx] {
+            if s == "else" {
+                idx += 1;
+                if idx >= cdr_list.len() {
+                    return None;
+                }
+                if let ASTNode::Variable(action) = &cdr_list[idx] {
+                    idx += 1;
+                    if action == "collect" {
+                        if idx >= cdr_list.len() {
+                            return None;
+                        }
+                        (Some(Box::new(cdr_list[idx].clone())), None)
+                    } else if action == "sum" {
+                        if idx >= cdr_list.len() {
+                            return None;
+                        }
+                        (None, Some(Box::new(cdr_list[idx].clone())))
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    Some(ASTNode::Loop {
+        var,
+        start,
+        limit,
+        when_condition,
+        collect,
+        sum,
+        else_collect,
+        else_sum,
+    })
+}
+
+/// Convert LispObject to AST treating it as DATA (not code)
+/// This is used for quoted forms where special forms should NOT be interpreted
+/// e.g., '(defun foo) should become a list, not a function definition
+fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
+    if obj.is_nil() {
+        return Ok(ASTNode::nil());
+    }
+
+    if let Some(n) = obj.as_fixnum() {
+        return Ok(ASTNode::fixnum(n));
+    }
+
+    if obj.is_character() {
+        if let Some(ch) = obj.as_character() {
+            return Ok(ASTNode::Constant(ConstantValue::Character(ch)));
+        }
+    }
+
+    if obj.is_general() {
+        // Use TypeHeader to determine exact type before casting
+        if let Some(ptr) = obj.as_general_ptr::<u8>() {
+            if !ptr.is_null() {
+                if let Some(obj_type) = unsafe { rlasp_runtime::header::TypeHeader::from_ptr(ptr) } {
+                    match obj_type {
+                        rlasp_runtime::header::ObjectType::Vector => {
+                            let vector = unsafe { &*(ptr as *const rlasp_runtime::RVector) };
+                            let mut elements = Vec::new();
+                            for elem in vector.as_slice() {
+                                elements.push(lisp_to_ast_as_data(*elem)?);
+                            }
+                            return Ok(ASTNode::Vector(elements));
+                        }
+                        rlasp_runtime::header::ObjectType::Symbol => {
+                            let symbol = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                            let name = symbol.name();
+                            // Strings are currently encoded by the reader as symbols with quotes.
+                            // Preserve them as string constants even in quoted/data context.
+                            if name.starts_with('"') && name.ends_with('"') && name.len() >= 2 {
+                                let string_content = &name[1..name.len() - 1];
+                                return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
+                            }
+                            // Don't check for T here - T in quoted context is just a symbol
+                            return Ok(ASTNode::Variable(name.to_string()));
+                        }
+                        rlasp_runtime::header::ObjectType::Number => {
+                            if let Some(f) = obj.as_float() {
+                                return Ok(ASTNode::float(f));
+                            }
+                        }
+                        rlasp_runtime::header::ObjectType::String => {
+                            // Handle string
+                            let str_ptr = ptr as *const rlasp_runtime::RString;
+                            let s = unsafe { (*str_ptr).as_str() };
+                            return Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.to_string())));
+                        }
+                        _ => {} // Fall through to other checks
+                    }
+                }
+            }
+        }
+    }
+
+    if obj.is_cons() {
+        // Convert list as data - recursively convert elements
+        let cons_ptr = obj.as_cons_ptr().ok_or("Invalid cons")?;
+        if cons_ptr.is_null() {
+            return Ok(ASTNode::nil());
+        }
+        let cons = unsafe { &*cons_ptr };
+        let car_obj = cons.car();
+        let cdr = cons.cdr();
+
+        // Check for unquote/unquote-splicing - these must be preserved even in quoted context
+        // because they may be inside a backquote
+        if car_obj.is_general() && !car_obj.is_number() {
+            if let Some(symbol_ptr) = car_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+                if !symbol_ptr.is_null() {
+                    let symbol = unsafe { &*symbol_ptr };
+                    let name = symbol.name();
+
+                    if name == "unquote" {
+                        // (unquote x) -> Unquote(x)
+                        // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
+                        // the unquoted form is CODE that will be evaluated
+                        if cdr.is_cons() {
+                            if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                                if !cdr_ptr.is_null() {
+                                    let cdr_cons = unsafe { &*cdr_ptr };
+                                    let form = lisp_to_ast(cdr_cons.car())?;
+                                    return Ok(ASTNode::Unquote(Box::new(form)));
+                                }
+                            }
+                        }
+                    }
+
+                    if name == "unquote-splicing" {
+                        // (unquote-splicing x) -> UnquoteSplicing(x)
+                        // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
+                        // the unquoted form is CODE that will be evaluated
+                        if cdr.is_cons() {
+                            if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                                if !cdr_ptr.is_null() {
+                                    let cdr_cons = unsafe { &*cdr_ptr };
+                                    let form = lisp_to_ast(cdr_cons.car())?;
+                                    return Ok(ASTNode::UnquoteSplicing(Box::new(form)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // For quoted data, we represent lists as Call nodes where the first element
+        // is the function and rest are args. When ast_to_result processes this,
+        // it will create a proper cons list (a . (b . (c . nil))).
+        let car = lisp_to_ast_as_data(car_obj)?;
+
+        if cdr.is_nil() {
+            // Single-element list (a) -> Call { function: a, args: [] }
+            return Ok(ASTNode::Call {
+                function: Box::new(car),
+                args: vec![],
+            });
+        } else if cdr.is_cons() {
+            // Multi-element list (a b c) -> Call { function: a, args: [b, c] }
+            let mut args = Vec::new();
+            let mut current = cdr;
+            while current.is_cons() {
+                let cdr_ptr = current.as_cons_ptr().ok_or("Invalid cons")?;
+                let cdr_cons = unsafe { &*cdr_ptr };
+                args.push(lisp_to_ast_as_data(cdr_cons.car())?);
+                current = cdr_cons.cdr();
+            }
+            if !current.is_nil() {
+                // Dotted pair at end - use DottedPair representation
+                // Actually, we need to handle this differently for improper lists
+                // For now, just add the final element to args (this may need refinement)
+                args.push(lisp_to_ast_as_data(current)?);
+            }
+            return Ok(ASTNode::Call {
+                function: Box::new(car),
+                args,
+            });
+        } else {
+            // Dotted pair
+            return Ok(ASTNode::DottedPair {
+                car: Box::new(car),
+                cdr: Box::new(lisp_to_ast_as_data(cdr)?),
+            });
+        }
+    }
+
+    // Fallback - treat as nil
+    Ok(ASTNode::nil())
+}
+
 fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
     let mut result = Vec::new();
 
@@ -1578,6 +1566,101 @@ fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
     }
 
     Ok(result)
+}
+
+/// Get raw LispObjects from a cons list without converting to AST
+/// Used for handling forms like case where keys should be treated as data
+fn raw_cdr_to_vec(mut cdr: LispObject) -> Result<Vec<LispObject>, String> {
+    let mut result = Vec::new();
+
+    while cdr.is_cons() {
+        let cons_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
+        if cons_ptr.is_null() {
+            return Err("Null cons pointer in raw_cdr_to_vec".to_string());
+        }
+        let cons = unsafe { &*cons_ptr };
+        result.push(cons.car());
+        cdr = cons.cdr();
+    }
+
+    Ok(result)
+}
+
+/// Convert a case key (which can be a symbol, list of symbols, T, or OTHERWISE) to a test expression
+fn case_key_to_test(key_obj: &LispObject, tmp_var: &str) -> Result<ASTNode, String> {
+    // Check if it's a symbol
+    if let Some(sym_ptr) = key_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+        let sym = unsafe { &*sym_ptr };
+        let name = sym.name().to_uppercase();
+        if name == "T" || name == "OTHERWISE" {
+            // Default case - always matches
+            return Ok(ASTNode::t());
+        } else {
+            // Single key - (eql tmp 'key)
+            return Ok(ASTNode::call(
+                ASTNode::variable("eql"),
+                vec![
+                    ASTNode::variable(tmp_var),
+                    ASTNode::Quote(Box::new(ASTNode::variable(&name)))
+                ]
+            ));
+        }
+    }
+
+    // Check if it's a list of keys
+    if key_obj.is_cons() {
+        let cons_ptr = key_obj.as_cons_ptr().ok_or("Invalid cons")?;
+        let cons = unsafe { &*cons_ptr };
+        let first_key = cons.car();
+        // Get the rest of the keys from the cdr
+        let keys = raw_cdr_to_vec(cons.cdr())?;
+
+        // Build (or (eql tmp 'key1) (eql tmp 'key2) ...)
+        let mut tests = Vec::new();
+
+        // First key
+        if let Some(sym_ptr) = first_key.as_general_ptr::<rlasp_runtime::Symbol>() {
+            let sym = unsafe { &*sym_ptr };
+            let name = sym.name().to_uppercase();
+            tests.push(ASTNode::call(
+                ASTNode::variable("eql"),
+                vec![
+                    ASTNode::variable(tmp_var),
+                    ASTNode::Quote(Box::new(ASTNode::variable(&name)))
+                ]
+            ));
+        }
+
+        // Rest of keys
+        for key in &keys {
+            if let Some(sym_ptr) = key.as_general_ptr::<rlasp_runtime::Symbol>() {
+                let sym = unsafe { &*sym_ptr };
+                let name = sym.name().to_uppercase();
+                tests.push(ASTNode::call(
+                    ASTNode::variable("eql"),
+                    vec![
+                        ASTNode::variable(tmp_var),
+                        ASTNode::Quote(Box::new(ASTNode::variable(&name)))
+                    ]
+                ));
+            }
+        }
+
+        if tests.is_empty() {
+            return Ok(ASTNode::nil());
+        } else if tests.len() == 1 {
+            return Ok(tests.into_iter().next().unwrap());
+        } else {
+            // (or test1 test2 ...)
+            return Ok(ASTNode::Call {
+                function: Box::new(ASTNode::variable("or")),
+                args: tests,
+            });
+        }
+    }
+
+    // Unknown key type - just return nil (won't match)
+    Ok(ASTNode::nil())
 }
 
 /// Extract macrolet bindings: ((name (params...) body...) ...)
@@ -1673,25 +1756,172 @@ fn expand_macrolet_call(
     macro_body: &ASTNode,
     call_args: &[ASTNode],
 ) -> Result<ASTNode, String> {
-    if call_args.len() != macro_params.len() {
-        return Err(format!(
-            "Macro parameter count mismatch: expected {}, got {}",
-            macro_params.len(),
-            call_args.len()
-        ));
-    }
-
-    // Build substitution map
-    let mut substitutions = std::collections::HashMap::new();
-    for (param, arg) in macro_params.iter().zip(call_args.iter()) {
-        substitutions.insert(param.clone(), arg.clone());
-    }
+    let substitutions = bind_macro_params(macro_params, call_args)?;
 
     // Substitute parameters in the macro body
     let substituted = substitute_in_ast(macro_body, &substitutions);
 
     // Expand backquote if present
     Ok(expand_backquote_ast(&substituted))
+}
+
+/// Parse macro lambda list and bind arguments to parameters
+/// Handles &optional, &rest, &body, &key, &allow-other-keys, &whole, &environment
+fn bind_macro_params(
+    macro_params: &[String],
+    call_args: &[ASTNode],
+) -> Result<std::collections::HashMap<String, ASTNode>, String> {
+    let mut substitutions = std::collections::HashMap::new();
+    let mut arg_idx = 0;
+    let mut param_idx = 0;
+
+    // Possible states: Required, Optional, Rest, Key
+    #[derive(PartialEq, Clone, Copy)]
+    enum ParamState {
+        Required,
+        Optional,
+        Rest,
+        Key,
+    }
+    let mut state = ParamState::Required;
+    #[allow(unused_variables)]
+    let mut seen_whole = false;
+    #[allow(unused_variables)]
+    let mut allow_other_keys = false;
+
+    while param_idx < macro_params.len() {
+        let param = &macro_params[param_idx];
+
+        match param.as_str() {
+            "&whole" => {
+                // &whole var binds the entire macro call form as a list
+                param_idx += 1;
+                if param_idx >= macro_params.len() {
+                    return Err("&whole requires a parameter name".to_string());
+                }
+                let whole_name = &macro_params[param_idx];
+                // Create a list from all the call args
+                let whole_list = args_to_list_ast(call_args);
+                substitutions.insert(whole_name.clone(), whole_list);
+                seen_whole = true;
+                param_idx += 1;
+            }
+            "&environment" => {
+                // &environment var binds the macro expansion environment
+                param_idx += 1;
+                if param_idx >= macro_params.len() {
+                    return Err("&environment requires a parameter name".to_string());
+                }
+                let env_name = &macro_params[param_idx];
+                // For now, bind to nil (we don't have a real environment object)
+                substitutions.insert(env_name.clone(), ASTNode::nil());
+                param_idx += 1;
+            }
+            "&optional" => {
+                state = ParamState::Optional;
+                param_idx += 1;
+            }
+            "&rest" | "&body" => {
+                state = ParamState::Rest;
+                param_idx += 1;
+                if param_idx >= macro_params.len() {
+                    return Err(format!("{} requires a parameter name", param));
+                }
+                let rest_name = &macro_params[param_idx];
+                // Bind remaining args as a list
+                let rest_args = if arg_idx < call_args.len() {
+                    args_to_list_ast(&call_args[arg_idx..])
+                } else {
+                    ASTNode::nil()
+                };
+                substitutions.insert(rest_name.clone(), rest_args);
+                arg_idx = call_args.len(); // Consume all remaining args
+                param_idx += 1;
+            }
+            "&key" => {
+                state = ParamState::Key;
+                param_idx += 1;
+            }
+            "&allow-other-keys" => {
+                allow_other_keys = true;
+                param_idx += 1;
+            }
+            "&aux" => {
+                // &aux introduces auxiliary variables, not bound from args
+                // Skip all remaining params (they're aux bindings)
+                break;
+            }
+            _ => {
+                match state {
+                    ParamState::Required => {
+                        if arg_idx < call_args.len() {
+                            substitutions.insert(param.clone(), call_args[arg_idx].clone());
+                            arg_idx += 1;
+                        } else {
+                            // Missing required arg - bind to nil to be lenient
+                            substitutions.insert(param.clone(), ASTNode::nil());
+                        }
+                        param_idx += 1;
+                    }
+                    ParamState::Optional => {
+                        if arg_idx < call_args.len() {
+                            substitutions.insert(param.clone(), call_args[arg_idx].clone());
+                            arg_idx += 1;
+                        } else {
+                            substitutions.insert(param.clone(), ASTNode::nil());
+                        }
+                        param_idx += 1;
+                    }
+                    ParamState::Rest => {
+                        // Should not reach here - rest param consumed all args above
+                        param_idx += 1;
+                    }
+                    ParamState::Key => {
+                        // Look for :param-name in remaining args
+                        let key_name = format!(":{}", param.to_uppercase());
+                        let key_name_lower = format!(":{}", param);
+                        let mut found = false;
+                        let mut i = arg_idx;
+                        while i + 1 < call_args.len() {
+                            if let ASTNode::Variable(k) = &call_args[i] {
+                                if k == &key_name || k == &key_name_lower || k.to_uppercase() == key_name {
+                                    substitutions.insert(param.clone(), call_args[i + 1].clone());
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            i += 2;
+                        }
+                        if !found {
+                            substitutions.insert(param.clone(), ASTNode::nil());
+                        }
+                        param_idx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(substitutions)
+}
+
+/// Convert a slice of ASTNodes to a list AST representation for macro parameter binding
+/// The result is a list structure that can be used directly in the macro body
+fn args_to_list_ast(args: &[ASTNode]) -> ASTNode {
+    if args.is_empty() {
+        ASTNode::nil()
+    } else {
+        // Build a list call: (list 'arg1 'arg2 ...)
+        // Each arg is quoted so it's treated as data, not code
+        let mut quoted_args = Vec::new();
+        for arg in args {
+            quoted_args.push(ASTNode::Quote(Box::new(arg.clone())));
+        }
+        ASTNode::Call {
+            function: Box::new(ASTNode::Variable("list".to_string())),
+            args: quoted_args,
+        }
+    }
 }
 
 /// Expand backquote at compile time (simplified version)

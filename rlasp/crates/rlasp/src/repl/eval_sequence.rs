@@ -1,17 +1,28 @@
 /// eval_sequence.rs - Common Lisp sequence operations
 /// Sequences include lists, vectors, and strings
 use super::eval_types::EvalResult;
+use super::eval_list::apply_function;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-pub fn call_sequence_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
+pub fn call_sequence_builtin(
+    name: &str,
+    args: &[EvalResult],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     match name {
         // Sequence access
         "elt" => {
             // (elt sequence index)
-            match (args.get(0), args.get(1)) {
-                (Some(seq), Some(EvalResult::Float(idx))) if *idx >= 0.0 => {
-                    let index = *idx as usize;
+            let index_opt = match args.get(1) {
+                Some(EvalResult::Fixnum(idx)) if *idx >= 0 => Some(*idx as usize),
+                Some(EvalResult::Float(idx)) if *idx >= 0.0 => Some(*idx as usize),
+                _ => None,
+            };
+
+            match (args.get(0), index_opt) {
+                (Some(seq), Some(index)) => {
                     match seq {
                         EvalResult::String(s) => {
                             s.chars().nth(index)
@@ -375,19 +386,122 @@ pub fn call_sequence_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
         }
 
         "substitute" => {
-            // (substitute newitem olditem sequence &key test)
-            match (args.get(0), args.get(1), args.get(2)) {
-                (Some(new), Some(old), Some(EvalResult::String(s))) => {
-                    // Simple string substitution
-                    if let (EvalResult::Character(new_ch), EvalResult::Character(old_ch)) = (new, old) {
-                        Ok(EvalResult::String(
-                            s.replace(*old_ch, &new_ch.to_string())
-                        ))
-                    } else {
-                        Err("substitute on strings requires characters".to_string())
-                    }
+            // (substitute newitem olditem sequence &key test test-not)
+            let newitem = args.get(0).cloned().ok_or_else(|| "substitute requires newitem".to_string())?;
+            let olditem = args.get(1).cloned().ok_or_else(|| "substitute requires olditem".to_string())?;
+            let sequence = args.get(2).cloned().ok_or_else(|| "substitute requires sequence".to_string())?;
+
+            let keyword_args = parse_keyword_args(&args[3..]);
+            let test_fn = keyword_args.get("test");
+            let test_not_fn = keyword_args.get("test-not");
+
+            let mut matches = |item: &EvalResult| -> Result<bool, String> {
+                if let Some(test) = test_fn {
+                    let res = apply_function(test, &[item.clone(), olditem.clone()], env)?;
+                    return Ok(is_truthy(&res));
                 }
-                _ => Err("substitute not fully implemented".to_string()),
+                if let Some(test_not) = test_not_fn {
+                    let res = apply_function(test_not, &[item.clone(), olditem.clone()], env)?;
+                    return Ok(!is_truthy(&res));
+                }
+                Ok(values_equal(item, &olditem))
+            };
+
+            match sequence {
+                EvalResult::String(s) => {
+                    let new_ch = match newitem {
+                        EvalResult::Character(c) => c,
+                        _ => return Err("substitute on strings requires character newitem".to_string()),
+                    };
+                    let mut result = String::new();
+                    for ch in s.chars() {
+                        let item = EvalResult::Character(ch);
+                        if matches(&item)? {
+                            result.push(new_ch);
+                        } else {
+                            result.push(ch);
+                        }
+                    }
+                    Ok(EvalResult::String(result))
+                }
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    // List substitution
+                    let mut result = EvalResult::Nil;
+                    let mut current = sequence;
+                    let mut items = Vec::new();
+                    loop {
+                        match current {
+                            EvalResult::Cons(car, cdr) => {
+                                let item = car.borrow().clone();
+                                let replaced = if matches(&item)? { newitem.clone() } else { item };
+                                items.push(replaced);
+                                current = cdr.borrow().clone();
+                            }
+                            EvalResult::Nil => break,
+                            _ => return Err("substitute requires a proper list or string".to_string()),
+                        }
+                    }
+                    for item in items.iter().rev() {
+                        result = EvalResult::Cons(
+                            Rc::new(RefCell::new(item.clone())),
+                            Rc::new(RefCell::new(result)),
+                        );
+                    }
+                    Ok(result)
+                }
+                _ => Err("substitute requires a sequence".to_string()),
+            }
+        }
+
+        "substitute-if" => {
+            // (substitute-if newitem predicate sequence)
+            let newitem = args.get(0).cloned().ok_or_else(|| "substitute-if requires newitem".to_string())?;
+            let predicate = args.get(1).cloned().ok_or_else(|| "substitute-if requires predicate".to_string())?;
+            let sequence = args.get(2).cloned().ok_or_else(|| "substitute-if requires sequence".to_string())?;
+
+            match sequence {
+                EvalResult::String(s) => {
+                    let new_ch = match newitem {
+                        EvalResult::Character(c) => c,
+                        _ => return Err("substitute-if on strings requires character newitem".to_string()),
+                    };
+                    let mut result = String::new();
+                    for ch in s.chars() {
+                        let pred_val = apply_function(&predicate, &[EvalResult::Character(ch)], env)?;
+                        if is_truthy(&pred_val) {
+                            result.push(new_ch);
+                        } else {
+                            result.push(ch);
+                        }
+                    }
+                    Ok(EvalResult::String(result))
+                }
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    let mut result = EvalResult::Nil;
+                    let mut current = sequence;
+                    let mut items = Vec::new();
+                    loop {
+                        match current {
+                            EvalResult::Cons(car, cdr) => {
+                                let item = car.borrow().clone();
+                                let pred_val = apply_function(&predicate, &[item.clone()], env)?;
+                                let replaced = if is_truthy(&pred_val) { newitem.clone() } else { item };
+                                items.push(replaced);
+                                current = cdr.borrow().clone();
+                            }
+                            EvalResult::Nil => break,
+                            _ => return Err("substitute-if requires a proper list or string".to_string()),
+                        }
+                    }
+                    for item in items.iter().rev() {
+                        result = EvalResult::Cons(
+                            Rc::new(RefCell::new(item.clone())),
+                            Rc::new(RefCell::new(result)),
+                        );
+                    }
+                    Ok(result)
+                }
+                _ => Err("substitute-if requires a sequence".to_string()),
             }
         }
 
@@ -415,4 +529,25 @@ fn values_equal(a: &EvalResult, b: &EvalResult) -> bool {
         (EvalResult::Nil, EvalResult::Nil) => true,
         _ => false,
     }
+}
+
+fn parse_keyword_args(args: &[EvalResult]) -> HashMap<String, EvalResult> {
+    let mut map = HashMap::new();
+    let mut i = 0;
+    while i + 1 < args.len() {
+        if let EvalResult::Symbol(key) = &args[i] {
+            if key.starts_with(':') {
+                let name = key.trim_start_matches(':').to_string();
+                map.insert(name, args[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    map
+}
+
+fn is_truthy(val: &EvalResult) -> bool {
+    !matches!(val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
 }

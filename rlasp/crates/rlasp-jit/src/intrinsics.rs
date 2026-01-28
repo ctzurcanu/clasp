@@ -4394,3 +4394,66 @@ pub extern "C" fn cc_incf(args_and_env: usize) -> usize {
         LispObject::nil().raw()
     }
 }
+
+// =============================================================================
+// Vector intrinsics
+// =============================================================================
+
+/// Create a new vector with the given length (all elements initialized to nil)
+#[no_mangle]
+pub extern "C" fn cc_make_vector(len: usize) -> usize {
+    let mut elements = Vec::with_capacity(len);
+    for _ in 0..len {
+        elements.push(LispObject::nil());
+    }
+    rlasp_runtime::RVector::allocate(elements).raw()
+}
+
+/// Set an element in a simple vector (svset)
+/// Returns the value that was set
+#[no_mangle]
+pub extern "C" fn cc_svset(vector: usize, index: usize, value: usize) -> usize {
+    let vec_obj = unsafe { LispObject::from_raw(vector) };
+    let value_obj = unsafe { LispObject::from_raw(value) };
+
+    if let Some(vec_ptr) = vec_obj.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
+            vec.set(index, value_obj);
+        }
+    }
+
+    value
+}
+
+/// Get an element from a simple vector (svref)
+#[no_mangle]
+pub extern "C" fn cc_svref(vector: usize, index: usize) -> usize {
+    let vec_obj = unsafe { LispObject::from_raw(vector) };
+
+    if let Some(vec_ptr) = vec_obj.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &*vec_ptr };
+            if let Some(elem) = vec.get(index) {
+                return elem.raw();
+            }
+        }
+    }
+
+    LispObject::nil().raw()
+}
+
+/// Get the length of a vector
+#[no_mangle]
+pub extern "C" fn cc_vector_length(vector: usize) -> usize {
+    let vec_obj = unsafe { LispObject::from_raw(vector) };
+
+    if let Some(vec_ptr) = vec_obj.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &*vec_ptr };
+            return LispObject::fixnum(vec.len() as i64).raw();
+        }
+    }
+
+    LispObject::fixnum(0).raw()
+}

@@ -26,6 +26,7 @@ impl<'ctx> JitEngine<'ctx> {
             "cc_get_internal_real_time",
             "cc_format",
             "cc_make_hash_table", "cc_make_hash_table_full", "cc_gethash", "cc_puthash", "cc_maphash",
+            "cc_make_vector", "cc_svset", "cc_svref", "cc_vector_length",
             "cc_make_instance", "cc_slot_value", "cc_set_slot_value",
             "cc_system", "cc_print", "cc_echo",
             "cc_make_symbol",
@@ -33,6 +34,9 @@ impl<'ctx> JitEngine<'ctx> {
             "cc_make_string", "cc_shell",
             "cc_argc", "cc_argv",
             "cc_box_function_ptr", "cc_unbox_function_ptr", "cc_is_function",
+            // IO syntax intrinsics for with-standard-io-syntax
+            "cc_save_io_syntax_state", "cc_restore_io_syntax_state", "cc_set_standard_io_syntax",
+            "cc_get_io_syntax_var", "cc_set_io_syntax_var", "cc_is_io_syntax_var",
         ];
         let intrinsics: Vec<FunctionValue> = intrinsic_names
             .iter()
@@ -46,6 +50,10 @@ impl<'ctx> JitEngine<'ctx> {
         // Map intrinsic functions to their implementations
         use crate::intrinsics::*;
         use crate::intrinsics_clos::*;
+        use rlasp_runtime::io_syntax::{
+            cc_save_io_syntax_state, cc_restore_io_syntax_state, cc_set_standard_io_syntax,
+            cc_get_io_syntax_var, cc_set_io_syntax_var, cc_is_io_syntax_var,
+        };
         let addrs: &[usize] = &[
             cc_box_fixnum as usize, cc_unbox_fixnum as usize,
             cc_box_float as usize, cc_unbox_float as usize,
@@ -60,6 +68,7 @@ impl<'ctx> JitEngine<'ctx> {
             cc_get_internal_real_time as usize,
             cc_format as usize,
             cc_make_hash_table as usize, cc_make_hash_table_full as usize, cc_gethash as usize, cc_puthash as usize, cc_maphash as usize,
+            cc_make_vector as usize, cc_svset as usize, cc_svref as usize, cc_vector_length as usize,
             cc_make_instance as usize, cc_slot_value as usize, cc_set_slot_value as usize,
             cc_system as usize, cc_print as usize, cc_echo as usize,
             cc_make_symbol as usize,
@@ -67,6 +76,9 @@ impl<'ctx> JitEngine<'ctx> {
             cc_make_string as usize, cc_shell as usize,
             cc_argc as usize, cc_argv as usize,
             cc_box_function_ptr as usize, cc_unbox_function_ptr as usize, cc_is_function as usize,
+            // IO syntax intrinsics
+            cc_save_io_syntax_state as usize, cc_restore_io_syntax_state as usize, cc_set_standard_io_syntax as usize,
+            cc_get_io_syntax_var as usize, cc_set_io_syntax_var as usize, cc_is_io_syntax_var as usize,
         ];
 
         for (func, &addr) in intrinsics.iter().zip(addrs.iter()) {

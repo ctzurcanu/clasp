@@ -93,6 +93,88 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
             Ok(EvalResult::Boolean(matches))
         }
 
+        "subtypep" => {
+            // (subtypep type1 type2) - check if type1 is a subtype of type2
+            // Returns two values: (subtype-p valid-p)
+            // For now, we implement a basic type hierarchy
+            if args.len() < 2 {
+                return Err("subtypep requires 2 arguments".to_string());
+            }
+            let type1 = match &args[0] {
+                EvalResult::Symbol(s) => s.to_uppercase(),
+                EvalResult::Nil => "NULL".to_string(),
+                _ => return Err("subtypep: type must be a symbol".to_string()),
+            };
+            let type2 = match &args[1] {
+                EvalResult::Symbol(s) => s.to_uppercase(),
+                EvalResult::Nil => "NULL".to_string(),
+                _ => return Err("subtypep: type must be a symbol".to_string()),
+            };
+
+            // Basic type hierarchy:
+            // T is supertype of everything
+            // NIL/NULL is subtype of everything
+            // NUMBER > REAL > RATIONAL > INTEGER > FIXNUM/BIGNUM
+            // NUMBER > REAL > FLOAT
+            // NUMBER > COMPLEX
+            // SEQUENCE > LIST, VECTOR, STRING
+            // CHARACTER > BASE-CHAR, STANDARD-CHAR, EXTENDED-CHAR
+            let is_subtype = if type1 == type2 {
+                true
+            } else if type2 == "T" {
+                true  // Everything is subtype of T
+            } else if type1 == "NIL" || type1 == "NULL" {
+                true  // NIL is subtype of everything
+            } else {
+                match (type1.as_str(), type2.as_str()) {
+                    // Number hierarchy
+                    ("FIXNUM", "INTEGER") | ("FIXNUM", "RATIONAL") | ("FIXNUM", "REAL") | ("FIXNUM", "NUMBER") => true,
+                    ("BIGNUM", "INTEGER") | ("BIGNUM", "RATIONAL") | ("BIGNUM", "REAL") | ("BIGNUM", "NUMBER") => true,
+                    ("INTEGER", "RATIONAL") | ("INTEGER", "REAL") | ("INTEGER", "NUMBER") => true,
+                    ("RATIO", "RATIONAL") | ("RATIO", "REAL") | ("RATIO", "NUMBER") => true,
+                    ("RATIONAL", "REAL") | ("RATIONAL", "NUMBER") => true,
+                    ("FLOAT", "REAL") | ("FLOAT", "NUMBER") => true,
+                    ("SINGLE-FLOAT", "FLOAT") | ("SINGLE-FLOAT", "REAL") | ("SINGLE-FLOAT", "NUMBER") => true,
+                    ("DOUBLE-FLOAT", "FLOAT") | ("DOUBLE-FLOAT", "REAL") | ("DOUBLE-FLOAT", "NUMBER") => true,
+                    ("REAL", "NUMBER") => true,
+                    ("COMPLEX", "NUMBER") => true,
+
+                    // Character hierarchy
+                    ("BASE-CHAR", "CHARACTER") => true,
+                    ("STANDARD-CHAR", "CHARACTER") | ("STANDARD-CHAR", "BASE-CHAR") => true,
+                    ("EXTENDED-CHAR", "CHARACTER") => true,
+
+                    // Sequence hierarchy
+                    ("LIST", "SEQUENCE") => true,
+                    ("CONS", "LIST") | ("CONS", "SEQUENCE") => true,
+                    ("NULL", "LIST") | ("NULL", "SEQUENCE") | ("NULL", "SYMBOL") => true,
+                    ("VECTOR", "SEQUENCE") | ("VECTOR", "ARRAY") => true,
+                    ("STRING", "VECTOR") | ("STRING", "SEQUENCE") | ("STRING", "ARRAY") => true,
+                    ("SIMPLE-STRING", "STRING") | ("SIMPLE-STRING", "VECTOR") | ("SIMPLE-STRING", "SEQUENCE") => true,
+                    ("SIMPLE-VECTOR", "VECTOR") | ("SIMPLE-VECTOR", "SEQUENCE") | ("SIMPLE-VECTOR", "ARRAY") => true,
+                    ("BIT-VECTOR", "VECTOR") | ("BIT-VECTOR", "SEQUENCE") | ("BIT-VECTOR", "ARRAY") => true,
+
+                    // Symbol hierarchy
+                    ("KEYWORD", "SYMBOL") => true,
+
+                    // Function hierarchy
+                    ("COMPILED-FUNCTION", "FUNCTION") => true,
+                    ("GENERIC-FUNCTION", "FUNCTION") => true,
+
+                    // Other
+                    ("SIMPLE-ARRAY", "ARRAY") => true,
+                    ("PATHNAME", "T") => true,
+                    ("LOGICAL-PATHNAME", "PATHNAME") => true,
+
+                    _ => false,
+                }
+            };
+
+            // Return T if subtype relationship is known, NIL otherwise
+            // Second value is T if we're certain about the result
+            Ok(EvalResult::Boolean(is_subtype))
+        }
+
         "slot-value" => {
             // (slot-value object slot-name)
             if args.len() < 2 {

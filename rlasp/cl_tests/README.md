@@ -66,3 +66,5 @@ begin with /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/tests/benchm
 ../target/release/irlasp -m mlir tests/benchmark-feat.lisp
 
 mlir-opt is at /opt/homebrew/Cellar/llvm/21.1.8/bin/mlir-opt
+
+/private/tmp/find-toplevel.py for finding top-level forms in .lisp files

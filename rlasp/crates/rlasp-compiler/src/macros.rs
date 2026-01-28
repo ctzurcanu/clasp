@@ -50,7 +50,7 @@ impl MacroTable {
     pub fn bootstrap(&self) {
         // Define core macros
         
-        // defun - (defun name (params) body...) => (setq name (lambda (params) body...))
+        // defun - (defun name (params) body...) => (setq name (lambda (params) (block name body...)))
         self.define_macro("defun", Arc::new(|args| {
             if args.len() < 3 {
                 return Err("defun requires at least 3 arguments: name, params, body".to_string());
@@ -60,15 +60,20 @@ impl MacroTable {
             let params = args[1];
             let body = &args[2..];
             
-            // Build (setq name (lambda params body...))
+            // Build (setq name (lambda params (block name body...)))
             use rlasp_runtime::{Symbol, Cons};
             
             let setq_sym = Symbol::allocate("setq");
             let lambda_sym = Symbol::allocate("lambda");
+            let block_sym = Symbol::allocate("block");
             
-            // Build lambda expression
-            let mut lambda_parts = vec![lambda_sym, params];
-            lambda_parts.extend_from_slice(body);
+            // Build block expression (block name body...)
+            let mut block_parts = vec![block_sym, name];
+            block_parts.extend_from_slice(body);
+            let block_expr = Cons::list(&block_parts);
+
+            // Build lambda expression with implicit block
+            let mut lambda_parts = vec![lambda_sym, params, block_expr];
             let lambda_expr = Cons::list(&lambda_parts);
             
             // Build setq expression

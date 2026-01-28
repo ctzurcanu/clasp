@@ -58,6 +58,29 @@ extern "C" {
 }
 
 fn main() -> Result<()> {
+    // Use larger stack (64MB) for deep Lisp evaluation with trampoline
+    let stack_size = 64 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("irlasp-main".to_string())
+        .stack_size(stack_size)
+        .spawn(|| {
+            match run_main() {
+                Ok(()) => {},
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        })
+        .expect("Failed to spawn main thread")
+        .join()
+        .expect("Main thread panicked");
+
+    Ok(())
+}
+
+fn run_main() -> Result<()> {
     let args = Args::parse();
 
     let mode = match args.mode.as_str() {
@@ -383,6 +406,27 @@ fn run_repl_mlir() -> Result<()> {
     // For now, MLIR mode uses the same implementation as LLIR
     // Future: Generate MLIR text, lower to LLVM IR, then execute
     run_repl_llvm()
+}
+
+fn macro_params_to_vec(params: &rlasp::ir::ASTNode) -> Vec<String> {
+    use rlasp::ir::ASTNode;
+    match params {
+        ASTNode::Call { function, args } => {
+            let mut result = Vec::with_capacity(args.len() + 1);
+            if let ASTNode::Variable(name) = &**function {
+                result.push(name.clone());
+            }
+            for arg in args {
+                if let ASTNode::Variable(name) = arg {
+                    result.push(name.clone());
+                }
+            }
+            result
+        }
+        ASTNode::Variable(name) => vec![name.clone()],
+        ASTNode::Constant(rlasp::ir::ConstantValue::Nil) => vec![],
+        _ => vec![],
+    }
 }
 
 /// Expand global macros in an AST node
@@ -841,7 +885,8 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
                         } else {
                             rlasp::ir::ASTNode::Progn { exprs: body.clone() }
                         };
-                        macros.insert(var.clone(), (params.clone(), macro_body));
+                        let param_vec = macro_params_to_vec(params);
+                        macros.insert(var.clone(), (param_vec, macro_body));
                     } else {
                         // Top-level setq that's not a defun or macro
                         toplevel_forms.push(ast);
@@ -6510,17 +6555,7 @@ fn eval_file_llvm(source: &str, file_path: &str) -> std::result::Result<(), Stri
                         else if op == "defmacro" && args.len() >= 2 {
                             if let rlasp::ir::ASTNode::Variable(name) = &args[0] {
                                 // Extract parameters
-                                let params = if let rlasp::ir::ASTNode::Call { args: param_list, .. } = &args[1] {
-                                    param_list.iter().filter_map(|p| {
-                                        if let rlasp::ir::ASTNode::Variable(v) = p {
-                                            Some(v.clone())
-                                        } else {
-                                            None
-                                        }
-                                    }).collect()
-                                } else {
-                                    Vec::new()
-                                };
+                                let params = macro_params_to_vec(&args[1]);
 
                                 // Store the macro body (should be a backquote template)
                                 // For now, just store the first body expression

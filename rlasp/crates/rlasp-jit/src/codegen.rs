@@ -192,6 +192,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let maphash_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_maphash", maphash_type, None);
 
+        // Vectors
+        let make_vector_type = i64_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("cc_make_vector", make_vector_type, None);
+        let svset_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module.add_function("cc_svset", svset_type, None);
+        let svref_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("cc_svref", svref_type, None);
+        let vector_length_type = i64_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("cc_vector_length", vector_length_type, None);
+
         // CLOS
         let make_instance_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_make_instance", make_instance_type, None);

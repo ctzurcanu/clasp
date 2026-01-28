@@ -59,7 +59,15 @@ pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult
 
         "string" => match args.get(0) {
             Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
-            Some(EvalResult::Symbol(s)) => Ok(EvalResult::String(s.clone())),
+            Some(EvalResult::Symbol(s)) => {
+                // For keywords (start with :), strip the colon and uppercase
+                let name = if s.starts_with(':') {
+                    s[1..].to_uppercase()
+                } else {
+                    s.to_uppercase()
+                };
+                Ok(EvalResult::String(name))
+            },
             Some(EvalResult::Character(c)) => Ok(EvalResult::String(c.to_string())),
             _ => Err("string requires a string designator".to_string()),
         },

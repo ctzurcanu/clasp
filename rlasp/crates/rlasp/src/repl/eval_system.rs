@@ -1,7 +1,7 @@
 /// System and utility functions for the evaluator
 
 use super::eval_types::{EvalResult, GENSYM_COUNTER, structural_equal};
-use super::eval_core::eval_with_env;
+use super::eval_core::{eval_with_env, ast_to_result};
 use crate::ir::{ASTNode, ConstantValue};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -22,22 +22,179 @@ pub(super) fn eval_funcall(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
 
     // Call the function
+    call_function_with_values(func, &eval_args, env)
+}
+
+/// Helper to call a function value with pre-evaluated arguments
+pub(super) fn call_function_with_values(
+    func: EvalResult,
+    eval_args: &[EvalResult],
+    env: &mut HashMap<String, EvalResult>
+) -> Result<EvalResult, String> {
     match func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env } => {
-            eval_lambda_call_with_values(params, defaults, body, closure_env, &eval_args, env)
+        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
+            eval_lambda_call_with_values(params, defaults, body, dynamic_env, closure_env, eval_args, env)
         }
-        EvalResult::Symbol(name) => {
-            // Look up the function by name
-            if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env }) = env.get(&name).cloned() {
-                eval_lambda_call_with_values(params, defaults, body, closure_env, &eval_args, env)
+        EvalResult::GenericFunction(gf) => {
+            // Dispatch generic function with pre-evaluated arguments
+            dispatch_generic_function_with_values(&gf, eval_args, env)
+        }
+        EvalResult::BuiltinFunction(name) => {
+            // Call built-in function
+            call_built_in_with_values(&name, eval_args, env)
+        }
+        EvalResult::ForeignFunction(func) => {
+            // Call foreign function
+            use rlasp_ffi::types::ToLisp;
+            let lisp_args: Result<Vec<_>, _> = eval_args.iter().map(|val| {
+                match val {
+                    EvalResult::Fixnum(n) => Ok((*n as i32).to_lisp()),
+                    EvalResult::Float(f) => Ok(f.to_lisp()),
+                    _ => Err(format!("FFI arguments must be numbers, got: {:?}", val)),
+                }
+            }).collect();
+            let lisp_args = lisp_args?;
+            let result = func.call(&lisp_args).map_err(|e| format!("FFI call failed: {:?}", e))?;
+            // Convert LispObject result back to EvalResult
+            if let Some(n) = result.as_fixnum() {
+                Ok(EvalResult::Fixnum(n))
+            } else if let Some(f) = result.as_float() {
+                Ok(EvalResult::Float(f))
             } else {
-                // Try calling as a built-in function with pre-evaluated arguments
-                call_built_in_with_values(&name, &eval_args, env)
+                Ok(EvalResult::Nil)
             }
         }
-        _ => Err("funcall: first argument must be a function".to_string()),
+        EvalResult::Symbol(name) => {
+            // Look up the function by name - try multiple variations
+            let lookup_names = vec![
+                name.clone(),
+                name.to_lowercase(),
+                name.to_uppercase(),
+            ];
+
+            for lookup_name in &lookup_names {
+                if let Some(func_val) = env.get(lookup_name).cloned() {
+                    match &func_val {
+                        EvalResult::Lambda { .. } | EvalResult::GenericFunction(_) |
+                        EvalResult::BuiltinFunction(_) | EvalResult::ForeignFunction(_) => {
+                            return call_function_with_values(func_val, eval_args, env);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Try calling as a built-in function with pre-evaluated arguments
+            call_built_in_with_values(&name, eval_args, env)
+        }
+        _ => Err(format!("funcall: first argument must be a function, got {:?}", func)),
     }
 }
+
+/// Dispatch a generic function with pre-evaluated arguments
+fn dispatch_generic_function_with_values(
+    gf: &Rc<RefCell<super::eval_types::GenericFunction>>,
+    eval_args: &[EvalResult],
+    env: &mut HashMap<String, EvalResult>
+) -> Result<EvalResult, String> {
+    use super::eval_types::specializer_matches;
+
+    let gf_ref = gf.borrow();
+    let mut before_methods = Vec::new();
+    let mut primary_methods = Vec::new();
+    let mut after_methods = Vec::new();
+    let mut _around_methods = Vec::new();
+
+    for method in &gf_ref.methods {
+        // Check if all specializers match
+        let matches = method.specializers.iter()
+            .zip(eval_args.iter())
+            .all(|(spec, arg)| specializer_matches(spec, arg));
+
+        if matches {
+            match method.qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
+                Some(":BEFORE") => before_methods.push(method),
+                Some(":AFTER") => after_methods.push(method),
+                Some(":AROUND") => _around_methods.push(method),
+                _ => primary_methods.push(method),
+            }
+        }
+    }
+
+    // Sort primary methods by specificity (most specific first)
+    primary_methods.sort_by(|a, b| {
+        let a_specificity: usize = a.specializers.iter()
+            .zip(eval_args.iter())
+            .map(|(spec, arg)| {
+                let arg_class = super::eval_types::class_of(arg);
+                if spec.eq_ignore_ascii_case(&arg_class) {
+                    2  // Exact match = most specific
+                } else if spec == "T" {
+                    0  // T = least specific
+                } else {
+                    1  // Superclass match
+                }
+            })
+            .sum();
+        let b_specificity: usize = b.specializers.iter()
+            .zip(eval_args.iter())
+            .map(|(spec, arg)| {
+                let arg_class = super::eval_types::class_of(arg);
+                if spec.eq_ignore_ascii_case(&arg_class) {
+                    2
+                } else if spec == "T" {
+                    0
+                } else {
+                    1
+                }
+            })
+            .sum();
+        b_specificity.cmp(&a_specificity)
+    });
+
+    // Execute :before methods
+    for method in &before_methods {
+        let mut method_env = method.env.borrow().clone();
+        for (param, arg) in method.params.iter().zip(eval_args.iter()) {
+            method_env.insert(param.clone(), arg.clone());
+        }
+        for expr in &method.body {
+            eval_with_env(expr, &mut method_env)?;
+        }
+    }
+
+    // Execute primary method
+    let result = if let Some(method) = primary_methods.first() {
+        let mut method_env = method.env.borrow().clone();
+        for (param, arg) in method.params.iter().zip(eval_args.iter()) {
+            method_env.insert(param.clone(), arg.clone());
+        }
+        let mut result = EvalResult::Nil;
+        for expr in &method.body {
+            result = eval_with_env(expr, &mut method_env)?;
+        }
+        result
+    } else if before_methods.is_empty() && after_methods.is_empty() {
+        return Err(format!("No applicable method for generic function {} with args {:?}",
+            gf_ref.name, eval_args.iter().map(|a| super::eval_types::class_of(a)).collect::<Vec<_>>()));
+    } else {
+        EvalResult::Nil
+    };
+
+    // Execute :after methods (reverse order - least-specific-first)
+    for method in after_methods.iter().rev() {
+        let mut method_env = method.env.borrow().clone();
+        for (param, arg) in method.params.iter().zip(eval_args.iter()) {
+            method_env.insert(param.clone(), arg.clone());
+        }
+        for expr in &method.body {
+            eval_with_env(expr, &mut method_env)?;
+        }
+    }
+
+    Ok(result)
+}
+
 
 pub(super) fn eval_apply(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.len() < 2 {
@@ -69,31 +226,8 @@ pub(super) fn eval_apply(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
         }
     }
 
-    // Call the function
-    match func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env } => {
-            eval_lambda_call_with_values(params, defaults, body, closure_env, &eval_args, env)
-        }
-        EvalResult::Symbol(name) => {
-            // Try looking up as a user-defined function first
-            if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env }) = env.get(&name).cloned() {
-                eval_lambda_call_with_values(params, defaults, body, closure_env, &eval_args, env)
-            } else {
-                // Try calling as a built-in function
-                // Convert eval_args back to ASTNodes
-                let ast_args: Result<Vec<ASTNode>, String> = eval_args.iter()
-                    .map(result_to_ast)
-                    .collect();
-                let ast_args = ast_args?;
-                let func_node = ASTNode::Variable(name.clone());
-                eval_with_env(&ASTNode::Call {
-                    function: Box::new(func_node),
-                    args: ast_args,
-                }, env)
-            }
-        }
-        _ => Err("apply: first argument must be a function".to_string()),
-    }
+    // Call the function using the shared helper
+    call_function_with_values(func, &eval_args, env)
 }
 
 pub(super) fn eval_apply_key(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -108,24 +242,7 @@ pub(super) fn eval_apply_key(args: &[ASTNode], env: &mut HashMap<String, EvalRes
     // Otherwise, apply key function to element
     match key {
         EvalResult::Nil => Ok(element),
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env } => {
-            eval_lambda_call_with_values(params, defaults, body, closure_env, &[element], env)
-        }
-        EvalResult::Symbol(name) => {
-            // Try looking up as a user-defined function first
-            if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env }) = env.get(&name).cloned() {
-                eval_lambda_call_with_values(params, defaults, body, closure_env, &[element], env)
-            } else {
-                // Try calling as a built-in function
-                let element_ast = result_to_ast(&element)?;
-                let func_node = ASTNode::Variable(name.clone());
-                eval_with_env(&ASTNode::Call {
-                    function: Box::new(func_node),
-                    args: vec![element_ast],
-                }, env)
-            }
-        }
-        _ => Err("apply-key: key must be a function or nil".to_string()),
+        _ => call_function_with_values(key, &[element], env),
     }
 }
 
@@ -133,17 +250,34 @@ pub(super) fn eval_lambda_call_with_values(
     params: Vec<String>,
     defaults: HashMap<String, ASTNode>,
     body: Vec<ASTNode>,
+    dynamic_env: bool,
     closure_env: Rc<RefCell<HashMap<String, EvalResult>>>,
     args: &[EvalResult],
-    _call_env: &mut HashMap<String, EvalResult>
+    call_env: &mut HashMap<String, EvalResult>
 ) -> Result<EvalResult, String> {
-    let mut closure_env = closure_env.borrow().clone();
-    // Check for &rest, &key, and &aux parameters
+    // Merge environments (dynamic_env prefers caller bindings)
+    let mut combined_env = closure_env.borrow().clone();
+    if dynamic_env {
+        for (k, v) in call_env.iter() {
+            combined_env.insert(k.clone(), v.clone());
+        }
+    } else {
+        let mut call_clone = call_env.clone();
+        for (k, v) in combined_env.iter() {
+            call_clone.insert(k.clone(), v.clone());
+        }
+        combined_env = call_clone;
+    }
+    let mut closure_env = combined_env;
+    // Check for &optional, &rest, &key, and &aux parameters
+    let mut optional_pos = None;
     let mut rest_pos = None;
     let mut key_pos = None;
     let mut aux_pos = None;
     for (i, param) in params.iter().enumerate() {
-        if param == "&rest" {
+        if param == "&optional" {
+            optional_pos = Some(i);
+        } else if param == "&rest" {
             rest_pos = Some(i);
         } else if param == "&key" {
             key_pos = Some(i);
@@ -152,6 +286,18 @@ pub(super) fn eval_lambda_call_with_values(
             break; // &aux is always last
         }
     }
+
+    // Calculate the end of required params
+    let end_of_required = optional_pos.or(rest_pos).or(key_pos).or(aux_pos).unwrap_or(params.len());
+    let required_params = &params[..end_of_required];
+
+    // Calculate optional params if any
+    let optional_params = if let Some(opt_idx) = optional_pos {
+        let opt_end = rest_pos.or(key_pos).or(aux_pos).unwrap_or(params.len());
+        &params[opt_idx + 1..opt_end]
+    } else {
+        &params[0..0]
+    };
 
     if let Some(rest_idx) = rest_pos {
         // Handle &rest parameters
@@ -225,26 +371,34 @@ pub(super) fn eval_lambda_call_with_values(
                 closure_env.insert(key_param.clone(), EvalResult::Nil);
             }
         }
+
     } else {
-        // Normal parameters - may have defaults for optional params
-        if args.len() > params.len() {
-            return Err(format!("Function requires at most {} arguments, got {}", params.len(), args.len()));
+        // Normal and optional parameters
+        let total_allowed = required_params.len() + optional_params.len();
+        if args.len() > total_allowed {
+            return Err(format!("Function requires at most {} arguments, got {}", total_allowed, args.len()));
+        }
+        if args.len() < required_params.len() {
+            return Err(format!("Function requires at least {} arguments, got {}", required_params.len(), args.len()));
         }
 
-        // Bind provided arguments
-        for (param, arg) in params.iter().zip(args.iter()) {
+        // Bind required parameters
+        for (param, arg) in required_params.iter().zip(args.iter()) {
             closure_env.insert(param.clone(), arg.clone());
         }
 
-        // Bind missing arguments using defaults
-        for i in args.len()..params.len() {
-            let param = &params[i];
-            if let Some(default_expr) = defaults.get(param) {
+        // Bind optional parameters from remaining args or defaults
+        let optional_args = &args[required_params.len()..];
+        for (i, param) in optional_params.iter().enumerate() {
+            if i < optional_args.len() {
+                closure_env.insert(param.clone(), optional_args[i].clone());
+            } else if let Some(default_expr) = defaults.get(param) {
                 // Evaluate default expression in closure environment
                 let default_value = eval_with_env(default_expr, &mut closure_env)?;
                 closure_env.insert(param.clone(), default_value);
             } else {
-                return Err(format!("Function requires {} arguments, got {}", params.len(), args.len()));
+                // No default provided, bind to nil
+                closure_env.insert(param.clone(), EvalResult::Nil);
             }
         }
     }
@@ -279,10 +433,78 @@ pub(super) fn eval_error(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     }
 
     let msg = eval_with_env(&args[0], env)?;
+
+    // If there are additional arguments, use them as format arguments
+    if args.len() > 1 {
+        let control_str = match &msg {
+            EvalResult::String(s) => s.clone(),
+            EvalResult::Symbol(s) => s.clone(),
+            _ => format!("{}", msg),
+        };
+
+        // Evaluate format arguments
+        let mut format_args = Vec::new();
+        for i in 1..args.len() {
+            format_args.push(eval_with_env(&args[i], env)?);
+        }
+
+        // Surface :datum in errors like (error 'no-such-package-error :datum X)
+        if let EvalResult::Symbol(sym) = &msg {
+            let mut i = 0;
+            while i + 1 < format_args.len() {
+                if let EvalResult::Symbol(key) = &format_args[i] {
+                    if key.eq_ignore_ascii_case(":datum") {
+                        let datum = &format_args[i + 1];
+                        return Err(format!("{} (datum: {})", sym, format_value(datum)));
+                    }
+                }
+                i += 2;
+            }
+        }
+
+        // Process format string
+        let mut output = String::new();
+        let mut chars = control_str.chars().peekable();
+        let mut arg_index = 0;
+
+        while let Some(ch) = chars.next() {
+            if ch == '~' {
+                if let Some(&directive) = chars.peek() {
+                    chars.next();
+                    match directive {
+                        '&' => {
+                            if !output.is_empty() && !output.ends_with('\n') {
+                                output.push('\n');
+                            }
+                        }
+                        '%' => output.push('\n'),
+                        'A' | 'a' | 'S' | 's' => {
+                            if arg_index < format_args.len() {
+                                output.push_str(&format_value(&format_args[arg_index]));
+                                arg_index += 1;
+                            }
+                        }
+                        '~' => output.push('~'),
+                        _ => {
+                            output.push('~');
+                            output.push(directive);
+                        }
+                    }
+                } else {
+                    output.push('~');
+                }
+            } else {
+                output.push(ch);
+            }
+        }
+
+        return Err(output);
+    }
+
     let error_msg = match msg {
         EvalResult::String(s) => s,
         EvalResult::Symbol(s) => s,
-        _ => format!("{:?}", msg),
+        _ => format!("{}", msg),
     };
 
     Err(error_msg)
@@ -321,10 +543,29 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
         EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
         EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
         EvalResult::Symbol(name) => Ok(ASTNode::variable(name.clone())),
+        EvalResult::MultipleValues(vals) => {
+            if vals.is_empty() {
+                Ok(ASTNode::nil())
+            } else {
+                result_to_ast(&vals[0])
+            }
+        }
         EvalResult::Cons(car, cdr) => {
             // Convert list to AST as a function call
             // This is used for macro expansion where the result should be evaluated as code
             let car_ast = result_to_ast(&car.borrow())?;
+
+            // Check if this is a dotted pair (cdr is not nil and not a cons)
+            let cdr_val = cdr.borrow();
+            if !matches!(&*cdr_val, EvalResult::Nil | EvalResult::Cons(_, _)) {
+                // This is a dotted pair: (car . cdr) where cdr is an atom
+                let cdr_ast = result_to_ast(&cdr_val)?;
+                return Ok(ASTNode::DottedPair {
+                    car: Box::new(car_ast),
+                    cdr: Box::new(cdr_ast),
+                });
+            }
+            drop(cdr_val);
 
             // Convert cdr to a list of arguments
             let args = match &*cdr.borrow() {
@@ -333,7 +574,7 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                     // Convert the rest of the list to a vector of AST nodes
                     cons_to_list(&cdr.borrow())?
                 }
-                other => vec![result_to_ast(other)?],
+                _ => unreachable!(), // We checked above that cdr is Nil or Cons
             };
 
             // Check if this is a special form and construct the appropriate ASTNode
@@ -345,12 +586,16 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                             return Err("let requires at least one argument (bindings)".to_string());
                         }
 
-                        // Parse bindings
+                        // If bindings is an Unquote or contains unquote (from backquote), keep as Call
                         let bindings_ast = &args[0];
-                        let bindings = parse_let_bindings(bindings_ast)?;
-                        let body = args[1..].to_vec();
-
-                        return Ok(ASTNode::Let { bindings, body });
+                        if matches!(bindings_ast, ASTNode::Unquote(_) | ASTNode::UnquoteSplicing(_))
+                            || contains_unquote_ast(bindings_ast) {
+                            // Fall through to generic Call handling
+                        } else {
+                            let bindings = parse_let_bindings(bindings_ast)?;
+                            let body = args[1..].to_vec();
+                            return Ok(ASTNode::Let { bindings, body });
+                        }
                     }
                     "let*" => {
                         // (let* ((var1 val1) (var2 val2) ...) body...)
@@ -358,11 +603,16 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                             return Err("let* requires at least one argument (bindings)".to_string());
                         }
 
+                        // If bindings is an Unquote or contains unquote (from backquote), keep as Call
                         let bindings_ast = &args[0];
-                        let bindings = parse_let_bindings(bindings_ast)?;
-                        let body = args[1..].to_vec();
-
-                        return Ok(ASTNode::LetStar { bindings, body });
+                        if matches!(bindings_ast, ASTNode::Unquote(_) | ASTNode::UnquoteSplicing(_))
+                            || contains_unquote_ast(bindings_ast) {
+                            // Fall through to generic Call handling
+                        } else {
+                            let bindings = parse_let_bindings(bindings_ast)?;
+                            let body = args[1..].to_vec();
+                            return Ok(ASTNode::LetStar { bindings, body });
+                        }
                     }
                     "progn" => {
                         return Ok(ASTNode::Progn { exprs: args });
@@ -399,6 +649,29 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                         }
                         return Ok(ASTNode::Quote(Box::new(args[0].clone())));
                     }
+                    "backquote" => {
+                        // (backquote form) => Backquote(form)
+                        if args.len() != 1 {
+                            return Err("backquote requires exactly one argument".to_string());
+                        }
+                        return Ok(ASTNode::Backquote(Box::new(args[0].clone())));
+                    }
+                    "unquote" => {
+                        // (unquote form) => Unquote(form)
+                        if args.len() != 1 {
+                            return Err("unquote requires exactly one argument".to_string());
+                        }
+                        return Ok(ASTNode::Unquote(Box::new(args[0].clone())));
+                    }
+                    "unquote-splicing" => {
+                        // (unquote-splicing form) => UnquoteSplicing(form)
+                        if args.len() != 1 {
+                            return Err("unquote-splicing requires exactly one argument".to_string());
+                        }
+                        return Ok(ASTNode::UnquoteSplicing(Box::new(args[0].clone())));
+                    }
+                    // read-time-eval is handled as a call and evaluated in eval_core
+                    // when the full environment is available
                     _ => {}
                 }
             }
@@ -423,7 +696,66 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                 entries: vec![],
             })
         }
-        _ => Err(format!("Cannot convert {:?} to AST", result)),
+        EvalResult::Array(arr) => {
+            // Convert array to AST as a vector literal
+            let elements: Result<Vec<ASTNode>, String> = arr.borrow()
+                .iter()
+                .map(|el| result_to_ast(el))
+                .collect();
+            Ok(ASTNode::Call {
+                function: Box::new(ASTNode::Variable("vector".to_string())),
+                args: elements?,
+            })
+        }
+        EvalResult::Character(c) => {
+            Ok(ASTNode::Constant(ConstantValue::Character(*c)))
+        }
+        EvalResult::Boolean(b) => {
+            if *b {
+                Ok(ASTNode::t())
+            } else {
+                Ok(ASTNode::nil())
+            }
+        }
+        EvalResult::Package(name) => {
+            // Convert package to (find-package "name") so it evaluates back to the package
+            Ok(ASTNode::Call {
+                function: Box::new(ASTNode::Variable("find-package".to_string())),
+                args: vec![ASTNode::Constant(ConstantValue::String(name.clone()))],
+            })
+        }
+        _ => Err(format!("Cannot convert {:?} to AST (variant {})", result, eval_result_variant(result))),
+    }
+}
+
+fn eval_result_variant(result: &EvalResult) -> &'static str {
+    match result {
+        EvalResult::Fixnum(_) => "Fixnum",
+        EvalResult::Bignum(_) => "Bignum",
+        EvalResult::Ratio(_) => "Ratio",
+        EvalResult::Float(_) => "Float",
+        EvalResult::Complex(_, _) => "Complex",
+        EvalResult::Bool(_) => "Bool",
+        EvalResult::Boolean(_) => "Boolean",
+        EvalResult::Nil => "Nil",
+        EvalResult::String(_) => "String",
+        EvalResult::Symbol(_) => "Symbol",
+        EvalResult::Character(_) => "Character",
+        EvalResult::Cons(_, _) => "Cons",
+        EvalResult::Lambda { .. } => "Lambda",
+        EvalResult::Macro { .. } => "Macro",
+        EvalResult::ModifyMacro { .. } => "ModifyMacro",
+        EvalResult::HashTable(_) => "HashTable",
+        EvalResult::Array(_) => "Array",
+        EvalResult::WasmBytes(_) => "WasmBytes",
+        EvalResult::BuiltinFunction(_) => "BuiltinFunction",
+        EvalResult::MultipleValues(_) => "MultipleValues",
+        EvalResult::ForeignLibrary(_) => "ForeignLibrary",
+        EvalResult::ForeignFunction(_) => "ForeignFunction",
+        EvalResult::Instance(_) => "Instance",
+        EvalResult::GenericFunction(_) => "GenericFunction",
+        EvalResult::Condition(_) => "Condition",
+        EvalResult::Package(_) => "Package",
     }
 }
 
@@ -438,6 +770,26 @@ pub(super) fn cons_to_list(result: &EvalResult) -> Result<Vec<ASTNode>, String> 
         other => {
             Ok(vec![result_to_ast(other)?])
         }
+    }
+}
+
+/// Check if an ASTNode contains unquote/unquote-splicing
+fn contains_unquote_ast(ast: &ASTNode) -> bool {
+    match ast {
+        ASTNode::Unquote(_) | ASTNode::UnquoteSplicing(_) => true,
+        ASTNode::Call { function, args } => {
+            contains_unquote_ast(function) || args.iter().any(|a| contains_unquote_ast(a))
+        }
+        ASTNode::Quote(inner) => contains_unquote_ast(inner),
+        ASTNode::Backquote(_) => false, // Don't recurse into backquotes
+        ASTNode::If { test, then_branch, else_branch } => {
+            contains_unquote_ast(test) || contains_unquote_ast(then_branch) || contains_unquote_ast(else_branch)
+        }
+        ASTNode::Progn { exprs } => exprs.iter().any(|e| contains_unquote_ast(e)),
+        ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+            bindings.iter().any(|(_, v)| contains_unquote_ast(v)) || body.iter().any(|e| contains_unquote_ast(e))
+        }
+        _ => false,
     }
 }
 
@@ -691,11 +1043,35 @@ pub(super) fn eval_in_package(args: &[ASTNode]) -> Result<EvalResult, String> {
         _ => return Err("in-package argument must be a symbol or string".to_string()),
     };
 
-    rlasp_runtime::PACKAGE_MANAGER
-        .set_current_package(&package_name)
-        .map_err(|e| format!("Failed to set package: {}", e))?;
+    // Strip leading colon for keywords
+    let pkg_name = if package_name.starts_with(':') {
+        package_name[1..].to_uppercase()
+    } else {
+        package_name.to_uppercase()
+    };
 
-    Ok(EvalResult::Nil)
+    // Also update the local package system
+    use super::eval_package::PACKAGES;
+    use super::eval_package::CURRENT_PACKAGE;
+
+    // Ensure package exists
+    let exists = PACKAGES.with(|p| p.borrow().contains_key(&pkg_name));
+    if !exists {
+        PACKAGES.with(|p| {
+            use super::eval_package::Package;
+            p.borrow_mut().insert(pkg_name.clone(), Package::new(&pkg_name, vec![]));
+        });
+    }
+
+    // Set current package in both systems
+    CURRENT_PACKAGE.with(|p| {
+        *p.borrow_mut() = pkg_name.clone();
+    });
+
+    // Also update runtime package manager
+    let _ = rlasp_runtime::PACKAGE_MANAGER.set_current_package(&pkg_name);
+
+    Ok(EvalResult::Symbol(pkg_name))
 }
 
 pub(super) fn eval_boundp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -719,6 +1095,65 @@ pub(super) fn eval_boundp(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     } else {
         Ok(EvalResult::Nil)
     }
+}
+
+pub(super) fn eval_symbol_value(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("symbol-value requires a symbol argument".to_string());
+    }
+
+    let symbol = eval_with_env(&args[0], env)?;
+
+    // Handle NIL specially - (symbol-value nil) returns NIL
+    if matches!(symbol, EvalResult::Nil) {
+        return Ok(EvalResult::Nil);
+    }
+
+    let symbol_name = match symbol {
+        EvalResult::Symbol(name) => name,
+        _ => return Err("symbol-value argument must be a symbol".to_string()),
+    };
+
+    // Check for T
+    if symbol_name.to_uppercase() == "T" {
+        return Ok(EvalResult::Bool(true));
+    }
+
+    // Check IO syntax variables first
+    if let Some(val) = super::eval_io_syntax::get_io_syntax_var(&symbol_name) {
+        return Ok(val);
+    }
+
+    // Check environment
+    if let Some(val) = env.get(&symbol_name) {
+        Ok(val.clone())
+    } else {
+        Err(format!("Unbound variable: {}", symbol_name))
+    }
+}
+
+pub(super) fn eval_set_symbol_value(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("set requires 2 arguments: symbol and value".to_string());
+    }
+
+    let symbol = eval_with_env(&args[0], env)?;
+    let symbol_name = match symbol {
+        EvalResult::Symbol(name) => name,
+        _ => return Err("set first argument must be a symbol".to_string()),
+    };
+
+    let value = eval_with_env(&args[1], env)?;
+
+    // Check IO syntax variables first
+    if super::eval_io_syntax::is_io_syntax_var(&symbol_name) {
+        super::eval_io_syntax::set_io_syntax_var(&symbol_name, value.clone());
+        return Ok(value);
+    }
+
+    // Set in environment
+    env.insert(symbol_name, value.clone());
+    Ok(value)
 }
 
 pub(super) fn eval_fset(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -745,8 +1180,9 @@ pub(super) fn eval_fset(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         if !matches!(is_macro, EvalResult::Nil | EvalResult::Bool(false)) {
             // Convert Lambda to Macro
             func_val = match func_val {
-                EvalResult::Lambda { params, defaults: _, supplied_p_vars: _, body, env: _closure_env } => {
-                    EvalResult::Macro { params, body }
+                EvalResult::Lambda { params, defaults: _, supplied_p_vars: _, body, env: _closure_env, .. } => {
+                    let params_ast = params_vec_to_ast_list(&params);
+                    EvalResult::Macro { params: Box::new(params_ast), body }
                 }
                 other => other, // If it's not a lambda, just use it as-is
             };
@@ -756,6 +1192,18 @@ pub(super) fn eval_fset(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     env.insert(symbol_name.clone(), func_val.clone());
 
     Ok(func_val)
+}
+
+fn params_vec_to_ast_list(params: &[String]) -> ASTNode {
+    if params.is_empty() {
+        return ASTNode::nil();
+    }
+    let mut nodes: Vec<ASTNode> = params.iter().map(|p| ASTNode::Variable(p.clone())).collect();
+    let first = nodes.remove(0);
+    ASTNode::Call {
+        function: Box::new(first),
+        args: nodes,
+    }
 }
 
 pub(super) fn eval_print(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1031,7 +1479,7 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
     // The complement lambda takes any number of arguments (&rest args)
     // and returns (not (apply func args))
     match func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: func_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: func_env, dynamic_env } => {
             // Create a new lambda that wraps the original and negates its result
             // We'll create a special "complement lambda" that stores the original function
             // For now, we'll use a simpler approach: create a lambda with &rest that calls the function and negates
@@ -1051,7 +1499,7 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
 
             // Store the original function in a new environment
             let mut complement_env = func_env.borrow().clone();
-            complement_env.insert("__complement_inner__".to_string(), EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: func_env });
+            complement_env.insert("__complement_inner__".to_string(), EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: func_env, dynamic_env });
 
             Ok(EvalResult::Lambda {
                 params: vec!["&rest".to_string(), "__complement_args__".to_string()],
@@ -1059,6 +1507,7 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
                 supplied_p_vars: HashMap::new(),
                 body: complement_body,
                 env: Rc::new(RefCell::new(complement_env)),
+                dynamic_env: false,
             })
         }
         EvalResult::Symbol(name) => {
@@ -1081,6 +1530,7 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
                 supplied_p_vars: HashMap::new(),
                 body: complement_body,
                 env: Rc::new(RefCell::new(env.clone())),
+                dynamic_env: false,
             })
         }
         _ => Err("complement requires a function argument".to_string()),
@@ -1250,18 +1700,46 @@ pub(super) fn eval_hash_table_p(args: &[ASTNode], env: &mut HashMap<String, Eval
     }
 }
 
+/// Convert a key to a typed string representation for hash table storage
+fn key_to_typed_string(key: &EvalResult) -> Result<String, String> {
+    match key {
+        EvalResult::Symbol(s) => {
+            // Keywords (symbols starting with :) get special prefix
+            if s.starts_with(':') {
+                Ok(format!("key:{}", s))
+            } else {
+                Ok(format!("sym:{}", s))
+            }
+        }
+        EvalResult::String(s) => Ok(format!("str:{}", s)),
+        EvalResult::Fixnum(n) => Ok(format!("num:{}", n)),
+        _ => Err("gethash key must be a symbol, string, or number".to_string()),
+    }
+}
+
+/// Parse a typed key string back to EvalResult
+fn typed_string_to_key(s: &str) -> EvalResult {
+    if let Some(rest) = s.strip_prefix("sym:") {
+        EvalResult::Symbol(rest.to_string())
+    } else if let Some(rest) = s.strip_prefix("str:") {
+        EvalResult::String(rest.to_string())
+    } else if let Some(rest) = s.strip_prefix("num:") {
+        EvalResult::Fixnum(rest.parse().unwrap_or(0))
+    } else if let Some(rest) = s.strip_prefix("key:") {
+        EvalResult::Symbol(rest.to_string())  // Keywords are stored as symbols
+    } else {
+        // Legacy: assume symbol for unprefixed keys
+        EvalResult::Symbol(s.to_string())
+    }
+}
+
 pub(super) fn eval_gethash(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.len() < 2 || args.len() > 3 {
         return Err("gethash requires 2 or 3 arguments (key hash-table [default])".to_string());
     }
 
     let key = eval_with_env(&args[0], env)?;
-    let key_str = match key {
-        EvalResult::Symbol(s) => s,
-        EvalResult::String(s) => s,
-        EvalResult::Fixnum(n) => n.to_string(),
-        _ => return Err("gethash key must be a symbol, string, or number".to_string()),
-    };
+    let key_str = key_to_typed_string(&key)?;
 
     let ht = eval_with_env(&args[1], env)?;
     match ht {
@@ -1289,12 +1767,7 @@ pub(super) fn eval_hash_set(args: &[ASTNode], env: &mut HashMap<String, EvalResu
     }
 
     let key = eval_with_env(&args[0], env)?;
-    let key_str = match key {
-        EvalResult::Symbol(s) => s,
-        EvalResult::String(s) => s,
-        EvalResult::Fixnum(n) => n.to_string(),
-        _ => return Err("hash-set key must be a symbol, string, or number".to_string()),
-    };
+    let key_str = key_to_typed_string(&key)?;
 
     let ht = eval_with_env(&args[1], env)?;
     let value = eval_with_env(&args[2], env)?;
@@ -1314,12 +1787,7 @@ pub(super) fn eval_remhash(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
 
     let key = eval_with_env(&args[0], env)?;
-    let key_str = match key {
-        EvalResult::Symbol(s) => s,
-        EvalResult::String(s) => s,
-        EvalResult::Fixnum(n) => n.to_string(),
-        _ => return Err("remhash key must be a symbol, string, or number".to_string()),
-    };
+    let key_str = key_to_typed_string(&key)?;
 
     let ht = eval_with_env(&args[1], env)?;
     match ht {
@@ -1437,16 +1905,17 @@ pub(super) fn eval_maphash(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 
             // Iterate over all key-value pairs in the hash table
             for (key_str, value) in hash.iter() {
-                // Convert key string to appropriate EvalResult
-                let key = EvalResult::Symbol(key_str.clone());
+                // Convert typed key string back to proper EvalResult
+                let key = typed_string_to_key(key_str);
 
                 // Call the function with key and value
                 match &func {
-                    EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env } => {
+                    EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
                         eval_lambda_call_with_values(
                             params.clone(),
                             defaults.clone(),
                             body.clone(),
+                            *dynamic_env,
                             closure_env.clone(),
                             &[key, value.clone()],
                             env
@@ -1466,6 +1935,62 @@ pub(super) fn eval_maphash(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 pub(super) fn eval_sethash(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     // Alias for si::hash-set
     eval_hash_set(args, env)
+}
+
+pub(super) fn eval_hash_table_keys(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("hash-table-keys requires 1 argument (hash-table)".to_string());
+    }
+
+    let ht = eval_with_env(&args[0], env)?;
+
+    match ht {
+        EvalResult::HashTable(hash_ref) => {
+            let hash = hash_ref.borrow();
+            let mut result = EvalResult::Nil;
+
+            // Collect keys in reverse order (to match Common Lisp behavior when consing)
+            let keys: Vec<_> = hash.keys().collect();
+            for key_str in keys.into_iter().rev() {
+                // Convert typed key string back to proper EvalResult
+                let key = typed_string_to_key(key_str);
+                result = EvalResult::Cons(
+                    std::rc::Rc::new(std::cell::RefCell::new(key)),
+                    std::rc::Rc::new(std::cell::RefCell::new(result)),
+                );
+            }
+
+            Ok(result)
+        }
+        _ => Err("hash-table-keys: argument must be a hash table".to_string()),
+    }
+}
+
+pub(super) fn eval_hash_table_values(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("hash-table-values requires 1 argument (hash-table)".to_string());
+    }
+
+    let ht = eval_with_env(&args[0], env)?;
+
+    match ht {
+        EvalResult::HashTable(hash_ref) => {
+            let hash = hash_ref.borrow();
+            let mut result = EvalResult::Nil;
+
+            // Collect values in reverse order (to match Common Lisp behavior when consing)
+            let values: Vec<_> = hash.values().collect();
+            for value in values.into_iter().rev() {
+                result = EvalResult::Cons(
+                    std::rc::Rc::new(std::cell::RefCell::new(value.clone())),
+                    std::rc::Rc::new(std::cell::RefCell::new(result)),
+                );
+            }
+
+            Ok(result)
+        }
+        _ => Err("hash-table-values: argument must be a hash table".to_string()),
+    }
 }
 
 pub(super) fn eval_parse_integer(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1536,7 +2061,55 @@ pub(super) fn eval_macroexpand_1(args: &[ASTNode], env: &mut HashMap<String, Eva
     if args.is_empty() {
         return Err("macroexpand-1 requires at least 1 argument".to_string());
     }
-    Ok(eval_with_env(&args[0], env)?)
+
+    // First evaluate the argument to get the form
+    let form = eval_with_env(&args[0], env)?;
+
+    // Check if the form is a list whose car is a macro name
+    if let EvalResult::Cons(car, cdr) = &form {
+        let car_val = car.borrow();
+        if let EvalResult::Symbol(name) = &*car_val {
+            // Check if this name is bound to a macro
+            if let Some(EvalResult::Macro { params, body }) = env.get(name).cloned() {
+                // It's a macro call - expand it once
+                // Convert cdr to a list of ASTNodes for macro expansion
+                let macro_args = cons_to_ast_args(&cdr.borrow())?;
+
+                // Create a new environment for the macro expansion
+                let mut macro_env = env.clone();
+                super::eval_core::bind_macro_params(&params, &macro_args, Some(name), &mut macro_env)?;
+
+                // Evaluate the macro body to get the expansion
+                let mut result = EvalResult::Nil;
+                for expr in &body {
+                    result = eval_with_env(expr, &mut macro_env)?;
+                }
+
+                // Return the expanded form (as EvalResult, not evaluated)
+                return Ok(result);
+            }
+        }
+    }
+
+    // Not a macro call - return the form unchanged
+    Ok(form)
+}
+
+/// Convert EvalResult cons list to Vec<ASTNode> for macro expansion
+fn cons_to_ast_args(result: &EvalResult) -> Result<Vec<ASTNode>, String> {
+    match result {
+        EvalResult::Nil => Ok(vec![]),
+        EvalResult::Cons(car, cdr) => {
+            let car_ast = result_to_ast(&car.borrow())?;
+            let mut args = vec![car_ast];
+            args.extend(cons_to_ast_args(&cdr.borrow())?);
+            Ok(args)
+        }
+        other => {
+            // Single element (dotted list tail)
+            Ok(vec![result_to_ast(other)?])
+        }
+    }
 }
 
 pub(super) fn eval_macro_function(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1560,7 +2133,7 @@ pub(super) fn eval_compiled_function_p(args: &[ASTNode], env: &mut HashMap<Strin
         return Err("compiled-function-p requires an argument".to_string());
     }
     match eval_with_env(&args[0], env)? {
-        EvalResult::Lambda { .. } | EvalResult::Macro { .. } => Ok(EvalResult::Boolean(true)),
+        EvalResult::Lambda { .. } | EvalResult::Macro { .. } | EvalResult::ModifyMacro { .. } => Ok(EvalResult::Boolean(true)),
         _ => Ok(EvalResult::Boolean(false)),
     }
 }
@@ -1571,7 +2144,81 @@ pub(super) fn eval_fdefinition(args: &[ASTNode], env: &mut HashMap<String, EvalR
     }
     match eval_with_env(&args[0], env)? {
         EvalResult::Symbol(name) => {
-            env.get(&name).cloned().ok_or_else(|| format!("Undefined function: {}", name))
+            // First check the environment for user-defined functions
+            if let Some(func) = env.get(&name).cloned() {
+                return Ok(func);
+            }
+
+            // Check for builtin functions - return a special marker
+            // This list includes common CL builtins plus pathname functions
+            let builtin_fns = [
+                // Pathname functions
+                "pathname-name", "pathname-type", "pathname-directory", "pathname-host",
+                "pathname-device", "pathname-version", "pathname", "pathnamep", "make-pathname",
+                "merge-pathnames", "namestring", "file-namestring", "directory-namestring",
+                "host-namestring", "enough-namestring", "parse-namestring", "truename",
+                "translate-pathname", "translate-logical-pathname", "probe-file", "directory",
+                "ensure-directories-exist", "delete-file", "rename-file", "file-write-date",
+                "file-author", "file-length", "file-position",
+                // List functions
+                "car", "cdr", "cons", "list", "list*", "append", "nconc", "reverse", "nreverse",
+                "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+                "nth", "nthcdr", "last", "butlast", "nbutlast", "length", "copy-list", "copy-tree",
+                "member", "assoc", "rassoc", "subst", "sublis", "acons", "pairlis",
+                "mapcar", "mapc", "maplist", "mapl", "mapcan", "mapcon",
+                // Sequence functions
+                "elt", "subseq", "copy-seq", "fill", "replace", "count", "count-if", "count-if-not",
+                "find", "find-if", "find-if-not", "position", "position-if", "position-if-not",
+                "search", "mismatch", "remove", "remove-if", "remove-if-not", "delete", "delete-if", "delete-if-not",
+                "substitute", "nsubstitute", "concatenate", "merge", "sort", "stable-sort",
+                "reduce", "every", "some", "notevery", "notany", "map", "map-into",
+                // String functions
+                "string", "string-upcase", "string-downcase", "string-capitalize",
+                "nstring-upcase", "nstring-downcase", "nstring-capitalize",
+                "string=", "string/=", "string<", "string>", "string<=", "string>=",
+                "string-equal", "string-not-equal", "string-lessp", "string-greaterp",
+                "string-not-lessp", "string-not-greaterp", "string-trim", "string-left-trim", "string-right-trim",
+                "char", "schar", "make-string",
+                // Character functions
+                "char-code", "code-char", "char-name", "name-char",
+                "alpha-char-p", "digit-char-p", "alphanumericp", "graphic-char-p",
+                "upper-case-p", "lower-case-p", "both-case-p", "char-upcase", "char-downcase",
+                // Numeric functions
+                "+", "-", "*", "/", "1+", "1-", "abs", "signum", "floor", "ceiling", "truncate", "round",
+                "mod", "rem", "min", "max", "gcd", "lcm", "exp", "expt", "log", "sqrt", "isqrt",
+                "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+                "=", "/=", "<", ">", "<=", ">=", "zerop", "plusp", "minusp", "evenp", "oddp",
+                "numberp", "integerp", "rationalp", "floatp", "complexp", "realp",
+                "random", "random-state-p", "make-random-state",
+                // Symbol functions
+                "symbol-name", "symbol-package", "symbol-value", "symbol-function", "symbol-plist",
+                "get", "getf", "remprop", "boundp", "fboundp", "makunbound", "fmakunbound",
+                "intern", "make-symbol", "gensym", "gentemp", "copy-symbol",
+                // I/O functions
+                "read", "read-char", "read-line", "read-from-string", "unread-char", "peek-char",
+                "write", "write-char", "write-line", "write-string", "prin1", "princ", "print", "pprint",
+                "format", "fresh-line", "terpri", "force-output", "finish-output", "clear-output",
+                "open", "close", "with-open-file", "with-input-from-string", "with-output-to-string",
+                // Type functions
+                "type-of", "typep", "subtypep", "coerce",
+                // Control functions
+                "funcall", "apply", "eval", "values", "values-list", "multiple-value-list",
+                "identity", "complement", "constantly", "not", "null", "eq", "eql", "equal", "equalp",
+                // Other common builtins
+                "error", "cerror", "warn", "signal", "make-condition",
+                "make-hash-table", "gethash", "remhash", "maphash", "hash-table-count",
+                "make-array", "aref", "array-dimensions", "array-dimension", "array-total-size",
+                "vector", "make-sequence",
+            ];
+
+            let name_lower = name.to_lowercase();
+            if builtin_fns.iter().any(|&f| f == name_lower) {
+                // Return a symbol indicating this is a builtin function
+                // This allows fdefinition to return something that can be funcalled
+                return Ok(EvalResult::Symbol(format!("#<BUILTIN {}>", name)));
+            }
+
+            Err(format!("Undefined function: {}", name))
         }
         _ => Err("fdefinition requires a symbol".to_string()),
     }
@@ -1833,7 +2480,7 @@ pub(super) fn eval_fboundp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::Symbol(name) => {
             // Check if it's a built-in or user-defined function
             match env.get(&name) {
-                Some(EvalResult::Lambda { .. }) | Some(EvalResult::Macro { .. }) => Ok(EvalResult::Boolean(true)),
+                Some(EvalResult::Lambda { .. }) | Some(EvalResult::Macro { .. }) | Some(EvalResult::ModifyMacro { .. }) => Ok(EvalResult::Boolean(true)),
                 _ => {
                     // Check if it's a builtin by trying to look it up
                     // For now, just check against known builtins
@@ -1884,6 +2531,7 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::Cons(_, _) => "CONS",
         EvalResult::Lambda { .. } => "FUNCTION",
         EvalResult::Macro { .. } => "MACRO",
+        EvalResult::ModifyMacro { .. } => "MACRO",
         EvalResult::HashTable(_) => "HASH-TABLE",
         EvalResult::Array(_) => "SIMPLE-ARRAY",
         EvalResult::WasmBytes(_) => "WASM-BYTES",
@@ -1895,7 +2543,7 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             if vals.is_empty() {
                 "NULL"
             } else {
-                return eval_type_of(&[result_to_ast(&vals[0])?], env);
+                return eval_type_of(&[result_to_ast_quoted(&vals[0])?], env);
             }
         }
         EvalResult::Instance(ref inst) => {
@@ -1903,8 +2551,218 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             return Ok(EvalResult::Symbol(inst.class_name.clone()));
         }
         EvalResult::GenericFunction(_) => "GENERIC-FUNCTION",
+        EvalResult::Condition(ref cond) => {
+            // Return the condition type name
+            return Ok(EvalResult::Symbol(cond.borrow().type_name.clone()));
+        }
+        EvalResult::Package(_) => "PACKAGE",
     };
     Ok(EvalResult::Symbol(type_name.to_string()))
+}
+
+/// Check if an object is of a given type
+/// (typep object type-specifier)
+pub fn eval_typep(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("typep requires 2 arguments".to_string());
+    }
+
+    let object = eval_with_env(&args[0], env)?;
+    let type_spec = eval_with_env(&args[1], env)?;
+
+    // Get the type specifier name
+    let type_name = match &type_spec {
+        EvalResult::Symbol(name) => name.to_uppercase(),
+        EvalResult::Cons(car, _) => {
+            // Compound type specifier like (and ...) or (or ...)
+            match &*car.borrow() {
+                EvalResult::Symbol(name) => name.to_uppercase(),
+                _ => return Ok(EvalResult::Boolean(false)),
+            }
+        }
+        _ => return Ok(EvalResult::Boolean(false)),
+    };
+
+    let result = match type_name.as_str() {
+        // Standard Common Lisp types
+        "T" => true, // Everything is of type T
+        "NIL" => false, // Nothing is of type NIL (except for compound specifiers)
+        "NULL" => matches!(object, EvalResult::Nil),
+        "ATOM" => !matches!(object, EvalResult::Cons(_, _)),
+        "LIST" => matches!(object, EvalResult::Nil | EvalResult::Cons(_, _)),
+        "CONS" => matches!(object, EvalResult::Cons(_, _)),
+        "SYMBOL" => matches!(object, EvalResult::Symbol(_)),
+        "KEYWORD" => matches!(&object, EvalResult::Symbol(s) if s.starts_with(':')),
+        "NUMBER" | "REAL" => matches!(object, EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)),
+        "INTEGER" => matches!(object, EvalResult::Fixnum(_) | EvalResult::Bignum(_)),
+        "FIXNUM" => matches!(object, EvalResult::Fixnum(_)),
+        "BIGNUM" => matches!(object, EvalResult::Bignum(_)),
+        "FLOAT" | "SINGLE-FLOAT" | "DOUBLE-FLOAT" | "SHORT-FLOAT" | "LONG-FLOAT" => matches!(object, EvalResult::Float(_)),
+        "RATIO" | "RATIONAL" => matches!(object, EvalResult::Ratio(_) | EvalResult::Fixnum(_) | EvalResult::Bignum(_)),
+        "COMPLEX" => matches!(object, EvalResult::Complex(_, _)),
+        "CHARACTER" | "CHAR" | "BASE-CHAR" | "STANDARD-CHAR" => matches!(object, EvalResult::Character(_)),
+        "STRING" | "SIMPLE-STRING" | "BASE-STRING" | "SIMPLE-BASE-STRING" => matches!(object, EvalResult::String(_)),
+        "VECTOR" | "SIMPLE-VECTOR" | "ARRAY" | "SIMPLE-ARRAY" => matches!(object, EvalResult::Array(_) | EvalResult::String(_)),
+        "SEQUENCE" => matches!(object, EvalResult::Nil | EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_)),
+        "HASH-TABLE" => matches!(object, EvalResult::HashTable(_)),
+        "FUNCTION" | "COMPILED-FUNCTION" => matches!(object, EvalResult::Lambda { .. } | EvalResult::BuiltinFunction(_) | EvalResult::GenericFunction(_)),
+        "STANDARD-OBJECT" | "STRUCTURE-OBJECT" => matches!(object, EvalResult::Instance(_)),
+        "CONDITION" | "ERROR" | "SIMPLE-ERROR" | "SIMPLE-CONDITION" | "WARNING" | "SIMPLE-WARNING" |
+        "SERIOUS-CONDITION" | "STYLE-WARNING" | "TYPE-ERROR" | "UNDEFINED-FUNCTION" => {
+            if let EvalResult::Condition(cond) = &object {
+                let cond_type = cond.borrow().type_name.to_uppercase();
+                cond_type == type_name || is_condition_subtype(&cond_type, &type_name)
+            } else {
+                false
+            }
+        }
+        "PACKAGE" => matches!(object, EvalResult::Package(_)),
+        "PATHNAME" | "LOGICAL-PATHNAME" => {
+            match &object {
+                EvalResult::Cons(car, cdr) => {
+                    if let EvalResult::Symbol(sym) = &*car.borrow() {
+                        sym.eq_ignore_ascii_case("pathname") && matches!(&*cdr.borrow(), EvalResult::Cons(_, _))
+                    } else {
+                        false
+                    }
+                }
+                EvalResult::Symbol(s) => s.starts_with("#P\"") && s.ends_with('"'),
+                _ => false,
+            }
+        }
+        "STREAM" | "FILE-STREAM" | "BROADCAST-STREAM" | "CONCATENATED-STREAM" |
+        "STRING-STREAM" | "SYNONYM-STREAM" | "TWO-WAY-STREAM" | "ECHO-STREAM" => false, // Streams not implemented
+        "READTABLE" => false, // Readtable not implemented
+        "AND" | "OR" | "NOT" | "MEMBER" | "EQL" | "SATISFIES" => {
+            // Compound type specifiers - handle specially
+            return eval_compound_typep(&object, &type_spec, env);
+        }
+        other => {
+            // Check if it's a user-defined class
+            if let EvalResult::Instance(inst) = &object {
+                inst.class_name.to_uppercase() == other || is_instance_of_class(inst, other)
+            } else {
+                false
+            }
+        }
+    };
+
+    Ok(EvalResult::Boolean(result))
+}
+
+/// Check compound type specifiers
+fn eval_compound_typep(object: &EvalResult, type_spec: &EvalResult, env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if let EvalResult::Cons(car, cdr) = type_spec {
+        let car_val = car.borrow();
+        if let EvalResult::Symbol(type_name) = &*car_val {
+            match type_name.to_uppercase().as_str() {
+                "AND" => {
+                    // (and type1 type2 ...) - object must be of all types
+                    let subtypes = cons_to_vec(&cdr.borrow())?;
+                    for subtype in subtypes {
+                        let obj_ast = result_to_ast_quoted(object)?;
+                        let type_ast = result_to_ast_quoted(&subtype)?;
+                        let result = eval_typep(&[obj_ast, type_ast], &mut env.clone())?;
+                        if !matches!(result, EvalResult::Boolean(true) | EvalResult::Bool(true)) {
+                            return Ok(EvalResult::Boolean(false));
+                        }
+                    }
+                    return Ok(EvalResult::Boolean(true));
+                }
+                "OR" => {
+                    // (or type1 type2 ...) - object must be of at least one type
+                    let subtypes = cons_to_vec(&cdr.borrow())?;
+                    for subtype in subtypes {
+                        let obj_ast = result_to_ast_quoted(object)?;
+                        let type_ast = result_to_ast_quoted(&subtype)?;
+                        let result = eval_typep(&[obj_ast, type_ast], &mut env.clone())?;
+                        if matches!(result, EvalResult::Boolean(true) | EvalResult::Bool(true)) {
+                            return Ok(EvalResult::Boolean(true));
+                        }
+                    }
+                    return Ok(EvalResult::Boolean(false));
+                }
+                "NOT" => {
+                    // (not type) - object must NOT be of the type
+                    let subtypes = cons_to_vec(&cdr.borrow())?;
+                    if let Some(subtype) = subtypes.first() {
+                        let obj_ast = result_to_ast_quoted(object)?;
+                        let type_ast = result_to_ast_quoted(subtype)?;
+                        let result = eval_typep(&[obj_ast, type_ast], &mut env.clone())?;
+                        return Ok(EvalResult::Boolean(!matches!(result, EvalResult::Boolean(true) | EvalResult::Bool(true))));
+                    }
+                }
+                "MEMBER" => {
+                    // (member obj1 obj2 ...) - object must be EQL to one of the listed objects
+                    let members = cons_to_vec(&cdr.borrow())?;
+                    for member in members {
+                        if super::eval_types::structural_equal(object, &member) {
+                            return Ok(EvalResult::Boolean(true));
+                        }
+                    }
+                    return Ok(EvalResult::Boolean(false));
+                }
+                "EQL" => {
+                    // (eql obj) - object must be EQL to obj
+                    let subtypes = cons_to_vec(&cdr.borrow())?;
+                    if let Some(eql_obj) = subtypes.first() {
+                        return Ok(EvalResult::Boolean(super::eval_types::structural_equal(object, eql_obj)));
+                    }
+                }
+                "SATISFIES" => {
+                    // (satisfies predicate) - call predicate with object
+                    let subtypes = cons_to_vec(&cdr.borrow())?;
+                    if let Some(EvalResult::Symbol(pred_name)) = subtypes.first() {
+                        let obj_ast = result_to_ast_quoted(object)?;
+                        let result = eval_with_env(&crate::ir::ASTNode::Call {
+                            function: Box::new(crate::ir::ASTNode::Variable(pred_name.clone())),
+                            args: vec![obj_ast],
+                        }, env)?;
+                        return Ok(EvalResult::Boolean(!matches!(result, EvalResult::Nil | EvalResult::Boolean(false) | EvalResult::Bool(false))));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(EvalResult::Boolean(false))
+}
+
+/// Check if a condition type is a subtype of another
+fn is_condition_subtype(cond_type: &str, parent_type: &str) -> bool {
+    // Simplified condition hierarchy
+    match parent_type {
+        "CONDITION" => true, // All conditions are of type CONDITION
+        "SERIOUS-CONDITION" => matches!(cond_type, "ERROR" | "SIMPLE-ERROR" | "TYPE-ERROR" | "UNDEFINED-FUNCTION"),
+        "ERROR" => matches!(cond_type, "SIMPLE-ERROR" | "TYPE-ERROR" | "UNDEFINED-FUNCTION"),
+        "WARNING" => matches!(cond_type, "SIMPLE-WARNING" | "STYLE-WARNING"),
+        _ => false,
+    }
+}
+
+/// Check if an instance is of a given class (including superclasses)
+fn is_instance_of_class(inst: &super::eval_types::Instance, class_name: &str) -> bool {
+    // Check direct class
+    if inst.class_name.to_uppercase() == class_name {
+        return true;
+    }
+    // Standard-object is a superclass of all CLOS instances
+    if class_name == "STANDARD-OBJECT" || class_name == "T" {
+        return true;
+    }
+    // TODO: Implement proper class hierarchy checking when we have class definitions stored
+    false
+}
+
+/// Convert cons list to Vec<EvalResult>
+fn cons_to_vec(result: &EvalResult) -> Result<Vec<EvalResult>, String> {
+    let mut vec = Vec::new();
+    let mut current = result.clone();
+    while let EvalResult::Cons(car, cdr) = current {
+        vec.push(car.borrow().clone());
+        current = cdr.borrow().clone();
+    }
+    Ok(vec)
 }
 
 pub(super) fn eval_keywordp(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1939,15 +2797,69 @@ pub(super) fn eval_special_operator_p(args: &[ASTNode], env: &mut HashMap<String
 // This is used by funcall when the function is a symbol referring to a built-in
 fn call_built_in_with_values(name: &str, args: &[EvalResult], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     // Convert pre-evaluated results back to AST nodes
+    // We must quote lists to prevent them from being re-evaluated as function calls
     let ast_args: Result<Vec<ASTNode>, String> = args.iter()
-        .map(|arg| result_to_ast(arg))
+        .map(|arg| result_to_ast_quoted(arg))
         .collect();
     let ast_args = ast_args?;
 
     // Call the built-in function through eval_call_with_env
-    // This works because result_to_ast converts values to constants,
-    // so re-evaluating them just returns the same value
     super::eval_core::eval_call_with_env(&ASTNode::Variable(name.to_string()), &ast_args, env)
+}
+
+/// Convert an EvalResult to an AST node, quoting lists to preserve them as data
+pub(super) fn result_to_ast_quoted(result: &EvalResult) -> Result<ASTNode, String> {
+    match result {
+        EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
+        EvalResult::Float(f) => Ok(ASTNode::float(*f)),
+        EvalResult::Bool(true) => Ok(ASTNode::t()),
+        EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
+        EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
+        EvalResult::MultipleValues(vals) => {
+            if vals.is_empty() {
+                Ok(ASTNode::nil())
+            } else {
+                result_to_ast_quoted(&vals[0])
+            }
+        }
+        EvalResult::Symbol(name) => {
+            // Quote symbols to prevent them from being evaluated as variables
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(name.clone()))))
+        }
+        EvalResult::Character(c) => Ok(ASTNode::Constant(crate::ir::ConstantValue::Character(*c))),
+        EvalResult::Cons(_, _) => {
+            // Quote the list to prevent it from being evaluated as a function call
+            let unquoted = result_to_ast(result)?;
+            Ok(ASTNode::Quote(Box::new(unquoted)))
+        }
+        EvalResult::Array(arr) => {
+            let elements: Result<Vec<ASTNode>, String> = arr.borrow().iter()
+                .map(|e| result_to_ast_quoted(e))
+                .collect();
+            Ok(ASTNode::Call {
+                function: Box::new(ASTNode::Variable("vector".to_string())),
+                args: elements?,
+            })
+        }
+        EvalResult::Lambda { params, defaults, supplied_p_vars, body, .. } => {
+            if defaults.is_empty() && supplied_p_vars.is_empty() {
+                Ok(ASTNode::lambda(params.clone(), body.clone()))
+            } else {
+                Ok(ASTNode::lambda_with_supplied_p(params.clone(), defaults.clone(), supplied_p_vars.clone(), body.clone()))
+            }
+        }
+        EvalResult::Macro { params, body } => {
+            Ok(ASTNode::Macro { params: params.clone(), body: body.clone() })
+        }
+        EvalResult::Package(name) => {
+            // Convert package to (find-package "name") so it evaluates back to the package
+            Ok(ASTNode::Call {
+                function: Box::new(ASTNode::Variable("find-package".to_string())),
+                args: vec![ASTNode::Constant(crate::ir::ConstantValue::String(name.clone()))],
+            })
+        }
+        _ => Err(format!("Cannot convert {:?} to AST for funcall", result)),
+    }
 }
 
 pub(super) fn eval_make_string(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {

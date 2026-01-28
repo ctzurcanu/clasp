@@ -230,6 +230,7 @@ fn eval_lambda_call(
     call_env: &mut HashMap<String, EvalResult>,
 ) -> Result<EvalResult, String> {
     if params.len() != args.len() {
+        eprintln!("DEBUG: Lambda call mismatch - params: {:?}, args: {:?}", params, args);
         return Err(format!("Expected {} arguments, got {}", params.len(), args.len()));
     }
 

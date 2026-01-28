@@ -10,6 +10,33 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+// Thread-local storage for *features* and other global dynamic variables
+thread_local! {
+    static FEATURES: RefCell<EvalResult> = {
+        // Initialize with default features as a proper list
+        let mut list = EvalResult::Nil;
+        // Include OS features that ASDF expects
+        for feat in &["OS-MACOSX", "OS-UNIX", "UNICODE", "DARWIN", "UNIX", "IEEE-FLOATING-POINT",
+                      "ANSI-CL", "COMMON-LISP", "CLASP", "RLASP"] {
+            list = EvalResult::Cons(
+                Rc::new(RefCell::new(EvalResult::Symbol(format!(":{}", feat)))),
+                Rc::new(RefCell::new(list)),
+            );
+        }
+        RefCell::new(list)
+    };
+}
+
+/// Get the current *features* value
+pub fn get_features() -> EvalResult {
+    FEATURES.with(|f| f.borrow().clone())
+}
+
+/// Set the *features* value
+pub fn set_features(value: EvalResult) {
+    FEATURES.with(|f| *f.borrow_mut() = value);
+}
+
 pub fn call_symbol_builtin(name: &str, args: &[EvalResult], env: &HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     match name {
         "symbol-name" => {

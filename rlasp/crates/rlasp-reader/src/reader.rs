@@ -26,7 +26,12 @@ impl Reader {
         let mut exprs = Vec::new();
         loop {
             match self.read() {
-                Ok(expr) => exprs.push(expr),
+                Ok(expr) => {
+                    // Filter out skip markers from skipped feature conditionals
+                    if !crate::parser::is_skip_marker(&expr) {
+                        exprs.push(expr);
+                    }
+                }
                 Err(crate::error::ReaderError::UnexpectedEof) => break,
                 Err(e) => return Err(e),
             }

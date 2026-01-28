@@ -7,6 +7,113 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 
+/// Setf expander entry - stores either a simple updater function name
+/// or a complex expansion (lambda-list, store-vars, body)
+#[derive(Clone)]
+pub enum SetfExpander {
+    /// Simple form: (defsetf accessor updater) - call (updater args... new-value)
+    Simple(String),
+    /// Complex form: (defsetf accessor lambda-list (store-var) body...)
+    Complex {
+        lambda_list: Vec<String>,
+        store_vars: Vec<String>,
+        body: Vec<ASTNode>,
+    },
+}
+
+thread_local! {
+    /// Global table of setf expanders defined by defsetf
+    pub static SETF_EXPANDERS: RefCell<HashMap<String, SetfExpander>> = RefCell::new(HashMap::new());
+}
+
+/// Register a setf expander for an accessor
+pub fn register_setf_expander(accessor: &str, expander: SetfExpander) {
+    SETF_EXPANDERS.with(|table| {
+        table.borrow_mut().insert(accessor.to_uppercase(), expander);
+    });
+}
+
+/// Get a setf expander for an accessor
+pub fn get_setf_expander(accessor: &str) -> Option<SetfExpander> {
+    SETF_EXPANDERS.with(|table| {
+        table.borrow().get(&accessor.to_uppercase()).cloned()
+    })
+}
+
+/// Evaluate defsetf
+/// Simple form: (defsetf accessor updater)
+/// Complex form: (defsetf accessor lambda-list (store-var) body...)
+pub fn eval_defsetf(args: &[ASTNode], _env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("defsetf requires at least 2 arguments".to_string());
+    }
+
+    // Get accessor name
+    let accessor = match &args[0] {
+        ASTNode::Variable(name) => name.clone(),
+        _ => return Err("defsetf: first argument must be a symbol".to_string()),
+    };
+
+    // Check if this is simple form (2 args) or complex form (3+ args)
+    if args.len() == 2 {
+        // Simple form: (defsetf accessor updater)
+        let updater = match &args[1] {
+            ASTNode::Variable(name) => name.clone(),
+            _ => return Err("defsetf: updater must be a symbol".to_string()),
+        };
+        register_setf_expander(&accessor, SetfExpander::Simple(updater));
+    } else {
+        // Complex form: (defsetf accessor lambda-list (store-var) [docstring] body...)
+        // Extract lambda-list
+        let lambda_list = extract_lambda_list(&args[1])?;
+
+        // Extract store-vars (should be a list with one variable)
+        let store_vars = extract_lambda_list(&args[2])?;
+
+        // Rest is body (skip optional docstring)
+        let body_start = if args.len() > 3 {
+            if let ASTNode::Constant(ConstantValue::String(_)) = &args[3] {
+                4 // Skip docstring
+            } else {
+                3
+            }
+        } else {
+            3
+        };
+
+        let body = args[body_start..].to_vec();
+
+        register_setf_expander(&accessor, SetfExpander::Complex {
+            lambda_list,
+            store_vars,
+            body,
+        });
+    }
+
+    Ok(EvalResult::Symbol(accessor))
+}
+
+/// Extract parameter names from a lambda list AST node
+fn extract_lambda_list(ast: &ASTNode) -> Result<Vec<String>, String> {
+    match ast {
+        ASTNode::Call { function, args } => {
+            let mut params = Vec::new();
+            if let ASTNode::Variable(name) = &**function {
+                params.push(name.clone());
+            }
+            for arg in args {
+                if let ASTNode::Variable(name) = arg {
+                    params.push(name.clone());
+                }
+            }
+            Ok(params)
+        }
+        ASTNode::Constant(ConstantValue::Nil) => Ok(vec![]),
+        ASTNode::Variable(name) => Ok(vec![name.clone()]),
+        _ => Err(format!("Invalid lambda list: {:?}", ast)),
+    }
+}
+
 // Helper to check if a name is a car/cdr accessor
 fn is_car_cdr_accessor(name: &str) -> bool {
     name == "car" || name == "cdr" ||
@@ -20,40 +127,17 @@ fn is_car_cdr_accessor(name: &str) -> bool {
 }
 
 pub(super) fn eval_return(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // return exits from the nearest enclosing NIL block (implicitly created by do)
-    // For now, we signal this using a special error with JSON encoding
+    // return exits from the nearest enclosing NIL block (implicitly created by do, loop, etc.)
+    // This is equivalent to (return-from nil value)
     let return_val = if args.is_empty() {
         EvalResult::Nil
     } else {
         eval_with_env(&args[0], env)?
     };
 
-    // Encode the return value in a way we can decode
-    // For complex types, we use serde_json
-    let encoded = match &return_val {
-        EvalResult::Fixnum(n) => format!("RETURN:FIXNUM:{}", n),
-        EvalResult::Float(f) => format!("RETURN:FLOAT:{}", f),
-        EvalResult::Bool(b) => format!("RETURN:BOOL:{}", b),
-        EvalResult::Nil => "RETURN:NIL".to_string(),
-        EvalResult::String(s) => format!("RETURN:STRING:{}", s),
-        EvalResult::Symbol(s) => format!("RETURN:SYMBOL:{}", s),
-        EvalResult::Cons(_, _) => {
-            // For cons, store in a global and return a marker
-            // This is a workaround - ideally we'd use a proper exception mechanism
-            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(return_val.clone()));
-            "RETURN:CONS".to_string()
-        }
-        EvalResult::Lambda { .. } => {
-            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(return_val.clone()));
-            "RETURN:LAMBDA".to_string()
-        }
-        _ => {
-            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(return_val.clone()));
-            "RETURN:COMPLEX".to_string()
-        }
-    };
-
-    Err(encoded)
+    // Use return-from nil to properly match block handling
+    let encoded = encode_return_value(&return_val);
+    Err(format!("RETURN-FROM:nil:{}", encoded))
 }
 
 pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -661,6 +745,277 @@ pub(super) fn eval_assert(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     Ok(EvalResult::Nil)
 }
 
+pub(super) fn eval_check_type(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (check-type place typespec &optional string)
+    // Signals an error if the value of place is not of type typespec
+    if args.len() < 2 {
+        return Err("check-type requires at least 2 arguments (place typespec)".to_string());
+    }
+
+    let place = &args[0];
+    let value = eval_with_env(place, env)?;
+    let typespec = &args[1];
+
+    // Check if the value matches the typespec
+    let matches = check_typespec_matches(&value, typespec, env)?;
+
+    if !matches {
+        let type_desc = format_typespec(typespec);
+        let place_desc = format!("{:?}", place);
+        eprintln!("DEBUG check-type failed: place={} value={:?} type={}", place_desc, value, type_desc);
+        let string_desc = if args.len() > 2 {
+            match eval_with_env(&args[2], env)? {
+                EvalResult::String(s) => format!(": {}", s),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        return Err(format!("The value {:?} is not of type {}{}", value, type_desc, string_desc));
+    }
+
+    Ok(EvalResult::Nil)
+}
+
+fn format_typespec(typespec: &ASTNode) -> String {
+    match typespec {
+        ASTNode::Variable(name) => name.to_uppercase(),
+        ASTNode::Quote(inner) => format_typespec(inner),
+        ASTNode::Call { function, args } => {
+            if let ASTNode::Variable(name) = function.as_ref() {
+                let args_str: Vec<String> = args.iter().map(format_typespec).collect();
+                format!("({} {})", name.to_uppercase(), args_str.join(" "))
+            } else {
+                "UNKNOWN-TYPE".to_string()
+            }
+        }
+        ASTNode::Constant(c) => format!("{:?}", c),
+        _ => "UNKNOWN-TYPE".to_string(),
+    }
+}
+
+fn check_typespec_matches(value: &EvalResult, typespec: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<bool, String> {
+    match typespec {
+        ASTNode::Variable(name) => Ok(type_matches(value, &name.to_uppercase())),
+        ASTNode::Quote(inner) => check_typespec_matches(value, inner, env),
+        ASTNode::Call { function, args } => {
+            // Handle compound type specifiers like (member nil t), (or null package), etc.
+            if let ASTNode::Variable(name) = function.as_ref() {
+                match name.to_uppercase().as_str() {
+                    "MEMBER" => {
+                        // (member item1 item2 ...) - check if value is eql to any item
+                        for arg in args {
+                            let item = eval_with_env(arg, env)?;
+                            if eql_values(value, &item) {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    }
+                    "OR" => {
+                        // (or type1 type2 ...) - check if value matches any type
+                        for arg in args {
+                            if check_typespec_matches(value, arg, env)? {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    }
+                    "AND" => {
+                        // (and type1 type2 ...) - check if value matches all types
+                        for arg in args {
+                            if !check_typespec_matches(value, arg, env)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    "NOT" => {
+                        // (not type) - check if value does NOT match type
+                        if args.len() != 1 {
+                            return Err("NOT type specifier requires exactly one argument".to_string());
+                        }
+                        Ok(!check_typespec_matches(value, &args[0], env)?)
+                    }
+                    "EQL" => {
+                        // (eql object) - check if value is eql to object
+                        if args.len() != 1 {
+                            return Err("EQL type specifier requires exactly one argument".to_string());
+                        }
+                        let item = eval_with_env(&args[0], env)?;
+                        Ok(eql_values(value, &item))
+                    }
+                    "SATISFIES" => {
+                        // (satisfies predicate) - always return true for now (complex to implement)
+                        Ok(true)
+                    }
+                    _ => {
+                        // Unknown compound type - be permissive
+                        Ok(true)
+                    }
+                }
+            } else {
+                // Unknown function form - be permissive
+                Ok(true)
+            }
+        }
+        _ => {
+            // Unknown typespec form - be permissive
+            Ok(true)
+        }
+    }
+}
+
+fn eql_values(a: &EvalResult, b: &EvalResult) -> bool {
+    match (a, b) {
+        (EvalResult::Nil, EvalResult::Nil) => true,
+        (EvalResult::Boolean(x), EvalResult::Boolean(y)) => x == y,
+        (EvalResult::Bool(x), EvalResult::Bool(y)) => x == y,
+        (EvalResult::Fixnum(x), EvalResult::Fixnum(y)) => x == y,
+        (EvalResult::Float(x), EvalResult::Float(y)) => x == y,
+        (EvalResult::Character(x), EvalResult::Character(y)) => x == y,
+        (EvalResult::Symbol(x), EvalResult::Symbol(y)) => x == y,
+        (EvalResult::String(x), EvalResult::String(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn type_matches(value: &EvalResult, type_name: &str) -> bool {
+    match type_name {
+        "T" => true,
+        "NIL" => false,
+        "NULL" => matches!(value, EvalResult::Nil),
+        "SYMBOL" => matches!(value, EvalResult::Symbol(_)),
+        "KEYWORD" => {
+            if let EvalResult::Symbol(s) = value {
+                s.starts_with(':')
+            } else {
+                false
+            }
+        },
+        "STRING" => matches!(value, EvalResult::String(_)),
+        "INTEGER" => matches!(value, EvalResult::Fixnum(_) | EvalResult::Bignum(_)),
+        "FIXNUM" => matches!(value, EvalResult::Fixnum(_)),
+        "BIGNUM" => matches!(value, EvalResult::Bignum(_)),
+        "FLOAT" => matches!(value, EvalResult::Float(_)),
+        "NUMBER" | "REAL" => matches!(value, EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)),
+        "RATIO" => matches!(value, EvalResult::Ratio(_)),
+        "COMPLEX" => matches!(value, EvalResult::Complex(_, _)),
+        "CONS" => matches!(value, EvalResult::Cons(_, _)),
+        "LIST" => matches!(value, EvalResult::Cons(_, _) | EvalResult::Nil),
+        "ATOM" => !matches!(value, EvalResult::Cons(_, _)),
+        "SEQUENCE" => matches!(value, EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_) | EvalResult::Nil),
+        "ARRAY" | "VECTOR" | "SIMPLE-VECTOR" => matches!(value, EvalResult::Array(_)),
+        "HASH-TABLE" => matches!(value, EvalResult::HashTable(_)),
+        "FUNCTION" => matches!(value, EvalResult::Lambda { .. } | EvalResult::Macro { .. } | EvalResult::ModifyMacro { .. } | EvalResult::BuiltinFunction(_) | EvalResult::GenericFunction(_) | EvalResult::ForeignFunction(_)),
+        "BOOLEAN" => {
+            match value {
+                EvalResult::Nil | EvalResult::Bool(_) | EvalResult::Boolean(_) => true,
+                EvalResult::Symbol(s) if s.to_uppercase() == "T" => true,
+                _ => false,
+            }
+        },
+        "CHARACTER" => matches!(value, EvalResult::Character(_)),
+        "INSTANCE" => matches!(value, EvalResult::Instance(_)),
+        "GENERIC-FUNCTION" => matches!(value, EvalResult::GenericFunction(_)),
+        "PACKAGE" => {
+            // Check if the value is a Package object or a symbol naming a valid package
+            match value {
+                EvalResult::Package(_) => true,
+                EvalResult::Symbol(name) => {
+                    super::eval_package::PACKAGES.with(|p| {
+                        p.borrow().contains_key(&name.to_uppercase())
+                    })
+                }
+                _ => false
+            }
+        }
+        "PACKAGE-DESIGNATOR" => {
+            // A package designator can be a package, string, or symbol
+            matches!(value, EvalResult::Symbol(_) | EvalResult::String(_))
+        }
+        _ => {
+            // For compound types like (or null package), (member nil t), etc.
+            // or for unknown types, just return true for now (permissive)
+            true
+        }
+    }
+}
+
+/// Implements (define-modify-macro name lambda-list function [documentation])
+/// This macro-defining macro creates a read-modify-write macro.
+/// Example: (define-modify-macro incf (&optional (delta 1)) +)
+/// creates (defmacro incf (place &optional (delta 1)) `(setf ,place (+ ,place ,delta)))
+pub(super) fn eval_define_modify_macro(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (define-modify-macro name lambda-list function [documentation])
+    if args.len() < 3 {
+        return Err("define-modify-macro requires at least 3 arguments (name lambda-list function)".to_string());
+    }
+
+    // Get name - could be Variable or quoted symbol
+    let name = match &args[0] {
+        ASTNode::Variable(s) => s.clone(),
+        ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+        _ => return Err("define-modify-macro: name must be a symbol".to_string()),
+    };
+
+    // Get function name
+    let func_name = match &args[2] {
+        ASTNode::Variable(s) => s.clone(),
+        ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+        _ => return Err("define-modify-macro: function must be a symbol".to_string()),
+    };
+
+    // Extract lambda-list parameters
+    let lambda_list_nodes = match &args[1] {
+        ASTNode::Call { function, args: inner_args } => {
+            let mut nodes = vec![function.as_ref().clone()];
+            nodes.extend(inner_args.clone());
+            nodes
+        }
+        _ => vec![],  // Empty lambda list
+    };
+
+    // Check for &rest
+    let has_rest = lambda_list_nodes.iter().any(|n| {
+        match n {
+            ASTNode::Variable(s) | ASTNode::Constant(ConstantValue::Symbol(s)) => s == "&rest",
+            _ => false,
+        }
+    });
+
+    // Get parameter names from AST nodes
+    fn get_symbol_name(node: &ASTNode) -> Option<String> {
+        match node {
+            ASTNode::Variable(s) => Some(s.clone()),
+            ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+            ASTNode::Call { function, .. } => get_symbol_name(function),
+            _ => None,
+        }
+    }
+
+    // Build macro parameters: (place &optional arg1 arg2) or (place &rest args)
+    let mut macro_params = vec!["place".to_string()];
+    for node in &lambda_list_nodes {
+        if let Some(s) = get_symbol_name(node) {
+            macro_params.push(s);
+        }
+    }
+
+    // Store as modify-macro which will be expanded specially
+    let macro_def = EvalResult::ModifyMacro {
+        name: name.clone(),
+        params: macro_params,
+        function: func_name.clone(),
+        has_rest,
+    };
+
+    // Register in the environment (like defmacro does)
+    env.insert(name.clone(), macro_def);
+
+    Ok(EvalResult::Symbol(name))
+}
+
 // Helper to navigate and get value from car/cdr accessors
 fn navigate_and_get(accessor: &str, cons: EvalResult) -> Result<EvalResult, String> {
     // Parse accessor: "cadr" means (car (cdr x))
@@ -720,7 +1075,7 @@ fn navigate_and_incf(accessor: &str, cons: EvalResult, delta: EvalResult) -> Res
             *cell_to_modify.borrow_mut() = new_val.clone();
             Ok(new_val)
         }
-        _ => Err(format!("Not a cons cell for final {} operation", accessor)),
+        other => Err(format!("Not a cons cell for final {} operation: {:?}", accessor, other)),
     }
 }
 
@@ -891,13 +1246,72 @@ pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 
 pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     // (eval-when (situation*) form*)
-    // For now, we just execute all forms since we're interpreting
-    // In a full compiler, we'd check for :compile-toplevel, :load-toplevel, :execute
+    // Situations: :compile-toplevel, :load-toplevel, :execute
+    // In interpreter mode:
+    //   - :execute means execute now
+    //   - :load-toplevel means execute when loading
+    //   - :compile-toplevel is ignored (we're not compiling)
     if args.is_empty() {
         return Err("eval-when requires at least 1 argument".to_string());
     }
 
-    // Skip the situations list and execute all forms
+    // Parse the situations list
+    let mut should_execute = false;
+
+    if let Some(situations) = args.get(0) {
+        let situation_list = match situations {
+            ASTNode::Call { function: _, args: situations_args } => {
+                // (situation1 situation2 ...)
+                let mut slist = vec![];
+                if let ASTNode::Variable(first) = &**&situations {
+                    slist.push(first.clone());
+                }
+                for arg in situations_args {
+                    if let ASTNode::Variable(s) = arg {
+                        slist.push(s.clone());
+                    }
+                }
+                slist
+            }
+            ASTNode::Constant(crate::ir::ConstantValue::Nil) => {
+                // Empty situations list - don't execute
+                vec![]
+            }
+            ASTNode::Variable(s) => {
+                // Single situation
+                vec![s.clone()]
+            }
+            _ => vec![],
+        };
+
+        // Check if any situation matches interpreter mode
+        for situation in situation_list {
+            let sit_lower = situation.to_lowercase();
+            let sit_normalized = sit_lower.trim_start_matches(':');
+            match sit_normalized {
+                "execute" | "eval" => {
+                    // :execute - execute at runtime in interpreter
+                    should_execute = true;
+                }
+                "load-toplevel" | "load" => {
+                    // :load-toplevel - execute when loading file (interpreter loads)
+                    should_execute = true;
+                }
+                "compile-toplevel" | "compile" => {
+                    // :compile-toplevel - only for compiler, ignore in interpreter
+                    // But many ASDF forms use this, so we execute anyway for compatibility
+                    should_execute = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !should_execute {
+        return Ok(EvalResult::Nil);
+    }
+
+    // Execute the forms
     let forms = &args[1..];
     let mut result = EvalResult::Nil;
     for form in forms {
@@ -921,8 +1335,14 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         match place {
             // Simple variable
             ASTNode::Variable(var_name) => {
-                env.insert(var_name.clone(), value.clone());
-                last_value = value.clone();
+                // Handle special global variables
+                if var_name == "*features*" {
+                    super::eval_symbol::set_features(value.clone());
+                    last_value = value.clone();
+                } else {
+                    env.insert(var_name.clone(), value.clone());
+                    last_value = value.clone();
+                }
             }
             // (gethash key ht) or (aref array index)
             ASTNode::Call { function, args: place_args } => {
@@ -1091,11 +1511,53 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                     }
                                     Ok(value)
                                 }
-                                _ => Err(format!("Not a cons cell for final {} operation", accessor)),
+                                _ => {
+                                    #[cfg(debug_assertions)]
+                                    eprintln!("DEBUG setf: non-cons for final {} operation", accessor);
+                                    Err(format!("Not a cons cell for final {} operation", accessor))
+                                },
                             }
                         }
 
                         last_value = navigate_and_set(func_name, list_result, value.clone())?;
+                    } else if let Some(expander) = get_setf_expander(func_name) {
+                        // User-defined setf expander from defsetf
+                        match expander {
+                            SetfExpander::Simple(updater) => {
+                                // (defsetf accessor updater) -> (updater args... new-value)
+                                let mut call_args = place_args.clone();
+                                call_args.push(super::eval_system::result_to_ast_quoted(&value)?);
+                                last_value = eval_with_env(&ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable(updater)),
+                                    args: call_args,
+                                }, env)?;
+                            }
+                            SetfExpander::Complex { lambda_list, store_vars, body } => {
+                                // Complex form - bind lambda-list params to place args, store-vars to value
+                                let mut expansion_env = env.clone();
+
+                                // Bind lambda-list params to evaluated place args
+                                for (param, arg) in lambda_list.iter().zip(place_args.iter()) {
+                                    let arg_val = eval_with_env(arg, env)?;
+                                    expansion_env.insert(param.clone(), arg_val);
+                                }
+
+                                // Bind store vars to the new value
+                                for store_var in &store_vars {
+                                    expansion_env.insert(store_var.clone(), value.clone());
+                                }
+
+                                // Evaluate the body to get the expansion form
+                                let mut expansion = EvalResult::Nil;
+                                for expr in &body {
+                                    expansion = eval_with_env(expr, &mut expansion_env)?;
+                                }
+
+                                // The expansion should be code to evaluate
+                                let expansion_ast = super::eval_system::result_to_ast(&expansion)?;
+                                last_value = eval_with_env(&expansion_ast, env)?;
+                            }
+                        }
                     } else {
                         // Unknown accessor - just return the value without erroring
                         // This allows files to parse even if we don't support the accessor
@@ -1202,10 +1664,35 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
             for handler in handlers {
                 if let ASTNode::Call { function: _condition_type, args: handler_args } = handler {
                     // For now, catch all errors (ignore condition type matching)
-                    // Execute handler body
+                    // Handler format: (condition-type (var) body...)
+                    // handler_args[0] is (var) - the variable binding list
+                    // handler_args[1..] is the body
+
+                    let mut handler_env = env.clone();
+
+                    // Extract variable from (var) list and bind error message
+                    if let Some(var_list) = handler_args.get(0) {
+                        match var_list {
+                            // (var) form where var is called as function
+                            ASTNode::Call { function, args: _ } => {
+                                if let ASTNode::Variable(var_name) = &**function {
+                                    handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                }
+                            }
+                            // Single variable (no parens, rare)
+                            ASTNode::Variable(var_name) => {
+                                handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                            }
+                            // nil or empty list means no binding
+                            ASTNode::Constant(ConstantValue::Nil) => {}
+                            _ => {}
+                        }
+                    }
+
+                    // Execute handler body (all args after the variable list)
                     let mut handler_result = EvalResult::Nil;
-                    for form in handler_args {
-                        handler_result = eval_with_env(form, env)?;
+                    for form in handler_args.iter().skip(1) {
+                        handler_result = eval_with_env(form, &mut handler_env)?;
                     }
                     return Ok(handler_result);
                 }

@@ -265,48 +265,76 @@ fn format_list(obj: &EvalResult) -> String {
     result
 }
 
-// Simplified format implementation
+// Enhanced format implementation with ASDF-required directives
 fn format_simple(fmt: &str, args: &[EvalResult]) -> Result<String, String> {
+    format_with_context(fmt, args, &mut 0)
+}
+
+fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) -> Result<String, String> {
     let mut result = String::new();
     let mut chars = fmt.chars().peekable();
-    let mut arg_index = 0;
 
     while let Some(ch) = chars.next() {
         if ch == '~' {
+            // Check for modifiers (@ : @:)
+            let mut at_modifier = false;
+            let mut colon_modifier = false;
+
+            while let Some(&modifier) = chars.peek() {
+                if modifier == '@' {
+                    at_modifier = true;
+                    chars.next();
+                } else if modifier == ':' {
+                    colon_modifier = true;
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+
             if let Some(&directive) = chars.peek() {
                 chars.next(); // consume directive
                 match directive {
                     'A' | 'a' => {
                         // Aesthetic (princ-like)
-                        if let Some(arg) = args.get(arg_index) {
+                        if let Some(arg) = args.get(*arg_index) {
                             result.push_str(&format_for_princ(arg));
-                            arg_index += 1;
+                            *arg_index += 1;
                         }
                     }
                     'S' | 's' => {
                         // Standard (prin1-like)
-                        if let Some(arg) = args.get(arg_index) {
+                        if let Some(arg) = args.get(*arg_index) {
                             result.push_str(&format_for_prin1(arg));
-                            arg_index += 1;
+                            *arg_index += 1;
                         }
                     }
                     'D' | 'd' => {
                         // Decimal
-                        if let Some(arg) = args.get(arg_index) {
-                            result.push_str(&format_for_princ(arg));
-                            arg_index += 1;
+                        if let Some(arg) = args.get(*arg_index) {
+                            if colon_modifier {
+                                // ~:D - decimal with commas for thousands
+                                if let EvalResult::Fixnum(n) = arg {
+                                    result.push_str(&format_with_commas(*n));
+                                } else {
+                                    result.push_str(&format_for_princ(arg));
+                                }
+                            } else {
+                                result.push_str(&format_for_princ(arg));
+                            }
+                            *arg_index += 1;
                         }
                     }
                     'F' | 'f' => {
-                        // Fixed-point float (handle ~,3F for 3 decimal places)
-                        if let Some(arg) = args.get(arg_index) {
+                        // Fixed-point float
+                        if let Some(arg) = args.get(*arg_index) {
                             let num_str = match arg {
                                 EvalResult::Float(n) => format!("{:.3}", n),
                                 EvalResult::Fixnum(i) => format!("{:.3}", *i as f64),
                                 _ => format_for_princ(arg),
                             };
                             result.push_str(&num_str);
-                            arg_index += 1;
+                            *arg_index += 1;
                         }
                     }
                     '%' => {
@@ -314,47 +342,274 @@ fn format_simple(fmt: &str, args: &[EvalResult]) -> Result<String, String> {
                         result.push('\n');
                     }
                     '&' => {
-                        // Fresh line (simplified: just newline)
+                        // Fresh line
                         result.push('\n');
                     }
                     '~' => {
                         // Literal tilde
                         result.push('~');
                     }
+                    '[' => {
+                        // Conditional: ~[...~;...~] or ~@[...~] or ~:[...~]
+                        // Find the matching ~]
+                        let mut nesting = 1;
+                        let mut body = String::new();
+                        while let Some(c) = chars.next() {
+                            if c == '~' {
+                                if let Some(&next) = chars.peek() {
+                                    if next == '[' {
+                                        nesting += 1;
+                                        body.push(c);
+                                        body.push(chars.next().unwrap());
+                                    } else if next == ']' {
+                                        nesting -= 1;
+                                        if nesting == 0 {
+                                            chars.next(); // consume ]
+                                            break;
+                                        } else {
+                                            body.push(c);
+                                            body.push(chars.next().unwrap());
+                                        }
+                                    } else {
+                                        body.push(c);
+                                    }
+                                } else {
+                                    body.push(c);
+                                }
+                            } else {
+                                body.push(c);
+                            }
+                        }
+
+                        if at_modifier {
+                            // ~@[...~] - conditional if arg is non-nil
+                            if let Some(arg) = args.get(*arg_index) {
+                                if !matches!(arg, EvalResult::Nil) {
+                                    // Don't consume arg, just use it for the test
+                                    result.push_str(&format_with_context(&body, args, arg_index)?);
+                                } else {
+                                    *arg_index += 1;
+                                }
+                            }
+                        } else if colon_modifier {
+                            // ~:[false~;true~] - conditional based on nil/non-nil
+                            if let Some(arg) = args.get(*arg_index) {
+                                *arg_index += 1;
+                                let parts: Vec<&str> = body.split("~;").collect();
+                                if matches!(arg, EvalResult::Nil) {
+                                    // Use first (false) clause
+                                    if let Some(false_clause) = parts.get(0) {
+                                        result.push_str(&format_with_context(false_clause, args, arg_index)?);
+                                    }
+                                } else {
+                                    // Use second (true) clause
+                                    if let Some(true_clause) = parts.get(1) {
+                                        result.push_str(&format_with_context(true_clause, args, arg_index)?);
+                                    }
+                                }
+                            }
+                        } else {
+                            // ~[...~;...~] - numeric selection
+                            if let Some(arg) = args.get(*arg_index) {
+                                *arg_index += 1;
+                                if let EvalResult::Fixnum(idx) = arg {
+                                    let parts: Vec<&str> = body.split("~;").collect();
+                                    if let Some(clause) = parts.get(*idx as usize) {
+                                        result.push_str(&format_with_context(clause, args, arg_index)?);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    '{' => {
+                        // Iteration: ~{...~}
+                        // Find the matching ~}
+                        let mut nesting = 1;
+                        let mut body = String::new();
+                        while let Some(c) = chars.next() {
+                            if c == '~' {
+                                if let Some(&next) = chars.peek() {
+                                    if next == '{' {
+                                        nesting += 1;
+                                        body.push(c);
+                                        body.push(chars.next().unwrap());
+                                    } else if next == '}' {
+                                        nesting -= 1;
+                                        if nesting == 0 {
+                                            chars.next(); // consume }
+                                            break;
+                                        } else {
+                                            body.push(c);
+                                            body.push(chars.next().unwrap());
+                                        }
+                                    } else {
+                                        body.push(c);
+                                    }
+                                } else {
+                                    body.push(c);
+                                }
+                            } else {
+                                body.push(c);
+                            }
+                        }
+
+                        // Get the list to iterate over
+                        if let Some(arg) = args.get(*arg_index) {
+                            *arg_index += 1;
+
+                            // Convert to a list of elements
+                            let elements = list_to_vec(arg);
+                            let mut first = true;
+
+                            for (idx, elem) in elements.iter().enumerate() {
+                                let is_last = idx + 1 == elements.len();
+                                let elem_args = vec![elem.clone()];
+                                let mut elem_idx = 0;
+
+                                let formatted = if body.contains("~^") {
+                                    if is_last {
+                                        // For the last element, stop at ~^ (skip separators)
+                                        let prefix = body.split("~^").next().unwrap_or("");
+                                        format_with_context(prefix, &elem_args, &mut elem_idx)?
+                                    } else {
+                                        // For non-last elements, ~^ is a no-op
+                                        let without_escape = body.replace("~^", "");
+                                        format_with_context(&without_escape, &elem_args, &mut elem_idx)?
+                                    }
+                                } else {
+                                    format_with_context(&body, &elem_args, &mut elem_idx)?
+                                };
+
+                                // Handle ~^ for last element
+                                if at_modifier && !first {
+                                    // ~@{ puts elements on separate lines
+                                    result.push('\n');
+                                }
+
+                                result.push_str(&formatted);
+                                first = false;
+                            }
+                        }
+                    }
+                    '^' => {
+                        // Escape from enclosing ~{...~} if no more args
+                        // In this simplified version, we just skip it
+                        // The parent iteration handler checks for this
+                    }
+                    '*' => {
+                        // Argument repositioning
+                        if colon_modifier {
+                            // ~:* - go back one argument
+                            if *arg_index > 0 {
+                                *arg_index -= 1;
+                            }
+                        } else if at_modifier {
+                            // ~@* - go to absolute position (next number, or 0)
+                            *arg_index = 0;
+                        } else {
+                            // ~* - skip one argument forward
+                            *arg_index += 1;
+                        }
+                    }
+                    'R' | 'r' => {
+                        // Radix (English words for numbers)
+                        if let Some(arg) = args.get(*arg_index) {
+                            if let EvalResult::Fixnum(n) = arg {
+                                if colon_modifier {
+                                    // ~:R - ordinal (1st, 2nd, etc.)
+                                    result.push_str(&format_ordinal(*n));
+                                } else {
+                                    // ~R - cardinal (one, two, etc.)
+                                    result.push_str(&format_cardinal(*n));
+                                }
+                            } else {
+                                result.push_str(&format_for_princ(arg));
+                            }
+                            *arg_index += 1;
+                        }
+                    }
                     ',' | '0'..='9' => {
-                        // Format parameters like ,3 in ~,3F - skip until we hit the directive letter
+                        // Format parameters - skip until directive letter
                         while let Some(&next_ch) = chars.peek() {
                             if next_ch.is_alphabetic() {
-                                chars.next(); // consume the directive letter
+                                chars.next();
                                 match next_ch.to_ascii_uppercase() {
                                     'F' => {
-                                        if let Some(arg) = args.get(arg_index) {
+                                        if let Some(arg) = args.get(*arg_index) {
                                             let num_str = match arg {
                                                 EvalResult::Float(n) => format!("{:.3}", n),
                                                 EvalResult::Fixnum(i) => format!("{:.3}", *i as f64),
                                                 _ => format_for_princ(arg),
                                             };
                                             result.push_str(&num_str);
-                                            arg_index += 1;
+                                            *arg_index += 1;
                                         }
                                     }
                                     'D' => {
-                                        if let Some(arg) = args.get(arg_index) {
+                                        if let Some(arg) = args.get(*arg_index) {
                                             result.push_str(&format_for_princ(arg));
-                                            arg_index += 1;
+                                            *arg_index += 1;
                                         }
                                     }
                                     _ => {}
                                 }
                                 break;
                             } else {
-                                chars.next(); // skip format parameter chars
+                                chars.next();
                             }
+                        }
+                    }
+                    '(' => {
+                        // Case conversion: ~:@( is upcase all
+                        let mut nesting = 1;
+                        let mut body = String::new();
+                        while let Some(c) = chars.next() {
+                            if c == '~' {
+                                if let Some(&next) = chars.peek() {
+                                    if next == '(' {
+                                        nesting += 1;
+                                        body.push(c);
+                                        body.push(chars.next().unwrap());
+                                    } else if next == ')' {
+                                        nesting -= 1;
+                                        if nesting == 0 {
+                                            chars.next();
+                                            break;
+                                        } else {
+                                            body.push(c);
+                                            body.push(chars.next().unwrap());
+                                        }
+                                    } else {
+                                        body.push(c);
+                                    }
+                                } else {
+                                    body.push(c);
+                                }
+                            } else {
+                                body.push(c);
+                            }
+                        }
+
+                        let formatted = format_with_context(&body, args, arg_index)?;
+                        if colon_modifier && at_modifier {
+                            // ~:@( - upcase all
+                            result.push_str(&formatted.to_uppercase());
+                        } else if colon_modifier {
+                            // ~:( - capitalize words
+                            result.push_str(&capitalize_words(&formatted));
+                        } else if at_modifier {
+                            // ~@( - capitalize first word
+                            result.push_str(&capitalize_first(&formatted));
+                        } else {
+                            // ~( - downcase all
+                            result.push_str(&formatted.to_lowercase());
                         }
                     }
                     _ => {
                         // Unknown directive, pass through
                         result.push('~');
+                        if at_modifier { result.push('@'); }
+                        if colon_modifier { result.push(':'); }
                         result.push(directive);
                     }
                 }
@@ -367,4 +622,91 @@ fn format_simple(fmt: &str, args: &[EvalResult]) -> Result<String, String> {
     }
 
     Ok(result)
+}
+
+// Helper: convert list to vector
+fn list_to_vec(list: &EvalResult) -> Vec<EvalResult> {
+    let mut result = Vec::new();
+    let mut current = list.clone();
+    while let EvalResult::Cons(car, cdr) = current {
+        result.push(car.borrow().clone());
+        current = cdr.borrow().clone();
+    }
+    result
+}
+
+// Helper: format number with commas
+fn format_with_commas(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.insert(0, ',');
+        }
+        result.insert(0, c);
+    }
+    if n < 0 {
+        result.insert(0, '-');
+    }
+    result
+}
+
+// Helper: format cardinal number (one, two, etc.)
+fn format_cardinal(n: i64) -> String {
+    match n {
+        0 => "zero".to_string(),
+        1 => "one".to_string(),
+        2 => "two".to_string(),
+        3 => "three".to_string(),
+        4 => "four".to_string(),
+        5 => "five".to_string(),
+        6 => "six".to_string(),
+        7 => "seven".to_string(),
+        8 => "eight".to_string(),
+        9 => "nine".to_string(),
+        10 => "ten".to_string(),
+        _ => n.to_string(),
+    }
+}
+
+// Helper: format ordinal number (first, second, etc.)
+fn format_ordinal(n: i64) -> String {
+    match n {
+        1 => "first".to_string(),
+        2 => "second".to_string(),
+        3 => "third".to_string(),
+        4 => "fourth".to_string(),
+        5 => "fifth".to_string(),
+        6 => "sixth".to_string(),
+        7 => "seventh".to_string(),
+        8 => "eighth".to_string(),
+        9 => "ninth".to_string(),
+        10 => "tenth".to_string(),
+        _ => {
+            let suffix = match n % 10 {
+                1 if n % 100 != 11 => "st",
+                2 if n % 100 != 12 => "nd",
+                3 if n % 100 != 13 => "rd",
+                _ => "th",
+            };
+            format!("{}{}", n, suffix)
+        }
+    }
+}
+
+// Helper: capitalize first character
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+// Helper: capitalize each word
+fn capitalize_words(s: &str) -> String {
+    s.split_whitespace()
+        .map(|word| capitalize_first(word))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

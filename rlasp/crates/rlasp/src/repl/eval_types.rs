@@ -95,10 +95,19 @@ pub enum EvalResult {
         supplied_p_vars: HashMap<String, String>,  // Maps param -> supplied-p var
         body: Vec<ASTNode>,
         env: Rc<RefCell<HashMap<String, EvalResult>>>,
+        dynamic_env: bool, // If true, prefer caller env for bindings (flet/labels approximation)
     },
     Macro {
-        params: Vec<String>,
+        params: Box<ASTNode>,
         body: Vec<ASTNode>,
+    },
+    /// Modify-macro created by define-modify-macro
+    /// Expands to (setf place (function place args...))
+    ModifyMacro {
+        name: String,
+        params: Vec<String>,  // place + lambda-list params
+        function: String,     // The function to call
+        has_rest: bool,       // Whether lambda-list has &rest
     },
     HashTable(Rc<RefCell<HashMap<String, EvalResult>>>),
     Array(Rc<RefCell<Vec<EvalResult>>>),  // Simple 1D array/vector
@@ -109,6 +118,8 @@ pub enum EvalResult {
     ForeignFunction(Rc<rlasp_ffi::ForeignFunction>),  // FFI function (wrapped in Rc)
     Instance(Instance),  // CLOS instance with class metadata
     GenericFunction(Rc<RefCell<GenericFunction>>),  // CLOS generic function with methods
+    Condition(Rc<RefCell<super::eval_conditions::ConditionInstance>>),  // Condition instance
+    Package(String),  // Package object (stores package name)
 }
 
 // Special error type for non-local exits (return, return-from)
@@ -138,6 +149,7 @@ impl std::fmt::Display for EvalResult {
             }
             EvalResult::Lambda { .. } => write!(f, "#<LAMBDA>"),
             EvalResult::Macro { .. } => write!(f, "#<MACRO>"),
+            EvalResult::ModifyMacro { name, .. } => write!(f, "#<MODIFY-MACRO {}>", name),
             EvalResult::HashTable(_) => write!(f, "#<HASH-TABLE>"),
             EvalResult::Array(_) => write!(f, "#<ARRAY>"),
             EvalResult::WasmBytes(bytes) => write!(f, "#<WASM {} bytes>", bytes.len()),
@@ -154,6 +166,8 @@ impl std::fmt::Display for EvalResult {
             EvalResult::ForeignFunction(_) => write!(f, "#<FOREIGN-FUNCTION>"),
             EvalResult::Instance(inst) => write!(f, "#<{} instance>", inst.class_name),
             EvalResult::GenericFunction(gf) => write!(f, "#<GENERIC-FUNCTION {}>", gf.borrow().name),
+            EvalResult::Condition(cond) => write!(f, "#<CONDITION {}>", cond.borrow().type_name),
+            EvalResult::Package(name) => write!(f, "#<PACKAGE \"{}\">", name),
         }
     }
 }
@@ -192,8 +206,9 @@ pub(super) fn structural_equal(a: &EvalResult, b: &EvalResult) -> bool {
         (EvalResult::Float(a), EvalResult::Float(b)) => a == b,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Nil, EvalResult::Nil) => true,
+        (EvalResult::Character(a), EvalResult::Character(b)) => a == b,
         (EvalResult::String(a), EvalResult::String(b)) => a == b,
-        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
+        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a.eq_ignore_ascii_case(b),
         _ => false,
     }
 }
@@ -231,6 +246,7 @@ pub fn class_of(val: &EvalResult) -> String {
         EvalResult::Cons(_, _) => "CONS".to_string(),
         EvalResult::Lambda { .. } => "FUNCTION".to_string(),
         EvalResult::Macro { .. } => "MACRO".to_string(),
+        EvalResult::ModifyMacro { .. } => "MACRO".to_string(),
         EvalResult::HashTable(_) => "HASH-TABLE".to_string(),
         EvalResult::Array(_) => "ARRAY".to_string(),
         EvalResult::GenericFunction(_) => "GENERIC-FUNCTION".to_string(),

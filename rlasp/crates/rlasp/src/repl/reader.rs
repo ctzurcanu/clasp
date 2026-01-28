@@ -439,8 +439,7 @@ impl Reader {
             _ => return Err(ReadError::InvalidNumber(format!("Unknown character: {}", name))),
         };
 
-        // Characters are represented as strings for now
-        Ok(ASTNode::Constant(ConstantValue::String(ch.to_string())))
+        Ok(ASTNode::Constant(ConstantValue::Character(ch)))
     }
 
     fn read_vector(&mut self) -> Result<ASTNode, ReadError> {

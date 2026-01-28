@@ -1366,6 +1366,36 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            // Vector - create vector with elements
+            ASTNode::Vector(elements) => {
+                // First, evaluate all elements onto the stack
+                for elem in elements.iter() {
+                    self.compile_expr(elem)?;
+                }
+
+                // Create vector with the given size
+                let len = elements.len();
+                let len_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
+
+                let vec = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_make_vector({}) : (i64) -> i64", vec, len_ssa));
+
+                // Pop elements from stack in reverse order and set them
+                for i in (0..len).rev() {
+                    let elem_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", elem_val));
+                    let idx = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant {} : i64", idx, i));
+                    let _ = self.fresh_ssa();
+                    self.writeln(&format!("%_ = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64", vec, idx, elem_val));
+                }
+
+                // Push vector to stack
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", vec));
+                Ok(())
+            }
+
             // C FFI call - call external C function
             ASTNode::CCall { function, args } => {
                 // Evaluate all arguments

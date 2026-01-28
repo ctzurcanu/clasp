@@ -538,10 +538,24 @@ impl Lexer {
         let text = self.read_atom_text();
 
         // Try to parse as number
-        // First check if it looks like an integer (all digits, possibly with sign)
-        let looks_like_int = text.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+')
-                          && text.chars().any(|c| c.is_ascii_digit())
-                          && !text.is_empty();
+        // First check if it looks like an integer (all digits, possibly with leading sign)
+        // IMPORTANT: Sign must be at the START, not at the end (1- and 1+ are CL functions, not numbers)
+        let looks_like_int = {
+            let chars: Vec<char> = text.chars().collect();
+            if chars.is_empty() {
+                false
+            } else {
+                // Check if first char is a sign
+                let digit_start = if chars[0] == '-' || chars[0] == '+' {
+                    1
+                } else {
+                    0
+                };
+                // Rest must be all digits and non-empty
+                let rest = &chars[digit_start..];
+                !rest.is_empty() && rest.iter().all(|c| c.is_ascii_digit())
+            }
+        };
 
         if looks_like_int {
             // Try parsing as i64, but also check if it's actually valid

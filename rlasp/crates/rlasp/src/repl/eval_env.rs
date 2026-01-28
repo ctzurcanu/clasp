@@ -2,6 +2,8 @@
 use super::eval_types::EvalResult;
 use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use std::sync::OnceLock;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 pub fn call_env_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
@@ -89,7 +91,18 @@ pub fn call_env_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
 
         "user-homedir-pathname" => {
             match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-                Ok(home) => Ok(EvalResult::String(home)),
+                Ok(mut home) => {
+                    if !home.ends_with('/') {
+                        home.push('/');
+                    }
+                    Ok(EvalResult::Cons(
+                        Rc::new(RefCell::new(EvalResult::Symbol("pathname".to_string()))),
+                        Rc::new(RefCell::new(EvalResult::Cons(
+                            Rc::new(RefCell::new(EvalResult::String(home))),
+                            Rc::new(RefCell::new(EvalResult::Nil)),
+                        ))),
+                    ))
+                }
                 Err(_) => Ok(EvalResult::Nil),
             }
         }

@@ -45,6 +45,12 @@ pub mod eval_io2;
 pub mod eval_readtable;
 #[path = "eval_clos.rs"]
 pub mod eval_clos;
+#[path = "eval_io_syntax.rs"]
+pub mod eval_io_syntax;
+#[path = "eval_loop.rs"]
+pub mod eval_loop;
+#[path = "eval_conditions.rs"]
+pub mod eval_conditions;
 
 // Re-export main types and functions
 pub use eval_types::EvalResult;

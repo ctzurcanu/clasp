@@ -1149,6 +1149,31 @@ impl MLIRCodegen {
                 Ok(ht)
             }
 
+            rlasp::ir::ASTNode::Vector(elements) => {
+                // Build vector from elements
+                // First, compile all elements
+                let element_ssas: Result<Vec<_>> = elements.iter().map(|e| self.compile_expr(e)).collect();
+                let element_ssas = element_ssas?;
+
+                // Create vector with the given size
+                let len = elements.len();
+                let len_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
+
+                let vec = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_make_vector({}) : (i64) -> i64", vec, len_ssa));
+
+                // Set each element
+                for (i, elem_ssa) in element_ssas.iter().enumerate() {
+                    let idx = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant {} : i64", idx, i));
+                    let _ = self.fresh_ssa();
+                    self.writeln(&format!("%_ = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64", vec, idx, elem_ssa));
+                }
+
+                Ok(vec)
+            }
+
             rlasp::ir::ASTNode::CCall { function, args } => {
                 // C function call via FFI
                 // Call runtime bridge function cc_ccall(function_name, args_list)

@@ -57,7 +57,8 @@
       "Bash(chmod:*)",
       "Bash(./rlasp:*)",
       "Bash(time:*)",
-      "Bash(../target/release/irlasp:*)"
+      "Bash(../target/release/irlasp:*)",
+      "Bash(python3:*)"
     ]
   }
 }

@@ -8,13 +8,29 @@ use crate::token::{Token, TokenKind};
 use rlasp_runtime::{LispObject, RString, RVector, Symbol};
 use std::collections::HashMap;
 
+/// Sentinel symbol for skipped feature conditionals
+/// read_list and read_all filter this out
+pub const FEATURE_SKIP_MARKER: &str = "#<FEATURE-SKIP>";
+
+/// Check if a LispObject is the feature skip marker
+pub fn is_skip_marker(obj: &LispObject) -> bool {
+    if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
+        unsafe { (*sym_ptr).name() == FEATURE_SKIP_MARKER }
+    } else {
+        false
+    }
+}
+
 /// Default features available in rlasp
 const DEFAULT_FEATURES: &[&str] = &[
     "RLASP",
+    "CLASP",           // For ASDF compatibility
     "COMMON-LISP",
     "ANSI-CL",
     "IEEE-FLOATING-POINT",
+    "UNICODE",         // For ASDF unicode support
     "UNIX",
+    "DARWIN",          // macOS
 ];
 
 /// Check if a feature is present
@@ -285,10 +301,18 @@ impl Parser {
                 if evaluate_feature_expr(feature_expr) {
                     Ok(form) // Feature present - include the form
                 } else {
-                    // Feature absent - skip this form, read next expression
-                    // Return a special "skip" value or continue reading
-                    // For now, return nil and let caller handle
-                    Ok(LispObject::nil())
+                    // Feature absent - form discarded, now continue reading
+                    // Check if there's another form to read
+                    match self.current_token.kind {
+                        // At structural boundary - return skip marker for caller to filter
+                        TokenKind::RightParen | TokenKind::RightBracket |
+                        TokenKind::RightBrace | TokenKind::Eof => {
+                            Ok(Symbol::allocate(FEATURE_SKIP_MARKER))
+                        }
+                        // More input available - recursively read next form
+                        // This correctly handles consecutive feature conditionals
+                        _ => self.read_expr()
+                    }
                 }
             }
 
@@ -302,18 +326,25 @@ impl Parser {
                 if !evaluate_feature_expr(feature_expr) {
                     Ok(form) // Feature absent - include the form
                 } else {
-                    // Feature present - skip this form
-                    Ok(LispObject::nil())
+                    // Feature present - form discarded, now continue reading
+                    match self.current_token.kind {
+                        TokenKind::RightParen | TokenKind::RightBracket |
+                        TokenKind::RightBrace | TokenKind::Eof => {
+                            Ok(Symbol::allocate(FEATURE_SKIP_MARKER))
+                        }
+                        _ => self.read_expr()
+                    }
                 }
             }
 
             TokenKind::HashDot => {
                 // Read-time eval: #.(form)
                 // Evaluates form at read time and uses result as object
-                // For parsing purposes, just read the form and return it
-                // In a real implementation, this would eval the form
+                // Wrap in (read-time-eval form) marker for processing during AST conversion
                 self.advance()?; // skip #.
-                self.read_expr() // Return the form itself
+                let form = self.read_expr()?;
+                let rte_sym = rlasp_runtime::Symbol::allocate("read-time-eval");
+                Ok(rlasp_runtime::Cons::list(&[rte_sym, form]))
             }
 
             TokenKind::HashColon => {
@@ -492,7 +523,11 @@ impl Parser {
                 break;
             }
 
-            elements.push(self.read_expr()?);
+            let elem = self.read_expr()?;
+            // Filter out feature conditional skip markers
+            if !is_skip_marker(&elem) {
+                elements.push(elem);
+            }
         }
 
         if !matches!(self.current_token.kind, TokenKind::RightParen) {
@@ -653,7 +688,11 @@ impl Parser {
         let mut elements = Vec::new();
 
         while !matches!(self.current_token.kind, TokenKind::RightParen | TokenKind::Eof) {
-            elements.push(self.read_expr()?);
+            let elem = self.read_expr()?;
+            // Filter out feature conditional skip markers
+            if !is_skip_marker(&elem) {
+                elements.push(elem);
+            }
         }
 
         if !matches!(self.current_token.kind, TokenKind::RightParen) {

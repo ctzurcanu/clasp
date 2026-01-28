@@ -44,7 +44,7 @@ pub enum ASTNode {
 
     /// Macro: user-defined macro
     Macro {
-        params: Vec<String>,
+        params: Box<ASTNode>,
         body: Vec<ASTNode>,
     },
 
@@ -148,6 +148,9 @@ pub enum ASTNode {
     HashTable {
         entries: Vec<(ASTNode, ASTNode)>,
     },
+
+    /// Vector: #(elem1 elem2 ...)
+    Vector(Vec<ASTNode>),
 
     // === CLOS (Common Lisp Object System) ===
     /// Define a class: (defclass name (superclasses...) (slots...) options...)

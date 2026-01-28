@@ -80,7 +80,8 @@ impl LowerContext {
             ASTNode::Macro { params, body } => {
                 // For now, treat macros like lambdas in the IR
                 // They should have been expanded before lowering, but if not, treat as lambda
-                self.lower_lambda(params, body)
+                let param_vec = ast_params_to_vec(params);
+                self.lower_lambda(&param_vec, body)
             }
 
             ASTNode::Dotimes { .. } => {
@@ -161,6 +162,18 @@ impl LowerContext {
                 // Create hash table constant
                 // For now, just create a nil constant
                 // TODO: implement proper hash table lowering
+                Ok(self.module.make_constant(ConstantValue::Nil))
+            }
+
+            ASTNode::Vector(elements) => {
+                // For BIR lowering, vectors are not directly supported
+                // The interpreter handles vectors via eval_core.rs
+                // For JIT, they're handled via MLIR codegen
+                // Here we just lower the elements and return a placeholder
+                for elem in elements {
+                    let _ = self.lower_ast(elem)?;
+                }
+                // Return nil as placeholder - actual vector creation happens at runtime
                 Ok(self.module.make_constant(ConstantValue::Nil))
             }
 
@@ -475,6 +488,26 @@ impl LowerContext {
         );
 
         Ok(val_datum)
+    }
+}
+
+fn ast_params_to_vec(params: &ASTNode) -> Vec<String> {
+    match params {
+        ASTNode::Call { function, args } => {
+            let mut result = Vec::with_capacity(args.len() + 1);
+            if let ASTNode::Variable(name) = &**function {
+                result.push(name.clone());
+            }
+            for arg in args {
+                if let ASTNode::Variable(name) = arg {
+                    result.push(name.clone());
+                }
+            }
+            result
+        }
+        ASTNode::Variable(name) => vec![name.clone()],
+        ASTNode::Constant(ConstantValue::Nil) => vec![],
+        _ => vec![],
     }
 }
 
