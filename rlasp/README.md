@@ -207,3 +207,5 @@ core image.
 
 we will have images in .ll and .bc files rather than .faso
 The .bc files will be input for ORC JIT and run.
+
+in /Users/christiantzurcanu/Documents/dev/clasp/rlasp/tools/ you have scripts for splitting the lisp top forms

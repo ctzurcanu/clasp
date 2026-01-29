@@ -58,7 +58,9 @@
       "Bash(./rlasp:*)",
       "Bash(time:*)",
       "Bash(../target/release/irlasp:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(sbcl --script:*)",
+      "Bash(sbcl:*)"
     ]
   }
 }

@@ -1,6 +1,40 @@
 /// eval_string.rs - Common Lisp string builtins
 use super::eval_types::EvalResult;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Convert a string designator to a string
+/// In CL, string designators are: string, symbol (uses symbol-name), or character
+fn get_string_designator(arg: &EvalResult) -> Result<String, String> {
+    match arg {
+        EvalResult::String(s) => Ok(s.clone()),
+        EvalResult::Symbol(s) => {
+            // For symbols, use the print name (uppercase, without leading colon for keywords)
+            if s.starts_with(':') {
+                Ok(s[1..].to_uppercase())
+            } else {
+                Ok(s.to_uppercase())
+            }
+        }
+        EvalResult::Character(c) => Ok(c.to_string()),
+        _ => Err(format!("Expected a string designator, got {:?}", arg)),
+    }
+}
+
+/// Extract characters from a character-bag argument (string or list of chars)
+fn get_char_bag(arg: &Option<&EvalResult>) -> Result<HashSet<char>, String> {
+    match arg {
+        Some(EvalResult::String(s)) => Ok(s.chars().collect()),
+        Some(EvalResult::Symbol(s)) => Ok(s.chars().collect()),
+        Some(EvalResult::Nil) => Ok(HashSet::new()),
+        Some(EvalResult::Cons(_, _)) => {
+            // For a list, we'd need to iterate - for now just use empty set
+            // This handles edge cases where a list of characters is passed
+            Ok(HashSet::new())
+        }
+        None => Ok(" \t\n\r".chars().collect()), // Default to whitespace
+        _ => Ok(HashSet::new()),
+    }
+}
 
 pub fn register_string_builtins(env: &mut HashMap<String, EvalResult>) {
     // String predicates
@@ -188,27 +222,42 @@ pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult
             _ => Err("string-capitalize requires a string".to_string()),
         },
 
-        // String trimming
-        "string-trim" => match args.get(1) {
-            Some(EvalResult::String(s)) => {
-                // For simplicity, trim whitespace. Full implementation would accept character bag.
-                Ok(EvalResult::String(s.trim().to_string()))
-            },
-            _ => Err("string-trim requires a character bag and string".to_string()),
+        // String trimming - trims characters from character-bag from string
+        // Second argument is a string designator (string, symbol, or character)
+        "string-trim" => {
+            let char_bag = get_char_bag(&args.get(0))?;
+            match args.get(1) {
+                Some(arg) => {
+                    let s = get_string_designator(arg)?;
+                    let trimmed = s.trim_matches(|c| char_bag.contains(&c));
+                    Ok(EvalResult::String(trimmed.to_string()))
+                },
+                _ => Err("string-trim requires a character bag and string designator".to_string()),
+            }
         },
 
-        "string-left-trim" => match args.get(1) {
-            Some(EvalResult::String(s)) => {
-                Ok(EvalResult::String(s.trim_start().to_string()))
-            },
-            _ => Err("string-left-trim requires a character bag and string".to_string()),
+        "string-left-trim" => {
+            let char_bag = get_char_bag(&args.get(0))?;
+            match args.get(1) {
+                Some(arg) => {
+                    let s = get_string_designator(arg)?;
+                    let trimmed = s.trim_start_matches(|c| char_bag.contains(&c));
+                    Ok(EvalResult::String(trimmed.to_string()))
+                },
+                _ => Err("string-left-trim requires a character bag and string designator".to_string()),
+            }
         },
 
-        "string-right-trim" => match args.get(1) {
-            Some(EvalResult::String(s)) => {
-                Ok(EvalResult::String(s.trim_end().to_string()))
-            },
-            _ => Err("string-right-trim requires a character bag and string".to_string()),
+        "string-right-trim" => {
+            let char_bag = get_char_bag(&args.get(0))?;
+            match args.get(1) {
+                Some(arg) => {
+                    let s = get_string_designator(arg)?;
+                    let trimmed = s.trim_end_matches(|c| char_bag.contains(&c));
+                    Ok(EvalResult::String(trimmed.to_string()))
+                },
+                _ => Err("string-right-trim requires a character bag and string designator".to_string()),
+            }
         },
 
         // Character access

@@ -81,13 +81,15 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
             // Check if the object's class matches the type
             // T matches everything
+            // In Common Lisp, NIL is both a symbol and a list
             let matches = type_name == "T"
                 || obj_class.eq_ignore_ascii_case(&type_name)
                 || (type_name == "NUMBER" && matches!(args[0], EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_) | EvalResult::Complex(_, _)))
                 || (type_name == "INTEGER" && matches!(args[0], EvalResult::Fixnum(_) | EvalResult::Bignum(_)))
                 || (type_name == "REAL" && matches!(args[0], EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)))
-                || (type_name == "SEQUENCE" && matches!(args[0], EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_)))
+                || (type_name == "SEQUENCE" && matches!(args[0], EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_) | EvalResult::Nil))
                 || (type_name == "LIST" && matches!(args[0], EvalResult::Cons(_, _) | EvalResult::Nil))
+                || (type_name == "SYMBOL" && matches!(args[0], EvalResult::Symbol(_) | EvalResult::Nil))  // NIL is a symbol in CL
                 || (type_name == "ATOM" && !matches!(args[0], EvalResult::Cons(_, _)));
 
             Ok(EvalResult::Boolean(matches))
@@ -209,6 +211,8 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
                         .cloned()
                         .ok_or_else(|| format!("Slot {} is unbound", slot_name))
                 }
+                // Return NIL for NIL objects (allows graceful handling when object doesn't exist)
+                EvalResult::Nil => Ok(EvalResult::Nil),
                 _ => Err("slot-value: object must be an instance".to_string()),
             }
         }

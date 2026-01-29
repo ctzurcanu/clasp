@@ -19,8 +19,11 @@ thread_local! {
 }
 
 /// Maximum recursion depth before we fail with an error
-/// Reduced to prevent stack overflow before the check triggers
 const MAX_EVAL_DEPTH: usize = 500;
+
+/// Prefix for function namespace (Lisp-2 semantics)
+/// Functions are stored with this prefix to separate from variables
+pub const FUNCTION_NS_PREFIX: &str = "%FN%";
 
 /// Debug flag to trace deep recursion
 const DEBUG_RECURSION: bool = false;
@@ -54,20 +57,35 @@ impl Drop for DepthGuard {
 }
 
 fn lookup_env_binding(name: &str, env: &HashMap<String, EvalResult>) -> Option<EvalResult> {
-    if !name.contains(':') {
-        return env.get(name).cloned();
-    }
-
+    // Try exact match first
     if let Some(val) = env.get(name).cloned() {
         return Some(val);
     }
 
+    // Try case-insensitive match for simple names (Common Lisp is case-insensitive)
+    if !name.contains(':') {
+        // Try uppercase version (standard CL symbol case)
+        let upper = name.to_uppercase();
+        if let Some(val) = env.get(&upper).cloned() {
+            return Some(val);
+        }
+        // Try lowercase version (rlasp's default reader case)
+        let lower = name.to_lowercase();
+        if let Some(val) = env.get(&lower).cloned() {
+            return Some(val);
+        }
+        return None;
+    }
+
+    // For package-qualified names, try various case combinations
     if !name.contains("::") {
         if let Some((pkg, sym)) = name.split_once(':') {
             let candidates = [
                 format!("{}::{}", pkg, sym),
                 format!("{}::{}", pkg.to_lowercase(), sym),
                 format!("{}::{}", pkg.to_uppercase(), sym),
+                format!("{}:{}", pkg, sym.to_uppercase()),
+                format!("{}:{}", pkg, sym.to_lowercase()),
             ];
             for candidate in candidates.iter() {
                 if let Some(val) = env.get(candidate).cloned() {
@@ -105,10 +123,10 @@ fn qualify_symbols_in_ast_with_exclusions(
         "car", "cdr", "cons", "list", "append", "mapcar", "mapc",
         "first", "second", "third", "rest", "nth", "nthcdr",
         "eq", "eql", "equal", "equalp",
-        "format", "print", "princ", "prin1", "terpri",
+        "format", "print", "princ", "prin1", "terpri", "write",
         "make-hash-table", "gethash", "maphash",
         "loop", "do", "dolist", "dotimes",
-        "error", "warn", "signal",
+        "error", "warn", "signal", "cerror",
         "values", "multiple-value-bind", "multiple-value-list",
         "prog1", "prog2", "multiple-value-prog1",
         "declare", "the", "locally",
@@ -119,6 +137,37 @@ fn qualify_symbols_in_ast_with_exclusions(
         "export", "import", "use-package", "rename-package", "delete-package",
         "package-name", "package-nicknames", "package-use-list", "package-used-by-list",
         "unuse-package", "unintern", "shadow", "shadowing-import",
+        // String functions
+        "string-trim", "string-left-trim", "string-right-trim",
+        "string-upcase", "string-downcase", "string-capitalize",
+        "string=", "string/=", "string<", "string>", "string<=", "string>=",
+        "string-equal", "string-lessp", "string-greaterp",
+        "char", "schar", "subseq", "length", "concatenate",
+        // Type functions
+        "type-of", "typep", "subtypep",
+        "numberp", "integerp", "floatp", "rationalp", "complexp",
+        "stringp", "symbolp", "consp", "listp", "atom", "null",
+        "characterp", "arrayp", "vectorp", "functionp", "packagep",
+        // Arithmetic
+        "+", "-", "*", "/", "mod", "rem", "floor", "ceiling", "truncate", "round",
+        "abs", "max", "min", "1+", "1-", "zerop", "plusp", "minusp", "evenp", "oddp",
+        "sqrt", "expt", "log", "exp", "sin", "cos", "tan",
+        // Comparison
+        "=", "/=", "<", ">", "<=", ">=",
+        // List functions
+        "caar", "cadr", "cdar", "cddr", "caaar", "caadr", "cadar", "caddr",
+        "cdaar", "cdadr", "cddar", "cdddr",
+        "member", "assoc", "rassoc", "find", "position", "remove", "delete",
+        "reverse", "nreverse", "copy-list", "last", "butlast",
+        "reduce", "mapcan", "mapcon", "map",
+        // Misc
+        "boundp", "fboundp", "fmakunbound", "makunbound",
+        "get", "getf", "put", "setf", "rplaca", "rplacd",
+        "make-array", "aref", "array-dimensions", "array-dimension",
+        "coerce", "ensure-list",
+        "find-symbol", "find-symbol*", "intern*",
+        "handler-bind", "handler-case", "restart-case", "invoke-restart",
+        "define-condition", "make-condition", "condition",
     ]
     .iter()
     .cloned()
@@ -615,7 +664,7 @@ pub fn eval_trampoline(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> 
                 }
             }
             Continuation::IfBranch { then_branch, else_branch } => {
-                let is_nil = matches!(value, EvalResult::Nil | EvalResult::Bool(false));
+                let is_nil = matches!(value, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
                 if is_nil {
                     stack.push(Continuation::Eval(else_branch));
                 } else {
@@ -635,7 +684,7 @@ pub fn eval_trampoline(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> 
             }
             Continuation::CondRest { remaining } => {
                 // Previous test was false (value is Nil), try next clause
-                let is_nil = matches!(value, EvalResult::Nil | EvalResult::Bool(false));
+                let is_nil = matches!(value, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
                 if is_nil && !remaining.is_empty() {
                     let (test, result) = &remaining[0];
                     let rest: Vec<_> = remaining[1..].iter().cloned().collect();
@@ -791,6 +840,11 @@ fn eval_variable(name: &str, env: &HashMap<String, EvalResult>) -> Result<EvalRe
         | "bignum" | "ratio" | "complex" | "number" | "real" | "rational"
         => return Ok(EvalResult::Symbol(name.to_string())),
         _ => {}
+    }
+
+    // Lambda-list keywords are self-evaluating if they somehow get evaluated
+    if name.starts_with('&') {
+        return Ok(EvalResult::Symbol(name.to_string()));
     }
 
     Err(format!("Unbound variable: {}", name))
@@ -958,7 +1012,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
     let _guard = DepthGuard::new()?;
 
     let depth = EVAL_DEPTH.with(|d| d.get());
-    if DEBUG_RECURSION && depth > 1000 && depth % 50 == 0 {
+    if DEBUG_RECURSION && depth > 400 && depth % 10 == 0 {
         match ast {
             ASTNode::Call { function, args: _ } => {
                 if let ASTNode::Variable(name) = &**function {
@@ -968,7 +1022,9 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             ASTNode::Variable(name) => {
                 eprintln!("    [{depth}] Var: {name}");
             }
-            _ => {}
+            _ => {
+                eprintln!("    [{depth}] AST: {:?}", std::mem::discriminant(ast));
+            }
         }
     }
 
@@ -1062,6 +1118,11 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                         _ => {}
                     }
 
+                    // Lambda-list keywords are self-evaluating if they somehow get evaluated
+                    if name.starts_with('&') {
+                        return Ok(EvalResult::Symbol(name.clone()));
+                    }
+
                     Err(format!("Unbound variable: {}", name))
                 }
             }
@@ -1073,7 +1134,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
         ASTNode::Call { function, args } => eval_call_with_env(function, args, env),
         ASTNode::If { test, then_branch, else_branch } => {
             let test_result = eval_with_env(test, env)?;
-            let is_nil = matches!(test_result, EvalResult::Nil | EvalResult::Bool(false));
+            let is_nil = matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
             if is_nil {
                 eval_with_env(else_branch, env)
             } else {
@@ -1084,7 +1145,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             // Evaluate cond: test each clause in order, return result of first true test
             for (test, result) in clauses {
                 let test_result = eval_with_env(test, env)?;
-                let is_nil = matches!(test_result, EvalResult::Nil | EvalResult::Bool(false));
+                let is_nil = matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
                 if !is_nil {
                     return eval_with_env(result, env);
                 }
@@ -1160,31 +1221,33 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             Ok(val)
         }
         ASTNode::Defgeneric { name, lambda_list: _ } => {
-            // Create or get existing generic function
+            // Create or get existing generic function (in function namespace)
             use super::eval_types::{GenericFunction as GF};
-            let gf = match env.get(name) {
+            let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+            let gf = match env.get(&fn_name) {
                 Some(EvalResult::GenericFunction(existing)) => existing.clone(),
                 _ => Rc::new(RefCell::new(GF {
                     name: name.clone(),
                     methods: Vec::new(),
                 })),
             };
-            env.insert(name.clone(), EvalResult::GenericFunction(gf));
+            env.insert(fn_name, EvalResult::GenericFunction(gf));
             Ok(EvalResult::Symbol(name.clone()))
         }
         ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
-            // Add method to generic function with specializers
+            // Add method to generic function with specializers (in function namespace)
             use super::eval_types::{GenericFunction as GF, Method};
 
-            // Get or create generic function
-            let gf = match env.get(generic_name) {
+            // Get or create generic function in function namespace
+            let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, generic_name);
+            let gf = match env.get(&fn_name) {
                 Some(EvalResult::GenericFunction(existing)) => existing.clone(),
                 _ => {
                     let new_gf = Rc::new(RefCell::new(GF {
                         name: generic_name.clone(),
                         methods: Vec::new(),
                     }));
-                    env.insert(generic_name.clone(), EvalResult::GenericFunction(new_gf.clone()));
+                    env.insert(fn_name.clone(), EvalResult::GenericFunction(new_gf.clone()));
                     new_gf
                 }
             };
@@ -1502,7 +1565,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 // Check when condition
                 let condition_met = if let Some(when_cond) = when_condition {
                     let cond_val = eval_with_env(when_cond, env)?;
-                    !matches!(cond_val, EvalResult::Nil | EvalResult::Bool(false))
+                    !matches!(cond_val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
                 } else {
                     true
                 };
@@ -1702,12 +1765,14 @@ fn eval_flet(
             env: Rc::new(RefCell::new(env.clone())),
             dynamic_env: true,
         };
-        functions.push((name.clone(), lambda));
+        // Store in function namespace with prefix (Lisp-2)
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        functions.push((fn_name, lambda));
     }
 
     // Now bind all functions at once
-    for (name, lambda) in functions {
-        env.insert(name, lambda);
+    for (fn_name, lambda) in functions {
+        env.insert(fn_name, lambda);
     }
 
     // Evaluate body
@@ -1744,7 +1809,9 @@ fn eval_labels(
             env: Rc::new(RefCell::new(new_env.clone())),
             dynamic_env: true,
         };
-        new_env.insert(name.clone(), lambda);
+        // Store in function namespace with prefix (Lisp-2)
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        new_env.insert(fn_name, lambda);
     }
 
     // Update the actual environment
@@ -1770,14 +1837,16 @@ fn eval_macrolet(
     // Save old environment
     let old_env = env.clone();
 
-    // Create macros in the current environment
+    // Create macros in the current environment (in function namespace)
     for (name, params, macro_body) in macro_bindings {
         let params_ast = params_vec_to_ast_list(params);
         let macro_def = EvalResult::Macro {
             params: Box::new(params_ast),
             body: macro_body.clone(),
         };
-        env.insert(name.clone(), macro_def);
+        // Store in function namespace with prefix (Lisp-2)
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        env.insert(fn_name, macro_def);
     }
 
     // Evaluate body
@@ -2381,22 +2450,48 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
             match base_name {
                 "defun" => {
                     // (defun name (params...) body...)
-                    // => (setq name (lambda (params...) body...))
+                    // => (setq %FN%name (lambda (params...) body...))
+                    // Also supports: (defun (setf name) (params...) body...)
+                    // => (setq %FN%(setf name) (lambda (params...) body...))
+                    // Store in function namespace (Lisp-2 semantics)
                     if args.len() >= 2 {
-                        let name_str = if let ASTNode::Variable(n) = &args[0] { n.clone() } else { return ast.clone(); };
+                        // Handle both regular function names and setf function names
+                        let name_str = match &args[0] {
+                            ASTNode::Variable(n) => n.clone(),
+                            ASTNode::Call { function, args: setf_args } => {
+                                // Check if it's (setf name)
+                                if let ASTNode::Variable(fn_name) = &**function {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                        if let ASTNode::Variable(setf_name) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else {
+                                            return ast.clone();
+                                        }
+                                    } else {
+                                        return ast.clone();
+                                    }
+                                } else {
+                                    return ast.clone();
+                                }
+                            }
+                            _ => return ast.clone(),
+                        };
                         let (params, defaults, supplied_p_vars) = extract_params_with_defaults(&args[1]);
                         let body = if args.len() > 2 { args[2..].to_vec() } else { vec![] };
                         let block_name = name_str.rsplit(':').next().unwrap_or(name_str.as_str()).to_string();
                         let block = ASTNode::Block { name: Some(block_name), body };
+                        // Store in function namespace with prefix
+                        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name_str);
                         return ASTNode::setq(
-                            name_str,
+                            fn_name,
                             ASTNode::lambda_with_supplied_p(params, defaults, supplied_p_vars, vec![block]),
                         );
                     }
                 }
                 "defmacro" => {
                     // (defmacro name (params...) body...)
-                    // => (setq name (macro (params...) body...))
+                    // => (setq %FN%name (macro (params...) body...))
+                    // Store in function namespace (Lisp-2 semantics)
                     if args.len() >= 2 {
                         let name_str = if let ASTNode::Variable(n) = &args[0] { n.clone() } else { return ast.clone(); };
                         let params_ast = args[1].clone();
@@ -2410,8 +2505,10 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                         let body: Vec<ASTNode> = args[2..].iter()
                             .map(|b| qualify_symbols_in_ast_with_exclusions(b, &current_pkg, &param_names))
                             .collect();
+                        // Store in function namespace with prefix
+                        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name_str);
                         return ASTNode::setq(
-                            name_str,
+                            fn_name,
                             ASTNode::Macro {
                                 params: Box::new(params_ast),
                                 body,
@@ -2832,6 +2929,7 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                                     "string" => "stringp",
                                     "symbol" => "symbolp",
                                     "keyword" => "keywordp",
+                                    "boolean" => "booleanp",  // matches T and NIL
                                     "package" => "packagep",
                                     "pathname" => "pathnamep",
                                     "array" | "simple-array" => "arrayp",
@@ -2901,6 +2999,7 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                                     "string" => "stringp",
                                     "symbol" => "symbolp",
                                     "keyword" => "keywordp",
+                                    "boolean" => "booleanp",  // matches T and NIL
                                     "package" => "packagep",
                                     "pathname" => "pathnamep",
                                     "array" | "simple-array" => "arrayp",
@@ -2969,6 +3068,7 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                                                             "string" => "stringp",
                                                             "symbol" => "symbolp",
                                                             "keyword" => "keywordp",
+                                                            "boolean" => "booleanp",  // matches T and NIL
                                                             "package" => "packagep",
                                                             "pathname" => "pathnamep",
                                                             "array" | "simple-array" => "arrayp",
@@ -3489,7 +3589,28 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
 
         // Check for user-defined functions FIRST (they shadow builtins)
         // This is critical for ASDF/UIOP which redefines functions like find-symbol*
-        if let Some(func_val) = lookup_env_binding(name, env) {
+        // Lisp-2: check function namespace first (with %FN% prefix), then variable namespace
+        // For package-qualified names like uiop/package:foo, also check %FN%foo
+        //
+        // EXCEPTION: System package prefixes (ext:, cl:, etc.) should NOT resolve to
+        // user-defined base names - this prevents ASDF's getenv from shadowing ext:getenv
+        let is_system_prefix = name.starts_with("ext:") || name.starts_with("cl:") ||
+            name.starts_with("system:") || name.starts_with("si:") ||
+            name.starts_with("EXT:") || name.starts_with("CL:") ||
+            name.starts_with("SYSTEM:") || name.starts_with("SI:");
+
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        let base_fn_name = if name.contains(':') && !is_system_prefix {
+            // Only check base name for non-system packages
+            let base = name.rsplit(':').next().unwrap_or(name);
+            format!("{}{}", FUNCTION_NS_PREFIX, base)
+        } else {
+            fn_name.clone()  // For system packages, don't look up base name
+        };
+        let func_val = lookup_env_binding(&fn_name, env)
+            .or_else(|| if !is_system_prefix { lookup_env_binding(&base_fn_name, env) } else { None })
+            .or_else(|| lookup_env_binding(name, env));
+        if let Some(func_val) = func_val {
             match func_val {
                 EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: closure_env, dynamic_env } => {
                     return eval_lambda_call(params, defaults, supplied_p_vars, body, dynamic_env, closure_env, args, env);
@@ -3599,7 +3720,106 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 // Skip first arg (result-type) and concatenate rest
                 eval_append(&args[1..], env)
             }
+            "strcat" => {
+                // (strcat &rest strings) - concatenate strings
+                let mut result = String::new();
+                for arg in args {
+                    let val = eval_with_env(arg, env)?;
+                    match val {
+                        EvalResult::String(s) => result.push_str(&s),
+                        EvalResult::Symbol(s) => {
+                            // Remove package prefix if present
+                            let name = if let Some(pos) = s.rfind(':') {
+                                &s[pos + 1..]
+                            } else {
+                                &s
+                            };
+                            result.push_str(name);
+                        }
+                        EvalResult::Character(c) => result.push(c),
+                        EvalResult::Nil => {}
+                        other => result.push_str(&format!("{:?}", other)),
+                    }
+                }
+                Ok(EvalResult::String(result))
+            }
             "reverse" => eval_reverse(args, env),
+            "replace" => {
+                // (replace sequence1 sequence2 &key start1 end1 start2 end2)
+                // Destructively modifies sequence1 by copying elements from sequence2
+                // This special handling allows modifying strings in place
+                if args.len() < 2 {
+                    return Err("replace requires at least 2 arguments".to_string());
+                }
+
+                // Parse keyword arguments first (from already-evaluated args would fail, so do it on AST)
+                let mut start1: usize = 0;
+                let mut start2: usize = 0;
+                let mut i = 2;
+                while i + 1 < args.len() {
+                    if let ASTNode::Variable(key) = &args[i] {
+                        if let Ok(EvalResult::Fixnum(n)) = eval_with_env(&args[i + 1], env) {
+                            match key.to_lowercase().as_str() {
+                                ":start1" | "start1" => start1 = n as usize,
+                                ":start2" | "start2" => start2 = n as usize,
+                                _ => {}
+                            }
+                        }
+                    }
+                    i += 2;
+                }
+
+                // Get the source sequence value
+                let seq2 = eval_with_env(&args[1], env)?;
+
+                // Check if first arg is a variable that we can update
+                if let ASTNode::Variable(var_name) = &args[0] {
+                    // Get the current value
+                    if let Some(seq1) = env.get(var_name).cloned() {
+                        match (&seq1, &seq2) {
+                            (EvalResult::String(s1), EvalResult::String(s2)) => {
+                                let mut chars1: Vec<char> = s1.chars().collect();
+                                let chars2: Vec<char> = s2.chars().skip(start2).collect();
+
+                                for (idx, c) in chars2.iter().enumerate() {
+                                    let dest_idx = start1 + idx;
+                                    if dest_idx < chars1.len() {
+                                        chars1[dest_idx] = *c;
+                                    }
+                                }
+
+                                let new_string: String = chars1.into_iter().collect();
+                                // Update the variable in the environment
+                                env.insert(var_name.clone(), EvalResult::String(new_string.clone()));
+                                return Ok(EvalResult::String(new_string));
+                            }
+                            _ => {
+                                // For non-strings, just return the first sequence
+                                return Ok(seq1);
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: evaluate first arg and return modified copy (won't update original)
+                let seq1 = eval_with_env(&args[0], env)?;
+                match (&seq1, &seq2) {
+                    (EvalResult::String(s1), EvalResult::String(s2)) => {
+                        let mut chars1: Vec<char> = s1.chars().collect();
+                        let chars2: Vec<char> = s2.chars().skip(start2).collect();
+
+                        for (idx, c) in chars2.iter().enumerate() {
+                            let dest_idx = start1 + idx;
+                            if dest_idx < chars1.len() {
+                                chars1[dest_idx] = *c;
+                            }
+                        }
+
+                        Ok(EvalResult::String(chars1.into_iter().collect()))
+                    }
+                    _ => Ok(seq1)
+                }
+            }
             "reduce" => eval_reduce(args, env),
             "remove" => eval_remove(args, env),
             "delete" => eval_delete(args, env),
@@ -3703,6 +3923,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             }
             "setf" => eval_setf(args, env),
             "multiple-value-bind" => eval_multiple_value_bind(args, env),
+            "destructuring-bind" => eval_destructuring_bind(args, env),
             "handler-case" => eval_handler_case(args, env),
             "handler-bind" => super::eval_conditions::eval_handler_bind(args, env),
             "restart-case" => super::eval_conditions::eval_restart_case(args, env),
@@ -3889,8 +4110,9 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                             EvalResult::BuiltinFunction(_) => Ok(obj),
                             EvalResult::GenericFunction(_) => Ok(obj),
                             EvalResult::Symbol(name) => {
-                                // Look up function by name
-                                if let Some(func) = env.get(name) {
+                                // Look up function by name in function namespace (Lisp-2)
+                                let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+                                if let Some(func) = env.get(&fn_name).or_else(|| env.get(name)) {
                                     match func {
                                         EvalResult::Lambda { .. } | EvalResult::BuiltinFunction(_) | EvalResult::GenericFunction(_) => {
                                             Ok(func.clone())
@@ -3910,6 +4132,16 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 }
             }
             "keywordp" => eval_keywordp(args, env),
+            "booleanp" => {
+                // (booleanp x) - true if x is T or NIL
+                if args.is_empty() {
+                    return Err("booleanp requires 1 argument".to_string());
+                }
+                let val = eval_with_env(&args[0], env)?;
+                let is_bool = matches!(val, EvalResult::Nil | EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    || matches!(&val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case("t"));
+                Ok(EvalResult::Boolean(is_bool))
+            }
             "special-operator-p" => eval_special_operator_p(args, env),
             "gensym" => eval_gensym(args, env),
             "error" => eval_error(args, env),
@@ -4025,7 +4257,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                     if let ASTNode::Variable(key) = &args[i] {
                         if key.eq_ignore_ascii_case(":ensure-directory") {
                             let val = eval_with_env(&args[i + 1], env)?;
-                            ensure_directory = !matches!(val, EvalResult::Nil | EvalResult::Bool(false));
+                            ensure_directory = !matches!(val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
                         }
                         i += 2;
                     } else {
@@ -4346,10 +4578,11 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "gctools:max-bootstrap-kinds" | "gctools::max-bootstrap-kinds" => {
                 Err("Not implemented: gctools:max-bootstrap-kinds (Clasp-specific)".to_string())
             }
-            "system-version" => {
-                // Return version string
+            "lisp-implementation-version" => {
+                // Return rlasp version string
                 Ok(EvalResult::String("rlasp-0.1.0".to_string()))
             }
+            // system-version removed - let ASDF define it
             // register-image-restore-hook and register-hook-function are defined by ASDF
             // Let them fall through to user-defined functions
             "ext:getenv" | "getenv" => {
@@ -4458,7 +4691,12 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 }
                 Ok(EvalResult::Nil)
             }
-            "documentation" => Err("Not implemented: documentation".to_string()),
+            "documentation" => {
+                // (documentation name doc-type)
+                // Returns documentation string for name, or nil if none
+                // For now, return nil (documentation not stored)
+                Ok(EvalResult::Nil)
+            }
             "disassemble" => Err("Not implemented: disassemble".to_string()),
             "file-length" => Err("Not implemented: file-length".to_string()),
             "princ" => {
@@ -4686,13 +4924,23 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 }
             }
             "symbol-name" => {
-                // Get name of symbol as string
+                // Get name of symbol as string (without package prefix)
                 if args.is_empty() {
                     return Err("symbol-name requires an argument".to_string());
                 }
                 let sym = eval_with_env(&args[0], env)?;
                 match sym {
-                    EvalResult::Symbol(s) => Ok(EvalResult::String(s)),
+                    EvalResult::Symbol(s) => {
+                        // Remove package prefix if present (e.g., ":foo" -> "FOO", "pkg:bar" -> "BAR")
+                        let name = if let Some(pos) = s.rfind(':') {
+                            &s[pos + 1..]
+                        } else {
+                            &s
+                        };
+                        // Symbol names are uppercase in CL
+                        Ok(EvalResult::String(name.to_uppercase()))
+                    }
+                    EvalResult::Nil => Ok(EvalResult::String("NIL".to_string())),
                     _ => Err("symbol-name requires a symbol".to_string())
                 }
             }
@@ -4898,7 +5146,21 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "llvm-sys:tag-tests" => Err("Not implemented: llvm-sys:tag-tests".to_string()),
             "tg-agent::proc-run-libtest" => Err("Not implemented: tg-agent::proc-run-libtest".to_string()),
             "tg-agent::implementation-identifier" => Err("Not implemented: tg-agent::implementation-identifier".to_string()),
-            "fmakunbound" => Err("Not implemented: fmakunbound".to_string()),
+            "fmakunbound" => {
+                // (fmakunbound function-name) - remove function definition
+                if args.is_empty() {
+                    return Err("fmakunbound requires 1 argument".to_string());
+                }
+                let name = match eval_with_env(&args[0], env)? {
+                    EvalResult::Symbol(s) => s,
+                    other => return Err(format!("fmakunbound requires a symbol, got {:?}", other)),
+                };
+                // Remove the function from the function namespace
+                let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+                env.remove(&fn_name);
+                // Return the function name symbol
+                Ok(EvalResult::Symbol(name))
+            }
             "defparameter*" => Err("Not implemented: defparameter*".to_string()),
             "alexandria:alist-hash-table" => Err("Not implemented: alexandria:alist-hash-table".to_string()),
             "typep" => eval_typep(args, env),
@@ -5174,6 +5436,13 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                             // Implementation-specific hook registration; ignore in interpreter
                             return Ok(EvalResult::Nil);
                         }
+                        // ASDF image restore hooks - no-ops in rlasp
+                        "setup-stdin" | "setup-stdout" | "setup-stderr" |
+                        "setup-command-line-arguments" | "setup-temporary-directory" |
+                        "register-image-dump-hook" | "call-image-restore-hook" |
+                        "call-image-dump-hook" => {
+                            return Ok(EvalResult::Nil);
+                        }
                         // NOTE: Namespace stubs removed - let them fall through to "Unknown function" error
                         // Removed: clang-tool:*, k:*, uiop/package:define-package, uiop:define-package,
                         //          ffi:*, si:*, ql:*, esrap:*, clasp-ffi:*, khazern:*, clos:*, cleavir-*, clim:*
@@ -5192,10 +5461,33 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                     name.as_str()
                 };
 
-                let func_val = env.get(lookup_name).cloned()
-                    .or_else(|| env.get(name).cloned())
-                    .or_else(|| eval_with_env(function, env).ok())
-                    .ok_or_else(|| format!("Unknown function: {}", name))?;
+                // Check if this is a system package call (ext:, cl:, etc.)
+                // These should NOT resolve to user-defined functions with the same base name
+                let is_system_package = name.starts_with("ext:") || name.starts_with("cl:") ||
+                    name.starts_with("system:") || name.starts_with("si:") ||
+                    name.starts_with("EXT:") || name.starts_with("CL:") ||
+                    name.starts_with("SYSTEM:") || name.starts_with("SI:");
+
+                // Lisp-2 semantics: look up in function namespace first (with %FN% prefix)
+                let fn_lookup_name = format!("{}{}", FUNCTION_NS_PREFIX, lookup_name);
+                let fn_full_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+
+                // For system package calls, only check the full name (to avoid shadowing)
+                // For other calls, check base name first (for package-qualified user functions)
+                let func_val = if is_system_package {
+                    // System package: only check full name, skip base name lookup
+                    env.get(&fn_full_name).cloned()
+                        .or_else(|| eval_with_env(function, env).ok())
+                        .ok_or_else(|| format!("Unknown function: {}", name))?
+                } else {
+                    env.get(&fn_lookup_name).cloned()
+                        .or_else(|| env.get(&fn_full_name).cloned())
+                        // Fallback to variable namespace for backward compatibility (funcall, lambdas)
+                        .or_else(|| env.get(lookup_name).cloned())
+                        .or_else(|| env.get(name).cloned())
+                        .or_else(|| eval_with_env(function, env).ok())
+                        .ok_or_else(|| format!("Unknown function: {}", name))?
+                };
 
                 match func_val {
                     EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: closure_env, dynamic_env } => {
@@ -5373,7 +5665,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
     }
 }
 
-fn eval_lambda_call(
+pub(super) fn eval_lambda_call(
     params: Vec<String>,
     defaults: HashMap<String, ASTNode>,
     supplied_p_vars: HashMap<String, String>,
@@ -6019,7 +6311,7 @@ fn eval_not(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<E
         return Err("not requires 1 argument".to_string());
     }
     match eval_with_env(&args[0], env)? {
-        EvalResult::Nil | EvalResult::Bool(false) => Ok(EvalResult::Bool(true)),
+        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => Ok(EvalResult::Bool(true)),
         _ => Ok(EvalResult::Nil),
     }
 }
@@ -6028,7 +6320,7 @@ fn eval_and(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<E
     let mut result = EvalResult::Bool(true);
     for arg in args {
         result = eval_with_env(arg, env)?;
-        if matches!(result, EvalResult::Nil | EvalResult::Bool(false)) {
+        if matches!(result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
             return Ok(EvalResult::Nil);
         }
     }
@@ -6040,7 +6332,7 @@ fn eval_or(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<Ev
         let result = eval_with_env(arg, env)?;
         // Extract primary value for truthy check (CL semantics)
         let primary = super::eval_types::primary_value(result.clone());
-        if !matches!(primary, EvalResult::Nil | EvalResult::Bool(false)) {
+        if !matches!(primary, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
             // Return the primary value, not the MultipleValues
             return Ok(primary);
         }

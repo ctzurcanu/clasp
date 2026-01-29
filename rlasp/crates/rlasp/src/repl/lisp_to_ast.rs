@@ -858,10 +858,38 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             return Err("defgeneric requires at least name and lambda-list".to_string());
                         }
 
-                        // Parse generic function name
+                        // If any args contain unquote (from backquote), keep as Call
+                        // This allows macro expansion to substitute values first
+                        if args.iter().any(|a| contains_unquote(a)) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("defgeneric".to_string())),
+                                args,
+                            });
+                        }
+
+                        // Parse generic function name (can be symbol or (setf name))
                         let name = match &args[0] {
                             ASTNode::Variable(n) => n.clone(),
-                            _ => return Err("defgeneric name must be a symbol".to_string()),
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+                            ASTNode::Call { function, args: setf_args } => {
+                                // Handle (setf name) form
+                                if let ASTNode::Variable(fn_name) = &**function {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                        if let ASTNode::Variable(setf_name) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else if let ASTNode::Constant(ConstantValue::Symbol(setf_name)) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else {
+                                            return Err("defgeneric (setf name) requires a symbol name".to_string());
+                                        }
+                                    } else {
+                                        return Err("defgeneric name must be a symbol or (setf name)".to_string());
+                                    }
+                                } else {
+                                    return Err("defgeneric name must be a symbol or (setf name)".to_string());
+                                }
+                            }
+                            _ => return Err(format!("defgeneric name must be a symbol, got {:?}", &args[0])),
                         };
 
                         // Parse lambda list
@@ -893,10 +921,38 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             return Err("defmethod requires at least name and specialized-lambda-list".to_string());
                         }
 
-                        // Parse method name
+                        // If any args contain unquote (from backquote), keep as Call
+                        // This allows macro expansion to substitute values first
+                        if args.iter().any(|a| contains_unquote(a)) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("defmethod".to_string())),
+                                args,
+                            });
+                        }
+
+                        // Parse method name (can be symbol or (setf name))
                         let generic_name = match &args[0] {
                             ASTNode::Variable(n) => n.clone(),
-                            _ => return Err("defmethod name must be a symbol".to_string()),
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+                            ASTNode::Call { function, args: setf_args } => {
+                                // Handle (setf name) form
+                                if let ASTNode::Variable(fn_name) = &**function {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                        if let ASTNode::Variable(setf_name) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else if let ASTNode::Constant(ConstantValue::Symbol(setf_name)) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else {
+                                            return Err("defmethod (setf name) requires a symbol name".to_string());
+                                        }
+                                    } else {
+                                        return Err("defmethod name must be a symbol or (setf name)".to_string());
+                                    }
+                                } else {
+                                    return Err("defmethod name must be a symbol or (setf name)".to_string());
+                                }
+                            }
+                            _ => return Err(format!("defmethod name must be a symbol, got {:?}", &args[0])),
                         };
 
                         // Check for optional qualifier (:before, :after, :around)

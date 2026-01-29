@@ -50,34 +50,48 @@ impl MacroTable {
     pub fn bootstrap(&self) {
         // Define core macros
         
-        // defun - (defun name (params) body...) => (setq name (lambda (params) (block name body...)))
+        // defun - (defun name (params) body...) => (setq %FN%name (lambda (params) (block name body...)))
+        // Store in function namespace (Lisp-2 semantics) using %FN% prefix
         self.define_macro("defun", Arc::new(|args| {
             if args.len() < 3 {
                 return Err("defun requires at least 3 arguments: name, params, body".to_string());
             }
-            
+
             let name = args[0];
             let params = args[1];
             let body = &args[2..];
-            
-            // Build (setq name (lambda params (block name body...)))
+
+            // Build (setq %FN%name (lambda params (block name body...)))
             use rlasp_runtime::{Symbol, Cons};
-            
+
             let setq_sym = Symbol::allocate("setq");
             let lambda_sym = Symbol::allocate("lambda");
             let block_sym = Symbol::allocate("block");
-            
+
+            // Extract symbol name for function namespace key
+            let name_str = if name.is_general() {
+                let symbol_ptr = name.as_general_ptr::<Symbol>().ok_or("defun name must be a symbol")?;
+                let symbol = unsafe { &*symbol_ptr };
+                symbol.name().to_string()
+            } else {
+                return Err("defun name must be a symbol".to_string());
+            };
+
+            // Create function namespace key: %FN%name
+            let fn_name_str = format!("%FN%{}", name_str);
+            let fn_name = Symbol::allocate(fn_name_str.as_str());
+
             // Build block expression (block name body...)
             let mut block_parts = vec![block_sym, name];
             block_parts.extend_from_slice(body);
             let block_expr = Cons::list(&block_parts);
 
             // Build lambda expression with implicit block
-            let mut lambda_parts = vec![lambda_sym, params, block_expr];
+            let lambda_parts = vec![lambda_sym, params, block_expr];
             let lambda_expr = Cons::list(&lambda_parts);
-            
-            // Build setq expression
-            let result = Cons::list(&[setq_sym, name, lambda_expr]);
+
+            // Build setq expression with function namespace key
+            let result = Cons::list(&[setq_sym, fn_name, lambda_expr]);
             Ok(result)
         }));
         

@@ -744,7 +744,7 @@ fn call_test_fn(test_fn: &EvalResult, a: &EvalResult, b: &EvalResult, env: &mut 
                 &[a.clone(), b.clone()],
                 env
             )?;
-            Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false)))
+            Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)))
         }
         EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
             let result = eval_lambda_call_with_values(
@@ -756,7 +756,7 @@ fn call_test_fn(test_fn: &EvalResult, a: &EvalResult, b: &EvalResult, env: &mut 
                 &[a.clone(), b.clone()],
                 env
             )?;
-            Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false)))
+            Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)))
         }
         EvalResult::Symbol(name) => {
             // Try looking up in environment first
@@ -768,7 +768,7 @@ fn call_test_fn(test_fn: &EvalResult, a: &EvalResult, b: &EvalResult, env: &mut 
                     &[a.clone(), b.clone()],
                     env
                 )?;
-                Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false)))
+                Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)))
             }
         }
         _ => Err("Test must be a function".to_string()),
@@ -1264,7 +1264,7 @@ fn values_equal(a: &EvalResult, b: &EvalResult) -> bool {
 }
 
 fn truthy(val: &EvalResult) -> bool {
-    !matches!(val, EvalResult::Nil | EvalResult::Bool(false))
+    !matches!(val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
 }
 
 fn parse_index(val: &EvalResult, name: &str) -> Result<Option<usize>, String> {

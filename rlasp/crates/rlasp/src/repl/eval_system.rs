@@ -553,12 +553,12 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
         EvalResult::Cons(car, cdr) => {
             // Convert list to AST as a function call
             // This is used for macro expansion where the result should be evaluated as code
-            let car_ast = result_to_ast(&car.borrow())?;
 
             // Check if this is a dotted pair (cdr is not nil and not a cons)
             let cdr_val = cdr.borrow();
             if !matches!(&*cdr_val, EvalResult::Nil | EvalResult::Cons(_, _)) {
                 // This is a dotted pair: (car . cdr) where cdr is an atom
+                let car_ast = result_to_ast(&car.borrow())?;
                 let cdr_ast = result_to_ast(&cdr_val)?;
                 return Ok(ASTNode::DottedPair {
                     car: Box::new(car_ast),
@@ -566,6 +566,28 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                 });
             }
             drop(cdr_val);
+
+            // Check if car is 'quote' - if so, handle specially to preserve data as data
+            if let EvalResult::Symbol(sym) = &*car.borrow() {
+                if sym == "quote" {
+                    // For quote, convert the argument using result_to_data_ast
+                    // to preserve list structure as data, not as code
+                    let args = match &*cdr.borrow() {
+                        EvalResult::Nil => vec![],
+                        EvalResult::Cons(inner_car, _) => {
+                            // (quote form) - form is the car of cdr
+                            vec![result_to_data_ast(&inner_car.borrow())?]
+                        }
+                        _ => vec![],
+                    };
+                    if args.len() == 1 {
+                        return Ok(ASTNode::Quote(Box::new(args[0].clone())));
+                    }
+                }
+            }
+
+            // Normal case: convert car and cdr normally
+            let car_ast = result_to_ast(&car.borrow())?;
 
             // Convert cdr to a list of arguments
             let args = match &*cdr.borrow() {
@@ -644,9 +666,14 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                     }
                     "quote" => {
                         // (quote form) => Quote(form)
+                        // Special handling: the argument should be converted as data, not code
                         if args.len() != 1 {
                             return Err("quote requires exactly one argument".to_string());
                         }
+                        // Re-convert the argument as data using result_to_quoted_ast
+                        // This requires getting the original result, not the already-converted AST
+                        // For now, wrap what we have - if it's a Call node starting with a keyword,
+                        // we should keep it as-is for quote to work correctly
                         return Ok(ASTNode::Quote(Box::new(args[0].clone())));
                     }
                     "backquote" => {
@@ -769,6 +796,59 @@ pub(super) fn cons_to_list(result: &EvalResult) -> Result<Vec<ASTNode>, String> 
         }
         other => {
             Ok(vec![result_to_ast(other)?])
+        }
+    }
+}
+
+/// Convert EvalResult to AST as data (for quoted forms)
+/// Unlike result_to_ast, this preserves lists as Call nodes that won't be evaluated
+/// because they're wrapped in a Quote
+pub(super) fn result_to_data_ast(result: &EvalResult) -> Result<ASTNode, String> {
+    match result {
+        EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
+        EvalResult::Float(f) => Ok(ASTNode::float(*f)),
+        EvalResult::Bool(true) => Ok(ASTNode::t()),
+        EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
+        EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
+        EvalResult::Symbol(name) => Ok(ASTNode::variable(name.clone())),
+        EvalResult::Cons(car, cdr) => {
+            // For data, convert list to a simple Call structure
+            // This is ok because when inside Quote, it won't be evaluated
+            let car_ast = result_to_data_ast(&car.borrow())?;
+
+            // Check if this is a dotted pair
+            let cdr_val = cdr.borrow();
+            if !matches!(&*cdr_val, EvalResult::Nil | EvalResult::Cons(_, _)) {
+                let cdr_ast = result_to_data_ast(&cdr_val)?;
+                return Ok(ASTNode::DottedPair {
+                    car: Box::new(car_ast),
+                    cdr: Box::new(cdr_ast),
+                });
+            }
+            drop(cdr_val);
+
+            // Convert cdr to list of args
+            let args = cons_to_data_list(&cdr.borrow())?;
+
+            Ok(ASTNode::Call {
+                function: Box::new(car_ast),
+                args,
+            })
+        }
+        _ => result_to_ast(result),
+    }
+}
+
+fn cons_to_data_list(result: &EvalResult) -> Result<Vec<ASTNode>, String> {
+    match result {
+        EvalResult::Nil => Ok(vec![]),
+        EvalResult::Cons(car, cdr) => {
+            let mut list = vec![result_to_data_ast(&car.borrow())?];
+            list.extend(cons_to_data_list(&cdr.borrow())?);
+            Ok(list)
+        }
+        other => {
+            Ok(vec![result_to_data_ast(other)?])
         }
     }
 }
@@ -938,6 +1018,7 @@ pub(super) fn eval_symbolp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
     match eval_with_env(&args[0], env)? {
         EvalResult::Symbol(_) => Ok(EvalResult::Bool(true)),
+        EvalResult::Nil => Ok(EvalResult::Bool(true)),  // NIL is a symbol in CL
         _ => Ok(EvalResult::Nil),
     }
 }
@@ -1177,7 +1258,7 @@ pub(super) fn eval_fset(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     // Check if third argument is present and true, indicating this should be a macro
     if args.len() >= 3 {
         let is_macro = eval_with_env(&args[2], env)?;
-        if !matches!(is_macro, EvalResult::Nil | EvalResult::Bool(false)) {
+        if !matches!(is_macro, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
             // Convert Lambda to Macro
             func_val = match func_val {
                 EvalResult::Lambda { params, defaults: _, supplied_p_vars: _, body, env: _closure_env, .. } => {
@@ -1631,7 +1712,8 @@ pub(super) fn eval_string_equal_ci(args: &[ASTNode], env: &mut HashMap<String, E
 }
 
 pub(super) fn eval_string_upcase(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (string-upcase string) - convert string to uppercase
+    // (string-upcase string-designator) - convert string to uppercase
+    // String designators: string, symbol (uses symbol name), or character
     if args.len() != 1 {
         return Err("string-upcase requires 1 argument".to_string());
     }
@@ -1640,12 +1722,24 @@ pub(super) fn eval_string_upcase(args: &[ASTNode], env: &mut HashMap<String, Eva
 
     match s {
         EvalResult::String(a) => Ok(EvalResult::String(a.to_uppercase())),
-        _ => Err("string-upcase requires a string argument".to_string()),
+        EvalResult::Symbol(sym) => {
+            // Extract symbol name without package prefix (e.g., ":foo" -> "FOO", "pkg:bar" -> "BAR")
+            let name = if let Some(pos) = sym.rfind(':') {
+                &sym[pos + 1..]
+            } else {
+                &sym
+            };
+            Ok(EvalResult::String(name.to_uppercase()))
+        }
+        EvalResult::Nil => Ok(EvalResult::String("NIL".to_string())),  // NIL symbol name is "NIL"
+        EvalResult::Character(c) => Ok(EvalResult::String(c.to_uppercase().to_string())),
+        _ => Err("string-upcase requires a string designator".to_string()),
     }
 }
 
 pub(super) fn eval_string_downcase(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (string-downcase string) - convert string to lowercase
+    // (string-downcase string-designator) - convert string to lowercase
+    // String designators: string, symbol (uses symbol name), or character
     if args.len() != 1 {
         return Err("string-downcase requires 1 argument".to_string());
     }
@@ -1654,7 +1748,18 @@ pub(super) fn eval_string_downcase(args: &[ASTNode], env: &mut HashMap<String, E
 
     match s {
         EvalResult::String(a) => Ok(EvalResult::String(a.to_lowercase())),
-        _ => Err("string-downcase requires a string argument".to_string()),
+        EvalResult::Symbol(sym) => {
+            // Extract symbol name without package prefix (e.g., ":foo" -> "foo", "pkg:bar" -> "bar")
+            let name = if let Some(pos) = sym.rfind(':') {
+                &sym[pos + 1..]
+            } else {
+                &sym
+            };
+            Ok(EvalResult::String(name.to_lowercase()))
+        }
+        EvalResult::Nil => Ok(EvalResult::String("nil".to_string())),  // NIL symbol name is "NIL"
+        EvalResult::Character(c) => Ok(EvalResult::String(c.to_lowercase().to_string())),
+        _ => Err("string-downcase requires a string designator".to_string()),
     }
 }
 
@@ -2145,6 +2250,12 @@ pub(super) fn eval_fdefinition(args: &[ASTNode], env: &mut HashMap<String, EvalR
     match eval_with_env(&args[0], env)? {
         EvalResult::Symbol(name) => {
             // First check the environment for user-defined functions
+            // Use function namespace prefix for Lisp-2 semantics
+            let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, name);
+            if let Some(func) = env.get(&fn_name).cloned() {
+                return Ok(func);
+            }
+            // Also try without prefix for backwards compatibility
             if let Some(func) = env.get(&name).cloned() {
                 return Ok(func);
             }
@@ -2209,9 +2320,34 @@ pub(super) fn eval_fdefinition(args: &[ASTNode], env: &mut HashMap<String, EvalR
                 "make-hash-table", "gethash", "remhash", "maphash", "hash-table-count",
                 "make-array", "aref", "array-dimensions", "array-dimension", "array-total-size",
                 "vector", "make-sequence",
+                // ASDF image hooks (no-ops in rlasp)
+                "setup-stdin", "setup-stdout", "setup-stderr",
+                "setup-command-line-arguments", "setup-temporary-directory",
+                "register-image-restore-hook", "register-image-dump-hook",
+                "call-image-restore-hook", "call-image-dump-hook",
             ];
 
             let name_lower = name.to_lowercase();
+
+            // ASDF image hooks - return no-op lambdas so they can be funcalled
+            let image_hooks = [
+                "setup-stdin", "setup-stdout", "setup-stderr",
+                "setup-command-line-arguments", "setup-temporary-directory",
+                "register-image-restore-hook", "register-image-dump-hook",
+                "call-image-restore-hook", "call-image-dump-hook",
+            ];
+            if image_hooks.iter().any(|&f| f == name_lower) {
+                // Return a no-op lambda that accepts any arguments and returns NIL
+                return Ok(EvalResult::Lambda {
+                    params: vec!["&rest".to_string(), "args".to_string()],
+                    defaults: std::collections::HashMap::new(),
+                    supplied_p_vars: std::collections::HashMap::new(),
+                    body: vec![crate::ir::ASTNode::nil()],
+                    env: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+                    dynamic_env: false,
+                });
+            }
+
             if builtin_fns.iter().any(|&f| f == name_lower) {
                 // Return a symbol indicating this is a builtin function
                 // This allows fdefinition to return something that can be funcalled
@@ -2478,21 +2614,51 @@ pub(super) fn eval_fboundp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
     match eval_with_env(&args[0], env)? {
         EvalResult::Symbol(name) => {
-            // Check if it's a built-in or user-defined function
-            match env.get(&name) {
-                Some(EvalResult::Lambda { .. }) | Some(EvalResult::Macro { .. }) | Some(EvalResult::ModifyMacro { .. }) => Ok(EvalResult::Boolean(true)),
-                _ => {
-                    // Check if it's a builtin by trying to look it up
-                    // For now, just check against known builtins
-                    let is_builtin = matches!(name.as_str(),
-                        "+" | "-" | "*" | "/" | "=" | "<" | ">" | "<=" | ">=" |
-                        "cons" | "car" | "cdr" | "list" | "append" | "mapcar" |
-                        "funcall" | "apply" | "identity" | "eq" | "eql" | "equal" |
-                        _ if name.starts_with("eval")
-                    );
-                    Ok(EvalResult::Boolean(is_builtin))
+            // Check function namespace (Lisp-2 semantics) - macros and functions are stored with %FN% prefix
+            let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, name);
+            // Also check uppercase version for case-insensitive lookup
+            let fn_name_upper = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, name.to_uppercase());
+
+            // Check function namespace first
+            if let Some(val) = env.get(&fn_name).or_else(|| env.get(&fn_name_upper)) {
+                match val {
+                    EvalResult::Lambda { .. } | EvalResult::Macro { .. } |
+                    EvalResult::ModifyMacro { .. } | EvalResult::GenericFunction(_) => {
+                        return Ok(EvalResult::Boolean(true));
+                    }
+                    _ => {}
                 }
             }
+
+            // Also check without prefix for backwards compatibility
+            if let Some(val) = env.get(&name) {
+                match val {
+                    EvalResult::Lambda { .. } | EvalResult::Macro { .. } |
+                    EvalResult::ModifyMacro { .. } | EvalResult::GenericFunction(_) => {
+                        return Ok(EvalResult::Boolean(true));
+                    }
+                    _ => {}
+                }
+            }
+
+            // Check if it's a builtin by trying to look it up
+            let is_builtin = matches!(name.to_lowercase().as_str(),
+                "+" | "-" | "*" | "/" | "=" | "<" | ">" | "<=" | ">=" |
+                "cons" | "car" | "cdr" | "list" | "append" | "mapcar" |
+                "funcall" | "apply" | "identity" | "eq" | "eql" | "equal" |
+                "defun" | "defmacro" | "lambda" | "let" | "let*" | "if" | "cond" |
+                "progn" | "setq" | "quote" | "function" | "block" | "return-from" |
+                "tagbody" | "go" | "catch" | "throw" | "unwind-protect" |
+                "multiple-value-bind" | "values" | "nth-value" |
+                "loop" | "dolist" | "dotimes" | "do" | "do*" |
+                "format" | "print" | "princ" | "prin1" | "terpri" |
+                "read" | "read-from-string" | "write" |
+                "intern" | "string" | "symbol-name" | "gensym" |
+                "type-of" | "typep" | "subtypep" | "coerce" |
+                "error" | "warn" | "signal" | "handler-case" | "handler-bind" |
+                "make-instance" | "slot-value" | "defclass" | "defgeneric" | "defmethod"
+            );
+            Ok(EvalResult::Boolean(is_builtin))
         }
         _ => Err("fboundp requires a symbol".to_string()),
     }
@@ -2591,8 +2757,9 @@ pub fn eval_typep(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Re
         "ATOM" => !matches!(object, EvalResult::Cons(_, _)),
         "LIST" => matches!(object, EvalResult::Nil | EvalResult::Cons(_, _)),
         "CONS" => matches!(object, EvalResult::Cons(_, _)),
-        "SYMBOL" => matches!(object, EvalResult::Symbol(_)),
+        "SYMBOL" => matches!(object, EvalResult::Symbol(_) | EvalResult::Nil),  // NIL is a symbol in CL
         "KEYWORD" => matches!(&object, EvalResult::Symbol(s) if s.starts_with(':')),
+        "BOOLEAN" => matches!(object, EvalResult::Nil | EvalResult::Boolean(true) | EvalResult::Bool(true)) || matches!(&object, EvalResult::Symbol(s) if s.eq_ignore_ascii_case("t")),  // boolean is (member t nil)
         "NUMBER" | "REAL" => matches!(object, EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)),
         "INTEGER" => matches!(object, EvalResult::Fixnum(_) | EvalResult::Bignum(_)),
         "FIXNUM" => matches!(object, EvalResult::Fixnum(_)),

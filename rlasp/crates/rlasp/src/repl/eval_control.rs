@@ -361,7 +361,7 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
 
         // Check end test
         let test_result = eval_with_env(&end_test, &mut loop_env)?;
-        if !matches!(test_result, EvalResult::Nil | EvalResult::Bool(false)) {
+        if !matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
             // End test is true, evaluate result forms
             let mut result = EvalResult::Nil;
             for form in &result_forms {
@@ -738,7 +738,7 @@ pub(super) fn eval_assert(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     let test_result = eval_with_env(test_form, env)?;
 
     // Check if test is false
-    if matches!(test_result, EvalResult::Nil | EvalResult::Bool(false)) {
+    if matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
         return Err(format!("Assertion failed: {:?}", test_form));
     }
 
@@ -1559,9 +1559,31 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             }
                         }
                     } else {
-                        // Unknown accessor - just return the value without erroring
-                        // This allows files to parse even if we don't support the accessor
-                        last_value = value.clone();
+                        // Try to find a setf function defined via (defun (setf name) ...)
+                        // These are stored as %FN%(setf name) in the environment
+                        let setf_fn_name = format!("{}(setf {})", super::eval_core::FUNCTION_NS_PREFIX, func_name);
+                        if let Some(func_val) = env.get(&setf_fn_name).cloned() {
+                            match func_val {
+                                EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: closure_env, dynamic_env } => {
+                                    // Call the setf function with (new-value ...other-args)
+                                    // First arg is the new value, rest are the place args
+                                    let mut all_args: Vec<ASTNode> = Vec::new();
+                                    all_args.push(super::eval_system::result_to_ast_quoted(&value)?);
+                                    all_args.extend(place_args.iter().cloned());
+                                    last_value = super::eval_core::eval_lambda_call(
+                                        params, defaults, supplied_p_vars, body, dynamic_env, closure_env, &all_args, env
+                                    )?;
+                                }
+                                _ => {
+                                    // Unknown accessor - just return the value without erroring
+                                    last_value = value.clone();
+                                }
+                            }
+                        } else {
+                            // Unknown accessor - just return the value without erroring
+                            // This allows files to parse even if we don't support the accessor
+                            last_value = value.clone();
+                        }
                     }
                 } else {
                     // Complex place forms not yet supported - return value without erroring
@@ -1645,6 +1667,186 @@ pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<Strin
     }
 
     Ok(body_result)
+}
+
+pub(super) fn eval_destructuring_bind(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (destructuring-bind lambda-list expression body-forms...)
+    // Binds variables in lambda-list to parts of the evaluated expression
+    if args.len() < 2 {
+        return Err("destructuring-bind requires at least 2 arguments".to_string());
+    }
+
+    let lambda_list = &args[0];
+    let expression = &args[1];
+    let body = &args[2..];
+
+    // Evaluate the expression to get the data to destructure
+    let data = eval_with_env(expression, env)?;
+
+    // Convert data to a list for easier processing
+    let data_list = result_to_list(&data);
+
+    // Parse lambda-list and bind variables
+    let old_env = env.clone();
+    destructure_bind(lambda_list, &data_list, env)?;
+
+    // Execute body forms
+    let mut result = EvalResult::Nil;
+    for form in body {
+        result = eval_with_env(form, env)?;
+    }
+
+    // Restore environment
+    *env = old_env;
+
+    Ok(result)
+}
+
+fn result_to_list(result: &EvalResult) -> Vec<EvalResult> {
+    let mut list = Vec::new();
+    let mut current = result.clone();
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                list.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            other => {
+                // Non-list - treat as single element
+                list.push(other);
+                break;
+            }
+        }
+    }
+    list
+}
+
+fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
+    match pattern {
+        ASTNode::Variable(name) => {
+            // Single variable - bind to entire data as list
+            if data.is_empty() {
+                env.insert(name.clone(), EvalResult::Nil);
+            } else if data.len() == 1 {
+                env.insert(name.clone(), data[0].clone());
+            } else {
+                // Convert back to cons list
+                let list = vec_to_cons(data);
+                env.insert(name.clone(), list);
+            }
+            Ok(())
+        }
+        ASTNode::Constant(crate::ir::ConstantValue::Nil) => {
+            // Empty pattern - nothing to bind
+            Ok(())
+        }
+        ASTNode::Call { function, args: pattern_args } => {
+            // Pattern is a list like (var1 var2 &optional var3 ...)
+            let mut data_idx = 0;
+            let mut pattern_idx = 0;
+            let mut mode = "required";
+
+            // First element of Call is the function (first pattern element)
+            let mut all_patterns = Vec::new();
+            all_patterns.push(function.as_ref().clone());
+            all_patterns.extend(pattern_args.iter().cloned());
+
+            while pattern_idx < all_patterns.len() {
+                let pat = &all_patterns[pattern_idx];
+
+                match pat {
+                    ASTNode::Variable(name) if name == "&optional" => {
+                        mode = "optional";
+                        pattern_idx += 1;
+                        continue;
+                    }
+                    ASTNode::Variable(name) if name == "&rest" || name == "&body" => {
+                        // Bind rest parameter to remaining data
+                        pattern_idx += 1;
+                        if pattern_idx < all_patterns.len() {
+                            if let ASTNode::Variable(rest_name) = &all_patterns[pattern_idx] {
+                                let rest_data = if data_idx < data.len() {
+                                    vec_to_cons(&data[data_idx..])
+                                } else {
+                                    EvalResult::Nil
+                                };
+                                env.insert(rest_name.clone(), rest_data);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    ASTNode::Variable(name) if name == "&key" || name == "&allow-other-keys" || name == "&aux" => {
+                        // Skip these for now - simplified implementation
+                        pattern_idx += 1;
+                        continue;
+                    }
+                    ASTNode::Variable(name) if name.starts_with('&') => {
+                        // Other lambda-list keyword - skip
+                        pattern_idx += 1;
+                        continue;
+                    }
+                    ASTNode::Variable(name) => {
+                        // Simple variable
+                        if data_idx < data.len() {
+                            env.insert(name.clone(), data[data_idx].clone());
+                            data_idx += 1;
+                        } else if mode == "optional" {
+                            env.insert(name.clone(), EvalResult::Nil);
+                        } else {
+                            return Err(format!("destructuring-bind: not enough values for {}", name));
+                        }
+                        pattern_idx += 1;
+                    }
+                    ASTNode::Call { function: inner_fn, args: inner_args } => {
+                        // Could be (var default) for &optional, or nested destructuring
+                        if mode == "optional" {
+                            // (var default-value) form
+                            if let ASTNode::Variable(var_name) = inner_fn.as_ref() {
+                                if data_idx < data.len() {
+                                    env.insert(var_name.clone(), data[data_idx].clone());
+                                    data_idx += 1;
+                                } else if !inner_args.is_empty() {
+                                    // Use default value
+                                    let default = eval_with_env(&inner_args[0], env)?;
+                                    env.insert(var_name.clone(), default);
+                                } else {
+                                    env.insert(var_name.clone(), EvalResult::Nil);
+                                }
+                            }
+                        } else {
+                            // Nested destructuring
+                            if data_idx < data.len() {
+                                let nested_data = result_to_list(&data[data_idx]);
+                                destructure_bind(pat, &nested_data, env)?;
+                                data_idx += 1;
+                            }
+                        }
+                        pattern_idx += 1;
+                    }
+                    _ => {
+                        pattern_idx += 1;
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn vec_to_cons(items: &[EvalResult]) -> EvalResult {
+    use std::rc::Rc;
+    use std::cell::RefCell;
+
+    let mut result = EvalResult::Nil;
+    for item in items.iter().rev() {
+        result = EvalResult::Cons(
+            Rc::new(RefCell::new(item.clone())),
+            Rc::new(RefCell::new(result))
+        );
+    }
+    result
 }
 
 pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
