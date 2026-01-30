@@ -246,7 +246,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // interpreting key lists as function calls
                         let raw_clauses = raw_cdr_to_vec(cdr.clone())?;
                         if raw_clauses.is_empty() {
-                            return Err("case requires at least 1 argument (keyform)".to_string());
+                            // (case) with no arguments - return nil
+                            return Ok(ASTNode::nil());
                         }
 
                         let keyform = lisp_to_ast(raw_clauses[0].clone())?;
@@ -299,12 +300,51 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if args.is_empty() {
                             return Err("block requires at least 1 argument (name)".to_string());
                         }
-                        let name = if let ASTNode::Variable(n) = &args[0] {
-                            Some(n.clone())
-                        } else if let ASTNode::Constant(ConstantValue::Nil) = &args[0] {
-                            None
-                        } else {
-                            return Err("block name must be a symbol or nil".to_string());
+                        // If name contains unquote (from backquote), keep as Call for later evaluation
+                        if contains_unquote(&args[0]) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("block".to_string())),
+                                args,
+                            });
+                        }
+                        // If name is a Backquote, keep as Call for macro expansion
+                        if matches!(&args[0], ASTNode::Backquote(_)) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("block".to_string())),
+                                args,
+                            });
+                        }
+                        let name = match &args[0] {
+                            ASTNode::Variable(n) => Some(n.clone()),
+                            ASTNode::Constant(ConstantValue::Nil) => None,
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+                            // Handle quoted symbols: (quote foo) or 'foo
+                            ASTNode::Quote(inner) => {
+                                if let ASTNode::Variable(n) = inner.as_ref() {
+                                    Some(n.clone())
+                                } else if let ASTNode::Constant(ConstantValue::Symbol(s)) = inner.as_ref() {
+                                    Some(s.clone())
+                                } else {
+                                    return Err("block name must be a symbol or nil".to_string());
+                                }
+                            }
+                            // Handle (setf name) form for setf functions
+                            ASTNode::Call { function, args: call_args } if call_args.len() == 1 => {
+                                if let ASTNode::Variable(fn_name) = function.as_ref() {
+                                    if fn_name.eq_ignore_ascii_case("setf") {
+                                        if let ASTNode::Variable(setf_name) = &call_args[0] {
+                                            Some(format!("(setf {})", setf_name))
+                                        } else {
+                                            return Err("block name must be a symbol or nil".to_string());
+                                        }
+                                    } else {
+                                        return Err("block name must be a symbol or nil".to_string());
+                                    }
+                                } else {
+                                    return Err("block name must be a symbol or nil".to_string());
+                                }
+                            }
+                            _ => return Err(format!("block name must be a symbol or nil, got {:?}", &args[0])),
                         };
                         let body = if args.len() > 1 {
                             args[1..].to_vec()
@@ -319,12 +359,44 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if args.is_empty() {
                             return Err("return-from requires at least 1 argument (block name)".to_string());
                         }
-                        let block_name = if let ASTNode::Variable(n) = &args[0] {
-                            Some(n.clone())
-                        } else if let ASTNode::Constant(ConstantValue::Nil) = &args[0] {
-                            None
-                        } else {
-                            return Err("return-from block name must be a symbol or nil".to_string());
+                        // If name contains unquote (from backquote), keep as Call for later evaluation
+                        if contains_unquote(&args[0]) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("return-from".to_string())),
+                                args,
+                            });
+                        }
+                        let block_name = match &args[0] {
+                            ASTNode::Variable(n) => Some(n.clone()),
+                            ASTNode::Constant(ConstantValue::Nil) => None,
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+                            // Handle quoted symbols: (quote foo) or 'foo
+                            ASTNode::Quote(inner) => {
+                                if let ASTNode::Variable(n) = inner.as_ref() {
+                                    Some(n.clone())
+                                } else if let ASTNode::Constant(ConstantValue::Symbol(s)) = inner.as_ref() {
+                                    Some(s.clone())
+                                } else {
+                                    return Err("return-from block name must be a symbol or nil".to_string());
+                                }
+                            }
+                            // Handle (setf name) form for setf functions
+                            ASTNode::Call { function, args: call_args } if call_args.len() == 1 => {
+                                if let ASTNode::Variable(fn_name) = function.as_ref() {
+                                    if fn_name.eq_ignore_ascii_case("setf") {
+                                        if let ASTNode::Variable(setf_name) = &call_args[0] {
+                                            Some(format!("(setf {})", setf_name))
+                                        } else {
+                                            return Err("return-from block name must be a symbol or nil".to_string());
+                                        }
+                                    } else {
+                                        return Err("return-from block name must be a symbol or nil".to_string());
+                                    }
+                                } else {
+                                    return Err("return-from block name must be a symbol or nil".to_string());
+                                }
+                            }
+                            _ => return Err("return-from block name must be a symbol or nil".to_string()),
                         };
                         let value = args.get(1).cloned().map(Box::new);
                         return Ok(ASTNode::ReturnFrom { block_name, value });
@@ -506,45 +578,63 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         });
                     }
                     "let" => {
-                        let args = cdr_to_vec(cdr)?;
-                        if args.is_empty() {
+                        // Get raw args to handle bindings specially
+                        let raw_args = raw_cdr_to_vec(cdr.clone())?;
+                        if raw_args.is_empty() {
                             return Err("let requires at least 1 argument (bindings)".to_string());
                         }
-                        // If bindings contain unquote (from backquote), keep as Call
-                        if contains_unquote(&args[0]) {
+                        // Check for unquote in the bindings to defer evaluation in backquote contexts
+                        // Use raw LispObject check to avoid triggering special form interpretation
+                        if contains_unquote_raw(&raw_args[0]) {
+                            let args = cdr_to_vec(cdr)?;
                             return Ok(ASTNode::Call {
                                 function: Box::new(ASTNode::variable("let".to_string())),
                                 args: args,
                             });
                         }
-                        let bindings = extract_bindings(&args[0])?;
-                        let body = if args.len() > 1 { args[1..].to_vec() } else { vec![] };
-                        return Ok(ASTNode::Let { bindings, body });
+                        // Extract bindings from raw to avoid special form interpretation for var names
+                        let bindings = extract_bindings_raw(raw_args[0].clone())?;
+                        let body: Result<Vec<ASTNode>, String> = raw_args[1..].iter().map(|obj| lisp_to_ast(obj.clone())).collect();
+                        return Ok(ASTNode::Let { bindings, body: body? });
                     }
                     "let*" => {
-                        let args = cdr_to_vec(cdr)?;
-                        if args.is_empty() {
+                        // Get raw args to handle bindings specially
+                        let raw_args = raw_cdr_to_vec(cdr.clone())?;
+                        if raw_args.is_empty() {
                             return Err("let* requires at least 1 argument (bindings)".to_string());
                         }
-                        // If bindings contain unquote (from backquote), keep as Call
-                        if contains_unquote(&args[0]) {
+                        // Check for unquote in the bindings to defer evaluation in backquote contexts
+                        // Use raw LispObject check to avoid triggering special form interpretation
+                        if contains_unquote_raw(&raw_args[0]) {
+                            let args = cdr_to_vec(cdr)?;
                             return Ok(ASTNode::Call {
                                 function: Box::new(ASTNode::variable("let*".to_string())),
                                 args: args,
                             });
                         }
-                        let bindings = extract_bindings(&args[0])?;
-                        let body = if args.len() > 1 { args[1..].to_vec() } else { vec![] };
-                        return Ok(ASTNode::LetStar { bindings, body });
+                        // Extract bindings from raw to avoid special form interpretation for var names
+                        let bindings = extract_bindings_raw(raw_args[0].clone())?;
+                        let body: Result<Vec<ASTNode>, String> = raw_args[1..].iter().map(|obj| lisp_to_ast(obj.clone())).collect();
+                        return Ok(ASTNode::LetStar { bindings, body: body? });
                     }
                     "symbol-macrolet" => {
-                        let args = cdr_to_vec(cdr)?;
-                        if args.is_empty() {
+                        // Get raw args to handle bindings specially
+                        let raw_args = raw_cdr_to_vec(cdr.clone())?;
+                        if raw_args.is_empty() {
                             return Err("symbol-macrolet requires at least 1 argument (bindings)".to_string());
                         }
-                        // Extract bindings: ((sym1 expansion1) (sym2 expansion2) ...)
-                        let bindings = extract_bindings(&args[0])?;
-                        let body = if args.len() > 1 { args[1..].to_vec() } else { vec![] };
+                        // Check for unquote in the bindings to defer evaluation in backquote contexts
+                        if contains_unquote_raw(&raw_args[0]) {
+                            let args = cdr_to_vec(cdr)?;
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("symbol-macrolet".to_string())),
+                                args: args,
+                            });
+                        }
+                        // Extract bindings from raw to avoid special form interpretation for var names
+                        let bindings = extract_bindings_raw(raw_args[0].clone())?;
+                        let body: Result<Vec<ASTNode>, String> = raw_args[1..].iter().map(|obj| lisp_to_ast(obj.clone())).collect();
+                        let body = body?;
 
                         // Expand symbol macros in the body
                         let expanded_body: Result<Vec<ASTNode>, String> = body.iter()
@@ -719,6 +809,14 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         let args = cdr_to_vec(cdr)?;
                         if args.len() < 2 {
                             return Err("defclass requires at least name and superclasses".to_string());
+                        }
+
+                        // If name contains unquote (from backquote), keep as Call for later evaluation
+                        if contains_unquote(&args[0]) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("defclass".to_string())),
+                                args,
+                            });
                         }
 
                         // Parse class name
@@ -1230,6 +1328,44 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
     }
 }
 
+/// Check for unquote/unquote-splicing in a raw LispObject
+/// Used to defer evaluation when unquote is found in backquote contexts
+fn contains_unquote_raw(obj: &LispObject) -> bool {
+    // Check if it's a symbol that is "unquote" or "unquote-splicing"
+    if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+        let sym = unsafe { &*sym_ptr };
+        let name = sym.name();
+        return name == "unquote" || name == "unquote-splicing";
+    }
+
+    // Check if it's a cons cell
+    if obj.is_cons() {
+        if let Some(cons_ptr) = obj.as_cons_ptr() {
+            let cons = unsafe { &*cons_ptr };
+            let car = cons.car();
+
+            // Check if car is unquote or unquote-splicing symbol
+            if let Some(sym_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
+                let sym = unsafe { &*sym_ptr };
+                let name = sym.name();
+                if name == "unquote" || name == "unquote-splicing" {
+                    return true;
+                }
+            }
+
+            // Recursively check car and cdr
+            if contains_unquote_raw(&car) {
+                return true;
+            }
+            if contains_unquote_raw(&cons.cdr()) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Expand symbol macros in an AST node
 fn expand_symbol_macros(ast: &ASTNode, bindings: &[(String, ASTNode)]) -> Result<ASTNode, String> {
     match ast {
@@ -1637,6 +1773,84 @@ fn raw_cdr_to_vec(mut cdr: LispObject) -> Result<Vec<LispObject>, String> {
         let cons = unsafe { &*cons_ptr };
         result.push(cons.car());
         cdr = cons.cdr();
+    }
+
+    Ok(result)
+}
+
+/// Extract bindings from raw LispObject without interpreting special forms for variable names
+/// This handles cases like (let* ((block (gensym))) ...) where "block" is a variable, not a special form
+fn extract_bindings_raw(bindings_obj: LispObject) -> Result<Vec<(String, ASTNode)>, String> {
+    let mut bindings = vec![];
+
+    if bindings_obj.is_nil() {
+        return Ok(bindings);
+    }
+
+    if !bindings_obj.is_cons() {
+        return Err("Bindings must be a list".to_string());
+    }
+
+    // Get the list of bindings as raw LispObjects
+    let binding_list = raw_cdr_to_vec_with_first(bindings_obj)?;
+
+    for binding_obj in binding_list {
+        if binding_obj.is_nil() {
+            continue;
+        }
+
+        if !binding_obj.is_cons() {
+            // Plain symbol with no value - treat as (var nil)
+            if let Some(sym_ptr) = binding_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+                let sym = unsafe { &*sym_ptr };
+                bindings.push((sym.name().to_string(), ASTNode::Constant(ConstantValue::Nil)));
+                continue;
+            }
+            return Err(format!("Invalid binding format: {:?}", binding_obj));
+        }
+
+        // Binding is a cons cell like (var value) or (var)
+        let binding_cons = unsafe { &*binding_obj.as_cons_ptr().unwrap() };
+        let var_obj = binding_cons.car();
+        let rest = binding_cons.cdr();
+
+        // Get variable name
+        let var_name = if let Some(sym_ptr) = var_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+            let sym = unsafe { &*sym_ptr };
+            sym.name().to_string()
+        } else {
+            return Err("Binding variable must be a symbol".to_string());
+        };
+
+        // Get value (if present)
+        let value = if rest.is_nil() {
+            ASTNode::Constant(ConstantValue::Nil)
+        } else if rest.is_cons() {
+            let val_cons = unsafe { &*rest.as_cons_ptr().unwrap() };
+            lisp_to_ast(val_cons.car())?
+        } else {
+            ASTNode::Constant(ConstantValue::Nil)
+        };
+
+        bindings.push((var_name, value));
+    }
+
+    Ok(bindings)
+}
+
+/// Get all elements from a cons list including the first
+fn raw_cdr_to_vec_with_first(obj: LispObject) -> Result<Vec<LispObject>, String> {
+    let mut result = Vec::new();
+    let mut current = obj;
+
+    while current.is_cons() {
+        let cons_ptr = current.as_cons_ptr().ok_or("Invalid cons pointer")?;
+        if cons_ptr.is_null() {
+            return Err("Null cons pointer".to_string());
+        }
+        let cons = unsafe { &*cons_ptr };
+        result.push(cons.car());
+        current = cons.cdr();
     }
 
     Ok(result)

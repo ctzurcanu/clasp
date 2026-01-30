@@ -296,15 +296,16 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     } else {
                         name.to_uppercase()
                     };
-                    let found = PACKAGES.with(|p| {
-                        p.borrow().contains_key(&pkg_name)
-                    });
-                    if found {
-                        // Return package object (represented as #<PACKAGE "NAME">)
-                        Ok(EvalResult::Package(pkg_name))
-                    } else {
-                        Ok(EvalResult::Nil)
-                    }
+                    // Look up the package and return its canonical name
+                    PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        if let Some(pkg) = packages.get(&pkg_name) {
+                            // Return the package's canonical name, not the lookup key (which could be a nickname)
+                            Ok(EvalResult::Package(pkg.get_name().to_string()))
+                        } else {
+                            Ok(EvalResult::Nil)
+                        }
+                    })
                 }
                 // Package object passed directly
                 Some(EvalResult::Package(name)) => Ok(EvalResult::Package(name.clone())),
@@ -600,6 +601,7 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Get target package (defaults to current package)
             let target_pkg = if args.len() > 1 {
                 match &args[1] {
+                    EvalResult::Package(name) => name.clone(),
                     EvalResult::Symbol(name) | EvalResult::String(name) => {
                         if name.starts_with(':') {
                             name[1..].to_uppercase()
@@ -834,13 +836,24 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 _ => return Err("find-symbol requires a string".to_string()),
             };
 
-            // Get package name
+            // Get package name - resolve to canonical name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
+                    EvalResult::Package(n) => n.clone(),
                     EvalResult::Symbol(n) => {
-                        if n.starts_with(':') { n[1..].to_uppercase() } else { n.to_uppercase() }
+                        let key = if n.starts_with(':') { n[1..].to_uppercase() } else { n.to_uppercase() };
+                        // Resolve nickname to canonical name
+                        PACKAGES.with(|p| {
+                            p.borrow().get(&key).map(|pkg| pkg.get_name().to_string()).unwrap_or(key)
+                        })
                     }
-                    EvalResult::String(n) => n.to_uppercase(),
+                    EvalResult::String(n) => {
+                        let key = n.to_uppercase();
+                        // Resolve nickname to canonical name
+                        PACKAGES.with(|p| {
+                            p.borrow().get(&key).map(|pkg| pkg.get_name().to_string()).unwrap_or(key)
+                        })
+                    }
                     _ => get_current_package(),
                 }
             } else {
@@ -1016,33 +1029,34 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "package-use-list" => {
             // Return list of packages used by this package
-            match args.get(0) {
+            let pkg_name = match args.get(0) {
+                Some(EvalResult::Package(name)) => name.clone(),
                 Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    let pkg_name = if name.starts_with(':') {
+                    if name.starts_with(':') {
                         name[1..].to_uppercase()
                     } else {
                         name.to_uppercase()
-                    };
-                    PACKAGES.with(|p| {
-                        let packages = p.borrow();
-                        if let Some(pkg) = packages.get(&pkg_name) {
-                            let mut result = EvalResult::Nil;
-                            for used_name in pkg.get_use_list().iter().rev() {
-                                result = EvalResult::Cons(
-                                    std::rc::Rc::new(std::cell::RefCell::new(
-                                        EvalResult::Symbol(used_name.clone())
-                                    )),
-                                    std::rc::Rc::new(std::cell::RefCell::new(result))
-                                );
-                            }
-                            Ok(result)
-                        } else {
-                            Ok(EvalResult::Nil)
-                        }
-                    })
+                    }
                 }
-                _ => Ok(EvalResult::Nil),
-            }
+                _ => return Ok(EvalResult::Nil),
+            };
+            PACKAGES.with(|p| {
+                let packages = p.borrow();
+                if let Some(pkg) = packages.get(&pkg_name) {
+                    let mut result = EvalResult::Nil;
+                    for used_name in pkg.get_use_list().iter().rev() {
+                        result = EvalResult::Cons(
+                            std::rc::Rc::new(std::cell::RefCell::new(
+                                EvalResult::Symbol(used_name.clone())
+                            )),
+                            std::rc::Rc::new(std::cell::RefCell::new(result))
+                        );
+                    }
+                    Ok(result)
+                } else {
+                    Ok(EvalResult::Nil)
+                }
+            })
         }
 
         "package-used-by-list" => {

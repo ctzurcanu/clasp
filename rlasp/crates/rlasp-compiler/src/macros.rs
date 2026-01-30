@@ -52,9 +52,10 @@ impl MacroTable {
         
         // defun - (defun name (params) body...) => (setq %FN%name (lambda (params) (block name body...)))
         // Store in function namespace (Lisp-2 semantics) using %FN% prefix
+        // Body can be empty - returns NIL in that case
         self.define_macro("defun", Arc::new(|args| {
-            if args.len() < 3 {
-                return Err("defun requires at least 3 arguments: name, params, body".to_string());
+            if args.len() < 2 {
+                return Err("defun requires at least 2 arguments: name, params".to_string());
             }
 
             let name = args[0];
@@ -69,12 +70,58 @@ impl MacroTable {
             let block_sym = Symbol::allocate("block");
 
             // Extract symbol name for function namespace key
-            let name_str = if name.is_general() {
-                let symbol_ptr = name.as_general_ptr::<Symbol>().ok_or("defun name must be a symbol")?;
-                let symbol = unsafe { &*symbol_ptr };
-                symbol.name().to_string()
+            // Handle both regular names and (setf name) forms
+            let name_str = if name.is_cons() {
+                // Check if it's (setf name)
+                if let Some(cons_ptr) = name.as_cons_ptr() {
+                    let cons = unsafe { &*cons_ptr };
+                    let car = cons.car();
+                    if car.is_general() {
+                        if let Some(sym_ptr) = car.as_general_ptr::<Symbol>() {
+                            let sym = unsafe { &*sym_ptr };
+                            if sym.name().eq_ignore_ascii_case("setf") {
+                                let cdr = cons.cdr();
+                                if cdr.is_cons() {
+                                    if let Some(cdr_cons_ptr) = cdr.as_cons_ptr() {
+                                        let cdr_cons = unsafe { &*cdr_cons_ptr };
+                                        let setf_name = cdr_cons.car();
+                                        if setf_name.is_general() {
+                                            if let Some(setf_sym_ptr) = setf_name.as_general_ptr::<Symbol>() {
+                                                let setf_sym = unsafe { &*setf_sym_ptr };
+                                                format!("(setf {})", setf_sym.name())
+                                            } else {
+                                                return Err("defun name must be a symbol or (setf name)".to_string());
+                                            }
+                                        } else {
+                                            return Err("defun name must be a symbol or (setf name)".to_string());
+                                        }
+                                    } else {
+                                        return Err("defun name must be a symbol or (setf name)".to_string());
+                                    }
+                                } else {
+                                    return Err("defun name must be a symbol or (setf name)".to_string());
+                                }
+                            } else {
+                                return Err("defun name must be a symbol or (setf name)".to_string());
+                            }
+                        } else {
+                            return Err("defun name must be a symbol or (setf name)".to_string());
+                        }
+                    } else {
+                        return Err("defun name must be a symbol or (setf name)".to_string());
+                    }
+                } else {
+                    return Err("defun name must be a symbol or (setf name)".to_string());
+                }
+            } else if name.is_general() {
+                if let Some(symbol_ptr) = name.as_general_ptr::<Symbol>() {
+                    let symbol = unsafe { &*symbol_ptr };
+                    symbol.name().to_string()
+                } else {
+                    return Err("defun name must be a symbol or (setf name)".to_string());
+                }
             } else {
-                return Err("defun name must be a symbol".to_string());
+                return Err("defun name must be a symbol or (setf name)".to_string());
             };
 
             // Create function namespace key: %FN%name

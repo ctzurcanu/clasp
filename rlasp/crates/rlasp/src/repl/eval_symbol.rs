@@ -55,12 +55,22 @@ pub fn call_symbol_builtin(name: &str, args: &[EvalResult], env: &HashMap<String
         }
 
         "symbol-value" => {
-            match args.get(0) {
-                Some(EvalResult::Symbol(s)) => {
+            // Extract first value if multiple values
+            let arg = match args.get(0) {
+                Some(EvalResult::MultipleValues(vals)) if !vals.is_empty() => &vals[0],
+                Some(v) => v,
+                None => return Err("symbol-value requires a symbol argument".to_string()),
+            };
+            match arg {
+                EvalResult::Nil => {
+                    // (symbol-value nil) returns nil
+                    Ok(EvalResult::Nil)
+                }
+                EvalResult::Symbol(s) => {
                     env.get(s).cloned()
                         .ok_or_else(|| format!("Unbound variable: {}", s))
                 }
-                _ => Err("symbol-value requires a symbol".to_string()),
+                _ => Err("symbol-value argument must be a symbol".to_string()),
             }
         }
 

@@ -413,19 +413,128 @@ pub fn call_sequence_builtin(
             Err("notany not implemented yet - needs function calling".to_string())
         }
 
-        "sort" => {
-            // (sort sequence predicate)
-            Err("sort not implemented yet - needs function calling".to_string())
-        }
+        "sort" | "stable-sort" => {
+            // (sort sequence predicate &key key)
+            // (stable-sort sequence predicate &key key)
+            if args.len() < 2 {
+                return Err(format!("{} requires sequence and predicate", name));
+            }
+            let sequence = &args[0];
+            let predicate = &args[1];
 
-        "stable-sort" => {
-            // (stable-sort sequence predicate)
-            Err("stable-sort not implemented yet - needs function calling".to_string())
+            // Convert sequence to vector for sorting
+            let mut items: Vec<EvalResult> = match sequence {
+                EvalResult::Cons(_, _) => {
+                    let mut v = Vec::new();
+                    let mut current = sequence.clone();
+                    while let EvalResult::Cons(car, cdr) = current {
+                        v.push(car.borrow().clone());
+                        current = cdr.borrow().clone();
+                    }
+                    v
+                }
+                EvalResult::Array(arr) => arr.borrow().clone(),
+                EvalResult::Nil => Vec::new(),
+                _ => return Err("sort: sequence must be a list or vector".to_string()),
+            };
+
+            // Sort using the predicate
+            // Note: This is a simplified sort that may not handle all edge cases
+            items.sort_by(|a, b| {
+                let result = apply_function(predicate, &[a.clone(), b.clone()], env);
+                match result {
+                    Ok(r) if is_truthy(&r) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Greater,
+                }
+            });
+
+            // Convert back to original type
+            match sequence {
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    // Return as list
+                    let mut result = EvalResult::Nil;
+                    for item in items.into_iter().rev() {
+                        result = EvalResult::Cons(
+                            std::rc::Rc::new(std::cell::RefCell::new(item)),
+                            std::rc::Rc::new(std::cell::RefCell::new(result)),
+                        );
+                    }
+                    Ok(result)
+                }
+                EvalResult::Array(_) => {
+                    Ok(EvalResult::Array(std::rc::Rc::new(std::cell::RefCell::new(items))))
+                }
+                _ => Ok(EvalResult::Nil),
+            }
         }
 
         "merge" => {
-            // (merge result-type sequence1 sequence2 predicate)
-            Err("merge not implemented yet - needs function calling".to_string())
+            // (merge result-type sequence1 sequence2 predicate &key key)
+            if args.len() < 4 {
+                return Err("merge requires result-type, sequence1, sequence2, and predicate".to_string());
+            }
+            let _result_type = &args[0]; // We'll just return a list for now
+            let seq1 = &args[1];
+            let seq2 = &args[2];
+            let predicate = &args[3];
+
+            // Convert sequences to vectors
+            let to_vec = |seq: &EvalResult| -> Vec<EvalResult> {
+                match seq {
+                    EvalResult::Cons(_, _) => {
+                        let mut v = Vec::new();
+                        let mut current = seq.clone();
+                        while let EvalResult::Cons(car, cdr) = current {
+                            v.push(car.borrow().clone());
+                            current = cdr.borrow().clone();
+                        }
+                        v
+                    }
+                    EvalResult::Array(arr) => arr.borrow().clone(),
+                    EvalResult::Nil => Vec::new(),
+                    other => vec![other.clone()],
+                }
+            };
+
+            let mut v1 = to_vec(seq1);
+            let mut v2 = to_vec(seq2);
+            let mut result = Vec::new();
+
+            // Merge the two sorted sequences
+            let mut i1 = 0;
+            let mut i2 = 0;
+            while i1 < v1.len() && i2 < v2.len() {
+                let cmp = apply_function(predicate, &[v1[i1].clone(), v2[i2].clone()], env);
+                match cmp {
+                    Ok(r) if is_truthy(&r) => {
+                        result.push(v1[i1].clone());
+                        i1 += 1;
+                    }
+                    _ => {
+                        result.push(v2[i2].clone());
+                        i2 += 1;
+                    }
+                }
+            }
+            // Append remaining elements
+            while i1 < v1.len() {
+                result.push(v1[i1].clone());
+                i1 += 1;
+            }
+            while i2 < v2.len() {
+                result.push(v2[i2].clone());
+                i2 += 1;
+            }
+
+            // Return as list
+            let mut list_result = EvalResult::Nil;
+            for item in result.into_iter().rev() {
+                list_result = EvalResult::Cons(
+                    std::rc::Rc::new(std::cell::RefCell::new(item)),
+                    std::rc::Rc::new(std::cell::RefCell::new(list_result)),
+                );
+            }
+            Ok(list_result)
         }
 
         "substitute" => {

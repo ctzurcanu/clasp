@@ -60,7 +60,10 @@
       "Bash(../target/release/irlasp:*)",
       "Bash(python3:*)",
       "Bash(sbcl --script:*)",
-      "Bash(sbcl:*)"
+      "Bash(sbcl:*)",
+      "Bash(for f in /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/*.lisp)",
+      "Bash(do)",
+      "Bash(/private/tmp/test_all_lisp.sh:*)"
     ]
   }
 }

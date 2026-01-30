@@ -1185,6 +1185,12 @@ pub(super) fn eval_symbol_value(args: &[ASTNode], env: &mut HashMap<String, Eval
 
     let symbol = eval_with_env(&args[0], env)?;
 
+    // Extract first value if multiple values (e.g., from find-symbol)
+    let symbol = match symbol {
+        EvalResult::MultipleValues(vals) if !vals.is_empty() => vals.into_iter().next().unwrap(),
+        other => other,
+    };
+
     // Handle NIL specially - (symbol-value nil) returns NIL
     if matches!(symbol, EvalResult::Nil) {
         return Ok(EvalResult::Nil);
@@ -1205,12 +1211,53 @@ pub(super) fn eval_symbol_value(args: &[ASTNode], env: &mut HashMap<String, Eval
         return Ok(val);
     }
 
-    // Check environment
+    // Check environment with multiple lookup strategies
+    // 1. Try exact name (as given)
     if let Some(val) = env.get(&symbol_name) {
-        Ok(val.clone())
-    } else {
-        Err(format!("Unbound variable: {}", symbol_name))
+        return Ok(val.clone());
     }
+
+    // 2. Try uppercase version
+    let upper_name = symbol_name.to_uppercase();
+    if let Some(val) = env.get(&upper_name) {
+        return Ok(val.clone());
+    }
+
+    // 2b. Try lowercase version
+    let lower_name = symbol_name.to_lowercase();
+    if let Some(val) = env.get(&lower_name) {
+        return Ok(val.clone());
+    }
+
+    // 3. If qualified (pkg:sym), try just the symbol part (uppercase and lowercase)
+    if let Some(colon_pos) = symbol_name.rfind(':') {
+        let unqualified = &symbol_name[colon_pos + 1..];
+        // Try exact case
+        if let Some(val) = env.get(unqualified) {
+            return Ok(val.clone());
+        }
+        // Try uppercase
+        let upper_unqualified = unqualified.to_uppercase();
+        if let Some(val) = env.get(&upper_unqualified) {
+            return Ok(val.clone());
+        }
+        // Try lowercase
+        let lower_unqualified = unqualified.to_lowercase();
+        if let Some(val) = env.get(&lower_unqualified) {
+            return Ok(val.clone());
+        }
+    }
+
+    // 4. If unqualified, try with current package prefix
+    if !symbol_name.contains(':') {
+        let current_pkg = super::eval_package::get_current_package();
+        let qualified = format!("{}:{}", current_pkg, upper_name);
+        if let Some(val) = env.get(&qualified) {
+            return Ok(val.clone());
+        }
+    }
+
+    Err(format!("Unbound variable: {}", symbol_name))
 }
 
 pub(super) fn eval_set_symbol_value(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1411,28 +1458,60 @@ fn format_value(val: &EvalResult) -> String {
     }
 }
 
+/// Extract a pathname string from an EvalResult (string, symbol, or pathname object)
+fn extract_pathname_from_eval(val: &EvalResult) -> Option<String> {
+    match val {
+        EvalResult::String(s) => Some(s.clone()),
+        EvalResult::Symbol(s) => {
+            // Strip quotes if present
+            if s.starts_with('"') && s.ends_with('"') {
+                Some(s[1..s.len()-1].to_string())
+            } else {
+                Some(s.clone())
+            }
+        }
+        EvalResult::Cons(car, cdr) => {
+            // Handle pathname objects: (pathname "...")
+            if let EvalResult::Symbol(sym) = &*car.borrow() {
+                let base_name = sym.rsplit(':').next().unwrap_or(sym);
+                if base_name.eq_ignore_ascii_case("pathname") {
+                    if let EvalResult::Cons(path_car, _) = &*cdr.borrow() {
+                        if let EvalResult::String(path_str) = &*path_car.borrow() {
+                            return Some(path_str.clone());
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.is_empty() {
         return Err("load requires a file path argument".to_string());
     }
 
-    let mut file_path = match eval_with_env(&args[0], env)? {
-        EvalResult::String(s) => s,
-        EvalResult::Symbol(s) => {
-            // Strip quotes if present
-            if s.starts_with('"') && s.ends_with('"') {
-                s[1..s.len()-1].to_string()
-            } else {
-                s
-            }
-        }
-        _ => return Err("load argument must be a string".to_string()),
-    };
+    let evaluated = eval_with_env(&args[0], env)?;
+    let mut file_path = extract_pathname_from_eval(&evaluated)
+        .ok_or_else(|| "load argument must be a string or pathname".to_string())?;
 
     // Translate logical pathnames
     if file_path.starts_with("sys:") {
         file_path = file_path.replacen("sys:", "./", 1);
     }
+
+    // Save old values of *load-pathname* and *load-truename*
+    let old_load_pathname = env.get("*load-pathname*").cloned();
+    let old_load_truename = env.get("*load-truename*").cloned();
+
+    // Set *load-pathname* and *load-truename* during load
+    env.insert("*load-pathname*".to_string(), EvalResult::String(file_path.clone()));
+    let truename = std::fs::canonicalize(&file_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| file_path.clone());
+    env.insert("*load-truename*".to_string(), EvalResult::String(truename));
 
     let contents = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read file {}: {}", file_path, e))?;
@@ -1447,6 +1526,16 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         let ast = lisp_to_ast(obj)?;
         _result = eval_with_env(&ast, env)?;
     }
+
+    // Restore old values
+    match old_load_pathname {
+        Some(v) => env.insert("*load-pathname*".to_string(), v),
+        None => env.remove("*load-pathname*"),
+    };
+    match old_load_truename {
+        Some(v) => env.insert("*load-truename*".to_string(), v),
+        None => env.remove("*load-truename*"),
+    };
 
     // Return t (true) on success, as per Common Lisp spec
     Ok(EvalResult::Bool(true))
@@ -2249,15 +2338,47 @@ pub(super) fn eval_fdefinition(args: &[ASTNode], env: &mut HashMap<String, EvalR
     }
     match eval_with_env(&args[0], env)? {
         EvalResult::Symbol(name) => {
-            // First check the environment for user-defined functions
-            // Use function namespace prefix for Lisp-2 semantics
-            let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, name);
-            if let Some(func) = env.get(&fn_name).cloned() {
+            // Helper to try looking up a function name
+            let try_lookup = |n: &str| -> Option<EvalResult> {
+                // Try with function namespace prefix
+                let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, n);
+                if let Some(func) = env.get(&fn_name).cloned() {
+                    return Some(func);
+                }
+                // Try without prefix
+                if let Some(func) = env.get(n).cloned() {
+                    return Some(func);
+                }
+                None
+            };
+
+            // First try the exact name
+            if let Some(func) = try_lookup(&name) {
                 return Ok(func);
             }
-            // Also try without prefix for backwards compatibility
-            if let Some(func) = env.get(&name).cloned() {
+
+            // Try uppercase
+            if let Some(func) = try_lookup(&name.to_uppercase()) {
                 return Ok(func);
+            }
+
+            // Try lowercase
+            if let Some(func) = try_lookup(&name.to_lowercase()) {
+                return Ok(func);
+            }
+
+            // If qualified (pkg:sym), try just the symbol part
+            if let Some(colon_pos) = name.rfind(':') {
+                let unqualified = &name[colon_pos + 1..];
+                if let Some(func) = try_lookup(unqualified) {
+                    return Ok(func);
+                }
+                if let Some(func) = try_lookup(&unqualified.to_uppercase()) {
+                    return Ok(func);
+                }
+                if let Some(func) = try_lookup(&unqualified.to_lowercase()) {
+                    return Ok(func);
+                }
             }
 
             // Check for builtin functions - return a special marker

@@ -1597,41 +1597,89 @@ pub(super) fn eval_find_if_not(args: &[ASTNode], env: &mut HashMap<String, EvalR
 }
 
 pub(super) fn eval_remove(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (remove item list) - return new list with item removed
-    if args.len() != 2 {
-        return Err("remove requires 2 arguments (item list)".to_string());
+    // (remove item sequence &key test test-not key start end count from-end)
+    if args.len() < 2 {
+        return Err("remove requires at least 2 arguments (item sequence)".to_string());
     }
 
     let item = eval_with_env(&args[0], env)?;
-    let list = eval_with_env(&args[1], env)?;
+    let sequence = eval_with_env(&args[1], env)?;
+    let (from_end, start, end, count, key_fn) = parse_sequence_keywords(args, env)?;
 
-    let mut result_items = Vec::new();
-    let mut current = list;
-
-    loop {
-        match current {
-            EvalResult::Nil => break,
-            EvalResult::Cons(car, cdr) => {
-                let elem = car.borrow().clone();
-                if !values_equal(&item, &elem) {
-                    result_items.push(elem);
-                }
-                current = cdr.borrow().clone();
+    // Parse :test and :test-not from keyword args
+    let mut test_fn: Option<EvalResult> = None;
+    let mut test_not_fn: Option<EvalResult> = None;
+    let mut i = 2;
+    while i + 1 < args.len() {
+        if let ASTNode::Variable(kw) = &args[i] {
+            let kw_lower = kw.to_lowercase();
+            if kw_lower == ":test" || kw_lower == "test" {
+                test_fn = Some(eval_with_env(&args[i + 1], env)?);
+                i += 2;
+            } else if kw_lower == ":test-not" || kw_lower == "test-not" {
+                test_not_fn = Some(eval_with_env(&args[i + 1], env)?);
+                i += 2;
+            } else {
+                i += 2;  // Skip other keywords
             }
-            _ => return Err("remove: second argument must be a list".to_string()),
+        } else {
+            i += 1;
         }
     }
 
-    // Build result list
-    let mut result = EvalResult::Nil;
-    for elem in result_items.iter().rev() {
-        result = EvalResult::Cons(
-            Rc::new(RefCell::new(elem.clone())),
-            Rc::new(RefCell::new(result))
-        );
+    let (is_string, items) = collect_sequence(&sequence)?;
+    let len = items.len();
+    let end_idx = end.unwrap_or(len).min(len);
+    if start > end_idx {
+        return Err("start must be <= end".to_string());
     }
 
-    Ok(result)
+    // Find elements that match the item
+    let mut matches: Vec<usize> = Vec::new();
+    for (idx, elem) in items.iter().enumerate().take(end_idx).skip(start) {
+        // Apply key function if present
+        let elem_val = if let Some(ref kf) = key_fn {
+            apply_function(kf, &[elem.clone()], env)?
+        } else {
+            elem.clone()
+        };
+
+        // Compare using test function or default eql
+        let is_match = if let Some(ref tf) = test_fn {
+            let result = apply_function(tf, &[item.clone(), elem_val], env)?;
+            !matches!(result, EvalResult::Nil | EvalResult::Boolean(false))
+        } else if let Some(ref tnf) = test_not_fn {
+            let result = apply_function(tnf, &[item.clone(), elem_val], env)?;
+            matches!(result, EvalResult::Nil | EvalResult::Boolean(false))
+        } else {
+            values_equal(&item, &elem_val)
+        };
+
+        if is_match {
+            matches.push(idx);
+        }
+    }
+
+    // Apply count limit
+    let remove_set: HashSet<usize> = if let Some(limit) = count {
+        if from_end {
+            matches.into_iter().rev().take(limit).collect()
+        } else {
+            matches.into_iter().take(limit).collect()
+        }
+    } else {
+        matches.into_iter().collect()
+    };
+
+    // Build result with non-matching elements
+    let result_items: Vec<EvalResult> = items
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| !remove_set.contains(idx))
+        .map(|(_, elem)| elem)
+        .collect();
+
+    build_sequence(is_string, result_items)
 }
 
 pub(super) fn eval_delete(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1642,18 +1690,55 @@ pub(super) fn eval_delete(args: &[ASTNode], env: &mut HashMap<String, EvalResult
 }
 
 pub(super) fn eval_find(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (find item list) - find first occurrence of item in list
-    if args.len() != 2 {
-        return Err("find requires 2 arguments (item list)".to_string());
+    // (find item sequence &key test key from-end start end)
+    if args.len() < 2 {
+        return Err("find requires at least 2 arguments (item sequence)".to_string());
     }
 
     let item = eval_with_env(&args[0], env)?;
     let list = eval_with_env(&args[1], env)?;
 
-    if let EvalResult::String(s) = list {
+    // Parse keyword arguments
+    let mut test_fn: Option<EvalResult> = None;
+    let mut key_fn: Option<EvalResult> = None;
+
+    let mut i = 2;
+    while i < args.len() {
+        if let ASTNode::Variable(key) = &args[i] {
+            if key.starts_with(':') && i + 1 < args.len() {
+                let val = eval_with_env(&args[i + 1], env)?;
+                match key.as_str() {
+                    ":test" => test_fn = Some(val),
+                    ":key" => key_fn = Some(val),
+                    ":from-end" | ":start" | ":end" => {} // Ignore for now
+                    _ => {}
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    if let EvalResult::String(s) = &list {
         for ch in s.chars() {
             let elem = EvalResult::Character(ch);
-            if values_equal(&item, &elem) {
+            // Apply key function if provided
+            let key_elem = if let Some(ref key) = key_fn {
+                call_function_with_values(key.clone(), &[elem.clone()], env)?
+            } else {
+                elem.clone()
+            };
+            // Apply test function or use default equality
+            let matches = if let Some(ref test) = test_fn {
+                let result = call_function_with_values(test.clone(), &[item.clone(), key_elem], env)?;
+                !matches!(result, EvalResult::Nil | EvalResult::Boolean(false) | EvalResult::Bool(false))
+            } else {
+                values_equal(&item, &key_elem)
+            };
+            if matches {
                 return Ok(elem);
             }
         }
@@ -1666,12 +1751,25 @@ pub(super) fn eval_find(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
             EvalResult::Nil => return Ok(EvalResult::Nil),
             EvalResult::Cons(car, cdr) => {
                 let elem = car.borrow().clone();
-                if values_equal(&item, &elem) {
+                // Apply key function if provided
+                let key_elem = if let Some(ref key) = key_fn {
+                    call_function_with_values(key.clone(), &[elem.clone()], env)?
+                } else {
+                    elem.clone()
+                };
+                // Apply test function or use default equality
+                let matches = if let Some(ref test) = test_fn {
+                    let result = call_function_with_values(test.clone(), &[item.clone(), key_elem], env)?;
+                    !matches!(result, EvalResult::Nil | EvalResult::Boolean(false) | EvalResult::Bool(false))
+                } else {
+                    values_equal(&item, &key_elem)
+                };
+                if matches {
                     return Ok(elem);
                 }
                 current = cdr.borrow().clone();
             }
-            _ => return Err("find: second argument must be a list".to_string()),
+            _ => return Err("find: second argument must be a sequence".to_string()),
         }
     }
 }
@@ -2005,4 +2103,257 @@ fn results_equal(a: &EvalResult, b: &EvalResult) -> bool {
         (EvalResult::Character(x), EvalResult::Character(y)) => x == y,
         _ => false,
     }
+}
+
+/// (intersection list1 list2 &key test key)
+/// Returns elements common to both lists
+pub(super) fn eval_intersection(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("intersection requires at least 2 arguments".to_string());
+    }
+
+    let list1 = eval_with_env(&args[0], env)?;
+    let list2 = eval_with_env(&args[1], env)?;
+
+    // Convert lists to vectors
+    let mut elems1 = Vec::new();
+    let mut current = list1;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                elems1.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("intersection: first argument must be a list".to_string()),
+        }
+    }
+
+    let mut elems2 = Vec::new();
+    current = list2;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                elems2.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("intersection: second argument must be a list".to_string()),
+        }
+    }
+
+    // Filter elements in list1 that are also in list2
+    let mut result_vec = Vec::new();
+    for elem in elems1 {
+        let found = elems2.iter().any(|e| results_equal(&elem, e));
+        if found {
+            result_vec.push(elem);
+        }
+    }
+
+    // Build result list
+    let mut result = EvalResult::Nil;
+    for item in result_vec.iter().rev() {
+        result = EvalResult::Cons(Rc::new(RefCell::new(item.clone())), Rc::new(RefCell::new(result)));
+    }
+
+    Ok(result)
+}
+
+/// (union list1 list2 &key test key)
+/// Returns elements that are in either list, without duplicates
+pub(super) fn eval_union(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("union requires at least 2 arguments".to_string());
+    }
+
+    let list1 = eval_with_env(&args[0], env)?;
+    let list2 = eval_with_env(&args[1], env)?;
+
+    // Convert lists to vectors
+    let mut elems1 = Vec::new();
+    let mut current = list1;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                elems1.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("union: first argument must be a list".to_string()),
+        }
+    }
+
+    let mut elems2 = Vec::new();
+    current = list2;
+    loop {
+        match current {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                elems2.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("union: second argument must be a list".to_string()),
+        }
+    }
+
+    // Start with all elements from list1
+    let mut result_vec = elems1.clone();
+
+    // Add elements from list2 that are not in list1
+    for elem in elems2 {
+        let found = result_vec.iter().any(|e| results_equal(&elem, e));
+        if !found {
+            result_vec.push(elem);
+        }
+    }
+
+    // Build result list
+    let mut result = EvalResult::Nil;
+    for item in result_vec.iter().rev() {
+        result = EvalResult::Cons(Rc::new(RefCell::new(item.clone())), Rc::new(RefCell::new(result)));
+    }
+
+    Ok(result)
+}
+
+/// (mismatch seq1 seq2 &key test key start1 end1 start2 end2 from-end)
+/// Returns the index of the first position where sequences differ, or NIL if equal
+pub(super) fn eval_mismatch(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("mismatch requires at least 2 arguments".to_string());
+    }
+
+    let seq1 = eval_with_env(&args[0], env)?;
+    let seq2 = eval_with_env(&args[1], env)?;
+
+    // Parse keyword arguments
+    let mut start1: usize = 0;
+    let mut end1: Option<usize> = None;
+    let mut start2: usize = 0;
+    let mut end2: Option<usize> = None;
+    let mut test_fn: Option<EvalResult> = None;
+    let mut key_fn: Option<EvalResult> = None;
+    let mut from_end = false;
+
+    let mut i = 2;
+    while i + 1 < args.len() {
+        if let ASTNode::Variable(kw) = &args[i] {
+            let kw_lower = kw.to_lowercase();
+            match kw_lower.as_str() {
+                ":start1" | "start1" => {
+                    if let EvalResult::Fixnum(n) = eval_with_env(&args[i + 1], env)? {
+                        start1 = n as usize;
+                    }
+                }
+                ":end1" | "end1" => {
+                    let v = eval_with_env(&args[i + 1], env)?;
+                    if let EvalResult::Fixnum(n) = v {
+                        end1 = Some(n as usize);
+                    }
+                }
+                ":start2" | "start2" => {
+                    if let EvalResult::Fixnum(n) = eval_with_env(&args[i + 1], env)? {
+                        start2 = n as usize;
+                    }
+                }
+                ":end2" | "end2" => {
+                    let v = eval_with_env(&args[i + 1], env)?;
+                    if let EvalResult::Fixnum(n) = v {
+                        end2 = Some(n as usize);
+                    }
+                }
+                ":test" | "test" => {
+                    test_fn = Some(eval_with_env(&args[i + 1], env)?);
+                }
+                ":key" | "key" => {
+                    let v = eval_with_env(&args[i + 1], env)?;
+                    if !matches!(v, EvalResult::Nil) {
+                        key_fn = Some(v);
+                    }
+                }
+                ":from-end" | "from-end" => {
+                    let v = eval_with_env(&args[i + 1], env)?;
+                    from_end = !matches!(v, EvalResult::Nil | EvalResult::Boolean(false));
+                }
+                _ => {}
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Collect sequences
+    let (_, items1) = collect_sequence(&seq1)?;
+    let (_, items2) = collect_sequence(&seq2)?;
+
+    let end1 = end1.unwrap_or(items1.len()).min(items1.len());
+    let end2 = end2.unwrap_or(items2.len()).min(items2.len());
+
+    let slice1: Vec<_> = items1[start1..end1].to_vec();
+    let slice2: Vec<_> = items2[start2..end2].to_vec();
+
+    // Compare elements
+    let mut compare_items = |idx1: usize, idx2: usize| -> Result<bool, String> {
+        let elem1 = &slice1[idx1];
+        let elem2 = &slice2[idx2];
+
+        // Apply key function if present
+        let val1 = if let Some(ref kf) = key_fn {
+            apply_function(kf, &[elem1.clone()], env)?
+        } else {
+            elem1.clone()
+        };
+        let val2 = if let Some(ref kf) = key_fn {
+            apply_function(kf, &[elem2.clone()], env)?
+        } else {
+            elem2.clone()
+        };
+
+        // Compare using test function or default eql
+        if let Some(ref tf) = test_fn {
+            let result = apply_function(tf, &[val1, val2], env)?;
+            Ok(!matches!(result, EvalResult::Nil | EvalResult::Boolean(false)))
+        } else {
+            Ok(values_equal(&val1, &val2))
+        }
+    };
+
+    let len1 = slice1.len();
+    let len2 = slice2.len();
+    let min_len = len1.min(len2);
+
+    if from_end {
+        // Compare from end
+        for i in 0..min_len {
+            let idx1 = len1 - 1 - i;
+            let idx2 = len2 - 1 - i;
+            if !compare_items(idx1, idx2)? {
+                return Ok(EvalResult::Fixnum((start1 + idx1) as i64));
+            }
+        }
+        // If lengths differ, return position of length difference
+        if len1 != len2 {
+            if len1 > len2 {
+                return Ok(EvalResult::Fixnum((start1 + len1 - min_len - 1) as i64));
+            } else {
+                return Ok(EvalResult::Fixnum(start1 as i64));
+            }
+        }
+    } else {
+        // Compare from start
+        for i in 0..min_len {
+            if !compare_items(i, i)? {
+                return Ok(EvalResult::Fixnum((start1 + i) as i64));
+            }
+        }
+        // If lengths differ, return position after common prefix
+        if len1 != len2 {
+            return Ok(EvalResult::Fixnum((start1 + min_len) as i64));
+        }
+    }
+
+    // Sequences are equal
+    Ok(EvalResult::Nil)
 }

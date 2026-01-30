@@ -209,3 +209,9 @@ we will have images in .ll and .bc files rather than .faso
 The .bc files will be input for ORC JIT and run.
 
 in /Users/christiantzurcanu/Documents/dev/clasp/rlasp/tools/ you have scripts for splitting the lisp top forms
+
+/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/
+sbcl is installed: do not add builtins that sbcl does not have
+
+in /private/tmp/ you have scripts for running and analysing /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/ .lisp files
+  run them and load scripts in the correct dependency order. add builtins that CL has to achieve same results with the installed sbcl
