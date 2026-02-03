@@ -63,7 +63,13 @@
       "Bash(sbcl:*)",
       "Bash(for f in /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/*.lisp)",
       "Bash(do)",
-      "Bash(/private/tmp/test_all_lisp.sh:*)"
+      "Bash(/private/tmp/test_all_lisp.sh:*)",
+      "Bash(mlir-opt:*)",
+      "Bash(xxd:*)",
+      "Bash(/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/rlasp:*)",
+      "Bash(lldb:*)",
+      "Bash(/opt/homebrew/opt/llvm/bin/mlir-opt:*)",
+      "Bash(awk:*)"
     ]
   }
 }

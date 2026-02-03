@@ -1,0 +1,385 @@
+extracted_total 740
+extra_total 164
+
+*caught-error*
+  crates/rlasp/src/repl/eval_core.rs:1243
+*cons*
+  crates/rlasp/src/repl/eval_core.rs:1250
+*narrowing-matcher-rules*
+  crates/rlasp/src/repl/eval_core.rs:1221
+*traversal-matcher-rules*
+  crates/rlasp/src/repl/eval_core.rs:1220
+*use-compile-file-parallel*
+  crates/rlasp/src/repl/eval_core.rs:1239
+*wild*
+  crates/rlasp/src/repl/eval_core.rs:944
+  crates/rlasp/src/repl/eval_core.rs:1218
+*wild-inferiors*
+  crates/rlasp/src/repl/eval_core.rs:945
+  crates/rlasp/src/repl/eval_core.rs:1219
++begin-tag+
+  crates/rlasp/src/repl/eval_core.rs:1222
++end-tag+
+  crates/rlasp/src/repl/eval_core.rs:1223
++the-t-class+
+  crates/rlasp/src/repl/eval_core.rs:1249
++unix-errno-condition-map+
+  crates/rlasp/src/repl/eval_core.rs:1258
++unix-errno-error-map+
+  crates/rlasp/src/repl/eval_core.rs:1248
+:count
+  crates/rlasp/src/repl/eval_list.rs:1419
+:defaults
+  crates/rlasp/src/repl/eval_pathname.rs:229
+:directory
+  crates/rlasp/src/repl/eval_pathname.rs:212
+:end
+  crates/rlasp/src/repl/eval_list.rs:1416
+  crates/rlasp/src/repl/eval_list.rs:1869
+  crates/rlasp-mlir/src/lib_stack.rs:7171
+  crates/rlasp-mlir/src/lib_stack.rs:7241
+  crates/rlasp-mlir/src/lib_stack.rs:7655
+:from-end
+  crates/rlasp/src/repl/eval_list.rs:1410
+  crates/rlasp/src/repl/eval_list.rs:1863
+  crates/rlasp-mlir/src/lib_stack.rs:7172
+  crates/rlasp-mlir/src/lib_stack.rs:7242
+  crates/rlasp-mlir/src/lib_stack.rs:7656
+:key
+  crates/rlasp/src/repl/eval_list.rs:586
+  crates/rlasp/src/repl/eval_list.rs:894
+  crates/rlasp/src/repl/eval_list.rs:1200
+  crates/rlasp/src/repl/eval_list.rs:1422
+  crates/rlasp/src/repl/eval_list.rs:1771
+  crates/rlasp/src/repl/eval_list.rs:1872
+  crates/rlasp-mlir/src/lib_stack.rs:3345
+  crates/rlasp-mlir/src/lib_stack.rs:3416
+  crates/rlasp-mlir/src/lib_stack.rs:3473
+  crates/rlasp-mlir/src/lib_stack.rs:3530
+  crates/rlasp-mlir/src/lib_stack.rs:3610
+  crates/rlasp-mlir/src/lib_stack.rs:7173
+  crates/rlasp-mlir/src/lib_stack.rs:7243
+  crates/rlasp-mlir/src/lib_stack.rs:7659
+:name
+  crates/rlasp/src/repl/eval_pathname.rs:194
+:start
+  crates/rlasp/src/repl/eval_list.rs:1413
+  crates/rlasp/src/repl/eval_list.rs:1866
+  crates/rlasp-mlir/src/lib_stack.rs:7170
+  crates/rlasp-mlir/src/lib_stack.rs:7240
+  crates/rlasp-mlir/src/lib_stack.rs:7654
+:start1
+  crates/rlasp/src/repl/eval_sequence.rs:146
+:start2
+  crates/rlasp/src/repl/eval_sequence.rs:147
+:test
+  crates/rlasp/src/repl/eval_list.rs:576
+  crates/rlasp/src/repl/eval_list.rs:813
+  crates/rlasp/src/repl/eval_list.rs:885
+  crates/rlasp/src/repl/eval_list.rs:1191
+  crates/rlasp/src/repl/eval_list.rs:1770
+  crates/rlasp/src/repl/eval_list.rs:1875
+  crates/rlasp-mlir/src/lib_stack.rs:3343
+  crates/rlasp-mlir/src/lib_stack.rs:3414
+  crates/rlasp-mlir/src/lib_stack.rs:3471
+  crates/rlasp-mlir/src/lib_stack.rs:3528
+  crates/rlasp-mlir/src/lib_stack.rs:3608
+  crates/rlasp-mlir/src/lib_stack.rs:7657
+:test-not
+  crates/rlasp/src/repl/eval_list.rs:580
+  crates/rlasp/src/repl/eval_list.rs:817
+  crates/rlasp/src/repl/eval_list.rs:889
+  crates/rlasp/src/repl/eval_list.rs:1195
+  crates/rlasp/src/repl/eval_list.rs:1879
+  crates/rlasp-mlir/src/lib_stack.rs:3344
+  crates/rlasp-mlir/src/lib_stack.rs:3415
+  crates/rlasp-mlir/src/lib_stack.rs:3472
+  crates/rlasp-mlir/src/lib_stack.rs:3529
+  crates/rlasp-mlir/src/lib_stack.rs:3609
+  crates/rlasp-mlir/src/lib_stack.rs:7658
+:type
+  crates/rlasp/src/repl/eval_pathname.rs:203
+INSTANCE
+  crates/rlasp/src/repl/eval_control.rs:919
+PACKAGE-DESIGNATOR
+  crates/rlasp/src/repl/eval_control.rs:933
+alexandria:alist-hash-table
+  crates/rlasp/src/repl/eval_core.rs:5906
+apply-key
+  crates/rlasp/src/repl/eval_core.rs:4392
+argc
+  crates/rlasp-jit/src/intrinsics.rs:4941
+arrayDimension
+  crates/rlasp/src/repl/eval_array.rs:161
+arrayDimensions
+  crates/rlasp/src/repl/eval_array.rs:166
+arrayElementType
+  crates/rlasp/src/repl/eval_array.rs:181
+arrayHasFillPointerP
+  crates/rlasp/src/repl/eval_array.rs:186
+arrayRowMajorIndex
+  crates/rlasp/src/repl/eval_array.rs:188
+arrayTotalSize
+  crates/rlasp/src/repl/eval_array.rs:190
+ast-tooling:*matcher-names*
+  crates/rlasp/src/repl/eval_core.rs:1224
+backquote
+  crates/rlasp/src/repl/eval_system.rs:679
+booleanp
+  crates/rlasp/src/repl/eval_core.rs:4559
+call-image-dump-hook
+  crates/rlasp/src/repl/eval_core.rs:6211
+char-EQ-
+  crates/rlasp/src/repl/eval_char.rs:207
+char-GE-
+  crates/rlasp/src/repl/eval_char.rs:242
+char-GT-
+  crates/rlasp/src/repl/eval_char.rs:228
+char-LE-
+  crates/rlasp/src/repl/eval_char.rs:235
+char-LT-
+  crates/rlasp/src/repl/eval_char.rs:221
+char-NE-
+  crates/rlasp/src/repl/eval_char.rs:214
+class-direct-slots
+  crates/rlasp-mlir/src/lib_stack.rs:8366
+class-direct-superclasses
+  crates/rlasp-mlir/src/lib_stack.rs:8379
+class-precedence-list
+  crates/rlasp-mlir/src/lib_stack.rs:8392
+class-slots
+  crates/rlasp-mlir/src/lib_stack.rs:8353
+cleavir-flow:define-flow
+  crates/rlasp/src/repl/eval_core.rs:5564
+cleavir-io:define-save-info
+  crates/rlasp/src/repl/eval_core.rs:5561
+cleavir-stealth-mixins:define-stealth-mixin
+  crates/rlasp/src/repl/eval_core.rs:5563
+clim:define-application-frame
+  crates/rlasp/src/repl/eval_core.rs:5562
+cmp::+derivable-wtag+
+  crates/rlasp/src/repl/eval_core.rs:1257
+cmp::+wtag-width+
+  crates/rlasp/src/repl/eval_core.rs:1247
+coerce-fdesignator
+  crates/rlasp/src/repl/eval_core.rs:4394
+compile-matcher
+  crates/rlasp/src/repl/eval_core.rs:6184
+condition-specializer
+  crates/rlasp/src/repl/eval_core.rs:1254
+condition-var
+  crates/rlasp/src/repl/eval_core.rs:1244
+core:fset
+  crates/rlasp/src/repl/eval_core.rs:4658
+core:select-package
+  crates/rlasp/src/repl/eval_core.rs:4578
+defalias
+  crates/rlasp/src/repl/eval_core.rs:5448
+defcfun
+  crates/rlasp/src/repl/eval_core.rs:3090
+defforeign
+  crates/rlasp/src/repl/eval_core.rs:4705
+define-constant
+  crates/rlasp/src/repl/eval_core.rs:5496
+define-convenience-action-methods
+  crates/rlasp/src/repl/eval_core.rs:3086
+  crates/rlasp-mlir/src/lib_stack.rs:2767
+define-validate-superclass-method
+  crates/rlasp/src/repl/eval_core.rs:5498
+defparameter*
+  crates/rlasp-mlir/src/lib_stack.rs:2776
+defrule
+  crates/rlasp/src/repl/eval_core.rs:5511
+defvar*
+  crates/rlasp-mlir/src/lib_stack.rs:2811
+double
+  crates/rlasp/src/repl/eval_system.rs:1607
+eclector.reader::set-standard-macro-characters
+  crates/rlasp/src/repl/eval_core.rs:5228
+eq?
+  crates/rlasp/src/repl/eval_core.rs:4039
+errorp
+  crates/rlasp/src/repl/eval_core.rs:4287
+  crates/rlasp-jit/src/intrinsics.rs:4848
+eval-note
+  crates/rlasp/src/repl/eval_core.rs:5513
+fillPointer
+  crates/rlasp/src/repl/eval_array.rs:195
+find-symbol*
+  crates/rlasp/src/repl/eval_core.rs:4929
+find-system
+  crates/rlasp/src/repl/eval_core.rs:5216
+for
+  crates/rlasp/src/repl/eval_core.rs:1255
+format-symbol
+  crates/rlasp/src/repl/eval_core.rs:4928
+fout
+  crates/rlasp/src/repl/eval_core.rs:1252
+fset
+  crates/rlasp/src/repl/eval_core.rs:4584
+get-host-by-name
+  crates/rlasp/src/repl/eval_core.rs:5117
+hash-table-keys
+  crates/rlasp/src/repl/eval_core.rs:5953
+  crates/rlasp-mlir/src/lib_stack.rs:4530
+hash-table-values
+  crates/rlasp/src/repl/eval_core.rs:5954
+  crates/rlasp-mlir/src/lib_stack.rs:4544
+int
+  crates/rlasp/src/repl/eval_core.rs:4022
+int16
+  crates/rlasp/src/repl/eval_system.rs:1600
+int32
+  crates/rlasp/src/repl/eval_system.rs:1602
+int64
+  crates/rlasp/src/repl/eval_system.rs:1604
+int8
+  crates/rlasp/src/repl/eval_system.rs:1598
+k:*extensions*
+  crates/rlasp/src/repl/eval_core.rs:1246
+key
+  crates/rlasp/src/repl/eval_core.rs:463
+khazern:define-interface
+  crates/rlasp/src/repl/eval_core.rs:5560
+llvm-sys:cxx-data-structures-info
+  crates/rlasp/src/repl/eval_core.rs:5125
+llvm-sys:initialize-native-target
+  crates/rlasp/src/repl/eval_core.rs:5223
+llvm-sys:tag-tests
+  crates/rlasp/src/repl/eval_core.rs:5887
+load-lib
+  crates/rlasp/src/repl/eval_core.rs:4704
+make-rule-properties
+  crates/rlasp/src/repl/eval_core.rs:5885
+member1
+  crates/rlasp/src/repl/eval_core.rs:4258
+mmsg
+  crates/rlasp/src/repl/eval_core.rs:5884
+mp:*current-process*
+  crates/rlasp/src/repl/eval_core.rs:1241
+mp:make-recursive-mutex
+  crates/rlasp/src/repl/eval_core.rs:5886
+mp:push-default-special-binding
+  crates/rlasp/src/repl/eval_core.rs:5131
+newline
+  crates/rlasp/src/repl/eval_char.rs:268
+null?
+  crates/rlasp/src/repl/eval_core.rs:4265
+package-external-symbols
+  crates/rlasp/src/repl/eval_package.rs:1252
+package-names
+  crates/rlasp/src/repl/eval_symbol.rs:263
+pair?
+  crates/rlasp/src/repl/eval_core.rs:4264
+parse
+  crates/rlasp/src/repl/eval_core.rs:5512
+parse-unix-namestring
+  crates/rlasp/src/repl/eval_core.rs:4735
+pointer
+  crates/rlasp/src/repl/eval_system.rs:1608
+puthash
+  crates/rlasp-jit/src/intrinsics.rs:4924
+read-file-form
+  crates/rlasp/src/repl/eval_core.rs:5626
+read-time-eval
+  crates/rlasp/src/repl/eval_core.rs:4340
+  crates/rlasp-mlir/src/lib_stack.rs:2898
+record-cons
+  crates/rlasp/src/repl/eval_core.rs:5957
+record-field
+  crates/rlasp/src/repl/eval_core.rs:5958
+register-clear-configuration-hook
+  crates/rlasp/src/repl/eval_core.rs:4731
+register-image-restore-hook
+  crates/rlasp/src/repl/eval_core.rs:6203
+rem-record-field
+  crates/rlasp/src/repl/eval_core.rs:5959
+required
+  crates/rlasp/src/repl/eval_core.rs:441
+rowMajorAref
+  crates/rlasp/src/repl/eval_array.rs:197
+rt:deftest
+  crates/rlasp/src/repl/eval_core.rs:5566
+select-package
+  crates/rlasp/src/repl/eval_core.rs:4577
+serve-event::add-fd-handler
+  crates/rlasp/src/repl/eval_core.rs:5915
+set-car
+  crates/rlasp-jit/src/intrinsics.rs:4893
+set-cdr
+  crates/rlasp-jit/src/intrinsics.rs:4894
+set-char
+  crates/rlasp-jit/src/intrinsics.rs:4926
+set-slot-value
+  crates/rlasp/src/repl/eval_clos.rs:220
+set-symbol-value
+  crates/rlasp-jit/src/intrinsics.rs:4910
+setf-logical-pathname-translations
+  crates/rlasp/src/repl/eval_pathname.rs:572
+sethash
+  crates/rlasp/src/repl/eval_core.rs:5952
+si::fset
+  crates/rlasp/src/repl/eval_core.rs:4659
+si::select-package
+  crates/rlasp/src/repl/eval_core.rs:4579
+socket-bind
+  crates/rlasp/src/repl/eval_core.rs:5758
+socket-listen
+  crates/rlasp/src/repl/eval_core.rs:5759
+strcat
+  crates/rlasp/src/repl/eval_core.rs:4143
+string-EQ-
+  crates/rlasp/src/repl/eval_string.rs:374
+string-GE-
+  crates/rlasp/src/repl/eval_string.rs:402
+string-GT-
+  crates/rlasp/src/repl/eval_string.rs:388
+string-LE-
+  crates/rlasp/src/repl/eval_string.rs:395
+string-LT-
+  crates/rlasp/src/repl/eval_string.rs:381
+string-NE-
+  crates/rlasp/src/repl/eval_string.rs:409
+symbolicate
+  crates/rlasp/src/repl/eval_core.rs:5797
+sys:*builtin-function-names*
+  crates/rlasp/src/repl/eval_core.rs:1240
+sys:*make-special
+  crates/rlasp/src/repl/eval_core.rs:5760
+tab
+  crates/rlasp/src/repl/eval_char.rs:269
+tg-agent::implementation-identifier
+  crates/rlasp/src/repl/eval_core.rs:5889
+tg-agent::proc-run-libtest
+  crates/rlasp/src/repl/eval_core.rs:5888
+tpl-commands
+  crates/rlasp/src/repl/eval_core.rs:1245
+trinsic:make-define-interface
+  crates/rlasp/src/repl/eval_core.rs:5565
+uint16
+  crates/rlasp/src/repl/eval_system.rs:1601
+uint32
+  crates/rlasp/src/repl/eval_system.rs:1603
+uint64
+  crates/rlasp/src/repl/eval_system.rs:1605
+uint8
+  crates/rlasp/src/repl/eval_system.rs:1599
+unquote
+  crates/rlasp/src/repl/eval_system.rs:686
+unquote-splicing
+  crates/rlasp/src/repl/eval_system.rs:693
+usocket::make-stream-socket
+  crates/rlasp/src/repl/eval_core.rs:5914
+void
+  crates/rlasp/src/repl/eval_system.rs:1597
+when-upgrading
+  crates/rlasp/src/repl/eval_core.rs:5788
+while
+  crates/rlasp/src/repl/eval_core.rs:4327
+  crates/rlasp-mlir/src/lib_stack.rs:6728
+with-asdf-deprecation
+  crates/rlasp/src/repl/eval_core.rs:5770
+with-deprecation
+  crates/rlasp/src/repl/eval_core.rs:5779
+with-upgradability
+  crates/rlasp/src/repl/eval_core.rs:5761

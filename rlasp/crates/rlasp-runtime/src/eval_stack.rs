@@ -250,7 +250,18 @@ pub extern "C" fn stack_pop_fixnum() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn stack_pop_pointer() -> usize {
-    EVAL_STACK.with(|stack| stack.borrow_mut().pop_pointer().unwrap_or(0))
+    EVAL_STACK.with(|stack| {
+        let mut s = stack.borrow_mut();
+        let depth = s.depth();
+        if depth == 0 {
+            eprintln!("[STACK ERROR] stack_pop_pointer called on empty stack!");
+            return crate::symbol::NIL_SYMBOL.raw();
+        }
+        s.pop_pointer().unwrap_or_else(|| {
+            eprintln!("[STACK ERROR] stack_pop_pointer failed to pop (depth was {})", depth);
+            crate::symbol::NIL_SYMBOL.raw()
+        })
+    })
 }
 
 #[no_mangle]

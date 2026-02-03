@@ -15,6 +15,9 @@ pub enum ObjectType {
     Package = 6,
     Closure = 7,
     Error = 8,
+    Pathname = 9,
+    Stream = 10,
+    HashTable = 11,
 }
 
 /// Header placed at the start of every General object

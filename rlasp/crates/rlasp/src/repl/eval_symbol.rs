@@ -17,7 +17,7 @@ thread_local! {
         let mut list = EvalResult::Nil;
         // Include OS features that ASDF expects
         for feat in &["OS-MACOSX", "OS-UNIX", "UNICODE", "DARWIN", "UNIX", "IEEE-FLOATING-POINT",
-                      "ANSI-CL", "COMMON-LISP", "CLASP", "RLASP"] {
+                      "ANSI-CL", "COMMON-LISP", "SBCL", "SB-UNICODE", "RLASP"] {
             list = EvalResult::Cons(
                 Rc::new(RefCell::new(EvalResult::Symbol(format!(":{}", feat)))),
                 Rc::new(RefCell::new(list)),

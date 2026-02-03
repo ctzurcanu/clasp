@@ -1263,12 +1263,16 @@ pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalRes
             ASTNode::Call { function: _, args: situations_args } => {
                 // (situation1 situation2 ...)
                 let mut slist = vec![];
-                if let ASTNode::Variable(first) = &**&situations {
-                    slist.push(first.clone());
+                match &**&situations {
+                    ASTNode::Variable(first) => slist.push(first.clone()),
+                    ASTNode::Constant(crate::ir::ConstantValue::Symbol(s)) => slist.push(s.clone()),
+                    _ => {}
                 }
                 for arg in situations_args {
-                    if let ASTNode::Variable(s) = arg {
-                        slist.push(s.clone());
+                    match arg {
+                        ASTNode::Variable(s) => slist.push(s.clone()),
+                        ASTNode::Constant(crate::ir::ConstantValue::Symbol(s)) => slist.push(s.clone()),
+                        _ => {}
                     }
                 }
                 slist
@@ -1277,10 +1281,8 @@ pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalRes
                 // Empty situations list - don't execute
                 vec![]
             }
-            ASTNode::Variable(s) => {
-                // Single situation
-                vec![s.clone()]
-            }
+            ASTNode::Variable(s) => vec![s.clone()],
+            ASTNode::Constant(crate::ir::ConstantValue::Symbol(s)) => vec![s.clone()],
             _ => vec![],
         };
 
@@ -1365,6 +1367,25 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             }
                             _ => return Err("setf gethash: second argument must be a hash table".to_string()),
                         }
+                    } else if func_name == "symbol-value" && place_args.len() == 1 {
+                        let sym_val = eval_with_env(&place_args[0], env)?;
+                        let sym_val = match sym_val {
+                            EvalResult::MultipleValues(vals) if !vals.is_empty() => vals[0].clone(),
+                            other => other,
+                        };
+
+                        let sym_name = match sym_val {
+                            EvalResult::Symbol(name) => name,
+                            EvalResult::Nil => return Err("setf symbol-value: nil is not a symbol".to_string()),
+                            _ => return Err("setf symbol-value requires a symbol".to_string()),
+                        };
+
+                        if sym_name == "*features*" {
+                            super::eval_symbol::set_features(value.clone());
+                        } else {
+                            env.insert(sym_name, value.clone());
+                        }
+                        last_value = value.clone();
                     } else if func_name == "aref" && place_args.len() >= 2 {
                         // For (setf (aref array-var index) value), get the array from environment
                         let array_result = eval_with_env(&place_args[0], env)?;
@@ -1564,14 +1585,14 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         let setf_fn_name = format!("{}(setf {})", super::eval_core::FUNCTION_NS_PREFIX, func_name);
                         if let Some(func_val) = env.get(&setf_fn_name).cloned() {
                             match func_val {
-                                EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: closure_env, dynamic_env } => {
+                                EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
                                     // Call the setf function with (new-value ...other-args)
                                     // First arg is the new value, rest are the place args
                                     let mut all_args: Vec<ASTNode> = Vec::new();
                                     all_args.push(super::eval_system::result_to_ast_quoted(&value)?);
                                     all_args.extend(place_args.iter().cloned());
                                     last_value = super::eval_core::eval_lambda_call(
-                                        params, defaults, supplied_p_vars, body, dynamic_env, closure_env, &all_args, env
+                                        params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, &all_args, env
                                     )?;
                                 }
                                 _ => {
@@ -1640,6 +1661,12 @@ pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<Strin
         EvalResult::MultipleValues(vals) => vals,
         other => vec![other],  // Single value treated as (values single-val)
     };
+
+    if std::env::var("RLASP_DEBUG_MVB").is_ok() {
+        if var_names.iter().any(|v| v == "unspecific-handler" || v.ends_with(":unspecific-handler")) {
+            eprintln!("[mv-bind] vars={:?} values={:?} form={:?}", var_names, values, values_form);
+        }
+    }
 
     // Save old variable values
     let old_values: Vec<Option<EvalResult>> = var_names.iter()

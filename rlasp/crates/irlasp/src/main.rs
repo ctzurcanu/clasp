@@ -132,7 +132,7 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
             }
         }
         ExecutionMode::MlirJit => {
-            if let Err(e) = eval_file_mlir(&source, file_path) {
+            if let Err(e) = eval_file_mlir(&source, file_path, true) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -502,7 +502,7 @@ fn expand_global_macros(
                 body: expanded_body,
             }
         }
-        ASTNode::Lambda { params, defaults, supplied_p_vars, body } => {
+        ASTNode::Lambda { params, defaults, supplied_p_vars, key_params, body } => {
             let expanded_defaults: HashMap<String, ASTNode> = defaults.iter()
                 .map(|(name, val)| (name.clone(), expand_global_macros(val, macros)))
                 .collect();
@@ -513,6 +513,7 @@ fn expand_global_macros(
                 params: params.clone(),
                 defaults: expanded_defaults,
                 supplied_p_vars: supplied_p_vars.clone(),
+                key_params: key_params.clone(),
                 body: expanded_body,
             }
         }
@@ -843,9 +844,41 @@ fn normalize_special_forms(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode {
     }
 }
 
-fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), String> {
+fn head_of_lisp_form(obj: rlasp_runtime::LispObject) -> String {
+    fn format_atom(obj: rlasp_runtime::LispObject) -> String {
+        if obj.is_nil() {
+            return "NIL".to_string();
+        }
+        if let Some(n) = obj.as_fixnum() {
+            return n.to_string();
+        }
+        if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+            if !sym_ptr.is_null() {
+                let sym = unsafe { &*sym_ptr };
+                return sym.name().to_string();
+            }
+        }
+        if let Some(str_ptr) = obj.as_general_ptr::<rlasp_runtime::RString>() {
+            if !str_ptr.is_null() {
+                let s = unsafe { &*str_ptr };
+                return format!("\"{}\"", s.as_str());
+            }
+        }
+        "#<OBJECT>".to_string()
+    }
+
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        if !cons_ptr.is_null() {
+            let cons = unsafe { &*cons_ptr };
+            return format_atom(cons.car());
+        }
+    }
+    format_atom(obj)
+}
+
+fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::result::Result<(), String> {
     use rlasp_mlir::lib_stack::StackMLIRCodegen;
-    use rlasp::repl::lisp_to_ast;
+    use rlasp::repl::{lisp_to_ast, eval_with_persistent_env, macroexpand_all_to_ast, EvalResult};
     use std::path::Path;
     use std::collections::HashMap;
 
@@ -864,69 +897,219 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
     let mut form_count = 0;
     let mut compiled_any = false;
     let mut user_functions: HashMap<String, Vec<String>> = HashMap::new();
-    let mut defuns: Vec<(String, Vec<String>, HashMap<String, rlasp::ir::ASTNode>, HashMap<String, String>, Vec<rlasp::ir::ASTNode>)> = Vec::new();
+    let mut defuns: Vec<(
+        String,
+        Vec<String>,
+        HashMap<String, rlasp::ir::ASTNode>,
+        HashMap<String, String>,
+        HashMap<String, String>,
+        Vec<rlasp::ir::ASTNode>,
+    )> = Vec::new();
     let mut toplevel_forms: Vec<rlasp::ir::ASTNode> = Vec::new();
-    let mut macros: HashMap<String, (Vec<String>, rlasp::ir::ASTNode)> = HashMap::new();
 
-    // First pass: collect all defuns, macros, and top-level forms
-    for lisp_obj in &lisp_objs {
-        match lisp_to_ast::lisp_to_ast(lisp_obj.clone()) {
-            Ok(ast) => {
-                // Check if this is a defun (setq name (lambda ...)) or defmacro (setq name (macro ...))
-                if let rlasp::ir::ASTNode::Setq { var, value } = &ast {
-                    if let rlasp::ir::ASTNode::Lambda { params, defaults, supplied_p_vars, body } = value.as_ref() {
-                        // Save for later compilation - include defaults and supplied_p_vars
-                        defuns.push((var.clone(), params.clone(), defaults.clone(), supplied_p_vars.clone(), body.clone()));
-                        user_functions.insert(var.clone(), params.clone());
-                    } else if let rlasp::ir::ASTNode::Macro { params, body } = value.as_ref() {
-                        // Save macro definition
-                        let macro_body = if body.len() == 1 {
-                            body[0].clone()
-                        } else {
-                            rlasp::ir::ASTNode::Progn { exprs: body.clone() }
-                        };
-                        let param_vec = macro_params_to_vec(params);
-                        macros.insert(var.clone(), (param_vec, macro_body));
-                    } else {
-                        // Top-level setq that's not a defun or macro
-                        toplevel_forms.push(ast);
+    // Create an interpreter environment for macro expansion
+    // This allows us to evaluate complex macros (like those using `loop`) at compile time
+    let mut interp_env: HashMap<String, EvalResult> = HashMap::new();
+
+    // ===== INCREMENTAL PROCESSING: Expand macros and evaluate each form before moving to next =====
+    // This matches how the interpreter works - each form is fully processed (expanded + evaluated)
+    // before the next, so definitions are available for subsequent macro expansions
+    println!("[MLIR] Incremental processing: expanding and evaluating forms...");
+    let trace_toplevel = std::env::var("RLASP_TRACE_TOPLEVEL").is_ok();
+
+    // Helper function to check if an AST is a macro definition
+    fn is_macro_definition(ast: &rlasp::ir::ASTNode) -> bool {
+        match ast {
+            rlasp::ir::ASTNode::Setq { value, .. } => {
+                matches!(value.as_ref(), rlasp::ir::ASTNode::Macro { .. })
+            }
+            rlasp::ir::ASTNode::Call { function, args } => {
+                if let rlasp::ir::ASTNode::Variable(name) = function.as_ref() {
+                    if name == "defmacro" {
+                        return true;
                     }
-                } else {
-                    // Skip package system directives
-                    let should_skip = if let rlasp::ir::ASTNode::Call { function, .. } = &ast {
-                        if let rlasp::ir::ASTNode::Variable(name) = &**function {
-                            name == "defpackage" || name == "in-package"
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !should_skip {
-                        // Any other top-level form (function calls, etc.)
-                        toplevel_forms.push(ast);
+                    if name == "eval-when" || name == "progn" {
+                        return args.iter().any(is_macro_definition);
                     }
                 }
+                false
             }
-            Err(_) => {}
+            rlasp::ir::ASTNode::Progn { exprs } => {
+                exprs.iter().any(is_macro_definition)
+            }
+            _ => false,
         }
     }
 
-    // Expand macros in all defuns
-    let expanded_defuns: Vec<(String, Vec<String>, HashMap<String, rlasp::ir::ASTNode>, HashMap<String, String>, Vec<rlasp::ir::ASTNode>)> = defuns.iter()
-        .map(|(name, params, defaults, supplied_p_vars, body)| {
-            let expanded_body: Vec<rlasp::ir::ASTNode> = body.iter()
-                .map(|expr| expand_global_macros(expr, &macros))
-                .collect();
-            (name.clone(), params.clone(), defaults.clone(), supplied_p_vars.clone(), expanded_body)
-        })
-        .collect();
+    // Helper function to recursively extract defuns from expanded AST
+    fn collect_definitions_expanded(
+        ast: &rlasp::ir::ASTNode,
+        defuns: &mut Vec<(
+            String,
+            Vec<String>,
+            HashMap<String, rlasp::ir::ASTNode>,
+            HashMap<String, String>,
+            HashMap<String, String>,
+            Vec<rlasp::ir::ASTNode>,
+        )>,
+        user_functions: &mut HashMap<String, Vec<String>>,
+        toplevel_forms: &mut Vec<rlasp::ir::ASTNode>,
+    ) {
+        match ast {
+            rlasp::ir::ASTNode::Setq { var, value } => {
+                if let rlasp::ir::ASTNode::Lambda { params, defaults, supplied_p_vars, key_params, body } = value.as_ref() {
+                    defuns.push((
+                        var.clone(),
+                        params.clone(),
+                        defaults.clone(),
+                        supplied_p_vars.clone(),
+                        key_params.clone(),
+                        body.clone(),
+                    ));
+                    user_functions.insert(var.clone(), params.clone());
+                } else if matches!(value.as_ref(), rlasp::ir::ASTNode::Macro { .. }) {
+                    // Skip macro definitions - they're handled by the interpreter
+                } else {
+                    toplevel_forms.push(ast.clone());
+                }
+            }
+            rlasp::ir::ASTNode::Call { function, args } => {
+                if let rlasp::ir::ASTNode::Variable(name) = function.as_ref() {
+                    if name == "eval-when" {
+                        // Recurse into eval-when body (skip first arg which is the situations)
+                        for arg in args.iter().skip(1) {
+                            collect_definitions_expanded(arg, defuns, user_functions, toplevel_forms);
+                        }
+                    } else if name == "defpackage" || name == "in-package" {
+                        // Skip package directives
+                    } else if name == "progn" {
+                        // Recurse into progn body
+                        for arg in args {
+                            collect_definitions_expanded(arg, defuns, user_functions, toplevel_forms);
+                        }
+                    } else if name == "defmacro" {
+                        // Skip macro definitions - they're handled by the interpreter
+                    } else if name == "defun" || name.ends_with(":defun") {
+                        // Handle defun calls: (defun name (params...) body...)
+                        // Extract function name, parameters, and body
+                        if args.len() >= 2 {
+                            let func_name = match &args[0] {
+                                rlasp::ir::ASTNode::Variable(n) => n.clone(),
+                                rlasp::ir::ASTNode::Call { function: setf_fn, args: setf_args } => {
+                                    // Handle (setf name) form
+                                    if let rlasp::ir::ASTNode::Variable(fn_name) = setf_fn.as_ref() {
+                                        if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                            if let rlasp::ir::ASTNode::Variable(setf_name) = &setf_args[0] {
+                                                format!("(setf {})", setf_name)
+                                            } else {
+                                                toplevel_forms.push(ast.clone());
+                                                return;
+                                            }
+                                        } else {
+                                            toplevel_forms.push(ast.clone());
+                                            return;
+                                        }
+                                    } else {
+                                        toplevel_forms.push(ast.clone());
+                                        return;
+                                    }
+                                }
+                                _ => {
+                                    toplevel_forms.push(ast.clone());
+                                    return;
+                                }
+                            };
 
-    // Expand macros in top-level forms
-    let expanded_toplevel: Vec<rlasp::ir::ASTNode> = toplevel_forms.iter()
-        .map(|expr| expand_global_macros(expr, &macros))
-        .collect();
+                            let (params, defaults, supplied_p_vars, key_params) =
+                                rlasp::repl::extract_params_with_defaults(&args[1]);
+                            let body: Vec<rlasp::ir::ASTNode> = args[2..].to_vec();
+
+                            // Add %FN% prefix to function name
+                            let fn_name = format!("%FN%{}", func_name);
+                            defuns.push((fn_name.clone(), params.clone(), defaults, supplied_p_vars, key_params, body));
+                            user_functions.insert(fn_name, params);
+                        } else {
+                            toplevel_forms.push(ast.clone());
+                        }
+                    } else {
+                        toplevel_forms.push(ast.clone());
+                    }
+                } else {
+                    toplevel_forms.push(ast.clone());
+                }
+            }
+            rlasp::ir::ASTNode::Progn { exprs } => {
+                for expr in exprs {
+                    collect_definitions_expanded(expr, defuns, user_functions, toplevel_forms);
+                }
+            }
+            _ => {
+                toplevel_forms.push(ast.clone());
+            }
+        }
+    }
+
+    // ===== INCREMENTAL: For each form, evaluate first (for definitions), then expand for MLIR =====
+    // Key insight: The interpreter evaluates forms directly (with implicit macro expansion).
+    // We need to do the same - evaluate first to get definitions, then expand for MLIR codegen.
+    for lisp_obj in &lisp_objs {
+        form_count += 1;
+        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
+            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+        }) {
+            Ok(ast) => {
+                let head = if trace_toplevel {
+                    Some(head_of_lisp_form(*lisp_obj))
+                } else {
+                    None
+                };
+                // Step 1: Evaluate the original form in interpreter mode
+                // This handles macro expansion internally and adds definitions to the environment
+                // This is how the interpreter works - it expands macros as part of evaluation
+                let _ = eval_with_persistent_env(&ast, &mut interp_env);
+
+                // Step 2: Now try to expand macros for MLIR compilation
+                // The environment should now have all definitions from this and previous forms
+                let expanded = match macroexpand_all_to_ast(&ast, &mut interp_env) {
+                    Ok(exp) => exp,
+                    Err(e) => {
+                        // Only warn for first 50 forms to avoid spam
+                        if form_count <= 50 {
+                            println!("[Warning: Macro expansion failed at form {}: {}]", form_count, e);
+                        }
+                        ast.clone()
+                    }
+                };
+
+                // Step 3: Collect definitions for MLIR compilation
+                let toplevel_before = toplevel_forms.len();
+                collect_definitions_expanded(&expanded, &mut defuns, &mut user_functions, &mut toplevel_forms);
+                if trace_toplevel {
+                    let added = toplevel_forms.len().saturating_sub(toplevel_before);
+                    if added > 0 {
+                        let head_str = head.unwrap_or_else(|| "<unknown>".to_string());
+                        for idx in 0..added {
+                            let toplevel_idx = toplevel_before + idx + 1;
+                            println!(
+                                "[MLIR] toplevel {} from form {} head={}",
+                                toplevel_idx, form_count, head_str
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[Warning: Could not parse form {}: {}]", form_count, e);
+            }
+        }
+    }
+    println!("[MLIR] Processing complete: {} bindings, {} defuns, {} toplevel forms",
+             interp_env.len(), defuns.len(), toplevel_forms.len());
+
+    // Macros have already been expanded by macroexpand_all_to_ast
+    // Use defuns and toplevel_forms directly (with alias for compatibility)
+    let expanded_defuns = &defuns;
+    let expanded_toplevel = &toplevel_forms;
 
     // Pre-pass: register generic function names before compiling defuns
     // This ensures that when defuns call generic functions, they use runtime dispatch
@@ -944,7 +1127,7 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         }
     }
     let mut generic_names = Vec::new();
-    for form in &expanded_toplevel {
+    for form in expanded_toplevel {
         collect_generic_function_names(form, &mut generic_names);
     }
     for name in &generic_names {
@@ -952,17 +1135,7 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
     }
 
     // Second pass: compile all expanded defuns to MLIR
-    for (name, params, defaults, supplied_p_vars, body) in &expanded_defuns {
-        // Compile function body
-        // Keep all params including &optional and &key markers for proper argument handling
-        let actual_params = params.clone();
-
-        // Create extended params list that includes supplied-p variables
-        let mut all_params = actual_params.clone();
-        for supplied_p_var in supplied_p_vars.values() {
-            all_params.push(supplied_p_var.clone());
-        }
-
+    for (name, params, defaults, supplied_p_vars, key_params, body) in expanded_defuns {
         // Wrap multi-expression bodies in Progn
         let body_expr;
         let progn_node;
@@ -973,86 +1146,82 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
             body_expr = &progn_node;
         };
 
-        // Generate code to handle optional parameter defaults and supplied-p variables
-        // For each optional parameter with a default, wrap the body in let* bindings:
-        // (let* ((b-p (not (nil? b-raw)))
-        //        (b (if (nil? b-raw) <default> b-raw)))
-        //   <body>)
-        let mut wrapped_body = body_expr.clone();
-        if !defaults.is_empty() || !supplied_p_vars.is_empty() {
-            let mut bindings = Vec::new();
-
-            // For each parameter that has a default or supplied-p var (skip &optional and &key markers)
-            for param in &actual_params {
-                if param.starts_with('&') {
-                    continue; // Skip lambda list keywords
-                }
-                if let Some(supplied_p_var) = supplied_p_vars.get(param) {
-                    // Raw parameter name (the one we extract from args)
-                    let raw_param = format!("{}-raw", param);
-
-                    // Generate: (b-p (not (nil? b-raw)))
-                    let nil_check = rlasp::ir::ASTNode::Call {
-                        function: Box::new(rlasp::ir::ASTNode::Variable("null".to_string())),
-                        args: vec![rlasp::ir::ASTNode::Variable(param.clone())],
-                    };
-                    let not_nil = rlasp::ir::ASTNode::Call {
-                        function: Box::new(rlasp::ir::ASTNode::Variable("not".to_string())),
-                        args: vec![nil_check],
-                    };
-                    bindings.push((supplied_p_var.clone(), not_nil));
-                }
-
-                if let Some(default_expr) = defaults.get(param) {
-                    // Generate: (b (if (nil? b-raw) <default> b-raw))
-                    let nil_check = rlasp::ir::ASTNode::Call {
-                        function: Box::new(rlasp::ir::ASTNode::Variable("null".to_string())),
-                        args: vec![rlasp::ir::ASTNode::Variable(param.clone())],
-                    };
-                    let if_expr = rlasp::ir::ASTNode::If {
-                        test: Box::new(nil_check),
-                        then_branch: Box::new(default_expr.clone()),
-                        else_branch: Box::new(rlasp::ir::ASTNode::Variable(param.clone())),
-                    };
-                    bindings.push((param.clone(), if_expr));
-                }
-            }
-
-            // Wrap body in let* with the bindings
-            if !bindings.is_empty() {
-                wrapped_body = rlasp::ir::ASTNode::LetStar {
-                    bindings,
-                    body: vec![wrapped_body],
-                };
-            }
-        }
-
-        match codegen.compile_function(name, &all_params, &wrapped_body) {
+        // Save output state before compiling - restore on failure to avoid partial output
+        let saved_output_len = codegen.output_len();
+        match codegen.compile_function(name, params, defaults, supplied_p_vars, key_params, body_expr) {
             Ok(_) => {
                 compiled_any = true;
-                println!("[MLIR] Compiled function: {}", name);
             }
             Err(e) => {
+                // Restore output to before this function's partial output
+                codegen.truncate_output(saved_output_len);
                 println!("[Warning: Could not compile defun {}: {}]", name, e);
             }
         }
     }
 
     // Compile expanded top-level forms as a special __main function
+    // Split into batches to avoid stack overflow from huge functions
     if !expanded_toplevel.is_empty() {
-        let main_body = if expanded_toplevel.len() == 1 {
-            expanded_toplevel[0].clone()
-        } else {
-            rlasp::ir::ASTNode::Progn { exprs: expanded_toplevel }
-        };
+        let batch_size = std::env::var("RLASP_BATCH_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(50);
+        let num_batches = (expanded_toplevel.len() + batch_size - 1) / batch_size;
+        let mut batch_names = Vec::new();
 
-        match codegen.compile_function("__main", &vec![], &main_body) {
-            Ok(_) => {
-                println!("[MLIR] Compiled top-level forms as __main");
-                compiled_any = true;
+        if num_batches <= 1 {
+            // Small enough to compile as single function
+            let main_body = if expanded_toplevel.len() == 1 {
+                expanded_toplevel[0].clone()
+            } else {
+                rlasp::ir::ASTNode::Progn { exprs: expanded_toplevel.clone() }
+            };
+
+            let empty_defaults: HashMap<String, rlasp::ir::ASTNode> = HashMap::new();
+            let empty_supplied: HashMap<String, String> = HashMap::new();
+            let empty_key_params: HashMap<String, String> = HashMap::new();
+            match codegen.compile_function("__main", &vec![], &empty_defaults, &empty_supplied, &empty_key_params, &main_body) {
+                Ok(_) => {
+                    println!("[MLIR] Compiled top-level forms as __main");
+                    compiled_any = true;
+                }
+                Err(e) => {
+                    println!("[Warning: Could not compile top-level forms: {}]", e);
+                }
             }
-            Err(e) => {
-                println!("[Warning: Could not compile top-level forms: {}]", e);
+        } else {
+            // Split into multiple batch functions
+            println!("[MLIR] Splitting {} toplevel forms into {} batches", expanded_toplevel.len(), num_batches);
+
+            for (i, chunk) in expanded_toplevel.chunks(batch_size).enumerate() {
+                let batch_name = format!("__main_batch_{}", i);
+                let batch_body = rlasp::ir::ASTNode::Progn { exprs: chunk.to_vec() };
+
+                let empty_defaults: HashMap<String, rlasp::ir::ASTNode> = HashMap::new();
+                let empty_supplied: HashMap<String, String> = HashMap::new();
+                let empty_key_params: HashMap<String, String> = HashMap::new();
+                match codegen.compile_function(&batch_name, &vec![], &empty_defaults, &empty_supplied, &empty_key_params, &batch_body) {
+                    Ok(_) => {
+                        batch_names.push(batch_name.clone());
+                        println!("[MLIR] Compiled batch {} ({} forms)", i, chunk.len());
+                    }
+                    Err(e) => {
+                        println!("[Warning: Could not compile batch {}: {}]", i, e);
+                    }
+                }
+            }
+
+            // Create __main that calls all batches in sequence using direct func.call
+            match codegen.compile_main_with_batches(&batch_names) {
+                Ok(_) => {
+                    println!("[MLIR] Compiled __main with {} batch calls", batch_names.len());
+                    compiled_any = true;
+                }
+                Err(e) => {
+                    println!("[Warning: Could not compile __main: {}]", e);
+                }
             }
         }
     }
@@ -1090,588 +1259,263 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
 
     println!("[Parsed LLVM IR into module]");
 
-    // Create JIT execution engine
-    use inkwell::execution_engine::{ExecutionEngine, JitFunction};
-    use inkwell::OptimizationLevel;
+    // Create ORC LLJIT execution engine using llvm-sys directly
+    use llvm_sys::orc2::*;
+    use llvm_sys::orc2::lljit::*;
+    use llvm_sys::error::*;
+    use std::ptr;
 
-    let execution_engine = module
-        .create_jit_execution_engine(OptimizationLevel::None)
-        .map_err(|e| format!("Failed to create JIT engine: {:?}", e))?;
+    // Initialize LLVM native target - required for LLJIT
+    use inkwell::targets::{Target, InitializationConfig};
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| format!("Failed to initialize native target: {}", e))?;
+    println!("[Initialized LLVM native target]");
 
-    println!("[Created JIT execution engine]");
-
-    // Link with runtime intrinsics
-    unsafe {
+    // Force linker to keep critical runtime symbols by referencing them
+    // This prevents the linker from stripping symbols needed at JIT runtime
+    {
         use rlasp_jit::intrinsics::*;
-
-        // Core constants
-        if let Some(f) = module.get_function("cc_nil") {
-            execution_engine.add_global_mapping(&f, cc_nil as usize);
-        }
-        if let Some(f) = module.get_function("cc_t") {
-            execution_engine.add_global_mapping(&f, cc_t as usize);
-        }
-
-        // Stack operations
+        use rlasp_jit::intrinsics_clos::*;
         use rlasp_runtime::eval_stack::{
             stack_push_fixnum, stack_push_pointer, stack_push_nil,
             stack_pop_fixnum, stack_pop_pointer, stack_depth, stack_clear
         };
-        if let Some(f) = module.get_function("stack_push_fixnum") {
-            execution_engine.add_global_mapping(&f, stack_push_fixnum as usize);
-        }
-        if let Some(f) = module.get_function("stack_push_pointer") {
-            execution_engine.add_global_mapping(&f, stack_push_pointer as usize);
-        }
-        if let Some(f) = module.get_function("stack_push_nil") {
-            execution_engine.add_global_mapping(&f, stack_push_nil as usize);
-        }
-        if let Some(f) = module.get_function("stack_pop_fixnum") {
-            execution_engine.add_global_mapping(&f, stack_pop_fixnum as usize);
-        }
-        if let Some(f) = module.get_function("stack_pop_pointer") {
-            execution_engine.add_global_mapping(&f, stack_pop_pointer as usize);
-        }
-        if let Some(f) = module.get_function("stack_depth") {
-            execution_engine.add_global_mapping(&f, stack_depth as usize);
-        }
-        if let Some(f) = module.get_function("stack_clear") {
-            execution_engine.add_global_mapping(&f, stack_clear as usize);
-        }
-
-        // Boxing/unboxing
-        if let Some(f) = module.get_function("cc_box_fixnum") {
-            execution_engine.add_global_mapping(&f, cc_box_fixnum as usize);
-        }
-        if let Some(f) = module.get_function("cc_unbox_fixnum") {
-            execution_engine.add_global_mapping(&f, cc_unbox_fixnum as usize);
-        }
-        if let Some(f) = module.get_function("cc_box_float") {
-            execution_engine.add_global_mapping(&f, cc_box_float as usize);
-        }
-        if let Some(f) = module.get_function("cc_unbox_float") {
-            execution_engine.add_global_mapping(&f, cc_unbox_float as usize);
-        }
-        if let Some(f) = module.get_function("cc_parse_bignum") {
-            execution_engine.add_global_mapping(&f, cc_parse_bignum as usize);
-        }
-
-        // Cons operations
-        if let Some(f) = module.get_function("cc_cons") {
-            execution_engine.add_global_mapping(&f, cc_cons as usize);
-        }
-        if let Some(f) = module.get_function("cc_car") {
-            execution_engine.add_global_mapping(&f, cc_car as usize);
-        }
-        if let Some(f) = module.get_function("cc_cdr") {
-            execution_engine.add_global_mapping(&f, cc_cdr as usize);
-        }
-        if let Some(f) = module.get_function("cc_set_car") {
-            execution_engine.add_global_mapping(&f, cc_set_car as usize);
-        }
-        if let Some(f) = module.get_function("cc_set_cdr") {
-            execution_engine.add_global_mapping(&f, cc_set_cdr as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_list") {
-            execution_engine.add_global_mapping(&f, cc_make_list as usize);
-        }
-        if let Some(f) = module.get_function("cc_reverse") {
-            execution_engine.add_global_mapping(&f, cc_reverse as usize);
-        }
-        if let Some(f) = module.get_function("cc_length") {
-            execution_engine.add_global_mapping(&f, cc_length as usize);
-        }
-        if let Some(f) = module.get_function("cc_nth") {
-            execution_engine.add_global_mapping(&f, cc_nth as usize);
-        }
-        if let Some(f) = module.get_function("cc_nthcdr") {
-            execution_engine.add_global_mapping(&f, cc_nthcdr as usize);
-        }
-        if let Some(f) = module.get_function("cc_last") {
-            execution_engine.add_global_mapping(&f, cc_last as usize);
-        }
-        if let Some(f) = module.get_function("cc_butlast") {
-            execution_engine.add_global_mapping(&f, cc_butlast as usize);
-        }
-        if let Some(f) = module.get_function("cc_is_cons") {
-            execution_engine.add_global_mapping(&f, cc_is_cons as usize);
-        }
-        if let Some(f) = module.get_function("cc_nil_value") {
-            execution_engine.add_global_mapping(&f, cc_nil_value as usize);
-        }
-        if let Some(f) = module.get_function("cc_t_value") {
-            execution_engine.add_global_mapping(&f, cc_t_value as usize);
-        }
-        if let Some(f) = module.get_function("cc_arg") {
-            execution_engine.add_global_mapping(&f, cc_arg as usize);
-        }
-        if let Some(f) = module.get_function("cc_collect_args") {
-            execution_engine.add_global_mapping(&f, cc_collect_args as usize);
-        }
-        if let Some(f) = module.get_function("cc_collect_rest_args") {
-            execution_engine.add_global_mapping(&f, cc_collect_rest_args as usize);
-        }
-
-        // Arithmetic operations
-        if let Some(f) = module.get_function("cc_add") {
-            execution_engine.add_global_mapping(&f, cc_add as usize);
-        }
-        if let Some(f) = module.get_function("cc_sub") {
-            execution_engine.add_global_mapping(&f, cc_sub as usize);
-        }
-        if let Some(f) = module.get_function("cc_mul") {
-            execution_engine.add_global_mapping(&f, cc_mul as usize);
-        }
-        if let Some(f) = module.get_function("cc_div") {
-            execution_engine.add_global_mapping(&f, cc_div as usize);
-        }
-        if let Some(f) = module.get_function("ratio") {
-            execution_engine.add_global_mapping(&f, ratio as usize);
-        }
-        if let Some(f) = module.get_function("complex") {
-            execution_engine.add_global_mapping(&f, complex as usize);
-        }
-        if let Some(f) = module.get_function("cc_sqrt") {
-            execution_engine.add_global_mapping(&f, cc_sqrt as usize);
-        }
-        if let Some(f) = module.get_function("cc_mod") {
-            execution_engine.add_global_mapping(&f, cc_mod as usize);
-        }
-        if let Some(f) = module.get_function("cc_expt") {
-            execution_engine.add_global_mapping(&f, cc_expt as usize);
-        }
-        if let Some(f) = module.get_function("cc_floor") {
-            execution_engine.add_global_mapping(&f, cc_floor as usize);
-        }
-        if let Some(f) = module.get_function("cc_floor_2") {
-            execution_engine.add_global_mapping(&f, cc_floor_2 as usize);
-        }
-        if let Some(f) = module.get_function("cc_ceiling") {
-            execution_engine.add_global_mapping(&f, cc_ceiling as usize);
-        }
-        if let Some(f) = module.get_function("cc_ceiling_2") {
-            execution_engine.add_global_mapping(&f, cc_ceiling_2 as usize);
-        }
-        if let Some(f) = module.get_function("cc_round") {
-            execution_engine.add_global_mapping(&f, cc_round as usize);
-        }
-        if let Some(f) = module.get_function("cc_round_2") {
-            execution_engine.add_global_mapping(&f, cc_round_2 as usize);
-        }
-        if let Some(f) = module.get_function("cc_truncate") {
-            execution_engine.add_global_mapping(&f, cc_truncate as usize);
-        }
-        if let Some(f) = module.get_function("cc_truncate_2") {
-            execution_engine.add_global_mapping(&f, cc_truncate_2 as usize);
-        }
-        if let Some(f) = module.get_function("cc_gcd") {
-            execution_engine.add_global_mapping(&f, cc_gcd as usize);
-        }
-        if let Some(f) = module.get_function("cc_lcm") {
-            execution_engine.add_global_mapping(&f, cc_lcm as usize);
-        }
-        if let Some(f) = module.get_function("cc_isqrt") {
-            execution_engine.add_global_mapping(&f, cc_isqrt as usize);
-        }
-        if let Some(f) = module.get_function("cc_signum") {
-            execution_engine.add_global_mapping(&f, cc_signum as usize);
-        }
-        if let Some(f) = module.get_function("cc_evenp") {
-            execution_engine.add_global_mapping(&f, cc_evenp as usize);
-        }
-        if let Some(f) = module.get_function("cc_oddp") {
-            execution_engine.add_global_mapping(&f, cc_oddp as usize);
-        }
-        if let Some(f) = module.get_function("cc_lt") {
-            execution_engine.add_global_mapping(&f, cc_lt as usize);
-        }
-        if let Some(f) = module.get_function("cc_gt") {
-            execution_engine.add_global_mapping(&f, cc_gt as usize);
-        }
-        if let Some(f) = module.get_function("cc_eq") {
-            execution_engine.add_global_mapping(&f, cc_eq as usize);
-        }
-        if let Some(f) = module.get_function("cc_le") {
-            execution_engine.add_global_mapping(&f, cc_le as usize);
-        }
-        if let Some(f) = module.get_function("cc_ge") {
-            execution_engine.add_global_mapping(&f, cc_ge as usize);
-        }
-
-        // Type predicates
-        if let Some(f) = module.get_function("cc_numberp") {
-            execution_engine.add_global_mapping(&f, cc_numberp as usize);
-        }
-        if let Some(f) = module.get_function("cc_integerp") {
-            execution_engine.add_global_mapping(&f, cc_integerp as usize);
-        }
-        if let Some(f) = module.get_function("cc_floatp") {
-            execution_engine.add_global_mapping(&f, cc_floatp as usize);
-        }
-        if let Some(f) = module.get_function("cc_rationalp") {
-            execution_engine.add_global_mapping(&f, cc_rationalp as usize);
-        }
-        if let Some(f) = module.get_function("cc_complexp") {
-            execution_engine.add_global_mapping(&f, cc_complexp as usize);
-        }
-        if let Some(f) = module.get_function("cc_realp") {
-            execution_engine.add_global_mapping(&f, cc_realp as usize);
-        }
-        if let Some(f) = module.get_function("cc_characterp") {
-            execution_engine.add_global_mapping(&f, cc_characterp as usize);
-        }
-        if let Some(f) = module.get_function("cc_stringp") {
-            execution_engine.add_global_mapping(&f, cc_stringp as usize);
-        }
-        if let Some(f) = module.get_function("cc_symbolp") {
-            execution_engine.add_global_mapping(&f, cc_symbolp as usize);
-        }
-        if let Some(f) = module.get_function("cc_arrayp") {
-            execution_engine.add_global_mapping(&f, cc_arrayp as usize);
-        }
-        if let Some(f) = module.get_function("cc_vectorp") {
-            execution_engine.add_global_mapping(&f, cc_vectorp as usize);
-        }
-        if let Some(f) = module.get_function("cc_hash_table_p") {
-            execution_engine.add_global_mapping(&f, cc_hash_table_p as usize);
-        }
-        if let Some(f) = module.get_function("cc_errorp") {
-            execution_engine.add_global_mapping(&f, cc_errorp as usize);
-        }
-        if let Some(f) = module.get_function("cc_plusp") {
-            execution_engine.add_global_mapping(&f, cc_plusp as usize);
-        }
-        if let Some(f) = module.get_function("cc_minusp") {
-            execution_engine.add_global_mapping(&f, cc_minusp as usize);
-        }
-        if let Some(f) = module.get_function("cc_equal") {
-            execution_engine.add_global_mapping(&f, cc_equal as usize);
-        }
-        if let Some(f) = module.get_function("cc_equalp") {
-            execution_engine.add_global_mapping(&f, cc_equalp as usize);
-        }
-
-        if let Some(f) = module.get_function("cc_append") {
-            execution_engine.add_global_mapping(&f, cc_append as usize);
-        }
-        if let Some(f) = module.get_function("cc_if") {
-            execution_engine.add_global_mapping(&f, cc_if as usize);
-        }
-
-        // Function references and funcall
-        if let Some(f) = module.get_function("cc_make_function_ref") {
-            execution_engine.add_global_mapping(&f, cc_make_function_ref as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_function_ref_const") {
-            execution_engine.add_global_mapping(&f, cc_make_function_ref_const as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_lambda_ref") {
-            execution_engine.add_global_mapping(&f, cc_make_lambda_ref as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_lambda_ref_str") {
-            execution_engine.add_global_mapping(&f, cc_make_lambda_ref_str as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_lambda_ref_id") {
-            execution_engine.add_global_mapping(&f, cc_make_lambda_ref_id as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_closure") {
-            execution_engine.add_global_mapping(&f, cc_make_closure as usize);
-        }
-        if let Some(f) = module.get_function("cc_funcall_stack") {
-            execution_engine.add_global_mapping(&f, cc_funcall_stack as usize);
-        }
-        if let Some(f) = module.get_function("cc_and") {
-            execution_engine.add_global_mapping(&f, cc_and as usize);
-        }
-        if let Some(f) = module.get_function("cc_or") {
-            execution_engine.add_global_mapping(&f, cc_or as usize);
-        }
-        if let Some(f) = module.get_function("cc_not") {
-            execution_engine.add_global_mapping(&f, cc_not as usize);
-        }
-        if let Some(f) = module.get_function("cc_get_internal_real_time") {
-            execution_engine.add_global_mapping(&f, cc_get_internal_real_time as usize);
-        }
-        if let Some(f) = module.get_function("cc_get_universal_time") {
-            execution_engine.add_global_mapping(&f, cc_get_universal_time as usize);
-        }
-        if let Some(f) = module.get_function("cc_shell") {
-            execution_engine.add_global_mapping(&f, cc_shell as usize);
-        }
-        if let Some(f) = module.get_function("cc_funcall") {
-            execution_engine.add_global_mapping(&f, cc_funcall as usize);
-        }
-        if let Some(f) = module.get_function("cc_funcall_0") {
-            execution_engine.add_global_mapping(&f, cc_funcall_0 as usize);
-        }
-        if let Some(f) = module.get_function("cc_funcall_1") {
-            execution_engine.add_global_mapping(&f, cc_funcall_1 as usize);
-        }
-        if let Some(f) = module.get_function("cc_funcall_2") {
-            execution_engine.add_global_mapping(&f, cc_funcall_2 as usize);
-        }
-        if let Some(f) = module.get_function("cc_register_function_ptr") {
-            execution_engine.add_global_mapping(&f, cc_register_function_ptr as usize);
-        }
-
-        // Print/IO
-        if let Some(f) = module.get_function("cc_print") {
-            execution_engine.add_global_mapping(&f, cc_print as usize);
-        }
-        if let Some(f) = module.get_function("cc_format") {
-            execution_engine.add_global_mapping(&f, cc_format as usize);
-        }
-        if let Some(f) = module.get_function("cc_null") {
-            execution_engine.add_global_mapping(&f, cc_null as usize);
-        }
-        if let Some(f) = module.get_function("cc_truthiness") {
-            execution_engine.add_global_mapping(&f, cc_truthiness as usize);
-        }
-        if let Some(f) = module.get_function("ratio") {
-            execution_engine.add_global_mapping(&f, ratio as usize);
-        }
-        if let Some(f) = module.get_function("complex") {
-            execution_engine.add_global_mapping(&f, complex as usize);
-        }
-        if let Some(f) = module.get_function("cc_ratio") {
-            execution_engine.add_global_mapping(&f, cc_ratio as usize);
-        }
-        if let Some(f) = module.get_function("cc_numerator") {
-            execution_engine.add_global_mapping(&f, cc_numerator as usize);
-        }
-        if let Some(f) = module.get_function("cc_denominator") {
-            execution_engine.add_global_mapping(&f, cc_denominator as usize);
-        }
-        if let Some(f) = module.get_function("cc_complex") {
-            execution_engine.add_global_mapping(&f, cc_complex as usize);
-        }
-        if let Some(f) = module.get_function("cc_realpart") {
-            execution_engine.add_global_mapping(&f, cc_realpart as usize);
-        }
-        if let Some(f) = module.get_function("cc_imagpart") {
-            execution_engine.add_global_mapping(&f, cc_imagpart as usize);
-        }
-
-        // Strings
-        if let Some(f) = module.get_function("cc_make_string") {
-            execution_engine.add_global_mapping(&f, cc_make_string as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_string_repeat") {
-            execution_engine.add_global_mapping(&f, cc_make_string_repeat as usize);
-        }
-        if let Some(f) = module.get_function("cc_string_equal") {
-            execution_engine.add_global_mapping(&f, cc_string_equal as usize);
-        }
-        if let Some(f) = module.get_function("cc_set_char") {
-            execution_engine.add_global_mapping(&f, cc_set_char as usize);
-        }
-        if let Some(f) = module.get_function("cc_string_upcase") {
-            execution_engine.add_global_mapping(&f, cc_string_upcase as usize);
-        }
-        if let Some(f) = module.get_function("cc_string_downcase") {
-            execution_engine.add_global_mapping(&f, cc_string_downcase as usize);
-        }
-        if let Some(f) = module.get_function("cc_string_capitalize") {
-            execution_engine.add_global_mapping(&f, cc_string_capitalize as usize);
-        }
-        if let Some(f) = module.get_function("cc_copy_seq") {
-            execution_engine.add_global_mapping(&f, cc_copy_seq as usize);
-        }
-
-        // Symbols
-        if let Some(f) = module.get_function("cc_make_symbol") {
-            execution_engine.add_global_mapping(&f, cc_make_symbol as usize);
-        }
-        if let Some(f) = module.get_function("cc_symbol_value") {
-            execution_engine.add_global_mapping(&f, cc_symbol_value as usize);
-        }
-        if let Some(f) = module.get_function("cc_set_symbol_value") {
-            execution_engine.add_global_mapping(&f, cc_set_symbol_value as usize);
-        }
-
-        // Sequence operations
-        if let Some(f) = module.get_function("cc_find") {
-            execution_engine.add_global_mapping(&f, cc_find as usize);
-        }
-        if let Some(f) = module.get_function("cc_position") {
-            execution_engine.add_global_mapping(&f, cc_position as usize);
-        }
-        if let Some(f) = module.get_function("cc_remove") {
-            execution_engine.add_global_mapping(&f, cc_remove as usize);
-        }
-        if let Some(f) = module.get_function("cc_subseq") {
-            execution_engine.add_global_mapping(&f, cc_subseq as usize);
-        }
-        if let Some(f) = module.get_function("cc_count") {
-            execution_engine.add_global_mapping(&f, cc_count as usize);
-        }
-        if let Some(f) = module.get_function("cc_member") {
-            execution_engine.add_global_mapping(&f, cc_member as usize);
-        }
-        if let Some(f) = module.get_function("cc_assoc") {
-            execution_engine.add_global_mapping(&f, cc_assoc as usize);
-        }
-
-        // Arrays
-        if let Some(f) = module.get_function("cc_make_array") {
-            execution_engine.add_global_mapping(&f, cc_make_array as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_array_with_contents") {
-            execution_engine.add_global_mapping(&f, cc_make_array_with_contents as usize);
-        }
-        if let Some(f) = module.get_function("cc_aref") {
-            execution_engine.add_global_mapping(&f, cc_aref as usize);
-        }
-        if let Some(f) = module.get_function("cc_set_aref") {
-            execution_engine.add_global_mapping(&f, cc_set_aref as usize);
-        }
-
-        // Hash tables
-        if let Some(f) = module.get_function("cc_gethash") {
-            execution_engine.add_global_mapping(&f, cc_gethash as usize);
-        }
-        if let Some(f) = module.get_function("cc_puthash") {
-            execution_engine.add_global_mapping(&f, cc_puthash as usize);
-        }
-
-        // CLOS (Common Lisp Object System)
-        use rlasp_jit::intrinsics_clos::*;
-
-        if let Some(f) = module.get_function("cc_defclass") {
-            execution_engine.add_global_mapping(&f, cc_defclass as usize);
-        }
-        if let Some(f) = module.get_function("cc_defgeneric") {
-            execution_engine.add_global_mapping(&f, cc_defgeneric as usize);
-        }
-        if let Some(f) = module.get_function("cc_defmethod") {
-            execution_engine.add_global_mapping(&f, cc_defmethod as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_instance") {
-            execution_engine.add_global_mapping(&f, cc_make_instance as usize);
-        }
-        if let Some(f) = module.get_function("cc_slot_value") {
-            execution_engine.add_global_mapping(&f, cc_slot_value as usize);
-        }
-        if let Some(f) = module.get_function("cc_set_slot_value") {
-            execution_engine.add_global_mapping(&f, cc_set_slot_value as usize);
-        }
-        if let Some(f) = module.get_function("cc_call_generic") {
-            execution_engine.add_global_mapping(&f, cc_call_generic as usize);
-        }
-        if let Some(f) = module.get_function("cc_defmethod_qualified") {
-            execution_engine.add_global_mapping(&f, cc_defmethod_qualified as usize);
-        }
-        if let Some(f) = module.get_function("cc_call_next_method") {
-            execution_engine.add_global_mapping(&f, cc_call_next_method as usize);
-        }
-        if let Some(f) = module.get_function("cc_call_next_method_with_args") {
-            execution_engine.add_global_mapping(&f, cc_call_next_method_with_args as usize);
-        }
-        if let Some(f) = module.get_function("cc_next_method_p") {
-            execution_engine.add_global_mapping(&f, cc_next_method_p as usize);
-        }
-
-        // MOP Introspection
-        if let Some(f) = module.get_function("cc_find_class") {
-            execution_engine.add_global_mapping(&f, cc_find_class as usize);
-        }
-        if let Some(f) = module.get_function("cc_class_of") {
-            execution_engine.add_global_mapping(&f, cc_class_of as usize);
-        }
-        if let Some(f) = module.get_function("cc_class_name") {
-            execution_engine.add_global_mapping(&f, cc_class_name as usize);
-        }
-        if let Some(f) = module.get_function("cc_class_slots") {
-            execution_engine.add_global_mapping(&f, cc_class_slots as usize);
-        }
-        if let Some(f) = module.get_function("cc_class_direct_slots") {
-            execution_engine.add_global_mapping(&f, cc_class_direct_slots as usize);
-        }
-        if let Some(f) = module.get_function("cc_class_direct_superclasses") {
-            execution_engine.add_global_mapping(&f, cc_class_direct_superclasses as usize);
-        }
-        if let Some(f) = module.get_function("cc_class_precedence_list") {
-            execution_engine.add_global_mapping(&f, cc_class_precedence_list as usize);
-        }
-        if let Some(f) = module.get_function("cc_typep") {
-            execution_engine.add_global_mapping(&f, cc_typep as usize);
-        }
-        if let Some(f) = module.get_function("cc_subtypep") {
-            execution_engine.add_global_mapping(&f, cc_subtypep as usize);
-        }
-
-        // Additional runtime intrinsics
-        if let Some(f) = module.get_function("cc_apply") {
-            execution_engine.add_global_mapping(&f, cc_apply as usize);
-        }
-        if let Some(f) = module.get_function("cc_boundp") {
-            execution_engine.add_global_mapping(&f, cc_boundp as usize);
-        }
-        if let Some(f) = module.get_function("cc_fboundp") {
-            execution_engine.add_global_mapping(&f, cc_fboundp as usize);
-        }
-        if let Some(f) = module.get_function("cc_functionp") {
-            execution_engine.add_global_mapping(&f, cc_functionp as usize);
-        }
-        if let Some(f) = module.get_function("cc_eval") {
-            execution_engine.add_global_mapping(&f, cc_eval as usize);
-        }
-        if let Some(f) = module.get_function("cc_compile") {
-            execution_engine.add_global_mapping(&f, cc_compile as usize);
-        }
-        if let Some(f) = module.get_function("cc_read_from_string") {
-            execution_engine.add_global_mapping(&f, cc_read_from_string as usize);
-        }
-        if let Some(f) = module.get_function("cc_make_hash_table") {
-            execution_engine.add_global_mapping(&f, cc_make_hash_table as usize);
-        }
-        if let Some(f) = module.get_function("cc_maphash_stack") {
-            execution_engine.add_global_mapping(&f, cc_maphash_stack as usize);
-        }
-        if let Some(f) = module.get_function("cc_reduce") {
-            execution_engine.add_global_mapping(&f, cc_reduce as usize);
-        }
-        if let Some(f) = module.get_function("cc_reduce_stack") {
-            execution_engine.add_global_mapping(&f, cc_reduce_stack as usize);
-        }
-        if let Some(f) = module.get_function("cc_mapcar_stack") {
-            execution_engine.add_global_mapping(&f, cc_mapcar_stack as usize);
-        }
-        if let Some(f) = module.get_function("cc_loop_collect") {
-            execution_engine.add_global_mapping(&f, cc_loop_collect as usize);
-        }
-        if let Some(f) = module.get_function("cc_build_range") {
-            execution_engine.add_global_mapping(&f, cc_build_range as usize);
-        }
-        if let Some(f) = module.get_function("cc_incf") {
-            execution_engine.add_global_mapping(&f, cc_incf as usize);
-        }
-
-        // User-defined and macro stubs
-        if let Some(f) = module.get_function("list") {
-            execution_engine.add_global_mapping(&f, list as usize);
-        }
-        if let Some(f) = module.get_function("twice") {
-            execution_engine.add_global_mapping(&f, twice as usize);
-        }
-        // Note: make-instance and magnitude are now handled by CLOS above
+        let _keep_symbols = [
+            // Stack operations - critical for JIT
+            stack_push_fixnum as *const (),
+            stack_push_pointer as *const (),
+            stack_push_nil as *const (),
+            stack_pop_fixnum as *const (),
+            stack_pop_pointer as *const (),
+            stack_depth as *const (),
+            stack_clear as *const (),
+            // Core intrinsics
+            cc_funcall_stack as *const (),
+            cc_funcall as *const (),
+            cc_nil as *const (),
+            cc_t as *const (),
+            cc_print as *const (),
+            cc_format as *const (),
+            cc_load as *const (),
+            cc_cons as *const (),
+            cc_car as *const (),
+            cc_cdr as *const (),
+            cc_nconc as *const (),
+            cc_make_string as *const (),
+            cc_make_symbol as *const (),
+            cc_symbol_value as *const (),
+            cc_set_symbol_value as *const (),
+            cc_get_symbol_property as *const (),
+            cc_set_symbol_property as *const (),
+            cc_add as *const (),
+            cc_sub as *const (),
+            cc_mul as *const (),
+            cc_div as *const (),
+            cc_equal as *const (),
+            cc_null as *const (),
+            cc_apply as *const (),
+            cc_eval as *const (),
+            cc_pushnew as *const (),
+            cc_box_fixnum as *const (),
+            cc_unbox_fixnum as *const (),
+            cc_box_character as *const (),
+            // Additional intrinsics for ASDF
+            cc_and as *const (),
+            cc_or as *const (),
+            cc_boundp as *const (),
+            cc_functionp as *const (),
+            cc_arg as *const (),
+            cc_collect_args as *const (),
+            cc_collect_rest_args as *const (),
+            cc_make_closure as *const (),
+            cc_make_lambda_ref_str as *const (),
+            cc_make_string_repeat as *const (),
+            cc_string_upcase as *const (),
+            cc_string_downcase as *const (),
+            cc_string_equal_full as *const (),
+            cc_last as *const (),
+            cc_acons as *const (),
+            cc_getf as *const (),
+            cc_read_from_string as *const (),
+            cc_substitute as *const (),
+            cc_substitute_if as *const (),
+            cc_set_difference as *const (),
+            cc_remove_duplicates as *const (),
+            cc_remove_if as *const (),
+            cc_remove_if_not as *const (),
+            cc_find_if as *const (),
+            cc_some as *const (),
+            cc_every as *const (),
+            cc_sort as *const (),
+            cc_map_nil as *const (),
+            cc_mapcar_stack as *const (),
+            cc_maphash_stack as *const (),
+            cc_reduce_stack as *const (),
+            cc_make_array as *const (),
+            cc_make_array_with_contents as *const (),
+            cc_make_array_with_initial_element as *const (),
+            cc_aref as *const (),
+            cc_set_aref as *const (),
+            cc_hash_table_keys as *const (),
+            cc_hash_table_values as *const (),
+            cc_remhash as *const (),
+            cc_clrhash as *const (),
+            cc_typep as *const (),
+            cc_subtypep as *const (),
+            cc_keywordp as *const (),
+            cc_mapc_stack as *const (),
+            cc_position_full as *const (),
+            cc_position_if_full as *const (),
+            cc_position_if_not as *const (),
+            cc_position_if_not_full as *const (),
+            cc_ceiling_2 as *const (),
+            cc_floor_2 as *const (),
+            cc_truncate_2 as *const (),
+            cc_arg_present as *const (),
+            // CLOS intrinsics
+            cc_defclass as *const (),
+            cc_defgeneric as *const (),
+            cc_defmethod_qualified as *const (),
+            cc_call_next_method as *const (),
+            cc_call_next_method_with_args as *const (),
+            cc_class_name as *const (),
+        ];
+        // Use volatile read to prevent optimizer from removing the references
+        std::hint::black_box(_keep_symbols);
+        println!("[Forced linker to keep {} runtime symbols]", _keep_symbols.len());
     }
 
-    println!("[Linked runtime intrinsics]");
+    // Make the process's symbols available to LLVM for dynamic lookup
+    inkwell::support::load_visible_symbols();
+    println!("[Loaded process symbols for ORC JIT]");
+
+    // Create LLJIT instance
+    let lljit: LLVMOrcLLJITRef = unsafe {
+        let builder = LLVMOrcCreateLLJITBuilder();
+        let mut lljit: LLVMOrcLLJITRef = ptr::null_mut();
+        let err = LLVMOrcCreateLLJIT(&mut lljit, builder);
+        if !err.is_null() {
+            let err_msg = LLVMGetErrorMessage(err);
+            let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(err_msg);
+            return Err(format!("Failed to create LLJIT: {}", msg));
+        }
+        lljit
+    };
+    println!("[Created ORC LLJIT]");
+
+    // Get the main JITDylib
+    let main_jd = unsafe { LLVMOrcLLJITGetMainJITDylib(lljit) };
+
+    // Add a DynamicLibrarySearchGenerator to resolve process symbols
+    unsafe {
+        let mut gen: LLVMOrcDefinitionGeneratorRef = ptr::null_mut();
+        let global_prefix = LLVMOrcLLJITGetGlobalPrefix(lljit);
+        let err = LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
+            &mut gen,
+            global_prefix,
+            None, // No filter
+            ptr::null_mut(),
+        );
+        if !err.is_null() {
+            let err_msg = LLVMGetErrorMessage(err);
+            let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(err_msg);
+            return Err(format!("Failed to create DynamicLibrarySearchGenerator: {}", msg));
+        }
+        LLVMOrcJITDylibAddGenerator(main_jd, gen);
+    }
+    println!("[Added DynamicLibrarySearchGenerator for process symbols]");
+
+    // Collect function names BEFORE transferring module to LLJIT
+    // (After transfer, we can't iterate module.get_functions() anymore)
+    let mut lambda_names: Vec<String> = Vec::new();
+    let mut method_names: Vec<String> = Vec::new();
+    for func_val in module.get_functions() {
+        let func_name = func_val.get_name().to_str().unwrap_or("");
+        if func_name.starts_with("__lambda_") {
+            lambda_names.push(func_name.to_string());
+        }
+        let is_method = func_name.ends_with("_primary")
+            || func_name.ends_with("_before")
+            || func_name.ends_with("_after")
+            || func_name.ends_with("_around");
+        if is_method {
+            method_names.push(func_name.to_string());
+        }
+    }
+    println!("[Collected {} lambdas and {} methods from module]", lambda_names.len(), method_names.len());
+
+    // Create a ThreadSafeContext and ThreadSafeModule
+    let ts_ctx = unsafe { LLVMOrcCreateNewThreadSafeContext() };
+
+    // We need to get the raw LLVMModuleRef from our inkwell module
+    // and transfer ownership to the ThreadSafeModule
+    let llvm_module_ref = module.as_mut_ptr();
+    let ts_module = unsafe { LLVMOrcCreateNewThreadSafeModule(llvm_module_ref, ts_ctx) };
+
+    // IMPORTANT: Prevent inkwell from freeing the module - ownership transferred to ORC JIT
+    std::mem::forget(module);
+
+    // Add the module to LLJIT
+    unsafe {
+        let err = LLVMOrcLLJITAddLLVMIRModule(lljit, main_jd, ts_module);
+        if !err.is_null() {
+            let err_msg = LLVMGetErrorMessage(err);
+            let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(err_msg);
+            return Err(format!("Failed to add module to LLJIT: {}", msg));
+        }
+    }
+    println!("[Added LLVM IR module to ORC LLJIT]");
+
+    // Helper function to look up symbols
+    let lookup_symbol = |name: &str| -> std::result::Result<u64, String> {
+        let c_name = std::ffi::CString::new(name).unwrap();
+        let mut addr: LLVMOrcExecutorAddress = 0;
+        unsafe {
+            let err = LLVMOrcLLJITLookup(lljit, &mut addr, c_name.as_ptr());
+            if !err.is_null() {
+                let err_msg = LLVMGetErrorMessage(err);
+                let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+                LLVMDisposeErrorMessage(err_msg);
+                return Err(format!("Failed to lookup '{}': {}", name, msg));
+            }
+        }
+        Ok(addr)
+    };
+
+    println!("[Created ORC LLJIT execution engine]");
+
+    // Note: With ORC JIT's DynamicLibrarySearchGenerator, runtime intrinsics are resolved
+    // automatically from the process symbols. No manual add_global_mapping needed.
+
+    // Register builtin intrinsics in the function registry for funcall support
+    rlasp_jit::intrinsics::register_builtin_intrinsics();
+
+    if init_runtime {
+        // Initialize standard Common Lisp variables
+        rlasp_jit::intrinsics::init_standard_cl_variables();
+        println!("[Initialized standard CL variables]");
+    }
 
     // Auto-register all JIT-compiled user functions and lambdas in the function registry
     // This allows funcall to look them up and call them
-    unsafe {
-        use rlasp_jit::intrinsics::cc_register_function_ptr;
+    // Note: Using lookup_symbol since module ownership was transferred to LLJIT
+    {
+        use rlasp_jit::intrinsics::{cc_register_function_ptr, cc_register_function_with_args_list};
         use std::ffi::CString;
+
+        let mut registered_functions = 0;
+        let mut registered_lambdas = 0;
+        let mut registered_methods = 0;
 
         // Register user-defined functions with uniform calling convention
         // All functions now take a single argument (args_and_env), so we use arity usize::MAX
         // to indicate uniform calling convention
-        for (name, params, _, _, _) in &defuns {
-            if let Some(func) = module.get_function(name) {
-                let func_ptr = execution_engine.get_function_address(name)
-                    .map_err(|e| format!("Failed to get address for {}: {:?}", name, e))?;
+        for (name, params, _, _, _, _) in &defuns {
+            // Use lookup_symbol to get function address from LLJIT
+            if let Ok(func_ptr) = lookup_symbol(name) {
                 let name_cstr = CString::new(name.as_str()).unwrap();
                 // Entry points like __main or __rlasp_* use direct params
                 // All other user functions (including main) use uniform calling convention
@@ -1681,90 +1525,120 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
                 } else {
                     usize::MAX  // Indicates uniform calling convention
                 };
-                cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, arity);
-                println!("[Registered function '{}' with arity {}]", name, if arity == usize::MAX { format!("uniform({})", params.len()) } else { format!("entry({})", arity) });
+
+                // Check if function has special params (&optional, &key, &rest)
+                let has_special_params = params.iter().any(|p| p.starts_with('&'));
+
+                unsafe {
+                    if has_special_params && !is_entry {
+                        cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, arity);
+                    } else {
+                        cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, arity);
+                    }
+                }
+                registered_functions += 1;
+
+                // Debug: count functions with special params
+                if has_special_params && std::env::var("RLASP_TRACE_ARGS_LIST").is_ok() {
+                    static mut SPECIAL_COUNT: usize = 0;
+                    unsafe {
+                        SPECIAL_COUNT += 1;
+                        if SPECIAL_COUNT <= 5 {
+                            eprintln!("[DEBUG] Registered with args_list: {} (params: {:?})", name, params);
+                        }
+                    }
+                }
             }
         }
 
-        // Register all lambda functions (functions starting with __lambda_)
-        for func_val in module.get_functions() {
-            let func_name = func_val.get_name().to_str().unwrap();
-            if func_name.starts_with("__lambda_") {
-                // Lambdas use uniform calling convention (single args_and_env parameter)
-                let func_ptr = execution_engine.get_function_address(func_name)
-                    .map_err(|e| format!("Failed to get address for {}: {:?}", func_name, e))?;
-                let name_cstr = CString::new(func_name).unwrap();
-                cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
-                println!("[Registered lambda '{}' with arity uniform]", func_name);
+        // Register all lambda functions (using pre-collected names)
+        for func_name in &lambda_names {
+            // Lambdas use uniform calling convention (single args_and_env parameter)
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                unsafe {
+                    cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                }
+                registered_lambdas += 1;
             }
         }
 
-        // Register method functions for CLOS dispatch
-        // These are functions ending with _primary, _before, _after, or _around
-        for func_val in module.get_functions() {
-            let func_name = func_val.get_name().to_str().unwrap();
-            let is_method = func_name.ends_with("_primary")
-                || func_name.ends_with("_before")
-                || func_name.ends_with("_after")
-                || func_name.ends_with("_around");
-            if is_method {
-                let func_ptr = execution_engine.get_function_address(func_name)
-                    .map_err(|e| format!("Failed to get address for {}: {:?}", func_name, e))?;
-                let name_cstr = CString::new(func_name).unwrap();
+        // Register method functions for CLOS dispatch (using pre-collected names)
+        for func_name in &method_names {
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
                 // Methods use uniform stack-based calling convention
-                cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
-                println!("[Registered method '{}']", func_name);
+                unsafe {
+                    cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                }
+                registered_methods += 1;
             }
         }
+        println!("[Registered {} functions, {} lambdas, {} methods]",
+                 registered_functions, registered_lambdas, registered_methods);
     }
 
     // Execute top-level forms if they exist, otherwise execute all functions
     let mut exec_count = 0;
 
+    let trace_batches = std::env::var("RLASP_TRACE_BATCHES").is_ok();
+
     // Check if __main exists (top-level forms)
-    if module.get_function("__main").is_some() {
+    // Try to look up __main - if it exists, execute it
+    if let Ok(__main_addr) = lookup_symbol("__main") {
         // Execute only __main (top-level forms)
         unsafe {
-            eprintln!("[Getting __main function]");
-            let __main_addr = execution_engine.get_function_address("__main")
-                .map_err(|e| format!("Failed to get __main address: {:?}", e))?;
-            eprintln!("[__main address: {:x}]", __main_addr);
-
-            // Debug: Check addresses of functions __main will call
-            if let Ok(addr) = execution_engine.get_function_address("run-benchmarks") {
-                eprintln!("[run-benchmarks address: {:x}]", addr);
-            } else {
-                eprintln!("[WARNING: run-benchmarks has no address!]");
-            }
-            if let Ok(addr) = execution_engine.get_function_address("cc_nil") {
-                eprintln!("[cc_nil address: {:x}]", addr);
-            } else {
-                eprintln!("[WARNING: cc_nil has no address!]");
-            }
-
             // Stack-based calling convention: __main returns void, result is on stack
             use rlasp_runtime::eval_stack::{stack_pop_pointer, stack_depth, stack_clear};
 
-            // Clear stack before execution
-            stack_clear();
+            // Force compilation of all batch functions before running
+            let mut batch_count = 0;
+            for i in 0..100 {
+                let batch_name = format!("__main_batch_{}", i);
+                match lookup_symbol(&batch_name) {
+                    Ok(_) => batch_count += 1,
+                    Err(_) => break,
+                }
+            }
+            if batch_count > 0 {
+                println!("[Pre-compiled {} batch functions]", batch_count);
+            }
 
-            let jit_fn: JitFunction<unsafe extern "C" fn()> =
-                execution_engine.get_function("__main")
-                    .map_err(|e| format!("Failed to get __main: {:?}", e))?;
-            eprintln!("[Calling __main]");
-            jit_fn.call();
-            eprintln!("[__main returned]");
-
-            let depth = stack_depth();
-
-            let result = if depth > 0 {
-                // Pop result as boxed pointer (all values are now boxed)
-                stack_pop_pointer()
+            if trace_batches && batch_count > 0 {
+                for i in 0..batch_count {
+                    let batch_name = format!("__main_batch_{}", i);
+                    if let Ok(batch_addr) = lookup_symbol(&batch_name) {
+                        println!("[Executing {}]", batch_name);
+                        stack_clear();
+                        let jit_fn: extern "C" fn() = std::mem::transmute(batch_addr);
+                        jit_fn();
+                        if stack_depth() > 0 {
+                            let _ = stack_pop_pointer();
+                        }
+                    }
+                }
+                exec_count += 1;
             } else {
-                0
-            };
-            println!("=> {}", format_jit_result(result as i64));
-            exec_count += 1;
+                // Clear stack before execution
+                stack_clear();
+
+                // Cast address to function pointer and call directly
+                let jit_fn: extern "C" fn() = std::mem::transmute(__main_addr);
+
+                println!("[Executing __main]");
+                jit_fn();
+
+                let depth = stack_depth();
+
+                let result = if depth > 0 {
+                    // Pop result as boxed pointer (all values are now boxed)
+                    stack_pop_pointer()
+                } else {
+                    0
+                };
+                println!("=> {}", format_jit_result(result as i64));
+                exec_count += 1;
+            }
         }
     } else {
         // Fall back to executing all defuns with uniform calling convention
@@ -1773,33 +1647,133 @@ fn eval_file_mlir(source: &str, file_path: &str) -> std::result::Result<(), Stri
         let nil = unsafe { cc_nil_value() as i64 };
         let boxed_zero = unsafe { cc_box_fixnum(0) as i64 };
 
-        for (name, params, _, _, _) in &defuns {
-        if let Some(func) = module.get_function(name) {
-            unsafe {
-                // Build args_and_env list with dummy arguments (all zeros)
-                let mut args_and_env = nil as usize;
-                for _ in 0..params.len() {
-                    args_and_env = cc_cons(boxed_zero as usize, args_and_env);
+        for (name, params, _, _, _, _) in &defuns {
+            if let Ok(func_addr) = lookup_symbol(name) {
+                unsafe {
+                    // Build args_and_env list with dummy arguments (all zeros)
+                    let mut args_and_env = nil as usize;
+                    for _ in 0..params.len() {
+                        args_and_env = cc_cons(boxed_zero as usize, args_and_env);
+                    }
+
+                    // Call with uniform calling convention: fn(args_and_env) -> i64
+                    let jit_fn: extern "C" fn(i64) -> i64 = std::mem::transmute(func_addr);
+                    let result = jit_fn(args_and_env as i64);
+
+                    println!("=> {}", format_jit_result(result as i64));
+                    exec_count += 1;
                 }
-
-                // Call with uniform calling convention: fn(args_and_env) -> i64
-                let result = {
-                    let jit_fn: JitFunction<unsafe extern "C" fn(i64) -> i64> =
-                        execution_engine.get_function(name)
-                            .map_err(|e| format!("Failed to get function {}: {:?}", name, e))?;
-                    jit_fn.call(args_and_env as i64)
-                };
-
-                println!("=> {}", format_jit_result(result as i64));
-                exec_count += 1;
             }
-        }
         }
     }
 
     println!("[JIT execution: {} functions compiled, {} forms executed]", defuns.len(), exec_count);
 
+    // Clean up ORC LLJIT
+    unsafe {
+        LLVMOrcDisposeLLJIT(lljit);
+    }
+
     Ok(())
+}
+
+fn normalize_path_string(raw: &str) -> String {
+    if raw.starts_with("#P\"") && raw.ends_with('"') && raw.len() >= 4 {
+        return raw[3..raw.len() - 1].to_string();
+    }
+    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+        return raw[1..raw.len() - 1].to_string();
+    }
+    raw.to_string()
+}
+
+fn extract_pathname_string(obj: rlasp_runtime::LispObject) -> Option<String> {
+    use rlasp_runtime::{Cons, RString, Symbol};
+
+    if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
+        if !str_ptr.is_null() {
+            let s = unsafe { &*str_ptr };
+            return Some(s.as_str().to_string());
+        }
+    }
+
+    if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
+        if !sym_ptr.is_null() {
+            let s = unsafe { &*sym_ptr };
+            return Some(s.name().to_string());
+        }
+    }
+
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        if cons_ptr.is_null() {
+            return None;
+        }
+        let cons = unsafe { &*cons_ptr };
+        let car = cons.car();
+        if let Some(sym_ptr) = car.as_general_ptr::<Symbol>() {
+            if !sym_ptr.is_null() {
+                let sym = unsafe { &*sym_ptr };
+                let name = sym.name();
+                let base = name.rsplit(':').next().unwrap_or(name);
+                if base.eq_ignore_ascii_case("pathname") {
+                    let cdr = cons.cdr();
+                    if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                        if !cdr_ptr.is_null() {
+                            let cdr_cons = unsafe { &*cdr_ptr };
+                            let path_obj = cdr_cons.car();
+                            return extract_pathname_string(path_obj);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[no_mangle]
+pub extern "C" fn cc_load(path_obj: usize) -> usize {
+    use rlasp_runtime::LispObject;
+    use std::path::Path;
+
+    let obj = unsafe { LispObject::from_raw(path_obj) };
+    let raw_path = match extract_pathname_string(obj) {
+        Some(p) => p,
+        None => {
+            eprintln!("Warning: load requires a pathname or string");
+            return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+        }
+    };
+
+    let mut path = normalize_path_string(&raw_path);
+    if path.starts_with("sys:") {
+        path = path.replacen("sys:", "./", 1);
+    }
+
+    let resolved_path = if Path::new(&path).is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path).to_string_lossy().to_string())
+            .unwrap_or(path)
+    };
+
+    let contents = match std::fs::read_to_string(&resolved_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("load failed to read {}: {}", resolved_path, e);
+            return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+        }
+    };
+
+    match eval_file_mlir(&contents, &resolved_path, false) {
+        Ok(_) => unsafe { rlasp_jit::intrinsics::cc_t_value() },
+        Err(e) => {
+            eprintln!("load failed: {}", e);
+            unsafe { rlasp_jit::intrinsics::cc_nil_value() }
+        }
+    }
 }
 
 /// Format a LispObject as a list string
@@ -6472,7 +6446,7 @@ fn eval_file_llvm(source: &str, file_path: &str) -> std::result::Result<(), Stri
     use rlasp_jit::CodeGenerator;
     use inkwell::context::Context;
     use std::path::Path;
-    use rlasp::repl::lisp_to_ast;
+    use rlasp::repl::{lisp_to_ast, EvalResult};
     use std::collections::HashMap;
 
     // Create LLVM context and module
@@ -6495,10 +6469,13 @@ fn eval_file_llvm(source: &str, file_path: &str) -> std::result::Result<(), Stri
     let mut defuns: Vec<(String, Vec<String>, Vec<rlasp::ir::ASTNode>)> = Vec::new();
     let mut generic_functions: HashMap<String, Vec<String>> = HashMap::new();
     let mut macros: HashMap<String, (Vec<String>, rlasp::ir::ASTNode)> = HashMap::new();
+    let mut interp_env: HashMap<String, EvalResult> = HashMap::new();
 
     // First pass: collect and declare all defuns, defgenerics, and defmethods
     for lisp_obj in &lisp_objs {
-        match lisp_to_ast::lisp_to_ast(lisp_obj.clone()) {
+        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
+            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+        }) {
             Ok(ast) => {
                 // Check if this is a defun (setq name (lambda ...))
                 if let rlasp::ir::ASTNode::Setq { var, value } = &ast {
@@ -6662,7 +6639,9 @@ fn eval_file_llvm(source: &str, file_path: &str) -> std::result::Result<(), Stri
 
     // Second pass: compile other forms
     for lisp_obj in &lisp_objs {
-        match lisp_to_ast::lisp_to_ast(lisp_obj.clone()) {
+        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
+            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+        }) {
             Ok(ast) => {
                 // Skip defuns (already compiled)
                 if let rlasp::ir::ASTNode::Setq { value, .. } = &ast {
@@ -6734,7 +6713,9 @@ fn eval_file_llvm(source: &str, file_path: &str) -> std::result::Result<(), Stri
 
     // Execute top-level forms that aren't defuns via JIT
     for lisp_obj in lisp_objs.iter() {
-        match lisp_to_ast::lisp_to_ast(lisp_obj.clone()) {
+        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
+            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+        }) {
             Ok(ast) => {
                 // Skip defuns (already compiled)
                 if let rlasp::ir::ASTNode::Setq { var, value } = &ast {
@@ -6869,6 +6850,9 @@ fn format_jit_result(val: i64) -> String {
     } else if obj.is_number() {
         // Format heap-allocated numbers
         if let Some(ptr) = obj.as_general_ptr::<rlasp_runtime::Number>() {
+            if ptr.is_null() {
+                return "#<NULL-NUMBER>".to_string();
+            }
             let num = unsafe { &*ptr };
             match &num.value {
                 rlasp_runtime::NumberValue::Bignum(b) => format!("(bignum {})", b),

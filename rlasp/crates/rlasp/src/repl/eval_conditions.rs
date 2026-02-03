@@ -738,6 +738,7 @@ pub fn eval_restart_case(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
                 params,
                 defaults: HashMap::new(),
                 supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
                 body,
             };
 

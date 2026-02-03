@@ -312,7 +312,12 @@ impl LispObject {
 
     pub fn as_class_ptr(&self) -> Option<*const Class> {
         if (self.raw & 0b11) == 0b10 {
-            Some((self.raw & !0b11) as *const Class)
+            let ptr = (self.raw & !0b11) as *const Class;
+            // Validate pointer is in reasonable address range (not a small value)
+            if (ptr as usize) < 0x1000 {
+                return None;
+            }
+            Some(ptr)
         } else {
             None
         }
@@ -329,7 +334,12 @@ impl LispObject {
 
     pub fn as_instance_ptr(&self) -> Option<*const Instance> {
         if (self.raw & 0b11) == 0b11 && self.raw != 3 {
-            Some((self.raw & !0b11) as *const Instance)
+            let ptr = (self.raw & !0b11) as *const Instance;
+            // Validate pointer is in reasonable address range (not a small value)
+            if (ptr as usize) < 0x1000 {
+                return None;
+            }
+            Some(ptr)
         } else {
             None
         }

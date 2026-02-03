@@ -21,6 +21,24 @@ impl RString {
         &self.data
     }
 
+    pub fn len_chars(&self) -> usize {
+        self.data.chars().count()
+    }
+
+    pub fn char_at(&self, index: usize) -> Option<char> {
+        self.data.chars().nth(index)
+    }
+
+    pub fn set_char(&mut self, index: usize, ch: char) -> bool {
+        let mut chars: Vec<char> = self.data.chars().collect();
+        if index >= chars.len() {
+            return false;
+        }
+        chars[index] = ch;
+        self.data = chars.into_iter().collect();
+        true
+    }
+
     pub fn allocate(s: String) -> LispObject {
         let string = Box::new(RString::new(s));
         LispObject::from_general_ptr(Box::into_raw(string))

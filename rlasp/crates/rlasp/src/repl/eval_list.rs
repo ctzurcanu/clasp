@@ -467,15 +467,24 @@ pub(super) fn apply_function(
     env: &mut HashMap<String, EvalResult>,
 ) -> Result<EvalResult, String> {
     match func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
             // Use the full lambda call handler that supports &optional, &rest, &key, etc.
-            eval_lambda_call_with_values(params.clone(), defaults.clone(), body.clone(), *dynamic_env, closure_env.clone(), args, env)
+            eval_lambda_call_with_values(params.clone(), defaults.clone(), supplied_p_vars.clone(), key_params.clone(), body.clone(), *dynamic_env, closure_env.clone(), args, env)
+        }
+        EvalResult::BuiltinFunction(name) => {
+            super::eval_system::call_function_with_values(EvalResult::BuiltinFunction(name.clone()), args, env)
+        }
+        EvalResult::GenericFunction(gf) => {
+            super::eval_system::call_function_with_values(EvalResult::GenericFunction(gf.clone()), args, env)
+        }
+        EvalResult::ForeignFunction(func) => {
+            super::eval_system::call_function_with_values(EvalResult::ForeignFunction(func.clone()), args, env)
         }
         EvalResult::Symbol(name) => {
             // Handle function name - look up in environment or call builtin
-            if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env }) = env.get(name).cloned() {
+            if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env }) = env.get(name).cloned() {
                 // User-defined function - use full lambda call handler
-                eval_lambda_call_with_values(params, defaults, body, dynamic_env, closure_env, args, env)
+                eval_lambda_call_with_values(params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, args, env)
             } else {
                 // Try calling as a builtin by creating an AST call
                 // Use result_to_ast_quoted to properly handle all types including Cons
@@ -513,11 +522,13 @@ pub(super) fn eval_mapc(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 
     // Apply function to each element (for side effects)
     match &func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: lambda_env, dynamic_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: lambda_env, dynamic_env } => {
             for elem in elements {
                 eval_lambda_call_with_values(
                     params.clone(),
                     defaults.clone(),
+                    supplied_p_vars.clone(),
+                    key_params.clone(),
                     body.clone(),
                     *dynamic_env,
                     lambda_env.clone(),
@@ -710,10 +721,12 @@ fn apply_key_fn(key_fn: &EvalResult, value: &EvalResult, env: &mut HashMap<Strin
             // If key is nil, return value unchanged
             Ok(value.clone())
         }
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
             let result = eval_lambda_call_with_values(
                 params.clone(),
                 defaults.clone(),
+                supplied_p_vars.clone(),
+                key_params.clone(),
                 body.clone(),
                 *dynamic_env,
                 closure_env.clone(),
@@ -746,10 +759,12 @@ fn call_test_fn(test_fn: &EvalResult, a: &EvalResult, b: &EvalResult, env: &mut 
             )?;
             Ok(!matches!(result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)))
         }
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
             let result = eval_lambda_call_with_values(
                 params.clone(),
                 defaults.clone(),
+                supplied_p_vars.clone(),
+                key_params.clone(),
                 body.clone(),
                 *dynamic_env,
                 closure_env.clone(),
@@ -778,7 +793,7 @@ fn call_test_fn(test_fn: &EvalResult, a: &EvalResult, b: &EvalResult, env: &mut 
 // Helper to complement a function
 fn eval_complement_fn(fn_val: EvalResult) -> Result<EvalResult, String> {
     match fn_val {
-        EvalResult::Lambda { params, defaults, supplied_p_vars, body, env, dynamic_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env, dynamic_env } => {
             // Create a new lambda that negates the result
             let not_body = vec![
                 ASTNode::Call {
@@ -786,7 +801,7 @@ fn eval_complement_fn(fn_val: EvalResult) -> Result<EvalResult, String> {
                     args: vec![ASTNode::Progn { exprs: body }],
                 }
             ];
-            Ok(EvalResult::Lambda { params, defaults, supplied_p_vars, body: not_body, env, dynamic_env })
+            Ok(EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body: not_body, env, dynamic_env })
         }
         _ => Err("complement: argument must be a function".to_string()),
     }
@@ -1118,7 +1133,10 @@ pub(super) fn eval_pop(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) 
             let current = env.get(place_name).cloned().unwrap_or(EvalResult::Nil);
 
             match current {
-                EvalResult::Nil => Err("pop: cannot pop from empty list".to_string()),
+                EvalResult::Nil => {
+                    env.insert(place_name.clone(), EvalResult::Nil);
+                    Ok(EvalResult::Nil)
+                }
                 EvalResult::Cons(car, cdr) => {
                     let result = car.borrow().clone();
                     let new_list = cdr.borrow().clone();
@@ -1135,7 +1153,16 @@ pub(super) fn eval_pop(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) 
             let current = eval_with_env(place, env)?;
 
             match current {
-                EvalResult::Nil => Err("pop: cannot pop from empty list".to_string()),
+                EvalResult::Nil => {
+                    // Store back using setf
+                    let new_val_ast = result_to_ast_quoted(&EvalResult::Nil)?;
+                    let setf_call = ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("setf".to_string())),
+                        args: vec![place.clone(), new_val_ast],
+                    };
+                    eval_with_env(&setf_call, env)?;
+                    Ok(EvalResult::Nil)
+                }
                 EvalResult::Cons(car, cdr) => {
                     let result = car.borrow().clone();
                     let new_list = cdr.borrow().clone();
@@ -1159,12 +1186,42 @@ pub(super) fn eval_pop(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) 
 pub(super) fn eval_pushnew(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     // (pushnew item place &key :test :test-not :key)
     // Push item onto list at place only if it's not already there
-    // For now, ignore keyword arguments and just handle the basic case
     if args.len() < 2 {
         return Err("pushnew requires at least 2 arguments (item place)".to_string());
     }
 
     let item = eval_with_env(&args[0], env)?;
+
+    // Parse keyword arguments
+    let mut test_fn: Option<EvalResult> = None;
+    let mut key_fn: Option<EvalResult> = None;
+
+    let mut i = 2;
+    while i < args.len() {
+        if let ASTNode::Variable(kw) = &args[i] {
+            if i + 1 >= args.len() {
+                return Err(format!("Keyword {} requires a value", kw));
+            }
+            match kw.as_str() {
+                ":test" => {
+                    test_fn = Some(eval_with_env(&args[i + 1], env)?);
+                    i += 2;
+                }
+                ":test-not" => {
+                    let fn_val = eval_with_env(&args[i + 1], env)?;
+                    test_fn = Some(eval_complement_fn(fn_val)?);
+                    i += 2;
+                }
+                ":key" => {
+                    key_fn = Some(eval_with_env(&args[i + 1], env)?);
+                    i += 2;
+                }
+                _ => return Err(format!("Unknown keyword argument: {}", kw)),
+            }
+        } else {
+            i += 1;
+        }
+    }
 
     match &args[1] {
         // Simple variable place
@@ -1177,19 +1234,8 @@ pub(super) fn eval_pushnew(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             };
 
             // Check if item is already in the list
-            let mut list_iter = current.clone();
-            loop {
-                match list_iter {
-                    EvalResult::Nil => break,
-                    EvalResult::Cons(car, cdr) => {
-                        if values_equal(&item, &car.borrow()) {
-                            // Item already present, return the list unchanged
-                            return Ok(current);
-                        }
-                        list_iter = cdr.borrow().clone();
-                    }
-                    _ => return Err("pushnew: place must contain a list".to_string()),
-                }
+            if list_contains_with_key(&item, &current, test_fn.as_ref(), key_fn.as_ref(), env)? {
+                return Ok(current);
             }
 
             // Item not found, cons it onto the list
@@ -1212,19 +1258,8 @@ pub(super) fn eval_pushnew(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             let current = eval_with_env(place, env)?;
 
             // Check if item is already in the list
-            let mut list_iter = current.clone();
-            loop {
-                match list_iter {
-                    EvalResult::Nil => break,
-                    EvalResult::Cons(car, cdr) => {
-                        if values_equal(&item, &car.borrow()) {
-                            // Item already present, return the list unchanged
-                            return Ok(current);
-                        }
-                        list_iter = cdr.borrow().clone();
-                    }
-                    _ => return Err("pushnew: place must contain a list".to_string()),
-                }
+            if list_contains_with_key(&item, &current, test_fn.as_ref(), key_fn.as_ref(), env)? {
+                return Ok(current);
             }
 
             // Item not found, cons it onto the list
@@ -1263,6 +1298,41 @@ fn values_equal(a: &EvalResult, b: &EvalResult) -> bool {
     }
 }
 
+fn list_contains_with_key(
+    item: &EvalResult,
+    list: &EvalResult,
+    test_fn: Option<&EvalResult>,
+    key_fn: Option<&EvalResult>,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<bool, String> {
+    let mut current = list.clone();
+    loop {
+        match current {
+            EvalResult::Nil => return Ok(false),
+            EvalResult::Cons(car, cdr) => {
+                let car_val = car.borrow().clone();
+                let test_item = if let Some(key) = key_fn {
+                    apply_key_fn(key, &car_val, env)?
+                } else {
+                    car_val.clone()
+                };
+
+                let matches = if let Some(test) = test_fn {
+                    call_test_fn(test, item, &test_item, env)?
+                } else {
+                    values_equal(item, &test_item)
+                };
+
+                if matches {
+                    return Ok(true);
+                }
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("pushnew: place must contain a list".to_string()),
+        }
+    }
+}
+
 fn truthy(val: &EvalResult) -> bool {
     !matches!(val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
 }
@@ -1298,7 +1368,11 @@ fn collect_sequence(seq: &EvalResult) -> Result<(bool, Vec<EvalResult>), String>
             let items = s.chars().map(EvalResult::Character).collect();
             Ok((true, items))
         }
-        _ => Err("sequence must be a list or string".to_string()),
+        EvalResult::Array(arr) => {
+            let items = arr.borrow().clone();
+            Ok((false, items))
+        }
+        _ => Err("sequence must be a list, string, or array".to_string()),
     }
 }
 
@@ -1775,41 +1849,189 @@ pub(super) fn eval_find(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 }
 
 pub(super) fn eval_position(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (position item list) - find position of first occurrence
-    if args.len() != 2 {
-        return Err("position requires 2 arguments (item list)".to_string());
+    // (position item sequence &key test test-not key start end from-end)
+    if args.len() < 2 {
+        return Err("position requires at least 2 arguments (item sequence)".to_string());
     }
 
     let item = eval_with_env(&args[0], env)?;
-    let list = eval_with_env(&args[1], env)?;
+    let sequence = eval_with_env(&args[1], env)?;
 
-    if let EvalResult::String(s) = list {
-        for (idx, ch) in s.chars().enumerate() {
-            let elem = EvalResult::Character(ch);
-            if values_equal(&item, &elem) {
+    let mut from_end = false;
+    let mut start: usize = 0;
+    let mut end: Option<usize> = None;
+    let mut key_fn: Option<EvalResult> = None;
+    let mut test_fn: Option<EvalResult> = None;
+    let mut negate_test = false;
+
+    let mut i = 2;
+    while i < args.len() {
+        let key = match &args[i] {
+            ASTNode::Variable(name) if name.starts_with(':') => name.to_lowercase(),
+            _ => break,
+        };
+        if i + 1 >= args.len() {
+            return Err(format!("Missing value for keyword {}", key));
+        }
+        let val = eval_with_env(&args[i + 1], env)?;
+        match key.as_str() {
+            ":from-end" => {
+                from_end = truthy(&val);
+            }
+            ":start" => {
+                start = parse_index(&val, "start")?.unwrap_or(0);
+            }
+            ":end" => {
+                end = parse_index(&val, "end")?;
+            }
+            ":key" => {
+                key_fn = Some(val);
+            }
+            ":test" => {
+                test_fn = Some(val);
+                negate_test = false;
+            }
+            ":test-not" => {
+                test_fn = Some(val);
+                negate_test = true;
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+
+    let (_is_string, items) = collect_sequence(&sequence)?;
+    let len = items.len();
+    let end_idx = end.unwrap_or(len).min(len);
+    if start > end_idx {
+        return Ok(EvalResult::Nil);
+    }
+
+    if from_end {
+        if end_idx == 0 {
+            return Ok(EvalResult::Nil);
+        }
+        let mut idx = end_idx as i64 - 1;
+        while idx >= start as i64 {
+            let elem = &items[idx as usize];
+            let key_elem = if let Some(ref key) = key_fn {
+                apply_key_fn(key, elem, env)?
+            } else {
+                elem.clone()
+            };
+            let mut matches = if let Some(ref test) = test_fn {
+                call_test_fn(test, &item, &key_elem, env)?
+            } else {
+                values_equal(&item, &key_elem)
+            };
+            if negate_test {
+                matches = !matches;
+            }
+            if matches {
+                return Ok(EvalResult::Fixnum(idx));
+            }
+            idx -= 1;
+        }
+    } else {
+        for idx in start..end_idx {
+            let elem = &items[idx];
+            let key_elem = if let Some(ref key) = key_fn {
+                apply_key_fn(key, elem, env)?
+            } else {
+                elem.clone()
+            };
+            let mut matches = if let Some(ref test) = test_fn {
+                call_test_fn(test, &item, &key_elem, env)?
+            } else {
+                values_equal(&item, &key_elem)
+            };
+            if negate_test {
+                matches = !matches;
+            }
+            if matches {
                 return Ok(EvalResult::Fixnum(idx as i64));
             }
+        }
+    }
+
+    Ok(EvalResult::Nil)
+}
+
+pub(super) fn eval_search(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (search seq1 seq2) - find position of seq1 as subsequence in seq2
+    if args.len() < 2 {
+        return Err("search requires 2 arguments (seq1 seq2)".to_string());
+    }
+
+    let seq1 = eval_with_env(&args[0], env)?;
+    let seq2 = eval_with_env(&args[1], env)?;
+
+    // Handle string search
+    if let (EvalResult::String(s1), EvalResult::String(s2)) = (&seq1, &seq2) {
+        if let Some(pos) = s2.find(s1.as_str()) {
+            return Ok(EvalResult::Fixnum(pos as i64));
         }
         return Ok(EvalResult::Nil);
     }
 
-    let mut current = list;
-    let mut pos = 0i64;
-
+    // Handle list search - find seq1 as subsequence of seq2
+    // Convert seq1 to a vector for matching
+    let mut needle: Vec<EvalResult> = Vec::new();
+    let mut cur1 = seq1.clone();
     loop {
-        match current {
-            EvalResult::Nil => return Ok(EvalResult::Nil),
+        match cur1 {
             EvalResult::Cons(car, cdr) => {
-                let elem = car.borrow().clone();
-                if values_equal(&item, &elem) {
-                    return Ok(EvalResult::Fixnum(pos));
-                }
-                pos += 1;
-                current = cdr.borrow().clone();
+                needle.push(car.borrow().clone());
+                cur1 = cdr.borrow().clone();
             }
-            _ => return Err("position: second argument must be a list".to_string()),
+            EvalResult::Nil => break,
+            _ => break,
         }
     }
+
+    if needle.is_empty() {
+        return Ok(EvalResult::Fixnum(0));
+    }
+
+    // Search in seq2
+    // Helper function to check if needle matches at current position
+    fn matches_at(start: &EvalResult, needle: &[EvalResult]) -> bool {
+        let mut cur = start.clone();
+        for needle_elem in needle {
+            match cur {
+                EvalResult::Cons(mcar, mcdr) => {
+                    if !values_equal(&mcar.borrow(), needle_elem) {
+                        return false;
+                    }
+                    cur = mcdr.borrow().clone();
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    let mut pos = 0i64;
+    let mut cur2 = seq2.clone();
+    loop {
+        let next = match &cur2 {
+            EvalResult::Cons(_, cdr) => Some(cdr.borrow().clone()),
+            _ => None,
+        };
+
+        if matches_at(&cur2, &needle) {
+            return Ok(EvalResult::Fixnum(pos));
+        }
+
+        match next {
+            Some(n) => {
+                cur2 = n;
+                pos += 1;
+            }
+            None => break,
+        }
+    }
+    Ok(EvalResult::Nil)
 }
 
 pub(super) fn eval_count(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {

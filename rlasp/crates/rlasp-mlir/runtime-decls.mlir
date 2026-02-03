@@ -19,6 +19,8 @@ func.func private @cc_box_fixnum(i64) -> i64
 func.func private @cc_unbox_fixnum(i64) -> i64
 func.func private @cc_box_float(f64) -> i64
 func.func private @cc_unbox_float(i64) -> f64
+func.func private @cc_box_character(i64) -> i64
+func.func private @cc_unbox_character(i64) -> i64
 func.func private @cc_parse_bignum(!llvm.ptr, i64) -> i64
 
 // ==============================================================================
@@ -81,12 +83,19 @@ func.func private @cc_realp(i64) -> i64
 func.func private @cc_characterp(i64) -> i64
 func.func private @cc_stringp(i64) -> i64
 func.func private @cc_symbolp(i64) -> i64
+func.func private @cc_keywordp(i64) -> i64
 func.func private @cc_arrayp(i64) -> i64
 func.func private @cc_vectorp(i64) -> i64
 func.func private @cc_hash_table_p(i64) -> i64
+func.func private @cc_pathnamep(i64) -> i64
+func.func private @cc_streamp(i64) -> i64
+func.func private @cc_packagep(i64) -> i64
+func.func private @cc_typep(i64, i64) -> i64
 func.func private @cc_errorp(i64) -> i64
 func.func private @cc_plusp(i64) -> i64
 func.func private @cc_minusp(i64) -> i64
+func.func private @cc_min(i64, i64) -> i64
+func.func private @cc_max(i64, i64) -> i64
 func.func private @cc_equal(i64, i64) -> i64
 func.func private @cc_equalp(i64, i64) -> i64
 
@@ -102,12 +111,42 @@ func.func private @cc_magnitude(i64) -> i64
 // I/O
 func.func private @cc_print(i64) -> i64
 func.func private @cc_format(i64, i64) -> i64
+func.func private @cc_load(i64) -> i64
 
 // Arrays
 func.func private @cc_make_array(i64) -> i64
 func.func private @cc_make_array_with_contents(i64, i64) -> i64
+func.func private @cc_make_array_with_initial_element(i64, i64) -> i64
 func.func private @cc_aref(i64, i64) -> i64
 func.func private @cc_set_aref(i64, i64, i64) -> i64
+
+// Vectors
+func.func private @cc_make_vector(i64) -> i64
+func.func private @cc_svref(i64, i64) -> i64
+func.func private @cc_svset(i64, i64, i64) -> i64
+func.func private @cc_vector_length(i64) -> i64
+
+// Higher-order functions
+func.func private @cc_some(i64, i64) -> i64
+func.func private @cc_every(i64, i64) -> i64
+func.func private @cc_find_if(i64, i64) -> i64
+func.func private @cc_find_if_not(i64, i64) -> i64
+func.func private @cc_remove_if(i64, i64) -> i64
+func.func private @cc_remove_if_not(i64, i64) -> i64
+func.func private @cc_substitute_if(i64, i64, i64) -> i64
+func.func private @cc_position_if(i64, i64) -> i64
+func.func private @cc_position_if_not(i64, i64) -> i64
+func.func private @cc_position_full(i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+func.func private @cc_position_if_full(i64, i64, i64, i64, i64, i64) -> i64
+func.func private @cc_position_if_not_full(i64, i64, i64, i64, i64, i64) -> i64
+func.func private @cc_sort(i64, i64) -> i64
+func.func private @cc_nconc(i64, i64) -> i64
+func.func private @cc_acons(i64, i64, i64) -> i64
+func.func private @cc_getf(i64, i64, i64) -> i64
+func.func private @cc_map_nil(i64, i64) -> i64
+func.func private @cc_clrhash(i64) -> i64
+func.func private @cc_set_difference(i64, i64) -> i64
+func.func private @cc_substitute(i64, i64, i64) -> i64
 
 // Lists
 func.func private @cc_make_list(i64) -> i64
@@ -126,11 +165,14 @@ func.func private @cc_make_hash_table() -> i64
 func.func private @cc_gethash(i64, i64, i64) -> i64
 func.func private @cc_puthash(i64, i64, i64) -> i64
 func.func private @cc_maphash_stack(i64, i64)
+func.func private @cc_hash_table_keys(i64) -> i64
+func.func private @cc_hash_table_values(i64) -> i64
 
 // Strings
 func.func private @cc_make_string(!llvm.ptr, i64) -> i64
 func.func private @cc_make_string_repeat(i64, i64) -> i64
 func.func private @cc_string_equal(i64, i64) -> i64
+func.func private @cc_string_equal_full(i64) -> i64
 func.func private @cc_set_char(i64, i64, i64) -> i64
 func.func private @cc_string_upcase(i64) -> i64
 func.func private @cc_string_downcase(i64) -> i64
@@ -143,12 +185,20 @@ func.func private @cc_remove(i64, i64) -> i64
 func.func private @cc_subseq(i64, i64, i64) -> i64
 func.func private @cc_count(i64, i64) -> i64
 func.func private @cc_member(i64, i64) -> i64
+func.func private @cc_pushnew(i64, i64, i64, i64, i64) -> i64
 func.func private @cc_assoc(i64, i64) -> i64
+func.func private @cc_search(i64, i64) -> i64
+func.func private @cc_elt(i64, i64) -> i64
+func.func private @cc_concatenate(i64, i64) -> i64
+func.func private @cc_remove_duplicates(i64) -> i64
+func.func private @cc_remhash(i64, i64) -> i64
 
 // Symbols
 func.func private @cc_make_symbol(!llvm.ptr, i64) -> i64
 func.func private @cc_symbol_value(i64) -> i64
 func.func private @cc_set_symbol_value(i64, i64) -> i64
+func.func private @cc_get_symbol_property(i64, i64) -> i64
+func.func private @cc_set_symbol_property(i64, i64, i64) -> i64
 
 // Reduction
 func.func private @cc_reduce(i64, i64) -> i64
@@ -156,6 +206,7 @@ func.func private @cc_reduce_stack(i64, i64) -> i64
 
 // Mapping
 func.func private @cc_mapcar_stack(i64, i64) -> i64
+func.func private @cc_mapc_stack(i64, i64) -> i64
 
 // Loop
 func.func private @cc_loop_collect(i64, i64, i64, i64) -> i64
@@ -193,7 +244,6 @@ func.func private @cc_class_slots(i64) -> i64
 func.func private @cc_class_direct_slots(i64) -> i64
 func.func private @cc_class_direct_superclasses(i64) -> i64
 func.func private @cc_class_precedence_list(i64) -> i64
-func.func private @cc_typep(i64, i64) -> i64
 func.func private @cc_subtypep(i64, i64) -> i64
 
 // Mutation
@@ -202,6 +252,7 @@ func.func private @cc_set_cdr(i64, i64) -> i64
 
 // Uniform calling convention support
 func.func private @cc_arg(i64, i64) -> i64
+func.func private @cc_arg_present(i64, i64) -> i64
 func.func private @cc_collect_args(i64) -> i64
 func.func private @cc_collect_rest_args(i64, i64) -> i64
 func.func private @cc_if(i64, i64, i64) -> i64
@@ -211,7 +262,7 @@ func.func private @cc_make_lambda_ref_str(!llvm.ptr) -> i64
 func.func private @cc_make_lambda_ref_id(i64) -> i64
 func.func private @cc_make_closure(i64, i64) -> i64
 func.func private @cc_funcall(i64, i64) -> i64
-func.func private @cc_funcall_stack(i64)
+func.func private @cc_funcall_stack(i64, i64)
 func.func private @cc_apply(i64, i64) -> i64
 
 // Control flow

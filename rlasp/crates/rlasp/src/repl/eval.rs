@@ -54,4 +54,5 @@ pub mod eval_conditions;
 
 // Re-export main types and functions
 pub use eval_types::EvalResult;
-pub use eval_core::{eval, eval_with_persistent_env, expand_macros};
+pub use eval_core::{eval, eval_with_persistent_env, expand_macros, macroexpand_all_to_ast, extract_params_with_defaults};
+pub(crate) use eval_system::{result_to_ast, result_to_data_ast};

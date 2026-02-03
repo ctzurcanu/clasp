@@ -19,6 +19,9 @@ pub mod eval_stack;
 pub mod closure;
 pub mod error;
 pub mod io_syntax;
+pub mod pathname;
+pub mod stream;
+pub mod cl_builtins;
 
 pub use stack::{TypeTag, ObjectHandle, allocate_object};
 pub use header::{TypeHeader, ObjectType};
@@ -33,6 +36,9 @@ pub use hash_table::HashTable;
 pub use clos::{Class, Instance};
 pub use closure::Closure;
 pub use error::{LispError, ErrorKind};
+pub use pathname::Pathname;
+pub use stream::{Stream, StreamDirection, StreamElementType, StreamData};
+pub use cl_builtins::is_cl_builtin;
 
 // Re-export GC functions
 pub use gc::{init_gc, global_gc, is_gc_initialized, GCAllocator};

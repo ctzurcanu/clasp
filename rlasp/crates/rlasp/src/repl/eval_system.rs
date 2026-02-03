@@ -22,7 +22,10 @@ pub(super) fn eval_funcall(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
 
     // Call the function
-    call_function_with_values(func, &eval_args, env)
+    match call_function_with_values(func, &eval_args, env) {
+        Ok(result) => Ok(result),
+        Err(err) => Err(format!("{} (callee ast: {:?})", err, args[0])),
+    }
 }
 
 /// Helper to call a function value with pre-evaluated arguments
@@ -32,8 +35,8 @@ pub(super) fn call_function_with_values(
     env: &mut HashMap<String, EvalResult>
 ) -> Result<EvalResult, String> {
     match func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
-            eval_lambda_call_with_values(params, defaults, body, dynamic_env, closure_env, eval_args, env)
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
+            eval_lambda_call_with_values(params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, eval_args, env)
         }
         EvalResult::GenericFunction(gf) => {
             // Dispatch generic function with pre-evaluated arguments
@@ -65,15 +68,23 @@ pub(super) fn call_function_with_values(
             }
         }
         EvalResult::Symbol(name) => {
-            // Look up the function by name - try multiple variations
-            let lookup_names = vec![
+            // Look up the function by name in the function namespace (Lisp-2)
+            let mut lookup_names = vec![
                 name.clone(),
                 name.to_lowercase(),
                 name.to_uppercase(),
             ];
+            if name.contains(':') {
+                if let Some(base) = name.rsplit(':').next() {
+                    lookup_names.push(base.to_string());
+                    lookup_names.push(base.to_lowercase());
+                    lookup_names.push(base.to_uppercase());
+                }
+            }
 
             for lookup_name in &lookup_names {
-                if let Some(func_val) = env.get(lookup_name).cloned() {
+                let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, lookup_name);
+                if let Some(func_val) = env.get(&fn_name).cloned() {
                     match &func_val {
                         EvalResult::Lambda { .. } | EvalResult::GenericFunction(_) |
                         EvalResult::BuiltinFunction(_) | EvalResult::ForeignFunction(_) => {
@@ -249,12 +260,20 @@ pub(super) fn eval_apply_key(args: &[ASTNode], env: &mut HashMap<String, EvalRes
 pub(super) fn eval_lambda_call_with_values(
     params: Vec<String>,
     defaults: HashMap<String, ASTNode>,
+    supplied_p_vars: HashMap<String, String>,
+    key_params: HashMap<String, String>,
     body: Vec<ASTNode>,
     dynamic_env: bool,
     closure_env: Rc<RefCell<HashMap<String, EvalResult>>>,
     args: &[EvalResult],
     call_env: &mut HashMap<String, EvalResult>
 ) -> Result<EvalResult, String> {
+    fn is_global_binding_name(name: &str) -> bool {
+        name.starts_with(super::eval_core::FUNCTION_NS_PREFIX)
+            || name.starts_with('*')
+            || name.contains("::")
+            || name.contains(':')
+    }
     // Merge environments (dynamic_env prefers caller bindings)
     let mut combined_env = closure_env.borrow().clone();
     if dynamic_env {
@@ -291,116 +310,146 @@ pub(super) fn eval_lambda_call_with_values(
     let end_of_required = optional_pos.or(rest_pos).or(key_pos).or(aux_pos).unwrap_or(params.len());
     let required_params = &params[..end_of_required];
 
-    // Calculate optional params if any
-    let optional_params = if let Some(opt_idx) = optional_pos {
+    let (optional_params, key_params_slice) = if let Some(opt_idx) = optional_pos {
         let opt_end = rest_pos.or(key_pos).or(aux_pos).unwrap_or(params.len());
-        &params[opt_idx + 1..opt_end]
+        let optional = &params[opt_idx + 1..opt_end];
+        let keys = if let Some(key_idx) = key_pos {
+            let key_end = aux_pos.unwrap_or(params.len());
+            &params[key_idx + 1..key_end]
+        } else {
+            &params[0..0]
+        };
+        (optional, keys)
+    } else if let Some(key_idx) = key_pos {
+        let key_end = aux_pos.unwrap_or(params.len());
+        (&params[0..0], &params[key_idx + 1..key_end])
     } else {
-        &params[0..0]
+        (&params[0..0], &params[0..0])
     };
 
-    if let Some(rest_idx) = rest_pos {
-        // Handle &rest parameters
-        let required_params = &params[..rest_idx];
-        if args.len() < required_params.len() {
-            return Err(format!("Function requires at least {} arguments, got {}", required_params.len(), args.len()));
-        }
-        // Get rest parameter name, making sure it's not &aux
-        let rest_param = if rest_idx + 1 < params.len() && params[rest_idx + 1] != "&aux" {
-            &params[rest_idx + 1]
+    let key_param_vars: Vec<&String> = key_params_slice.iter()
+        .filter(|p| !p.starts_with('&'))
+        .collect();
+    let declared_key_names: Vec<String> = key_param_vars.iter()
+        .map(|p| key_params.get(*p).cloned().unwrap_or_else(|| super::eval_core::trim_keyword(p)))
+        .collect();
+
+    let rest_param = rest_pos.and_then(|r| {
+        let next = r + 1;
+        if next < params.len() && params.get(next).map_or(false, |p| p != "&aux" && p != "&key") {
+            Some(&params[next])
         } else {
-            return Err("&rest must be followed by a parameter name".to_string());
-        };
-
-        // Bind required parameters
-        for (param, arg) in required_params.iter().zip(args.iter()) {
-            closure_env.insert(param.clone(), arg.clone());
+            None
         }
+    });
 
-        // Bind rest parameter to list of remaining arguments
+    // Count positional arguments (before keyword arguments)
+    let mut positional_count = 0;
+    for (i, arg) in args.iter().enumerate() {
+        if let EvalResult::Symbol(name) = arg {
+            if name.starts_with(':') && i + 1 < args.len() {
+                let key_name = &name[1..];
+                if declared_key_names.iter().any(|p| p.eq_ignore_ascii_case(key_name)) {
+                    positional_count = i;
+                    break;
+                }
+            }
+        }
+        positional_count = i + 1;
+    }
+
+    let min_args = required_params.len();
+    if positional_count < min_args {
+        return Err(format!("Expected at least {} arguments, got {}", min_args, positional_count));
+    }
+
+    let positional_args = &args[..positional_count];
+    let keyword_args = &args[positional_count..];
+
+    // Bind required parameters
+    for (param, arg) in required_params.iter().zip(positional_args.iter()) {
+        closure_env.insert(param.clone(), arg.clone());
+    }
+
+    // Bind optional parameters
+    let optional_positional = &positional_args[required_params.len()..];
+    let mut consumed_optional = 0;
+    for (i, param) in optional_params.iter().enumerate() {
+        if i < optional_positional.len() {
+            closure_env.insert(param.clone(), optional_positional[i].clone());
+            consumed_optional += 1;
+            if let Some(supplied_p_var) = supplied_p_vars.get(param) {
+                closure_env.insert(supplied_p_var.clone(), EvalResult::Boolean(true));
+            }
+        } else if let Some(default_expr) = defaults.get(param) {
+            let default_value = eval_with_env(default_expr, &mut closure_env)?;
+            closure_env.insert(param.clone(), default_value);
+            if let Some(supplied_p_var) = supplied_p_vars.get(param) {
+                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+            }
+        } else {
+            closure_env.insert(param.clone(), EvalResult::Nil);
+            if let Some(supplied_p_var) = supplied_p_vars.get(param) {
+                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+            }
+        }
+    }
+
+    // Parse keyword arguments into a map
+    let mut keyword_map = HashMap::new();
+    let mut i = 0;
+    while i < keyword_args.len() {
+        if let EvalResult::Symbol(kw) = &keyword_args[i] {
+            if kw.starts_with(':') {
+                if i + 1 < keyword_args.len() {
+                    let key_name = &kw[1..];
+                    keyword_map.insert(key_name.to_string(), keyword_args[i + 1].clone());
+                    i += 2;
+                    continue;
+                } else {
+                    return Err(format!("Keyword {} requires a value", kw));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Bind keyword parameters with defaults
+    for key_param in key_param_vars.iter() {
+        let key_name = key_params.get(*key_param)
+            .cloned()
+            .unwrap_or_else(|| super::eval_core::trim_keyword(key_param));
+        if let Some(value) = keyword_map.get(&key_name) {
+            closure_env.insert((*key_param).clone(), value.clone());
+            if let Some(supplied_p_var) = supplied_p_vars.get(*key_param) {
+                closure_env.insert(supplied_p_var.clone(), EvalResult::Boolean(true));
+            }
+        } else if let Some(default_expr) = defaults.get(*key_param) {
+            let default_value = eval_with_env(default_expr, &mut closure_env)?;
+            closure_env.insert((*key_param).clone(), default_value);
+            if let Some(supplied_p_var) = supplied_p_vars.get(*key_param) {
+                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+            }
+        } else {
+            closure_env.insert((*key_param).clone(), EvalResult::Nil);
+            if let Some(supplied_p_var) = supplied_p_vars.get(*key_param) {
+                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+            }
+        }
+    }
+
+    // Bind rest parameter if present (including keyword args)
+    if let Some(rest_p) = rest_param {
+        let rest_start = required_params.len() + consumed_optional;
+        let rest_args = &args[rest_start..];
         let mut rest_list = EvalResult::Nil;
-        for arg in args[required_params.len()..].iter().rev() {
+        for arg in rest_args.iter().rev() {
             rest_list = EvalResult::Cons(
                 Rc::new(RefCell::new(arg.clone())),
                 Rc::new(RefCell::new(rest_list))
             );
         }
-        closure_env.insert(rest_param.clone(), rest_list);
-    } else if let Some(key_idx) = key_pos {
-        // Handle &key parameters
-        let required_params = &params[..key_idx];
-        let key_params = &params[key_idx + 1..];
-
-        // Bind required positional parameters
-        if args.len() < required_params.len() {
-            return Err(format!("Function requires at least {} arguments, got {}", required_params.len(), args.len()));
-        }
-        for (param, arg) in required_params.iter().zip(args.iter()) {
-            closure_env.insert(param.clone(), arg.clone());
-        }
-
-        // Parse keyword arguments from remaining args
-        let mut keyword_args = HashMap::new();
-        let remaining_args = &args[required_params.len()..];
-        let mut i = 0;
-        while i < remaining_args.len() {
-            if let EvalResult::Symbol(key_name) = &remaining_args[i] {
-                // Check if it's a keyword (starts with ':')
-                if key_name.starts_with(':') {
-                    let param_name = &key_name[1..]; // Remove ':'
-                    if i + 1 < remaining_args.len() {
-                        keyword_args.insert(param_name.to_string(), remaining_args[i + 1].clone());
-                        i += 2;
-                        continue;
-                    }
-                }
-            }
-            i += 1;
-        }
-
-        // Bind keyword parameters, using defaults if not provided
-        for key_param in key_params {
-            if let Some(value) = keyword_args.get(key_param) {
-                closure_env.insert(key_param.clone(), value.clone());
-            } else if let Some(default_expr) = defaults.get(key_param) {
-                // Evaluate default expression in closure environment
-                let default_value = eval_with_env(default_expr, &mut closure_env)?;
-                closure_env.insert(key_param.clone(), default_value);
-            } else {
-                // No default, bind to nil
-                closure_env.insert(key_param.clone(), EvalResult::Nil);
-            }
-        }
-
-    } else {
-        // Normal and optional parameters
-        let total_allowed = required_params.len() + optional_params.len();
-        if args.len() > total_allowed {
-            return Err(format!("Function requires at most {} arguments, got {}", total_allowed, args.len()));
-        }
-        if args.len() < required_params.len() {
-            return Err(format!("Function requires at least {} arguments, got {}", required_params.len(), args.len()));
-        }
-
-        // Bind required parameters
-        for (param, arg) in required_params.iter().zip(args.iter()) {
-            closure_env.insert(param.clone(), arg.clone());
-        }
-
-        // Bind optional parameters from remaining args or defaults
-        let optional_args = &args[required_params.len()..];
-        for (i, param) in optional_params.iter().enumerate() {
-            if i < optional_args.len() {
-                closure_env.insert(param.clone(), optional_args[i].clone());
-            } else if let Some(default_expr) = defaults.get(param) {
-                // Evaluate default expression in closure environment
-                let default_value = eval_with_env(default_expr, &mut closure_env)?;
-                closure_env.insert(param.clone(), default_value);
-            } else {
-                // No default provided, bind to nil
-                closure_env.insert(param.clone(), EvalResult::Nil);
-            }
-        }
+        closure_env.insert(rest_p.clone(), rest_list);
     }
 
     // Bind &aux parameters (local variables with optional initializers)
@@ -422,6 +471,13 @@ pub(super) fn eval_lambda_call_with_values(
     let mut result = EvalResult::Nil;
     for expr in &body {
         result = eval_with_env(expr, &mut closure_env)?;
+    }
+
+    // Propagate global-like bindings back to the caller env
+    for (k, v) in closure_env.iter() {
+        if is_global_binding_name(k) {
+            call_env.insert(k.clone(), v.clone());
+        }
     }
 
     Ok(result)
@@ -535,7 +591,7 @@ fn result_to_cons_ast(result: &EvalResult) -> Result<ASTNode, String> {
     }
 }
 
-pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
+pub(crate) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
     match result {
         EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
         EvalResult::Float(f) => Ok(ASTNode::float(*f)),
@@ -569,7 +625,8 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
 
             // Check if car is 'quote' - if so, handle specially to preserve data as data
             if let EvalResult::Symbol(sym) = &*car.borrow() {
-                if sym == "quote" {
+                let base = sym.rsplit(':').next().unwrap_or(sym.as_str());
+                if base.eq_ignore_ascii_case("quote") {
                     // For quote, convert the argument using result_to_data_ast
                     // to preserve list structure as data, not as code
                     let args = match &*cdr.borrow() {
@@ -582,6 +639,36 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                     };
                     if args.len() == 1 {
                         return Ok(ASTNode::Quote(Box::new(args[0].clone())));
+                    }
+                }
+                if base.eq_ignore_ascii_case("unquote") {
+                    let args = match &*cdr.borrow() {
+                        EvalResult::Nil => vec![],
+                        EvalResult::Cons(inner_car, _) => vec![result_to_ast(&inner_car.borrow())?],
+                        _ => vec![],
+                    };
+                    if args.len() == 1 {
+                        return Ok(ASTNode::Unquote(Box::new(args[0].clone())));
+                    }
+                }
+                if base.eq_ignore_ascii_case("unquote-splicing") {
+                    let args = match &*cdr.borrow() {
+                        EvalResult::Nil => vec![],
+                        EvalResult::Cons(inner_car, _) => vec![result_to_ast(&inner_car.borrow())?],
+                        _ => vec![],
+                    };
+                    if args.len() == 1 {
+                        return Ok(ASTNode::UnquoteSplicing(Box::new(args[0].clone())));
+                    }
+                }
+                if base.eq_ignore_ascii_case("backquote") {
+                    let args = match &*cdr.borrow() {
+                        EvalResult::Nil => vec![],
+                        EvalResult::Cons(inner_car, _) => vec![result_to_ast(&inner_car.borrow())?],
+                        _ => vec![],
+                    };
+                    if args.len() == 1 {
+                        return Ok(ASTNode::Backquote(Box::new(args[0].clone())));
                     }
                 }
             }
@@ -601,6 +688,21 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
 
             // Check if this is a special form and construct the appropriate ASTNode
             if let ASTNode::Variable(name) = &car_ast {
+                let base = name.rsplit(':').next().unwrap_or(name.as_str());
+                if base.eq_ignore_ascii_case("lambda") {
+                    if args.is_empty() {
+                        return Ok(ASTNode::Lambda {
+                            params: Vec::new(),
+                            defaults: std::collections::HashMap::new(),
+                            supplied_p_vars: std::collections::HashMap::new(),
+                            key_params: std::collections::HashMap::new(),
+                            body: Vec::new(),
+                        });
+                    }
+                    let (params, defaults, supplied_p_vars, key_params) = super::eval_core::extract_params_with_defaults(&args[0]);
+                    let body = if args.len() > 1 { args[1..].to_vec() } else { vec![] };
+                    return Ok(ASTNode::Lambda { params, defaults, supplied_p_vars, key_params, body });
+                }
                 match name.as_str() {
                     "let" => {
                         // (let ((var1 val1) (var2 val2) ...) body...)
@@ -708,8 +810,8 @@ pub(super) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                 args,
             })
         }
-        EvalResult::Lambda { params, defaults, supplied_p_vars, body, .. } => {
-            Ok(ASTNode::lambda_with_supplied_p(params.clone(), defaults.clone(), supplied_p_vars.clone(), body.clone()))
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, .. } => {
+            Ok(ASTNode::lambda_with_supplied_p(params.clone(), defaults.clone(), supplied_p_vars.clone(), key_params.clone(), body.clone()))
         }
         EvalResult::Macro { params, body } => {
             Ok(ASTNode::Macro {
@@ -803,7 +905,7 @@ pub(super) fn cons_to_list(result: &EvalResult) -> Result<Vec<ASTNode>, String> 
 /// Convert EvalResult to AST as data (for quoted forms)
 /// Unlike result_to_ast, this preserves lists as Call nodes that won't be evaluated
 /// because they're wrapped in a Quote
-pub(super) fn result_to_data_ast(result: &EvalResult) -> Result<ASTNode, String> {
+pub(crate) fn result_to_data_ast(result: &EvalResult) -> Result<ASTNode, String> {
     match result {
         EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
         EvalResult::Float(f) => Ok(ASTNode::float(*f)),
@@ -815,6 +917,24 @@ pub(super) fn result_to_data_ast(result: &EvalResult) -> Result<ASTNode, String>
             // For data, convert list to a simple Call structure
             // This is ok because when inside Quote, it won't be evaluated
             let car_ast = result_to_data_ast(&car.borrow())?;
+
+            if let EvalResult::Symbol(sym) = &*car.borrow() {
+                let base = sym.rsplit(':').next().unwrap_or(sym.as_str());
+                if let EvalResult::Cons(inner_car, _) = &*cdr.borrow() {
+                    if base.eq_ignore_ascii_case("unquote") {
+                        let inner_ast = result_to_ast(&inner_car.borrow())?;
+                        return Ok(ASTNode::Unquote(Box::new(inner_ast)));
+                    }
+                    if base.eq_ignore_ascii_case("unquote-splicing") {
+                        let inner_ast = result_to_ast(&inner_car.borrow())?;
+                        return Ok(ASTNode::UnquoteSplicing(Box::new(inner_ast)));
+                    }
+                    if base.eq_ignore_ascii_case("backquote") {
+                        let inner_ast = result_to_ast(&inner_car.borrow())?;
+                        return Ok(ASTNode::Backquote(Box::new(inner_ast)));
+                    }
+                }
+            }
 
             // Check if this is a dotted pair
             let cdr_val = cdr.borrow();
@@ -881,37 +1001,35 @@ fn parse_let_bindings(bindings_ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, 
     match bindings_ast {
         ASTNode::Constant(crate::ir::ConstantValue::Nil) => Ok(vec![]),
         ASTNode::Call { function, args } => {
-            // The bindings list has been converted to a Call
-            // Each element (binding) is itself a Call of (var value)
-            let mut bindings = vec![];
+            // The bindings list has been converted to a Call.
+            // Each element is either a variable symbol or a (var [init]) call.
+            let mut elems = Vec::with_capacity(args.len() + 1);
+            elems.push((**function).clone());
+            elems.extend(args.iter().cloned());
 
-            // First element is the function (which is the first binding)
-            if let ASTNode::Call { function: bind_func, args: bind_args } = &**function {
-                if let ASTNode::Variable(var) = &**bind_func {
-                    if bind_args.len() != 1 {
-                        return Err(format!("let binding must have exactly one value, got {}", bind_args.len()));
+            let mut bindings = Vec::with_capacity(elems.len());
+            for elem in elems {
+                match elem {
+                    ASTNode::Variable(var) => {
+                        bindings.push((var, ASTNode::nil()));
                     }
-                    bindings.push((var.clone(), bind_args[0].clone()));
-                } else {
-                    return Err("let binding must start with a variable".to_string());
-                }
-            } else {
-                return Err("Invalid let binding format".to_string());
-            }
-
-            // Rest of the bindings are in args
-            for arg in args {
-                if let ASTNode::Call { function: bind_func, args: bind_args } = arg {
-                    if let ASTNode::Variable(var) = &**bind_func {
-                        if bind_args.len() != 1 {
-                            return Err(format!("let binding must have exactly one value, got {}", bind_args.len()));
+                    ASTNode::Call { function: bind_func, args: bind_args } => {
+                        if let ASTNode::Variable(var) = *bind_func {
+                            if bind_args.len() > 1 {
+                                return Err(format!(
+                                    "let binding must have at most one value, got {}",
+                                    bind_args.len()
+                                ));
+                            }
+                            let value = bind_args.get(0).cloned().unwrap_or_else(ASTNode::nil);
+                            bindings.push((var, value));
+                        } else {
+                            return Err("let binding must start with a variable".to_string());
                         }
-                        bindings.push((var.clone(), bind_args[0].clone()));
-                    } else {
-                        return Err("let binding must start with a variable".to_string());
                     }
-                } else {
-                    return Err("Invalid let binding format".to_string());
+                    _ => {
+                        return Err("Invalid let binding format".to_string());
+                    }
                 }
             }
 
@@ -1502,19 +1620,28 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         file_path = file_path.replacen("sys:", "./", 1);
     }
 
+    // Resolve relative paths against current directory for *load-pathname*
+    let resolved_path = if std::path::Path::new(&file_path).is_absolute() {
+        file_path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&file_path).to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_path.clone())
+    };
+
     // Save old values of *load-pathname* and *load-truename*
     let old_load_pathname = env.get("*load-pathname*").cloned();
     let old_load_truename = env.get("*load-truename*").cloned();
 
     // Set *load-pathname* and *load-truename* during load
-    env.insert("*load-pathname*".to_string(), EvalResult::String(file_path.clone()));
-    let truename = std::fs::canonicalize(&file_path)
+    env.insert("*load-pathname*".to_string(), EvalResult::String(resolved_path.clone()));
+    let truename = std::fs::canonicalize(&resolved_path)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| file_path.clone());
+        .unwrap_or_else(|_| resolved_path.clone());
     env.insert("*load-truename*".to_string(), EvalResult::String(truename));
 
-    let contents = std::fs::read_to_string(&file_path)
-        .map_err(|e| format!("Failed to read file {}: {}", file_path, e))?;
+    let contents = std::fs::read_to_string(&resolved_path)
+        .map_err(|e| format!("Failed to read file {}: {}", resolved_path, e))?;
 
     let objects = rlasp_reader::read_all_from_string(&contents)
         .map_err(|e| format!("Error parsing {}: {:?}", file_path, e))?;
@@ -1649,7 +1776,7 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
     // The complement lambda takes any number of arguments (&rest args)
     // and returns (not (apply func args))
     match func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: func_env, dynamic_env } => {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: func_env, dynamic_env } => {
             // Create a new lambda that wraps the original and negates its result
             // We'll create a special "complement lambda" that stores the original function
             // For now, we'll use a simpler approach: create a lambda with &rest that calls the function and negates
@@ -1669,12 +1796,13 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
 
             // Store the original function in a new environment
             let mut complement_env = func_env.borrow().clone();
-            complement_env.insert("__complement_inner__".to_string(), EvalResult::Lambda { params, defaults, supplied_p_vars, body, env: func_env, dynamic_env });
+            complement_env.insert("__complement_inner__".to_string(), EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: func_env, dynamic_env });
 
             Ok(EvalResult::Lambda {
                 params: vec!["&rest".to_string(), "__complement_args__".to_string()],
                 defaults: HashMap::new(),
                 supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
                 body: complement_body,
                 env: Rc::new(RefCell::new(complement_env)),
                 dynamic_env: false,
@@ -1698,6 +1826,7 @@ pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalRe
                 params: vec!["&rest".to_string(), "__complement_args__".to_string()],
                 defaults: HashMap::new(),
                 supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
                 body: complement_body,
                 env: Rc::new(RefCell::new(env.clone())),
                 dynamic_env: false,
@@ -2104,10 +2233,12 @@ pub(super) fn eval_maphash(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 
                 // Call the function with key and value
                 match &func {
-                    EvalResult::Lambda { params, defaults, supplied_p_vars: _, body, env: closure_env, dynamic_env } => {
+                    EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
                         eval_lambda_call_with_values(
                             params.clone(),
                             defaults.clone(),
+                            supplied_p_vars.clone(),
+                            key_params.clone(),
                             body.clone(),
                             *dynamic_env,
                             closure_env.clone(),
@@ -2313,12 +2444,41 @@ pub(super) fn eval_macro_function(args: &[ASTNode], env: &mut HashMap<String, Ev
 
     match eval_with_env(&args[0], env)? {
         EvalResult::Symbol(name) => {
-            match env.get(&name) {
-                Some(EvalResult::Macro { .. }) => Ok(env.get(&name).unwrap().clone()),
-                _ => Ok(EvalResult::Nil),
+            let mut candidates = vec![
+                name.clone(),
+                name.to_lowercase(),
+                name.to_uppercase(),
+            ];
+            if let Some(base) = name.rsplit(':').next() {
+                if base != name {
+                    candidates.push(base.to_string());
+                    candidates.push(base.to_lowercase());
+                    candidates.push(base.to_uppercase());
+                }
             }
+
+            for cand in candidates {
+                let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, cand);
+                if let Some(val) = env.get(&fn_name) {
+                    if matches!(val, EvalResult::Macro { .. }) {
+                        return Ok(val.clone());
+                    }
+                }
+                if let Some(val) = env.get(&cand) {
+                    if matches!(val, EvalResult::Macro { .. }) {
+                        return Ok(val.clone());
+                    }
+                }
+            }
+
+            Ok(EvalResult::Nil)
         }
-        _ => Err("macro-function requires a symbol".to_string()),
+        other => {
+            if std::env::var("RLASP_DEBUG_MACRO_FUNCTION").is_ok() {
+                eprintln!("[macro-function] arg={:?} ast={:?}", other, args.get(0));
+            }
+            Err("macro-function requires a symbol".to_string())
+        }
     }
 }
 
@@ -2463,6 +2623,7 @@ pub(super) fn eval_fdefinition(args: &[ASTNode], env: &mut HashMap<String, EvalR
                     params: vec!["&rest".to_string(), "args".to_string()],
                     defaults: std::collections::HashMap::new(),
                     supplied_p_vars: std::collections::HashMap::new(),
+                    key_params: std::collections::HashMap::new(),
                     body: vec![crate::ir::ASTNode::nil()],
                     env: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
                     dynamic_env: false,
@@ -3129,11 +3290,11 @@ pub(super) fn result_to_ast_quoted(result: &EvalResult) -> Result<ASTNode, Strin
                 args: elements?,
             })
         }
-        EvalResult::Lambda { params, defaults, supplied_p_vars, body, .. } => {
-            if defaults.is_empty() && supplied_p_vars.is_empty() {
+        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, .. } => {
+            if defaults.is_empty() && supplied_p_vars.is_empty() && key_params.is_empty() {
                 Ok(ASTNode::lambda(params.clone(), body.clone()))
             } else {
-                Ok(ASTNode::lambda_with_supplied_p(params.clone(), defaults.clone(), supplied_p_vars.clone(), body.clone()))
+                Ok(ASTNode::lambda_with_supplied_p(params.clone(), defaults.clone(), supplied_p_vars.clone(), key_params.clone(), body.clone()))
             }
         }
         EvalResult::Macro { params, body } => {

@@ -1,5 +1,13 @@
 # rlasp Development Progress
 
+## Current
+- Interpreter runs asdf.lisp
+- MLIR hits stack overflow in asdf.lisp
+- Read-time eval (#.) handled in lisp_to_ast
+- Loop :by support for :on/:in
+- Propagate global bindings out of lambda calls (quiet load/defs)
+- MLIR runtime load (cc_load) wired for compiled `load`
+
 ## Completed ✅
 
 ### Phase 1.1: Core Object System (Week 1)
@@ -49,6 +57,7 @@
 - ✅ Rust FFI: Register functions with #[lisp_fn], call directly from Lisp
 - ✅ Mixed evaluation: `(+ (sqrt 144.0) 10)` works!
 - ✅ Piped input support for release builds
+- ✅ MLIR: vectors, mapc/keywordp, variadic compares, position keywords
 
 ### Phase 2: LLVM JIT Infrastructure ✅ COMPLETE!
 - ✅ LLVM IR code generation using inkwell

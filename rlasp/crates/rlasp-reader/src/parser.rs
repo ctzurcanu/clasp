@@ -24,7 +24,8 @@ pub fn is_skip_marker(obj: &LispObject) -> bool {
 /// Default features available in rlasp
 const DEFAULT_FEATURES: &[&str] = &[
     "RLASP",
-    "CLASP",           // For ASDF compatibility
+    "SBCL",
+    "SB-UNICODE",
     "COMMON-LISP",
     "ANSI-CL",
     "IEEE-FLOATING-POINT",
@@ -340,10 +341,10 @@ impl Parser {
             TokenKind::HashDot => {
                 // Read-time eval: #.(form)
                 // Evaluates form at read time and uses result as object
-                // Wrap in (read-time-eval form) marker for processing during AST conversion
+                // Wrap in internal marker (sys::read-time-eval form) for processing during AST conversion
                 self.advance()?; // skip #.
                 let form = self.read_expr()?;
-                let rte_sym = rlasp_runtime::Symbol::allocate("read-time-eval");
+                let rte_sym = rlasp_runtime::Symbol::allocate("sys::read-time-eval");
                 Ok(rlasp_runtime::Cons::list(&[rte_sym, form]))
             }
 

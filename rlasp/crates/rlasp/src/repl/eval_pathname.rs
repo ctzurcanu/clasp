@@ -103,18 +103,18 @@ fn directory_list_to_string(dir: &EvalResult) -> Option<String> {
             _ => return None,
         };
 
-        if idx == 0 {
-            if item_str.eq_ignore_ascii_case(":absolute") {
+        if item_str.eq_ignore_ascii_case(":absolute") {
+            if idx == 0 {
                 is_absolute = true;
-                continue;
             }
-            if item_str.eq_ignore_ascii_case(":relative") {
-                continue;
-            }
-            if item_str.eq_ignore_ascii_case(":back") {
-                parts.push("..".to_string());
-                continue;
-            }
+            continue;
+        }
+        if item_str.eq_ignore_ascii_case(":relative") {
+            continue;
+        }
+        if item_str.eq_ignore_ascii_case(":back") {
+            parts.push("..".to_string());
+            continue;
         }
 
         let trimmed = item_str.trim_matches('/');

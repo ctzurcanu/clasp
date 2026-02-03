@@ -1,7 +1,52 @@
 /// Convert LispObject from rlasp-reader to ASTNode for evaluation
 
 use crate::ir::{ASTNode, ConstantValue, SlotSpec};
+use super::eval::{eval_with_persistent_env, result_to_ast, result_to_data_ast, EvalResult};
 use rlasp_runtime::{LispObject, RVector, header::{TypeHeader, ObjectType}};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+thread_local! {
+    static READ_TIME_ENV_PTR: RefCell<Option<*mut HashMap<String, EvalResult>>> = RefCell::new(None);
+}
+
+pub fn with_read_time_env<F, R>(env: &mut HashMap<String, EvalResult>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    struct ResetGuard(Option<*mut HashMap<String, EvalResult>>);
+
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            READ_TIME_ENV_PTR.with(|ptr| {
+                *ptr.borrow_mut() = self.0;
+            });
+        }
+    }
+
+    let prev = READ_TIME_ENV_PTR.with(|ptr| ptr.replace(Some(env as *mut _)));
+    let _guard = ResetGuard(prev);
+    f()
+}
+
+fn eval_read_time_form(form: LispObject, as_data: bool) -> Result<ASTNode, String> {
+    let ast = lisp_to_ast(form)?;
+    let env_ptr = READ_TIME_ENV_PTR.with(|ptr| *ptr.borrow());
+    let result = if let Some(env_ptr) = env_ptr {
+        // Safety: pointer is only set within with_read_time_env and lives for the duration.
+        let env = unsafe { &mut *env_ptr };
+        eval_with_persistent_env(&ast, env)?
+    } else {
+        let mut env = HashMap::new();
+        eval_with_persistent_env(&ast, &mut env)?
+    };
+
+    if as_data {
+        result_to_data_ast(&result)
+    } else {
+        result_to_ast(&result)
+    }
+}
 
 pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     // Special case: raw value 0 is ambiguous - it could be fixnum(0) or nil()
@@ -43,6 +88,11 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             if name.starts_with('"') && name.ends_with('"') {
                                 let string_content = &name[1..name.len()-1];
                                 return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
+                            }
+
+                            // Keywords are self-evaluating constants
+                            if name.starts_with(':') {
+                                return Ok(ASTNode::Constant(ConstantValue::Symbol(name.to_string())));
                             }
 
                             // Special case: the symbol 'nil' should be treated as NIL constant
@@ -195,6 +245,28 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     raw_name
                 };
 
+                let base = name.rsplit(':').next().unwrap_or(name);
+                if base.eq_ignore_ascii_case("read-time-eval") {
+                    if !cdr.is_cons() {
+                        return Err("read-time-eval requires one argument".to_string());
+                    }
+                    let cdr_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
+                    if cdr_ptr.is_null() {
+                        return Err("read-time-eval requires one argument".to_string());
+                    }
+                    let cdr_cons = unsafe { &*cdr_ptr };
+                    if !cdr_cons.cdr().is_nil() {
+                        return Err("read-time-eval requires one argument".to_string());
+                    }
+                    return eval_read_time_form(cdr_cons.car(), false);
+                }
+
+                if std::env::var("RLASP_DEBUG_DEFUN").is_ok()
+                    && name.eq_ignore_ascii_case("defun")
+                {
+                    let args = cdr_to_vec(cdr.clone())?;
+                    eprintln!("[defun-raw] args={:?}", args);
+                }
                 match name {
                     "if" => {
                         let args = cdr_to_vec(cdr)?;
@@ -212,6 +284,18 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         let args = cdr_to_vec(cdr)?;
                         if args.is_empty() {
                             return Err("when requires at least 1 argument (test)".to_string());
+                        }
+                        if std::env::var("RLASP_DEBUG_WHEN").is_ok() {
+                            if let ASTNode::Call { function, args: test_args } = &args[0] {
+                                if let ASTNode::Variable(fn_name) = function.as_ref() {
+                                    if fn_name.eq_ignore_ascii_case("null")
+                                        && test_args.len() == 1
+                                        && matches!(&test_args[0], ASTNode::Variable(v) if v.eq_ignore_ascii_case("specified") || v.eq_ignore_ascii_case("defaults"))
+                                    {
+                                        eprintln!("[when-null] args={:?}", args);
+                                    }
+                                }
+                            }
                         }
                         let test = args[0].clone();
                         let body = if args.len() > 1 {
@@ -251,6 +335,31 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
 
                         let keyform = lisp_to_ast(raw_clauses[0].clone())?;
+                        if std::env::var("RLASP_DEBUG_CASE").is_ok() {
+                            if let ASTNode::Call { function, args } = &keyform {
+                                if let ASTNode::Variable(fn_name) = function.as_ref() {
+                                    if fn_name.eq_ignore_ascii_case("first")
+                                        && args.len() == 1
+                                        && matches!(&args[0], ASTNode::Variable(v) if v.eq_ignore_ascii_case("directory"))
+                                    {
+                                        let mut clause_keys = Vec::new();
+                                        for raw_clause in raw_clauses.iter().skip(1) {
+                                            if let Some(cons_ptr) = raw_clause.as_cons_ptr() {
+                                                let cons = unsafe { &*cons_ptr };
+                                                clause_keys.push(debug_key_list(&cons.car()));
+                                            } else {
+                                                clause_keys.push(format!("non-cons: {:?}", raw_clause));
+                                            }
+                                        }
+                                        eprintln!(
+                                            "[case-dir] raw_len={} clause_keys={:?}",
+                                            raw_clauses.len(),
+                                            clause_keys
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         let tmp_var = "__case_tmp".to_string();
 
                         // Build cond clauses from raw LispObjects
@@ -283,8 +392,29 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             }
                         }
 
+                        if std::env::var("RLASP_DEBUG_CASE").is_ok() && cond_clauses.is_empty() {
+                            eprintln!(
+                                "[case-empty] keyform={:?} raw_len={} raw_clauses={:?}",
+                                keyform,
+                                raw_clauses.len(),
+                                raw_clauses
+                            );
+                        }
+
                         // Build (let ((tmp keyform)) (cond ...))
                         let cond_node = ASTNode::Cond { clauses: cond_clauses };
+                        if std::env::var("RLASP_DEBUG_CASE").is_ok() {
+                            if let ASTNode::Call { function, args } = &keyform {
+                                if let ASTNode::Variable(fn_name) = function.as_ref() {
+                                    if fn_name.eq_ignore_ascii_case("first")
+                                        && args.len() == 1
+                                        && matches!(&args[0], ASTNode::Variable(v) if v.eq_ignore_ascii_case("directory"))
+                                    {
+                                        eprintln!("[case-dir-ast] node={:?}", cond_node);
+                                    }
+                                }
+                            }
+                        }
                         return Ok(ASTNode::let_bindings(
                             vec![(tmp_var, keyform)],
                             vec![cond_node]
@@ -351,6 +481,13 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         } else {
                             vec![]
                         };
+                        if std::env::var("RLASP_DEBUG_BLOCK").is_ok() {
+                            if let Some(n) = &name {
+                                if n.to_lowercase().contains("merge-pathnames*") {
+                                    eprintln!("[block-merge] body={:?}", body);
+                                }
+                            }
+                        }
                         return Ok(ASTNode::Block { name, body });
                     }
                     "return-from" => {
@@ -409,38 +546,49 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     }
                     "cond" => {
                         // Parse: (cond (test1 result1) (test2 result2) ...)
-                        let raw_clauses = cdr_to_vec(cdr)?;
+                        // Handle clauses at raw LispObject level so the test expression
+                        // isn't misinterpreted as a function position.
+                        let raw_clauses = raw_cdr_to_vec(cdr.clone())?;
                         let mut clauses = Vec::new();
 
-                        for clause_ast in raw_clauses {
-                            // Each clause should be a list (test result)
-                            match &clause_ast {
-                                ASTNode::Call { function, args } => {
-                                    // The test is the function, results are the args
-                                    let test = (**function).clone();
-                                    let result = if args.is_empty() {
-                                        // (test) - result is test value itself
-                                        test.clone()
-                                    } else if args.len() == 1 {
-                                        args[0].clone()
+                        for raw_clause in raw_clauses {
+                            if raw_clause.is_nil() {
+                                continue;
+                            }
+
+                            if raw_clause.is_cons() {
+                                let elems = raw_cdr_to_vec_with_first(raw_clause)?;
+                                if elems.is_empty() {
+                                    continue;
+                                }
+
+                                let test = lisp_to_ast(elems[0].clone())?;
+                                let result = if elems.len() == 1 {
+                                    // (test) - result is test value itself
+                                    test.clone()
+                                } else {
+                                    let body_asts: Result<Vec<_>, _> = elems[1..]
+                                        .iter()
+                                        .map(|o| lisp_to_ast(o.clone()))
+                                        .collect();
+                                    let body_asts = body_asts?;
+                                    if body_asts.len() == 1 {
+                                        body_asts[0].clone()
                                     } else {
-                                        ASTNode::progn(args.clone())
-                                    };
-                                    clauses.push((test, result));
+                                        ASTNode::progn(body_asts)
+                                    }
+                                };
+
+                                if std::env::var("RLASP_DEBUG_COND").is_ok() {
+                                    eprintln!("[cond] raw_clause={:?}", raw_clause);
+                                    eprintln!("[cond] test={:?} result={:?}", test, result);
                                 }
-                                ASTNode::Quote(inner) => {
-                                    // Quoted form as clause - unlikely but handle it
-                                    // Treat quote as test, and its value as result
-                                    clauses.push((clause_ast.clone(), clause_ast.clone()));
-                                }
-                                ASTNode::Constant(ConstantValue::Nil) => {
-                                    // Empty clause () - skip
-                                }
-                                _ => {
-                                    // For unsupported patterns, skip and continue
-                                    // or treat the clause as (test) where result is test
-                                    clauses.push((clause_ast.clone(), clause_ast.clone()));
-                                }
+
+                                clauses.push((test, result));
+                            } else {
+                                // Non-list clause - treat as (test)
+                                let test = lisp_to_ast(raw_clause)?;
+                                clauses.push((test.clone(), test));
                             }
                         }
 
@@ -491,9 +639,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if args.is_empty() {
                             return Err("lambda requires at least 1 argument".to_string());
                         }
-                        let (params, defaults, supplied_p_vars) = extract_params_with_defaults(&args[0]);
+                        let (params, defaults, supplied_p_vars, key_params) = extract_params_with_defaults(&args[0]);
                         let body = args[1..].to_vec();
-                        return Ok(ASTNode::lambda_with_supplied_p(params, defaults, supplied_p_vars, body));
+                        return Ok(ASTNode::lambda_with_supplied_p(params, defaults, supplied_p_vars, key_params, body));
                     }
                     "dotimes" => {
                         // Parse: (dotimes (var count [result]) body...)
@@ -949,6 +1097,155 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             slots: slot_specs,
                         });
                     }
+                    "define-condition" => {
+                        // (define-condition name (parent-types...) ((slot options...) ...) options...)
+                        // Conditions are like classes but inherit from CONDITION by default
+                        let args = cdr_to_vec(cdr)?;
+                        if args.len() < 2 {
+                            return Err("define-condition requires at least name and parent-types".to_string());
+                        }
+
+                        // If name contains unquote, keep as Call for later evaluation
+                        if contains_unquote(&args[0]) {
+                            return Ok(ASTNode::Call {
+                                function: Box::new(ASTNode::variable("define-condition".to_string())),
+                                args,
+                            });
+                        }
+
+                        // Parse condition name
+                        let condition_name = match &args[0] {
+                            ASTNode::Variable(n) => n.clone(),
+                            _ => return Err("define-condition name must be a symbol".to_string()),
+                        };
+
+                        // Parse parent types - default to (condition) if empty
+                        let parent_types = match &args[1] {
+                            ASTNode::Constant(ConstantValue::Nil) => vec!["condition".to_string()],
+                            ASTNode::Call { function, args: parents } => {
+                                let mut all_parents = vec![*function.clone()];
+                                all_parents.extend(parents.clone());
+                                let parsed: Vec<String> = all_parents.iter().filter_map(|s| {
+                                    if let ASTNode::Variable(name) = s {
+                                        Some(name.clone())
+                                    } else {
+                                        None
+                                    }
+                                }).collect();
+                                if parsed.is_empty() {
+                                    vec!["condition".to_string()]
+                                } else {
+                                    parsed
+                                }
+                            }
+                            _ => vec!["condition".to_string()],
+                        };
+
+                        // Parse slots (args[2] if it exists, otherwise empty)
+                        // Similar to defclass slot parsing
+                        let slots_def = if args.len() > 2 { &args[2] } else { &ASTNode::Constant(ConstantValue::Nil) };
+
+                        let mut slot_specs = Vec::new();
+
+                        match slots_def {
+                            ASTNode::Constant(ConstantValue::Nil) => {
+                                // No slots
+                            }
+                            ASTNode::Call { function, args: slot_list } => {
+                                // Process all slots
+                                let mut all_slots = vec![function.as_ref().clone()];
+                                all_slots.extend(slot_list.clone());
+
+                                for slot_def in &all_slots {
+                                    match slot_def {
+                                        // Simple slot name
+                                        ASTNode::Variable(slot_name) => {
+                                            slot_specs.push(SlotSpec {
+                                                name: slot_name.clone(),
+                                                initarg: None,
+                                                initform: None,
+                                                accessor: None,
+                                                reader: Some(slot_name.clone()), // Default reader for conditions
+                                                writer: None,
+                                            });
+                                        }
+                                        // Slot with options: (name :initarg :name :reader name ...)
+                                        ASTNode::Call { function: slot_fn, args: slot_options } => {
+                                            let slot_name = match slot_fn.as_ref() {
+                                                ASTNode::Variable(n) => n.clone(),
+                                                _ => continue,
+                                            };
+
+                                            let mut initarg: Option<String> = None;
+                                            let mut initform: Option<Box<ASTNode>> = None;
+                                            let mut accessor: Option<String> = None;
+                                            let mut reader: Option<String> = None;
+                                            let mut writer: Option<String> = None;
+
+                                            // Parse slot options
+                                            let mut i = 0;
+                                            while i < slot_options.len() {
+                                                if let ASTNode::Variable(opt) = &slot_options[i] {
+                                                    let opt_lower = opt.to_lowercase();
+                                                    if i + 1 < slot_options.len() {
+                                                        match opt_lower.as_str() {
+                                                            ":initarg" => {
+                                                                if let ASTNode::Variable(val) = &slot_options[i + 1] {
+                                                                    initarg = Some(val.clone());
+                                                                }
+                                                            }
+                                                            ":initform" => {
+                                                                initform = Some(Box::new(slot_options[i + 1].clone()));
+                                                            }
+                                                            ":accessor" => {
+                                                                if let ASTNode::Variable(val) = &slot_options[i + 1] {
+                                                                    accessor = Some(val.clone());
+                                                                }
+                                                            }
+                                                            ":reader" => {
+                                                                if let ASTNode::Variable(val) = &slot_options[i + 1] {
+                                                                    reader = Some(val.clone());
+                                                                }
+                                                            }
+                                                            ":writer" => {
+                                                                if let ASTNode::Variable(val) = &slot_options[i + 1] {
+                                                                    writer = Some(val.clone());
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        i += 2;
+                                                    } else {
+                                                        i += 1;
+                                                    }
+                                                } else {
+                                                    i += 1;
+                                                }
+                                            }
+
+                                            slot_specs.push(SlotSpec {
+                                                name: slot_name,
+                                                initarg,
+                                                initform,
+                                                accessor,
+                                                reader,
+                                                writer,
+                                            });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        // Treat define-condition as defclass with condition as parent
+                        return Ok(ASTNode::Defclass {
+                            name: condition_name,
+                            superclasses: parent_types,
+                            slots: slot_specs,
+                        });
+                    }
                     "defgeneric" => {
                         // (defgeneric name lambda-list [:argument-precedence-order ...] [:documentation ...])
                         let args = cdr_to_vec(cdr)?;
@@ -1187,6 +1484,13 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     let car_ast = lisp_to_ast(car)?;
     let args = cdr_to_vec(cdr)?;
 
+    if std::env::var("RLASP_DEBUG_DEFUN_ACTUAL").is_ok() {
+        if let ASTNode::Variable(name) = &car_ast {
+            if name.eq_ignore_ascii_case("defun") {
+                eprintln!("[defun-actual] args={:?}", args);
+            }
+        }
+    }
     Ok(ASTNode::Call {
         function: Box::new(car_ast),
         args,
@@ -1194,57 +1498,12 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 }
 
 fn extract_params(ast: &ASTNode) -> Vec<String> {
-    let (params, _, _) = extract_params_with_defaults(ast);
+    let (params, _, _, _) = extract_params_with_defaults(ast);
     params
 }
 
-fn extract_params_with_defaults(ast: &ASTNode) -> (Vec<String>, std::collections::HashMap<String, ASTNode>, std::collections::HashMap<String, String>) {
-    use std::collections::HashMap;
-    let mut params = vec![];
-    let mut defaults = HashMap::new();
-    let mut supplied_p_vars = HashMap::new();
-
-    match ast {
-        ASTNode::Call { function, args } => {
-            if let ASTNode::Variable(name) = &**function {
-                // Preserve &optional and &key markers
-                params.push(name.clone());
-            }
-            for arg in args {
-                match arg {
-                    ASTNode::Variable(name) => {
-                        // Preserve &optional and &key markers as well as parameter names
-                        params.push(name.clone());
-                    }
-                    // Handle keyword parameter with default value: (name default-expr)
-                    // Or optional parameter with supplied-p: (name default-expr supplied-p-var)
-                    ASTNode::Call { function: param_func, args: param_args } => {
-                        if let ASTNode::Variable(param_name) = &**param_func {
-                            params.push(param_name.clone());
-                            // Store default value if provided
-                            if !param_args.is_empty() {
-                                defaults.insert(param_name.clone(), param_args[0].clone());
-                            }
-                            // If there's a supplied-p parameter (2nd element), track it (but DON'T add to params)
-                            if param_args.len() > 1 {
-                                if let ASTNode::Variable(supplied_p_name) = &param_args[1] {
-                                    supplied_p_vars.insert(param_name.clone(), supplied_p_name.clone());
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        ASTNode::Variable(name) => {
-            params.push(name.clone());
-        }
-        ASTNode::Constant(ConstantValue::Nil) => {}
-        _ => {}
-    }
-
-    (params, defaults, supplied_p_vars)
+fn extract_params_with_defaults(ast: &ASTNode) -> (Vec<String>, std::collections::HashMap<String, ASTNode>, std::collections::HashMap<String, String>, std::collections::HashMap<String, String>) {
+    super::eval::extract_params_with_defaults(ast)
 }
 
 fn contains_unquote(ast: &ASTNode) -> bool {
@@ -1462,13 +1721,15 @@ fn try_parse_simple_loop(cdr_list: &[ASTNode]) -> Option<ASTNode> {
         None
     };
 
-    // Check for limit keyword (below, to, upto, downto, above)
+    // Check for limit keyword - only handle "below" in the specialized path
+    // Other keywords like "to", "upto", "downto", "above" have different semantics
+    // and should go through the general expand_loop path
     if idx >= cdr_list.len() {
         return None;
     }
     let limit_keyword = match &cdr_list[idx] {
-        ASTNode::Variable(s) if s == "below" || s == "to" || s == "upto" || s == "downto" || s == "above" => s.clone(),
-        _ => return None,
+        ASTNode::Variable(s) if s == "below" => s.clone(),
+        _ => return None,  // Let "to", "upto", etc. fall through to expand_loop
     };
     idx += 1;
 
@@ -1651,6 +1912,31 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
         let cons = unsafe { &*cons_ptr };
         let car_obj = cons.car();
         let cdr = cons.cdr();
+
+        // Handle read-time eval in quoted context: evaluate and insert as data
+        if car_obj.is_general() && !car_obj.is_number() {
+            if let Some(symbol_ptr) = car_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+                if !symbol_ptr.is_null() {
+                    let symbol = unsafe { &*symbol_ptr };
+                    let name = symbol.name();
+                    let base = name.rsplit(':').next().unwrap_or(name);
+                    if base.eq_ignore_ascii_case("read-time-eval") {
+                        if !cdr.is_cons() {
+                            return Err("read-time-eval requires one argument".to_string());
+                        }
+                        let cdr_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
+                        if cdr_ptr.is_null() {
+                            return Err("read-time-eval requires one argument".to_string());
+                        }
+                        let cdr_cons = unsafe { &*cdr_ptr };
+                        if !cdr_cons.cdr().is_nil() {
+                            return Err("read-time-eval requires one argument".to_string());
+                        }
+                        return eval_read_time_form(cdr_cons.car(), true);
+                    }
+                }
+            }
+        }
 
         // Check for unquote/unquote-splicing - these must be preserved even in quoted context
         // because they may be inside a backquote
@@ -1856,25 +2142,106 @@ fn raw_cdr_to_vec_with_first(obj: LispObject) -> Result<Vec<LispObject>, String>
     Ok(result)
 }
 
-/// Convert a case key (which can be a symbol, list of symbols, T, or OTHERWISE) to a test expression
-fn case_key_to_test(key_obj: &LispObject, tmp_var: &str) -> Result<ASTNode, String> {
-    // Check if it's a symbol
+fn debug_key_obj(obj: &LispObject) -> String {
+    if obj.is_nil() {
+        return "NIL".to_string();
+    }
+    if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+        let sym = unsafe { &*sym_ptr };
+        return sym.name().to_string();
+    }
+    if let Some(n) = obj.as_fixnum() {
+        return n.to_string();
+    }
+    if let Some(f) = obj.as_float() {
+        return f.to_string();
+    }
+    if let Some(ch) = obj.as_character() {
+        return format!("#\\{}", ch);
+    }
+    format!("{:?}", obj)
+}
+
+fn debug_key_list(obj: &LispObject) -> String {
+    if !obj.is_cons() {
+        return debug_key_obj(obj);
+    }
+    let mut parts = Vec::new();
+    let mut current = *obj;
+    while current.is_cons() {
+        let cons_ptr = current.as_cons_ptr().unwrap();
+        let cons = unsafe { &*cons_ptr };
+        parts.push(debug_key_obj(&cons.car()));
+        current = cons.cdr();
+    }
+    if !current.is_nil() {
+        parts.push(format!(". {}", debug_key_obj(&current)));
+    }
+    format!("({})", parts.join(" "))
+}
+
+fn case_key_to_atom_test(key_obj: &LispObject, tmp_var: &str) -> Option<ASTNode> {
+    if key_obj.is_nil() {
+        return Some(ASTNode::call(
+            ASTNode::variable("eql"),
+            vec![
+                ASTNode::variable(tmp_var),
+                ASTNode::Constant(ConstantValue::Nil),
+            ],
+        ));
+    }
+
     if let Some(sym_ptr) = key_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
         let sym = unsafe { &*sym_ptr };
         let name = sym.name().to_uppercase();
         if name == "T" || name == "OTHERWISE" {
-            // Default case - always matches
-            return Ok(ASTNode::t());
-        } else {
-            // Single key - (eql tmp 'key)
-            return Ok(ASTNode::call(
-                ASTNode::variable("eql"),
-                vec![
-                    ASTNode::variable(tmp_var),
-                    ASTNode::Quote(Box::new(ASTNode::variable(&name)))
-                ]
-            ));
+            return Some(ASTNode::t());
         }
+        return Some(ASTNode::call(
+            ASTNode::variable("eql"),
+            vec![
+                ASTNode::variable(tmp_var),
+                ASTNode::Quote(Box::new(ASTNode::variable(&name))),
+            ],
+        ));
+    }
+
+    if let Some(n) = key_obj.as_fixnum() {
+        return Some(ASTNode::call(
+            ASTNode::variable("eql"),
+            vec![
+                ASTNode::variable(tmp_var),
+                ASTNode::Constant(ConstantValue::Fixnum(n)),
+            ],
+        ));
+    }
+    if let Some(f) = key_obj.as_float() {
+        return Some(ASTNode::call(
+            ASTNode::variable("eql"),
+            vec![
+                ASTNode::variable(tmp_var),
+                ASTNode::Constant(ConstantValue::Float(f)),
+            ],
+        ));
+    }
+    if let Some(ch) = key_obj.as_character() {
+        return Some(ASTNode::call(
+            ASTNode::variable("eql"),
+            vec![
+                ASTNode::variable(tmp_var),
+                ASTNode::Constant(ConstantValue::Character(ch)),
+            ],
+        ));
+    }
+
+    None
+}
+
+/// Convert a case key (which can be a symbol, list of symbols, T, or OTHERWISE) to a test expression
+fn case_key_to_test(key_obj: &LispObject, tmp_var: &str) -> Result<ASTNode, String> {
+    // Check if it's a single atom key
+    if let Some(test) = case_key_to_atom_test(key_obj, tmp_var) {
+        return Ok(test);
     }
 
     // Check if it's a list of keys
@@ -1889,30 +2256,14 @@ fn case_key_to_test(key_obj: &LispObject, tmp_var: &str) -> Result<ASTNode, Stri
         let mut tests = Vec::new();
 
         // First key
-        if let Some(sym_ptr) = first_key.as_general_ptr::<rlasp_runtime::Symbol>() {
-            let sym = unsafe { &*sym_ptr };
-            let name = sym.name().to_uppercase();
-            tests.push(ASTNode::call(
-                ASTNode::variable("eql"),
-                vec![
-                    ASTNode::variable(tmp_var),
-                    ASTNode::Quote(Box::new(ASTNode::variable(&name)))
-                ]
-            ));
+        if let Some(test) = case_key_to_atom_test(&first_key, tmp_var) {
+            tests.push(test);
         }
 
         // Rest of keys
         for key in &keys {
-            if let Some(sym_ptr) = key.as_general_ptr::<rlasp_runtime::Symbol>() {
-                let sym = unsafe { &*sym_ptr };
-                let name = sym.name().to_uppercase();
-                tests.push(ASTNode::call(
-                    ASTNode::variable("eql"),
-                    vec![
-                        ASTNode::variable(tmp_var),
-                        ASTNode::Quote(Box::new(ASTNode::variable(&name)))
-                    ]
-                ));
+            if let Some(test) = case_key_to_atom_test(key, tmp_var) {
+                tests.push(test);
             }
         }
 

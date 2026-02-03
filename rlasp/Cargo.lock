@@ -450,6 +450,7 @@ dependencies = [
  "clap",
  "inkwell",
  "libc",
+ "llvm-sys",
  "rlasp",
  "rlasp-jit",
  "rlasp-mlir",

@@ -9,3 +9,4 @@ pub use runtime::*;
 pub use ir::*;
 pub use repl::*;
 pub use c_api::*;
+pub use rlasp_runtime::is_cl_builtin;

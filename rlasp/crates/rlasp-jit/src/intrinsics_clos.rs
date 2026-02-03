@@ -416,8 +416,10 @@ pub extern "C" fn cc_make_instance(class_name: usize, initargs: usize) -> usize 
                         let rest_cons_ref = unsafe { &*rest_cons };
                         let value = rest_cons_ref.car();
 
+                        let trimmed_key = key_name.trim_start_matches(':');
                         for slot in class.slots() {
-                            if slot.trim_start_matches(':') == key_name.trim_start_matches(':') {
+                            let trimmed_slot = slot.trim_start_matches(':');
+                            if trimmed_slot == trimmed_key {
                                 inst.set_slot(slot.clone(), value);
                                 break;
                             }
@@ -1047,8 +1049,17 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
 
     // For instances, check CPL
     if let Some(inst_ptr) = obj.as_instance_ptr() {
+        // Validate the instance pointer is reasonable (not tiny address)
+        if (inst_ptr as usize) < 0x1000 {
+            return LispObject::nil().raw();
+        }
         let inst = unsafe { &*inst_ptr };
-        let class = unsafe { &*inst.class() };
+        let class_ptr = inst.class();
+        // Validate class pointer is reasonable
+        if class_ptr.is_null() || (class_ptr as usize) < 0x1000 {
+            return LispObject::nil().raw();
+        }
+        let class = unsafe { &*class_ptr };
 
         if class.is_subclass_of(&name_str) {
             return LispObject::t().raw();
@@ -1074,6 +1085,10 @@ pub extern "C" fn cc_subtypep(class1: usize, class2_name: usize) -> usize {
     let name_str = extract_string_from_cons_list(class2_name);
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
+        // Validate class pointer is reasonable
+        if class_ptr.is_null() || (class_ptr as usize) < 0x1000 {
+            return LispObject::nil().raw();
+        }
         let class = unsafe { &*class_ptr };
         if class.is_subclass_of(&name_str) {
             return LispObject::t().raw();
@@ -1114,12 +1129,19 @@ fn make_symbol_list(strings: &[String]) -> usize {
 //============================================================================
 
 /// Execute a generic function call using stack-based calling convention.
-/// The argument is already on the stack - we pop it, determine its class,
+/// Arguments are already on the stack - we peek at the first to determine class,
 /// find the applicable method, and call it (which expects arguments on stack).
-pub fn execute_stack_based_dispatch(gf_name: &str) {
+/// num_args: the number of arguments on the stack
+pub fn execute_stack_based_dispatch(gf_name: &str, num_args: usize) {
     use crate::intrinsics::get_registry;
 
-    // Peek at the argument to determine its class (don't pop yet - method will pop it)
+    // If no arguments, we can't dispatch - just push nil
+    if num_args == 0 {
+        stack_push_nil();
+        return;
+    }
+
+    // Peek at the first argument to determine its class (don't pop yet - method will pop it)
     let arg_raw = stack_pop_pointer();
     let arg_obj = unsafe { LispObject::from_raw(arg_raw) };
 
@@ -1134,9 +1156,11 @@ pub fn execute_stack_based_dispatch(gf_name: &str) {
     let gf = match registry.get(gf_name) {
         Some(gf) => gf,
         None => {
-            // Generic function not found - just push nil and return
+            // Generic function not found - clean up all arguments and push nil
             drop(registry);
-            stack_pop_pointer(); // Remove the argument we pushed
+            for _ in 0..num_args {
+                let _ = stack_pop_pointer();
+            }
             stack_push_nil();
             return;
         }
@@ -1179,7 +1203,10 @@ pub fn execute_stack_based_dispatch(gf_name: &str) {
             Some(name) => name,
             None => {
                 debug_println!("[DEBUG] Could not extract function name from lambda ref");
-                stack_pop_pointer(); // Remove the argument we pushed
+                // Clean up all arguments
+                for _ in 0..num_args {
+                    let _ = stack_pop_pointer();
+                }
                 stack_push_nil();
                 return;
             }
@@ -1199,14 +1226,20 @@ pub fn execute_stack_based_dispatch(gf_name: &str) {
             // Method function not found in registry
             drop(func_registry);
             debug_println!("[DEBUG] Method '{}' not found in registry", func_name);
-            stack_pop_pointer(); // Remove the argument we pushed
+            // Clean up all arguments
+            for _ in 0..num_args {
+                let _ = stack_pop_pointer();
+            }
             stack_push_nil();
         }
     } else {
         // No applicable method found
         drop(registry);
         debug_println!("[DEBUG] No applicable method found for generic function '{}'", gf_name);
-        stack_pop_pointer(); // Remove the argument we pushed
+        // Clean up all arguments
+        for _ in 0..num_args {
+            let _ = stack_pop_pointer();
+        }
         stack_push_nil();
     }
 }

@@ -88,7 +88,15 @@ fn map_intrinsics(execution_engine: &ExecutionEngine, module: &Module) {
     // Additional intrinsics that might be in MLIR-generated code
     map_if_exists(execution_engine, module, "cc_truthiness", cc_truthiness as usize);
     map_if_exists(execution_engine, module, "cc_arg", cc_arg as usize);
+    map_if_exists(execution_engine, module, "cc_arg_present", cc_arg_present as usize);
     map_if_exists(execution_engine, module, "cc_null", cc_null as usize);
+    map_if_exists(execution_engine, module, "cc_make_array_with_contents", cc_make_array_with_contents as usize);
+    map_if_exists(execution_engine, module, "cc_set_aref", cc_set_aref as usize);
+    map_if_exists(execution_engine, module, "cc_position_if_not", cc_position_if_not as usize);
+    map_if_exists(execution_engine, module, "cc_position_if_not_full", cc_position_if_not_full as usize);
+    map_if_exists(execution_engine, module, "cc_floor_2", cc_floor_2 as usize);
+    map_if_exists(execution_engine, module, "cc_ceiling_2", cc_ceiling_2 as usize);
+    map_if_exists(execution_engine, module, "cc_truncate_2", cc_truncate_2 as usize);
 }
 
 fn map_if_exists(execution_engine: &ExecutionEngine, module: &Module, name: &str, addr: usize) {

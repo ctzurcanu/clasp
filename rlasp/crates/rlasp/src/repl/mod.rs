@@ -62,7 +62,9 @@ impl Repl {
             .map_err(|e| format!("Macro expansion error: {:?}", e))?;
 
         // 3. Convert LispObject to AST
-        let ast = lisp_to_ast::lisp_to_ast(expanded)?;
+        let ast = lisp_to_ast::with_read_time_env(&mut self.env, || {
+            lisp_to_ast::lisp_to_ast(expanded)
+        })?;
 
         // 4. Check for FFI commands
         if let Some(result) = self.try_eval_ffi(&ast)? {
@@ -88,7 +90,13 @@ impl Repl {
                 .map_err(|e| format!("Macro expansion error: {:?}", e))?;
 
             // 3. Convert LispObject to AST
-            let ast = lisp_to_ast::lisp_to_ast(expanded)?;
+            let ast = lisp_to_ast::with_read_time_env(&mut self.env, || {
+                lisp_to_ast::lisp_to_ast(expanded)
+            })?;
+
+            if std::env::var("RLASP_DEBUG_LOAD").is_ok() {
+                eprintln!("[load] ast={:?}", ast);
+            }
 
             // 4. Check for FFI commands
             if let Some(result) = self.try_eval_ffi(&ast)? {
@@ -97,7 +105,15 @@ impl Repl {
             }
 
             // 5. Evaluate with persistent environment
-            last_result = eval::eval_with_persistent_env(&ast, &mut self.env)?;
+            match eval::eval_with_persistent_env(&ast, &mut self.env) {
+                Ok(val) => last_result = val,
+                Err(e) => {
+                    if std::env::var("RLASP_DEBUG_LOAD_ERROR").is_ok() {
+                        eprintln!("[load-error] ast={:?}", ast);
+                    }
+                    return Err(e);
+                }
+            }
         }
 
         Ok(last_result)

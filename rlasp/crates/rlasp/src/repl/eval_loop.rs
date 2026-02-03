@@ -69,7 +69,12 @@ pub fn expand_loop(args: &[ASTNode]) -> ASTNode {
 
 /// Check if a node is any loop keyword
 fn is_loop_keyword_any(node: &ASTNode) -> bool {
-    if let ASTNode::Variable(kw) = node {
+    let kw = match node {
+        ASTNode::Variable(kw) => Some(kw.as_str()),
+        ASTNode::Constant(ConstantValue::Symbol(kw)) => Some(kw.as_str()),
+        _ => None,
+    };
+    if let Some(kw) = kw {
         let kw_lower = kw.to_lowercase();
         matches!(kw_lower.as_str(),
             "with" | ":with" |
@@ -128,7 +133,12 @@ fn is_loop_keyword_any(node: &ASTNode) -> bool {
 
 /// Check if a node matches a specific loop keyword
 fn is_loop_keyword(node: &ASTNode, keyword: &str) -> bool {
-    if let ASTNode::Variable(kw) = node {
+    let kw = match node {
+        ASTNode::Variable(kw) => Some(kw.as_str()),
+        ASTNode::Constant(ConstantValue::Symbol(kw)) => Some(kw.as_str()),
+        _ => None,
+    };
+    if let Some(kw) = kw {
         let kw_lower = kw.to_lowercase();
         kw_lower == keyword || kw_lower == format!(":{}", keyword)
     } else {
@@ -141,20 +151,20 @@ enum LoopClause {
     /// :with var [= init]
     With { var: String, init: Option<ASTNode> },
 
-    /// :for var :in list - simple iteration
-    ForIn { var: String, list: ASTNode },
+    /// :for var :in list [:by step] - simple iteration
+    ForIn { var: String, list: ASTNode, by: Option<ASTNode> },
 
     /// :for var :across sequence - iterate over sequence elements
     ForAcross { var: String, seq: ASTNode },
 
-    /// :for (var1 . var2) :in list - destructuring iteration
-    ForInDestructure { car_var: String, cdr_var: String, list: ASTNode },
+    /// :for (var1 . var2) :in list [:by step] - destructuring iteration
+    ForInDestructure { car_var: String, cdr_var: String, list: ASTNode, by: Option<ASTNode> },
 
-    /// :for var :on list - iterate over successive cdrs
-    ForOn { var: String, list: ASTNode },
+    /// :for var :on list [:by step] - iterate over successive cdrs
+    ForOn { var: String, list: ASTNode, by: Option<ASTNode> },
 
-    /// :for (var1 var2 ...) :on list - bind vars from successive cdrs
-    ForOnDestructure { vars: Vec<String>, list: ASTNode },
+    /// :for (var1 var2 ...) :on list [:by step] - bind vars from successive cdrs
+    ForOnDestructure { vars: Vec<String>, list: ASTNode, by: Option<ASTNode> },
 
     /// :for var :from start :to end [:by step]
     ForFromTo { var: String, start: ASTNode, end: ASTNode, step: Option<ASTNode>, inclusive: bool },
@@ -423,10 +433,12 @@ impl<'a> LoopParser<'a> {
                         if is_loop_keyword(kw, "in") {
                             self.advance(); // consume :in
                             let list = self.advance()?.clone();
+                            let by = self.parse_optional_by();
                             return Some(LoopClause::ForInDestructure {
                                 car_var,
                                 cdr_var,
                                 list,
+                                by,
                             });
                         }
                     }
@@ -435,19 +447,23 @@ impl<'a> LoopParser<'a> {
                         if is_loop_keyword(kw, "on") {
                             self.advance(); // consume :on
                             let list = self.advance()?.clone();
+                            let by = self.parse_optional_by();
                             return Some(LoopClause::ForOnDestructure {
                                 vars,
                                 list,
+                                by,
                             });
                         }
                         // List pattern can also work with :in (bind from each element)
                         if is_loop_keyword(kw, "in") {
                             self.advance(); // consume :in
                             let list = self.advance()?.clone();
+                            let by = self.parse_optional_by();
                             // For :in with list pattern, destructure each list element
                             return Some(LoopClause::ForOnDestructure {
                                 vars,
                                 list,
+                                by,
                             });
                         }
                     }
@@ -483,7 +499,8 @@ impl<'a> LoopParser<'a> {
         if is_loop_keyword(keyword, "in") {
             self.advance(); // consume :in
             let list = self.advance()?.clone();
-            Some(LoopClause::ForIn { var, list })
+            let by = self.parse_optional_by();
+            Some(LoopClause::ForIn { var, list, by })
         } else if is_loop_keyword(keyword, "across") {
             self.advance(); // consume :across
             let seq = self.advance()?.clone();
@@ -491,7 +508,8 @@ impl<'a> LoopParser<'a> {
         } else if is_loop_keyword(keyword, "on") {
             self.advance(); // consume :on
             let list = self.advance()?.clone();
-            Some(LoopClause::ForOn { var, list })
+            let by = self.parse_optional_by();
+            Some(LoopClause::ForOn { var, list, by })
         } else if is_loop_keyword(keyword, "from") {
             self.advance(); // consume :from
             let start = self.advance()?.clone();
@@ -609,6 +627,16 @@ impl<'a> LoopParser<'a> {
         } else {
             None
         }
+    }
+
+    fn parse_optional_by(&mut self) -> Option<ASTNode> {
+        if let Some(node) = self.current() {
+            if is_loop_keyword(node, "by") {
+                self.advance(); // consume :by
+                return self.advance().cloned();
+            }
+        }
+        None
     }
 
     fn parse_when(&mut self) -> Option<LoopClause> {
@@ -907,10 +935,11 @@ impl<'a> LoopParser<'a> {
         let mut all_count_vars: HashSet<String> = HashSet::new(); // All :into vars for count ops
         let mut iter_var: Option<String> = None;
         let mut iter_list: Option<ASTNode> = None;
+        let mut iter_step: Option<ASTNode> = None;
         let mut across_iter: Option<(String, ASTNode)> = None;
         let mut destructure: Option<(String, String)> = None;
-        let mut on_iter: Option<(String, ASTNode)> = None; // Simple :on iteration
-        let mut on_destructure: Option<(Vec<String>, ASTNode)> = None; // :on with list pattern
+        let mut on_iter: Option<(String, ASTNode, Option<ASTNode>)> = None; // Simple :on iteration
+        let mut on_destructure: Option<(Vec<String>, ASTNode, Option<ASTNode>)> = None; // :on with list pattern
         let mut numeric_iter: Option<(String, ASTNode, ASTNode, Option<ASTNode>, bool)> = None;
         let mut hash_iter: Option<(String, ASTNode, bool)> = None; // (var, hash-table, is_keys)
         let mut symbol_iter: Option<(String, ASTNode, SymbolKind)> = None; // (var, package, kind)
@@ -926,6 +955,7 @@ impl<'a> LoopParser<'a> {
         let mut has_thereis = false;
         let mut has_always = false;
         let mut has_never = false;
+        let mut while_conditions: Vec<ASTNode> = Vec::new();  // :while conditions
 
         // First pass: collect all variable initializations and iteration info
         for clause in &self.clauses {
@@ -933,9 +963,10 @@ impl<'a> LoopParser<'a> {
                 LoopClause::With { var, init } => {
                     bindings.push((var.clone(), init.clone().unwrap_or_else(ASTNode::nil)));
                 }
-                LoopClause::ForIn { var, list } => {
+                LoopClause::ForIn { var, list, by } => {
                     iter_var = Some(var.clone());
                     iter_list = Some(list.clone());
+                    iter_step = by.clone();
                     ensure_binding(&mut bindings, var, ASTNode::nil());
                     // Add temp var for list iteration
                     bindings.push(("__loop_list__".to_string(), list.clone()));
@@ -946,20 +977,21 @@ impl<'a> LoopParser<'a> {
                     bindings.push(("__loop_across_seq__".to_string(), seq.clone()));
                     bindings.push(("__loop_across_i__".to_string(), ASTNode::Constant(ConstantValue::Fixnum(0))));
                 }
-                LoopClause::ForInDestructure { car_var, cdr_var, list } => {
+                LoopClause::ForInDestructure { car_var, cdr_var, list, by } => {
                     destructure = Some((car_var.clone(), cdr_var.clone()));
                     iter_list = Some(list.clone());
+                    iter_step = by.clone();
                     ensure_binding(&mut bindings, car_var, ASTNode::nil());
                     ensure_binding(&mut bindings, cdr_var, ASTNode::nil());
                     bindings.push(("__loop_list__".to_string(), list.clone()));
                 }
-                LoopClause::ForOn { var, list } => {
-                    on_iter = Some((var.clone(), list.clone()));
+                LoopClause::ForOn { var, list, by } => {
+                    on_iter = Some((var.clone(), list.clone(), by.clone()));
                     ensure_binding(&mut bindings, var, ASTNode::nil());
                     bindings.push(("__loop_list__".to_string(), list.clone()));
                 }
-                LoopClause::ForOnDestructure { vars, list } => {
-                    on_destructure = Some((vars.clone(), list.clone()));
+                LoopClause::ForOnDestructure { vars, list, by } => {
+                    on_destructure = Some((vars.clone(), list.clone(), by.clone()));
                     for var in vars {
                         ensure_binding(&mut bindings, var, ASTNode::nil());
                     }
@@ -1073,6 +1105,9 @@ impl<'a> LoopParser<'a> {
                 LoopClause::Finally { body } => {
                     finally_body = Some(body.clone());
                 }
+                LoopClause::While { condition } => {
+                    while_conditions.push(condition.clone());
+                }
                 _ => {}
             }
         }
@@ -1125,13 +1160,13 @@ impl<'a> LoopParser<'a> {
             ));
 
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: std::iter::once(ASTNode::Call {
                     function: Box::new(ASTNode::Variable(cmp_op.to_string())),
                     args: vec![ASTNode::Variable(var.clone()), end.clone()],
                 }).chain(while_body).collect(),
             }
-        } else if let Some((vars, _list)) = &on_destructure {
+        } else if let Some((vars, _list, on_by)) = &on_destructure {
             // :on iteration with list destructuring
             // For (type next) :on list:
             //   type = (nth 0 __loop_list__)  -- first element
@@ -1151,40 +1186,56 @@ impl<'a> LoopParser<'a> {
 
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
+            let next_list = if let Some(step) = on_by {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("funcall".to_string())),
+                    args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                }
+            } else {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                }
+            };
 
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: vec![
                     ASTNode::Variable("__loop_list__".to_string()),
                     inner_body,
                     ASTNode::setq(
                         "__loop_list__".to_string(),
-                        ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("cdr".to_string())),
-                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
-                        }
+                        next_list
                     ),
                 ],
             }
-        } else if let Some((var, _list)) = &on_iter {
+        } else if let Some((var, _list, on_by)) = &on_iter {
             // Simple :on iteration
             // var = __loop_list__ (the current tail)
             let mut iter_body = Vec::new();
             iter_body.push(ASTNode::setq(var.clone(), ASTNode::Variable("__loop_list__".to_string())));
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
+            let next_list = if let Some(step) = on_by {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("funcall".to_string())),
+                    args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                }
+            } else {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                }
+            };
 
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: vec![
                     ASTNode::Variable("__loop_list__".to_string()),
                     inner_body,
                     ASTNode::setq(
                         "__loop_list__".to_string(),
-                        ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("cdr".to_string())),
-                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
-                        }
+                        next_list
                     ),
                 ],
             }
@@ -1205,7 +1256,7 @@ impl<'a> LoopParser<'a> {
             let inner_body = ASTNode::progn(iter_body);
 
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: vec![
                     ASTNode::Call {
                         function: Box::new(ASTNode::Variable("<".to_string())),
@@ -1261,18 +1312,26 @@ impl<'a> LoopParser<'a> {
             }
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
+            let next_list = if let Some(step) = &iter_step {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("funcall".to_string())),
+                    args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                }
+            } else {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                }
+            };
 
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: vec![
                     ASTNode::Variable("__loop_list__".to_string()),
                     inner_body,
                     ASTNode::setq(
                         "__loop_list__".to_string(),
-                        ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("cdr".to_string())),
-                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
-                        }
+                        next_list
                     ),
                 ],
             }
@@ -1306,7 +1365,7 @@ impl<'a> LoopParser<'a> {
             let inner_body = ASTNode::progn(iter_body);
 
             let while_loop = ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: vec![
                     ASTNode::Variable(list_var.to_string()),
                     inner_body,
@@ -1349,7 +1408,7 @@ impl<'a> LoopParser<'a> {
             let inner_body = ASTNode::progn(iter_body);
 
             let while_loop = ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: vec![
                     ASTNode::Variable("__loop_symbols__".to_string()),
                     inner_body,
@@ -1386,7 +1445,7 @@ impl<'a> LoopParser<'a> {
             ));
 
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: std::iter::once(ASTNode::Call {
                     function: Box::new(ASTNode::Variable("<".to_string())),
                     args: vec![
@@ -1398,8 +1457,25 @@ impl<'a> LoopParser<'a> {
         } else if !for_equals_clauses.is_empty() {
             // Infinite loop driven only by :for var = init [:then step]
             ASTNode::Call {
-                function: Box::new(ASTNode::Variable("while".to_string())),
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: std::iter::once(ASTNode::t())
+                    .chain(body.into_iter())
+                    .collect(),
+            }
+        } else if !while_conditions.is_empty() {
+            // Loop driven by :while condition(s)
+            // Combine multiple :while conditions with AND
+            let combined_condition = if while_conditions.len() == 1 {
+                while_conditions.into_iter().next().unwrap()
+            } else {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("and".to_string())),
+                    args: while_conditions,
+                }
+            };
+            ASTNode::Call {
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
+                args: std::iter::once(combined_condition)
                     .chain(body.into_iter())
                     .collect(),
             }

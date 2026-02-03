@@ -93,6 +93,7 @@ pub enum EvalResult {
         params: Vec<String>,
         defaults: HashMap<String, ASTNode>,  // Default values for params
         supplied_p_vars: HashMap<String, String>,  // Maps param -> supplied-p var
+        key_params: HashMap<String, String>,  // Maps param -> keyword name (no leading :)
         body: Vec<ASTNode>,
         env: Rc<RefCell<HashMap<String, EvalResult>>>,
         dynamic_env: bool, // If true, prefer caller env for bindings (flet/labels approximation)

@@ -73,7 +73,7 @@ impl LowerContext {
                 self.lower_call(function, args)
             }
 
-            ASTNode::Lambda { params, defaults: _, supplied_p_vars: _, body } => {
+            ASTNode::Lambda { params, body, .. } => {
                 self.lower_lambda(params, body)
             }
 

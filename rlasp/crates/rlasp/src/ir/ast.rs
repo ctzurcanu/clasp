@@ -39,6 +39,7 @@ pub enum ASTNode {
         params: Vec<String>,
         defaults: std::collections::HashMap<String, ASTNode>,  // Default values for params
         supplied_p_vars: std::collections::HashMap<String, String>,  // Maps param -> supplied-p var
+        key_params: std::collections::HashMap<String, String>,  // Maps param -> keyword name (no leading :)
         body: Vec<ASTNode>,
     },
 
@@ -245,6 +246,7 @@ impl ASTNode {
             params,
             defaults: std::collections::HashMap::new(),
             supplied_p_vars: std::collections::HashMap::new(),
+            key_params: std::collections::HashMap::new(),
             body,
         }
     }
@@ -254,15 +256,17 @@ impl ASTNode {
             params,
             defaults,
             supplied_p_vars: std::collections::HashMap::new(),
+            key_params: std::collections::HashMap::new(),
             body,
         }
     }
 
-    pub fn lambda_with_supplied_p(params: Vec<String>, defaults: std::collections::HashMap<String, ASTNode>, supplied_p_vars: std::collections::HashMap<String, String>, body: Vec<ASTNode>) -> Self {
+    pub fn lambda_with_supplied_p(params: Vec<String>, defaults: std::collections::HashMap<String, ASTNode>, supplied_p_vars: std::collections::HashMap<String, String>, key_params: std::collections::HashMap<String, String>, body: Vec<ASTNode>) -> Self {
         ASTNode::Lambda {
             params,
             defaults,
             supplied_p_vars,
+            key_params,
             body,
         }
     }

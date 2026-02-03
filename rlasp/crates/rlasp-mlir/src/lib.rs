@@ -910,11 +910,10 @@ impl MLIRCodegen {
 
                 // Create the trampoline function that recreates the symbol and calls cc_call_generic
                 let trampoline = format!(
-                    "  func.func @{}(%arg0: i64) -> i64 {{\n    %str_ptr = llvm.mlir.addressof {} : !llvm.ptr\n    %name = func.call @cc_make_lambda_ref_str(%str_ptr) : (!llvm.ptr) -> i64\n    %result = func.call @cc_call_generic(%name, %arg0) : (i64, i64) -> i64\n    return %result : i64\n  }}",
+                    "  func.func @{}(%arg0: i64) -> i64 {{\n    %str_ptr = llvm.mlir.addressof {} : !llvm.ptr\n    %name = func.call @cc_make_lambda_ref_str(%str_ptr) : (!llvm.ptr) -> i64\n    %result = func.call @cc_call_generic(%name, %arg0) : (i64, i64) -> i64\n    func.return %result : i64\n  }}",
                     quoted_name,
                     str_const_name
                 );
-                eprintln!("[DEFGENERIC] Creating trampoline for '{}' as @{}", name, quoted_name);
                 self.pending_functions.push(trampoline);
 
                 Ok(result)
@@ -1686,8 +1685,26 @@ impl MLIRCodegen {
             "apply" if args.len() >= 2 => {
                 let func = self.compile_expr(&args[0])?;
                 let last_arg = self.compile_expr(&args[args.len() - 1])?;
+
+                // Prepend any prefix args onto the argument list
+                let prefix_args: Result<Vec<_>> = args[1..args.len() - 1]
+                    .iter()
+                    .map(|arg| self.compile_expr(arg))
+                    .collect();
+                let prefix_args = prefix_args?;
+
+                let mut arg_list = last_arg;
+                for arg in prefix_args.into_iter().rev() {
+                    let new_list = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                        new_list, arg, arg_list
+                    ));
+                    arg_list = new_list;
+                }
+
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_apply({}, {}) : (i64, i64) -> i64", result, func, last_arg));
+                self.writeln(&format!("{} = func.call @cc_apply({}, {}) : (i64, i64) -> i64", result, func, arg_list));
                 Ok(result)
             }
 
