@@ -16,8 +16,10 @@ thread_local! {
         // Initialize with default features as a proper list
         let mut list = EvalResult::Nil;
         // Include OS features that ASDF expects
+        // NOTE: We don't claim to be SBCL or CLASP to avoid triggering implementation-specific code
+        // that we can't support. ASDF will use generic fallbacks.
         for feat in &["OS-MACOSX", "OS-UNIX", "UNICODE", "DARWIN", "UNIX", "IEEE-FLOATING-POINT",
-                      "ANSI-CL", "COMMON-LISP", "SBCL", "SB-UNICODE", "RLASP"] {
+                      "ANSI-CL", "COMMON-LISP", "RLASP"] {
             list = EvalResult::Cons(
                 Rc::new(RefCell::new(EvalResult::Symbol(format!(":{}", feat)))),
                 Rc::new(RefCell::new(list)),

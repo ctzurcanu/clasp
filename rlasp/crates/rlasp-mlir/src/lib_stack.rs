@@ -151,15 +151,30 @@ impl StackMLIRCodegen {
     }
 
     /// Create a symbol constant (calls cc_make_symbol with a string constant)
+    /// Symbol names are uppercased to match CL's default readcase
     fn create_symbol_constant(&mut self, name: &str) -> String {
+        // Uppercase the symbol name to match CL's default readcase
+        // Keywords keep the colon prefix but uppercase the rest
+        // Gensym-style symbols (#:name) are preserved as-is
+        let normalized_name = if name.starts_with("#:") {
+            // Uninterned symbol (gensym) - preserve as-is
+            name.to_string()
+        } else if name.starts_with(':') {
+            // Keyword - keep colon, uppercase the rest
+            format!(":{}", &name[1..].to_uppercase())
+        } else {
+            // Regular symbol - uppercase
+            name.to_uppercase()
+        };
+
         // Create a string constant for the symbol name
-        let const_name = self.create_string_constant(name);
+        let const_name = self.create_string_constant(&normalized_name);
         // Get address of the string constant (using opaque pointers)
         let str_ptr = self.fresh_ssa();
         self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr",
             str_ptr, const_name));
-        // Get string length
-        let len = name.len();
+        // Get string length (use normalized name length)
+        let len = normalized_name.len();
         let len_ssa = self.fresh_ssa();
         self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
         // Create symbol using cc_make_symbol
@@ -2351,6 +2366,7 @@ impl StackMLIRCodegen {
         let is_non_cl_macro_stub = matches!(
             base_name,
             "define-convenience-action-methods" | "defparameter*" | "defvar*" | "define-package"
+            | "load-mlir"
         );
         if !rlasp::is_cl_builtin(base_name) && !is_non_cl_macro_stub {
             return self.compile_user_function_call(base_name, args);
@@ -2829,7 +2845,32 @@ impl StackMLIRCodegen {
             }
 
             // Package system directives - these are no-ops at runtime (processed at load time)
-            "in-package" | "defpackage" | "define-package" | "use-package" | "export" | "import" |
+            "defpackage" | "define-package" => {
+                // Register the package name at runtime, then push T
+                if !args.is_empty() {
+                    // Extract package name from first arg
+                    let pkg_name = match &args[0] {
+                        ASTNode::Variable(name) => Some(name.trim_start_matches(':').to_uppercase()),
+                        ASTNode::Constant(ConstantValue::String(s)) => Some(s.to_uppercase()),
+                        ASTNode::Quote(inner) => match inner.as_ref() {
+                            ASTNode::Variable(name) => Some(name.trim_start_matches(':').to_uppercase()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(name) = pkg_name {
+                        let sym = self.create_symbol_constant(&name);
+                        let _reg = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_register_package({}) : (i64) -> i64", _reg, sym));
+                    }
+                }
+                let t_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", t_val));
+                return Ok(());
+            }
+
+            "in-package" | "use-package" | "export" | "import" |
             "shadow" | "shadowing-import" | "unexport" | "unintern" | "use" => {
                 // Package operations are handled at read/load time
                 // Just push T to indicate success
@@ -7666,17 +7707,90 @@ impl StackMLIRCodegen {
 
             // Sequence functions - find, position, remove
             "find" => {
-                if args.len() != 2 {
-                    anyhow::bail!("find requires exactly 2 arguments");
+                if args.len() < 2 {
+                    anyhow::bail!("find requires at least 2 arguments");
                 }
                 self.compile_expr(&args[0])?; // item
                 self.compile_expr(&args[1])?; // sequence
+
+                let mut start_idx: Option<usize> = None;
+                let mut end_idx: Option<usize> = None;
+                let mut from_end_idx: Option<usize> = None;
+                let mut test_idx: Option<usize> = None;
+                let mut test_not_idx: Option<usize> = None;
+                let mut key_idx: Option<usize> = None;
+
+                let mut i = 2;
+                while i + 1 < args.len() {
+                    if let ASTNode::Variable(kw) = &args[i] {
+                        match kw.as_str() {
+                            ":start" => start_idx = Some(i + 1),
+                            ":end" => end_idx = Some(i + 1),
+                            ":from-end" => from_end_idx = Some(i + 1),
+                            ":test" => test_idx = Some(i + 1),
+                            ":test-not" => test_not_idx = Some(i + 1),
+                            ":key" => key_idx = Some(i + 1),
+                            _ => {}
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+
+                if let Some(idx) = start_idx {
+                    self.compile_expr(&args[idx])?;
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                if let Some(idx) = end_idx {
+                    self.compile_expr(&args[idx])?;
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                if let Some(idx) = from_end_idx {
+                    self.compile_expr(&args[idx])?;
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                if let Some(idx) = test_idx {
+                    self.compile_expr(&args[idx])?;
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                if let Some(idx) = test_not_idx {
+                    self.compile_expr(&args[idx])?;
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                if let Some(idx) = key_idx {
+                    self.compile_expr(&args[idx])?;
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+
+                let key = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key));
+                let test_not = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", test_not));
+                let test = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", test));
+                let from_end = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", from_end));
+                let end = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", end));
+                let start = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", start));
                 let seq = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", seq));
                 let item = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", item));
+
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_find({}, {}) : (i64, i64) -> i64", result, item, seq));
+                self.writeln(&format!(
+                    "{} = func.call @cc_find_full({}, {}, {}, {}, {}, {}, {}, {}) : (i64, i64, i64, i64, i64, i64, i64, i64) -> i64",
+                    result, item, seq, start, end, from_end, test, test_not, key
+                ));
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -7945,6 +8059,23 @@ impl StackMLIRCodegen {
             }
 
             // Evaluation and compilation
+            "load-mlir" => {
+                if args.is_empty() {
+                    anyhow::bail!("load-mlir requires a path argument");
+                }
+
+                // Evaluate first argument (path designator)
+                self.compile_expr(&args[0])?;
+                let path_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", path_ssa));
+
+                // Call runtime load-mlir
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_load_mlir({}) : (i64) -> i64", result, path_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
             "load" => {
                 if args.is_empty() {
                     anyhow::bail!("load requires at least a path argument");
@@ -7987,19 +8118,135 @@ impl StackMLIRCodegen {
             "compile" | "compile-file" | "require" | "provide" |
             "constantp" | "macro-function" | "macroexpand" | "macroexpand-1" |
             // Declarations (typically ignored at runtime)
+            // CL Standard Symbol Functions - implemented via runtime
+            "gensym" => {
+                // (gensym &optional prefix)
+                let prefix_ssa = if args.is_empty() {
+                    // No prefix - pass NIL
+                    let nil = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+                    nil
+                } else {
+                    self.compile_expr(&args[0])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                };
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_gensym({}) : (i64) -> i64", result, prefix_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                return Ok(());
+            }
+
+            "symbol-name" => {
+                // (symbol-name symbol)
+                if args.is_empty() {
+                    anyhow::bail!("symbol-name requires 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let sym_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", sym_ssa));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_symbol_name({}) : (i64) -> i64", result, sym_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                return Ok(());
+            }
+
+            "intern" => {
+                // (intern name &optional package)
+                if args.is_empty() {
+                    anyhow::bail!("intern requires at least 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let name_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", name_ssa));
+                let pkg_ssa = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let nil = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+                    nil
+                };
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_intern({}, {}) : (i64, i64) -> i64", result, name_ssa, pkg_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                return Ok(());
+            }
+
+            "find-package" => {
+                // (find-package name)
+                if args.is_empty() {
+                    anyhow::bail!("find-package requires 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let name_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", name_ssa));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_find_package({}) : (i64) -> i64", result, name_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                return Ok(());
+            }
+
+            // make-package: register the package and return a package symbol
+            "make-package" => {
+                if !args.is_empty() {
+                    // Evaluate the package name argument
+                    self.compile_expr(&args[0])?;
+                    let name_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", name_val));
+                    // Register the package
+                    let _reg = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_register_package({}) : (i64) -> i64", _reg, name_val));
+                    // Return the package name (find-package will find it now)
+                    let result = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_find_package({}) : (i64) -> i64", result, name_val));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                return Ok(());
+            }
+
             "declare" | "ignore" | "ignorable" | "type" | "ftype" | "inline" | "notinline" |
             "optimize" | "special" | "dynamic-extent" |
-            // Packages
+            // Packages (remaining stubs - these need more complex implementation)
             "in-package" | "use-package" | "unuse-package" | "export" | "unexport" |
-            "import" | "shadowing-import" | "shadow" | "find-package" | "find-symbol" |
-            "intern" | "unintern" | "make-package" | "delete-package" | "rename-package" |
+            "import" | "shadowing-import" | "shadow" |
+            "unintern" | "delete-package" | "rename-package" |
             "package-name" | "package-nicknames" | "package-use-list" | "package-used-by-list" |
             "package-shadowing-symbols" | "list-all-packages" |
-            // Symbols
-            "gensym" | "gentemp" | "symbol-name" | "symbol-package" |
+            // Symbols (remaining stubs)
+            "gentemp" | "symbol-package" |
             "symbol-function" | "symbol-plist" | "get" | "remprop" | "make-symbol" | "copy-symbol" => {
                 // Stub: push NIL for unimplemented functions
                 self.writeln("func.call @stack_push_nil() : () -> ()");
+                Ok(())
+            }
+
+            "find-symbol" => {
+                // (find-symbol name &optional package) -> symbol or nil
+                if args.is_empty() {
+                    anyhow::bail!("find-symbol requires at least 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let name_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", name_ssa));
+                let pkg_ssa = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_find_symbol({}, {}) : (i64, i64) -> i64", result, name_ssa, pkg_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
 
@@ -8053,7 +8300,21 @@ impl StackMLIRCodegen {
             }
 
             // Strings
-            "string" | "string/=" | "string<" | "string>" | "string<=" | "string>=" |
+            // CL string coercion function
+            "string" => {
+                if args.len() != 1 {
+                    anyhow::bail!("string requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let arg = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arg));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_string({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                return Ok(());
+            }
+
+            "string/=" | "string<" | "string>" | "string<=" | "string>=" |
             "string-upcase" | "string-downcase" | "string-capitalize" | "nstring-upcase" |
             "nstring-downcase" | "nstring-capitalize" | "string-trim" | "string-left-trim" |
             "string-right-trim" | "schar" | "string-not-equal" |
@@ -8949,9 +9210,23 @@ impl StackMLIRCodegen {
             self.local_function_map.insert(name.clone(), unique_name);
         }
 
-        // Step 2: Compile local functions (buffer them to emit at module level)
+        // Step 2: Compile local functions and identify captured variables
+        // Local functions are compiled as separate module-level functions,
+        // so they can't directly access enclosing scope variables.
+        // We identify free variables and bind them as dynamic variables
+        // so the local functions can access them via cc_symbol_value.
+        let mut all_captured_vars = HashSet::new();
+
         for (name, params, defaults, supplied_p_vars, key_params, func_body) in func_defs {
             let unique_name = local_names.get(name).unwrap();
+
+            // Find free variables: referenced in body, not in params, but in enclosing scope
+            let param_set: HashSet<String> = params.iter()
+                .filter(|p| !p.starts_with('&'))
+                .cloned()
+                .collect();
+            let free_vars = self.find_outer_scope_refs(func_body, &param_set);
+            all_captured_vars.extend(free_vars);
 
             // Save current output and indentation
             let saved_output = std::mem::take(&mut self.output);
@@ -8977,6 +9252,20 @@ impl StackMLIRCodegen {
                         e
                     ));
                 }
+            }
+        }
+
+        // Step 2b: Push captured variables to dynamic bindings so local functions
+        // can access them at runtime via cc_symbol_value
+        for var_name in &all_captured_vars {
+            if let Some(ssa_val) = self.symbol_table.get(var_name).cloned() {
+                // Create a symbol for the variable name (uppercased to match cc_symbol_value lookup)
+                let var_sym = self.create_symbol_constant(var_name);
+                // Store the current value as a dynamic binding
+                self.writeln(&format!(
+                    "func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                    var_sym, ssa_val
+                ));
             }
         }
 
@@ -9030,6 +9319,32 @@ impl StackMLIRCodegen {
             // name already includes @, so don't add another one
             self.writeln(&format!("llvm.mlir.global private constant {}(\"{}\") : !llvm.array<{} x i8>",
                 name, c_str, len));
+        }
+
+        // Emit a global constant listing functions that expect args_list
+        // (functions with &optional, &key, &rest parameters)
+        // Format: null-separated list of function names, double-null terminated
+        if !self.special_param_functions.is_empty() {
+            let names: Vec<&String> = self.special_param_functions.iter().collect();
+            let mut data = String::new();
+            let mut total_len = 0;
+            for name in &names {
+                // Add %FN% prefix if not present (to match registry keys)
+                let key = if name.starts_with("%FN%") {
+                    name.to_string()
+                } else {
+                    format!("%FN%{}", name)
+                };
+                data.push_str(&key);
+                data.push_str("\\00");
+                total_len += key.len() + 1;
+            }
+            data.push_str("\\00"); // double null terminator
+            total_len += 1;
+            self.writeln(&format!(
+                "llvm.mlir.global external constant @__argslist_functions(\"{}\") : !llvm.array<{} x i8>",
+                data, total_len
+            ));
         }
 
         self.dedent();

@@ -334,21 +334,29 @@ impl Reader {
             }
             '+' => {
                 // Reader conditional #+feature form
-                // Skip feature expression and the following form
+                // Include form if feature IS present in *features*
                 self.advance();
-                let _feature = self.read()?; // Read and discard feature
-                let _form = self.read()?;    // Read and discard form
-                // Continue reading next form
-                self.read()
+                let feature = self.read()?; // Read feature expression
+                let form = self.read()?;    // Read form
+                if self.feature_present(&feature) {
+                    Ok(form)
+                } else {
+                    // Feature not present - skip this form, read next
+                    self.read()
+                }
             }
             '-' => {
                 // Reader conditional #-feature form
-                // Skip feature expression and the following form
+                // Include form if feature is NOT present in *features*
                 self.advance();
-                let _feature = self.read()?; // Read and discard feature
-                let _form = self.read()?;    // Read and discard form
-                // Continue reading next form
-                self.read()
+                let feature = self.read()?; // Read feature expression
+                let form = self.read()?;    // Read form
+                if !self.feature_present(&feature) {
+                    Ok(form)
+                } else {
+                    // Feature present - skip this form, read next
+                    self.read()
+                }
             }
             '|' => {
                 // Block comment already handled in skip_whitespace
@@ -753,6 +761,72 @@ impl Reader {
             }
 
             break;
+        }
+    }
+
+    /// Check if a feature is present in *features*
+    /// Handles simple features (symbols) and compound features (and, or, not)
+    fn feature_present(&self, feature: &ASTNode) -> bool {
+        // Get the features list from the global state
+        let features_list = super::eval::eval_symbol::get_features();
+        self.check_feature(feature, &features_list)
+    }
+
+    /// Check if a feature expression matches the current features
+    fn check_feature(&self, feature: &ASTNode, features: &super::eval::EvalResult) -> bool {
+        use super::eval::EvalResult;
+
+        match feature {
+            // Simple feature - check if symbol is in *features*
+            ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                let feature_name = name.trim_start_matches(':').to_uppercase();
+                self.feature_in_list(&feature_name, features)
+            }
+            // Compound feature expression: (and ...), (or ...), (not ...)
+            ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(op) = function.as_ref() {
+                    match op.to_lowercase().as_str() {
+                        "and" => args.iter().all(|f| self.check_feature(f, features)),
+                        "or" => args.iter().any(|f| self.check_feature(f, features)),
+                        "not" => {
+                            if args.len() == 1 {
+                                !self.check_feature(&args[0], features)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a feature name is in the features list
+    fn feature_in_list(&self, name: &str, features: &super::eval::EvalResult) -> bool {
+        use super::eval::EvalResult;
+
+        match features {
+            EvalResult::Cons(car, cdr) => {
+                let car_val = car.borrow();
+                let matches = match &*car_val {
+                    EvalResult::Symbol(s) => {
+                        let feat_name = s.trim_start_matches(':').to_uppercase();
+                        feat_name == name
+                    }
+                    _ => false,
+                };
+                if matches {
+                    true
+                } else {
+                    self.feature_in_list(name, &cdr.borrow())
+                }
+            }
+            EvalResult::Nil => false,
+            _ => false,
         }
     }
 }

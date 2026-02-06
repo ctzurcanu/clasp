@@ -177,9 +177,11 @@ func.func private @cc_set_char(i64, i64, i64) -> i64
 func.func private @cc_string_upcase(i64) -> i64
 func.func private @cc_string_downcase(i64) -> i64
 func.func private @cc_string_capitalize(i64) -> i64
+func.func private @cc_string(i64) -> i64
 
 // Sequence operations
 func.func private @cc_find(i64, i64) -> i64
+func.func private @cc_find_full(i64, i64, i64, i64, i64, i64, i64, i64) -> i64
 func.func private @cc_position(i64, i64) -> i64
 func.func private @cc_remove(i64, i64) -> i64
 func.func private @cc_subseq(i64, i64, i64) -> i64
@@ -199,6 +201,11 @@ func.func private @cc_symbol_value(i64) -> i64
 func.func private @cc_set_symbol_value(i64, i64) -> i64
 func.func private @cc_get_symbol_property(i64, i64) -> i64
 func.func private @cc_set_symbol_property(i64, i64, i64) -> i64
+func.func private @cc_gensym(i64) -> i64
+func.func private @cc_symbol_name(i64) -> i64
+func.func private @cc_intern(i64, i64) -> i64
+func.func private @cc_find_symbol(i64, i64) -> i64
+func.func private @cc_find_package(i64) -> i64
 
 // Reduction
 func.func private @cc_reduce(i64, i64) -> i64
@@ -284,3 +291,9 @@ func.func private @cc_get_universal_time(i64) -> i64
 
 // System interaction
 func.func private @cc_shell(i64) -> i64
+
+// MLIR file loading
+func.func private @cc_load_mlir(i64) -> i64
+
+// Package registration
+func.func private @cc_register_package(i64) -> i64

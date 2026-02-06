@@ -14,49 +14,84 @@ pub fn lower_mlir_to_llvm(mlir_text: &str) -> Result<String> {
     translate_llvm_dialect_to_ir(&lowered_mlir)
 }
 
-fn lower_to_llvm_dialect(mlir_text: &str) -> Result<String> {
-    // Load runtime declarations
+/// Merge user MLIR with runtime declarations into a complete module
+fn merge_with_runtime_decls(mlir_text: &str) -> String {
     let runtime_decls = include_str!("../runtime-decls.mlir");
-
-    // Merge runtime declarations with user code
-    // Extract the module body from user code (skip "module {" and final "}")
     let user_lines: Vec<&str> = mlir_text.lines().collect();
     let mut merged_mlir = String::from("module {\n");
 
-    // Add runtime declarations inside the module
     merged_mlir.push_str(runtime_decls);
     merged_mlir.push_str("\n");
 
-    // Add user code (skip first "module {" line and last "}" line)
     if user_lines.len() > 2 {
         for line in &user_lines[1..user_lines.len()-1] {
-            // Strip leading whitespace to avoid indentation issues
             merged_mlir.push_str(line.trim_start());
             merged_mlir.push('\n');
         }
     }
     merged_mlir.push_str("}\n");
+    merged_mlir
+}
 
-    // Write merged MLIR to temporary file
+/// Emit MLIR bytecode (.mlirbc) from MLIR text
+pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
+    let merged_mlir = merge_with_runtime_decls(mlir_text);
+
     let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join("scf_input.mlir");
+    let input_path = temp_dir.join("mlirbc_input.mlir");
     std::fs::write(&input_path, &merged_mlir)?;
 
-    // Also write to /tmp for debugging
-    std::fs::write("/tmp/debug_scf.mlir", &merged_mlir)?;
-
-    // Find mlir-opt (Homebrew installs it in a keg-only location)
     let mlir_opt_paths = [
         "/opt/homebrew/opt/llvm/bin/mlir-opt",
         "/usr/local/opt/llvm/bin/mlir-opt",
-        "mlir-opt", // fallback to PATH
+        "mlir-opt",
     ];
 
     let mlir_opt = mlir_opt_paths.iter()
         .find(|p| std::path::Path::new(p).exists())
-        .ok_or_else(|| anyhow::anyhow!("mlir-opt not found. Install with: brew install llvm"))?;
+        .ok_or_else(|| anyhow::anyhow!("mlir-opt not found"))?;
 
-    // Run mlir-opt with full lowering pipeline to LLVM dialect
+    let output = Command::new(mlir_opt)
+        .arg("--emit-bytecode")
+        .arg("-o")
+        .arg(output_path)
+        .arg(input_path.to_str().unwrap())
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("mlir-opt --emit=bytecode failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
+fn find_mlir_opt() -> Result<&'static str> {
+    let mlir_opt_paths = [
+        "/opt/homebrew/opt/llvm/bin/mlir-opt",
+        "/usr/local/opt/llvm/bin/mlir-opt",
+        "mlir-opt",
+    ];
+    mlir_opt_paths.iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("mlir-opt not found. Install with: brew install llvm"))
+}
+
+fn find_mlir_translate() -> Result<&'static str> {
+    let paths = [
+        "/opt/homebrew/opt/llvm/bin/mlir-translate",
+        "/usr/local/opt/llvm/bin/mlir-translate",
+        "mlir-translate",
+    ];
+    paths.iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("mlir-translate not found. Install with: brew install llvm"))
+}
+
+fn run_mlir_opt_lowering(input_path: &str) -> Result<String> {
+    let mlir_opt = find_mlir_opt()?;
     let output = Command::new(mlir_opt)
         .arg("--convert-scf-to-cf")
         .arg("--convert-arith-to-llvm")
@@ -64,33 +99,41 @@ fn lower_to_llvm_dialect(mlir_text: &str) -> Result<String> {
         .arg("--convert-func-to-llvm")
         .arg("--convert-cf-to-llvm")
         .arg("--reconcile-unrealized-casts")
-        .arg(input_path.to_str().unwrap())
+        .arg(input_path)
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!("mlir-opt failed: {}", stderr));
     }
-
     Ok(String::from_utf8(output.stdout)?)
 }
 
+/// Lower an MLIR or MLIRBC file (with runtime decls already included) to LLVM IR
+pub fn lower_mlir_file_to_llvm(file_path: &str) -> Result<String> {
+    // The file already has runtime decls (bytecode was generated from merged MLIR)
+    // For .mlir text files without runtime decls, caller should use lower_mlir_to_llvm instead
+    let lowered_mlir = run_mlir_opt_lowering(file_path)?;
+    translate_llvm_dialect_to_ir(&lowered_mlir)
+}
+
+fn lower_to_llvm_dialect(mlir_text: &str) -> Result<String> {
+    let merged_mlir = merge_with_runtime_decls(mlir_text);
+
+    let temp_dir = std::env::temp_dir();
+    let input_path = temp_dir.join("scf_input.mlir");
+    std::fs::write(&input_path, &merged_mlir)?;
+    std::fs::write("/tmp/debug_scf.mlir", &merged_mlir)?;
+
+    run_mlir_opt_lowering(input_path.to_str().unwrap())
+}
+
 fn translate_llvm_dialect_to_ir(llvm_dialect_mlir: &str) -> Result<String> {
-    // Write LLVM dialect MLIR to temporary file
     let temp_dir = std::env::temp_dir();
     let input_path = temp_dir.join("llvm_dialect.mlir");
     std::fs::write(&input_path, llvm_dialect_mlir)?;
 
-    // Find mlir-translate (same location as mlir-opt)
-    let mlir_translate_paths = [
-        "/opt/homebrew/opt/llvm/bin/mlir-translate",
-        "/usr/local/opt/llvm/bin/mlir-translate",
-        "mlir-translate", // fallback to PATH
-    ];
-
-    let mlir_translate = mlir_translate_paths.iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .ok_or_else(|| anyhow::anyhow!("mlir-translate not found. Install with: brew install llvm"))?;
+    let mlir_translate = find_mlir_translate()?;
 
     // Run mlir-translate to convert LLVM dialect to LLVM IR
     let output = Command::new(mlir_translate)

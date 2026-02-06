@@ -303,7 +303,12 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                             // Return the package's canonical name, not the lookup key (which could be a nickname)
                             Ok(EvalResult::Package(pkg.get_name().to_string()))
                         } else {
-                            Ok(EvalResult::Nil)
+                            // Check JIT package registry (populated during load-mlir)
+                            if rlasp_jit::intrinsics::is_jit_package(&pkg_name) {
+                                Ok(EvalResult::Package(pkg_name.clone()))
+                            } else {
+                                Ok(EvalResult::Nil)
+                            }
                         }
                     })
                 }

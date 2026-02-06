@@ -1235,6 +1235,13 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         .map_err(|e| format!("Failed to write MLIR file: {}", e))?;
     println!("[Saved MLIR to: {}]", mlir_path);
 
+    // Save MLIR bytecode
+    let mlirbc_path = format!("/tmp/{}.mlirbc", module_name);
+    match rlasp_mlir::lowering::emit_mlir_bytecode(&mlir_text, &mlirbc_path) {
+        Ok(()) => println!("[Saved MLIR bytecode to: {}]", mlirbc_path),
+        Err(e) => eprintln!("[Warning: Could not emit MLIR bytecode: {}]", e),
+    }
+
     // Lower MLIR to LLVM IR in memory
     let llvm_ir_text = rlasp_mlir::lowering::lower_mlir_to_llvm(&mlir_text)
         .map_err(|e| format!("Failed to lower MLIR: {}", e))?;
@@ -1307,6 +1314,11 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             cc_set_symbol_value as *const (),
             cc_get_symbol_property as *const (),
             cc_set_symbol_property as *const (),
+            cc_gensym as *const (),
+            cc_symbol_name as *const (),
+            cc_intern as *const (),
+            cc_find_symbol as *const (),
+            cc_find_package as *const (),
             cc_add as *const (),
             cc_sub as *const (),
             cc_mul as *const (),
@@ -1364,6 +1376,10 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             cc_subtypep as *const (),
             cc_keywordp as *const (),
             cc_mapc_stack as *const (),
+            cc_find_full as *const (),
+            cc_load_mlir as *const (),
+            cc_register_package as *const (),
+            cc_string as *const (),
             cc_position_full as *const (),
             cc_position_if_full as *const (),
             cc_position_if_not as *const (),
@@ -1774,6 +1790,290 @@ pub extern "C" fn cc_load(path_obj: usize) -> usize {
             unsafe { rlasp_jit::intrinsics::cc_nil_value() }
         }
     }
+}
+
+/// Load and execute an MLIR (.mlir) or MLIR bytecode (.mlirbc) file
+/// (load-mlir path) - callable from Lisp
+#[no_mangle]
+pub extern "C" fn cc_load_mlir(path_obj: usize) -> usize {
+    use rlasp_runtime::LispObject;
+    use std::path::Path;
+
+    let obj = unsafe { LispObject::from_raw(path_obj) };
+    let raw_path = match extract_pathname_string(obj) {
+        Some(p) => p,
+        None => {
+            eprintln!("load-mlir: requires a pathname or string (got 0x{:x})", path_obj);
+            return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+        }
+    };
+
+    let path = normalize_path_string(&raw_path);
+    let resolved_path = if Path::new(&path).is_absolute() {
+        path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path).to_string_lossy().to_string())
+            .unwrap_or(path.clone())
+    };
+
+    if !Path::new(&resolved_path).exists() {
+        eprintln!("load-mlir: file not found: {}", resolved_path);
+        return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+    }
+
+    let is_bytecode = resolved_path.ends_with(".mlirbc");
+    let is_text_mlir = resolved_path.ends_with(".mlir");
+
+    if !is_bytecode && !is_text_mlir {
+        eprintln!("load-mlir: expected .mlir or .mlirbc file, got: {}", resolved_path);
+        return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+    }
+
+    // Lower to LLVM IR
+    println!("[load-mlir: loading {}]", resolved_path);
+    let llvm_ir_text = if is_bytecode {
+        // .mlirbc already has runtime decls baked in
+        rlasp_mlir::lowering::lower_mlir_file_to_llvm(&resolved_path)
+    } else {
+        // .mlir text - check if it has runtime decls by looking for cc_nil
+        let mlir_text = match std::fs::read_to_string(&resolved_path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("load-mlir: failed to read {}: {}", resolved_path, e);
+                return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+            }
+        };
+        // Always merge runtime decls for .mlir text files
+        rlasp_mlir::lowering::lower_mlir_to_llvm(&mlir_text)
+    };
+
+    let llvm_ir_text = match llvm_ir_text {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("load-mlir: lowering failed: {}", e);
+            return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+        }
+    };
+
+    // JIT compile and execute
+    match jit_execute_llvm_ir(&llvm_ir_text, &resolved_path) {
+        Ok(()) => unsafe { rlasp_jit::intrinsics::cc_t_value() },
+        Err(e) => {
+            eprintln!("load-mlir: JIT execution failed: {}", e);
+            unsafe { rlasp_jit::intrinsics::cc_nil_value() }
+        }
+    }
+}
+
+/// JIT compile and execute LLVM IR text
+fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Result<(), String> {
+    use inkwell::context::Context;
+    use inkwell::memory_buffer::MemoryBuffer;
+    use llvm_sys::orc2::*;
+    use llvm_sys::orc2::lljit::*;
+    use llvm_sys::error::*;
+    use std::ptr;
+    use std::path::Path;
+
+    // Ensure LLVM native target is initialized
+    use inkwell::targets::{Target, InitializationConfig};
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| format!("Failed to initialize native target: {}", e))?;
+
+    let module_name = Path::new(source_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("loaded_module");
+
+    let context = Context::create();
+    let memory_buffer = MemoryBuffer::create_from_memory_range_copy(llvm_ir_text.as_bytes(), module_name);
+    let module = context.create_module_from_ir(memory_buffer)
+        .map_err(|e| format!("Failed to parse LLVM IR: {:?}", e))?;
+
+    // Collect function names before transferring module
+    let mut lambda_names: Vec<String> = Vec::new();
+    let mut fn_names: Vec<String> = Vec::new();
+    for func_val in module.get_functions() {
+        let func_name = func_val.get_name().to_str().unwrap_or("");
+        if func_name.starts_with("__lambda_") {
+            lambda_names.push(func_name.to_string());
+        }
+        if func_name.starts_with("%FN%") {
+            fn_names.push(func_name.to_string());
+        }
+    }
+
+    // Create LLJIT
+    let lljit: LLVMOrcLLJITRef = unsafe {
+        let builder = LLVMOrcCreateLLJITBuilder();
+        let mut lljit: LLVMOrcLLJITRef = ptr::null_mut();
+        let err = LLVMOrcCreateLLJIT(&mut lljit, builder);
+        if !err.is_null() {
+            let err_msg = LLVMGetErrorMessage(err);
+            let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(err_msg);
+            return Err(format!("Failed to create LLJIT: {}", msg));
+        }
+        lljit
+    };
+
+    let main_jd = unsafe { LLVMOrcLLJITGetMainJITDylib(lljit) };
+
+    // Add process symbol resolver
+    unsafe {
+        let mut gen: LLVMOrcDefinitionGeneratorRef = ptr::null_mut();
+        let global_prefix = LLVMOrcLLJITGetGlobalPrefix(lljit);
+        let err = LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
+            &mut gen, global_prefix, None, ptr::null_mut(),
+        );
+        if !err.is_null() {
+            let err_msg = LLVMGetErrorMessage(err);
+            let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(err_msg);
+            LLVMOrcDisposeLLJIT(lljit);
+            return Err(format!("Failed to create symbol resolver: {}", msg));
+        }
+        LLVMOrcJITDylibAddGenerator(main_jd, gen);
+    }
+
+    // Add module to LLJIT
+    let ts_ctx = unsafe { LLVMOrcCreateNewThreadSafeContext() };
+    let llvm_module_ref = module.as_mut_ptr();
+    let ts_module = unsafe { LLVMOrcCreateNewThreadSafeModule(llvm_module_ref, ts_ctx) };
+    std::mem::forget(module);
+
+    unsafe {
+        let err = LLVMOrcLLJITAddLLVMIRModule(lljit, main_jd, ts_module);
+        if !err.is_null() {
+            let err_msg = LLVMGetErrorMessage(err);
+            let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            LLVMDisposeErrorMessage(err_msg);
+            LLVMOrcDisposeLLJIT(lljit);
+            return Err(format!("Failed to add module: {}", msg));
+        }
+    }
+
+    let lookup_symbol = |name: &str| -> std::result::Result<u64, String> {
+        let c_name = std::ffi::CString::new(name).unwrap();
+        let mut addr: LLVMOrcExecutorAddress = 0;
+        unsafe {
+            let err = LLVMOrcLLJITLookup(lljit, &mut addr, c_name.as_ptr());
+            if !err.is_null() {
+                let err_msg = LLVMGetErrorMessage(err);
+                let msg = std::ffi::CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+                LLVMDisposeErrorMessage(err_msg);
+                return Err(msg);
+            }
+        }
+        Ok(addr)
+    };
+
+    // Read the __argslist_functions global to find which functions expect args_list
+    let argslist_functions: std::collections::HashSet<String> = {
+        let mut set = std::collections::HashSet::new();
+        if let Ok(addr) = lookup_symbol("__argslist_functions") {
+            if addr != 0 {
+                let ptr = addr as *const u8;
+                let mut offset = 0;
+                loop {
+                    let start = unsafe { ptr.add(offset) };
+                    if unsafe { *start } == 0 { break; } // double null = end
+                    let c_str = unsafe { std::ffi::CStr::from_ptr(start as *const i8) };
+                    if let Ok(name) = c_str.to_str() {
+                        if !name.is_empty() {
+                            set.insert(name.to_string());
+                        }
+                        offset += name.len() + 1; // +1 for null
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        set
+    };
+
+    // Register functions
+    {
+        use rlasp_jit::intrinsics::{cc_register_function_ptr, cc_register_function_with_args_list};
+        use std::ffi::CString;
+
+        for func_name in &fn_names {
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                if argslist_functions.contains(func_name) {
+                    unsafe { cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
+                } else {
+                    unsafe { cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
+                }
+            }
+        }
+        for func_name in &lambda_names {
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                unsafe { cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
+            }
+        }
+    }
+
+    // Ensure standard CL variables are initialized
+    rlasp_jit::intrinsics::init_standard_cl_variables();
+
+    // Execute __main or batch functions
+    let trace_batches = std::env::var("RLASP_TRACE_BATCHES").is_ok();
+
+    if let Ok(__main_addr) = lookup_symbol("__main") {
+        unsafe {
+            use rlasp_runtime::eval_stack::{stack_pop_pointer, stack_depth, stack_clear};
+
+            // Pre-compile batch functions
+            let mut batch_count = 0;
+            for i in 0..100 {
+                let batch_name = format!("__main_batch_{}", i);
+                match lookup_symbol(&batch_name) {
+                    Ok(_) => batch_count += 1,
+                    Err(_) => break,
+                }
+            }
+
+            println!("[load-mlir: {} batches, {} functions, {} lambdas]",
+                batch_count, fn_names.len(), lambda_names.len());
+
+            if batch_count > 0 {
+                for i in 0..batch_count {
+                    let batch_name = format!("__main_batch_{}", i);
+                    if let Ok(batch_addr) = lookup_symbol(&batch_name) {
+                        if trace_batches {
+                            println!("[load-mlir: batch {}/{}]", i, batch_count);
+                        }
+                        stack_clear();
+                        let jit_fn: extern "C" fn() = std::mem::transmute(batch_addr);
+                        jit_fn();
+                        if stack_depth() > 0 {
+                            let _ = stack_pop_pointer();
+                        }
+                    }
+                }
+                println!("[load-mlir: {} batches executed]", batch_count);
+            } else {
+                stack_clear();
+                let jit_fn: extern "C" fn() = std::mem::transmute(__main_addr);
+                jit_fn();
+                if stack_depth() > 0 {
+                    let _ = stack_pop_pointer();
+                }
+            }
+        }
+    } else {
+        return Err("No __main function found in module".to_string());
+    }
+
+    // IMPORTANT: Do NOT dispose the LLJIT - the compiled code must remain in memory
+    // so that function pointers in the registry stay valid for later calls from the REPL.
+    // The LLJIT will live for the process lifetime.
+    // unsafe { LLVMOrcDisposeLLJIT(lljit); }
+    Ok(())
 }
 
 /// Format a LispObject as a list string

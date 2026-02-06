@@ -4173,6 +4173,73 @@ fn parse_single_function_binding(ast: &ASTNode) -> Result<Option<(String, Vec<St
     }
 }
 
+/// Try calling a function from the JIT function registry.
+/// Returns Ok(Some(result)) if the function was found and called, Ok(None) if not found.
+fn try_call_jit_function(name: &str, args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<Option<EvalResult>, String> {
+    use rlasp_jit::intrinsics::get_registry;
+    use rlasp_runtime::eval_stack::{stack_push_pointer, stack_pop_pointer, stack_depth};
+    use rlasp_runtime::{LispObject, Symbol, RString, Number, NumberValue};
+
+    // Check if function exists in JIT registry (try %FN%name, name, and uppercase variants)
+    let fn_key = format!("%FN%{}", name);
+    let fn_key_upper = format!("%FN%{}", name.to_uppercase());
+    let found = {
+        let registry = get_registry().lock().unwrap();
+        registry.contains_key(&fn_key) || registry.contains_key(name)
+            || registry.contains_key(&fn_key_upper) || registry.contains_key(&name.to_uppercase())
+    };
+    if !found {
+        return Ok(None);
+    }
+
+    // Evaluate arguments and convert to LispObject, push to JIT stack
+    let eval_args: Vec<EvalResult> = args.iter()
+        .map(|arg| eval_with_env(arg, env))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for arg in &eval_args {
+        let raw = match arg {
+            EvalResult::Fixnum(n) => LispObject::fixnum(*n).raw(),
+            EvalResult::Float(f) => unsafe { rlasp_jit::intrinsics::cc_box_float(*f) },
+            EvalResult::Bool(true) => LispObject::t().raw(),
+            EvalResult::Bool(false) | EvalResult::Nil => LispObject::nil().raw(),
+            EvalResult::String(s) => unsafe { rlasp_jit::intrinsics::cc_make_string(s.as_ptr(), s.len()) },
+            EvalResult::Symbol(s) => Symbol::allocate(s.clone()).raw(),
+            EvalResult::Character(c) => unsafe { rlasp_jit::intrinsics::cc_box_character(*c as usize) },
+            _ => LispObject::nil().raw(),
+        };
+        stack_push_pointer(raw);
+    }
+
+    // Create symbol for the function name and call via funcall_stack
+    let sym = Symbol::allocate(name.to_uppercase());
+    rlasp_jit::intrinsics::cc_funcall_stack(sym.raw(), eval_args.len() as i64);
+
+    // Pop result from stack and convert back to EvalResult
+    if stack_depth() > 0 {
+        let result_raw = stack_pop_pointer();
+        let result_obj = unsafe { LispObject::from_raw(result_raw) };
+        if result_obj.is_nil() {
+            Ok(Some(EvalResult::Nil))
+        } else if result_obj.raw() == LispObject::t().raw() {
+            Ok(Some(EvalResult::Bool(true)))
+        } else if let Some(n) = result_obj.as_fixnum() {
+            Ok(Some(EvalResult::Fixnum(n)))
+        } else if let Some(s_ptr) = result_obj.as_general_ptr::<RString>() {
+            let s = unsafe { &*s_ptr };
+            Ok(Some(EvalResult::String(s.as_str().to_string())))
+        } else if let Some(sym_ptr) = result_obj.as_general_ptr::<Symbol>() {
+            let sym = unsafe { &*sym_ptr };
+            Ok(Some(EvalResult::Symbol(sym.name().to_string())))
+        } else {
+            // Return as opaque value - wrap in string representation
+            Ok(Some(EvalResult::String(format!("{}", result_obj))))
+        }
+    } else {
+        Ok(Some(EvalResult::Nil))
+    }
+}
+
 fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
     if name.starts_with("sb-ext:") {
         matches!(base_name, "posix-getenv" | "parse-native-namestring" | "native-namestring")
@@ -4183,7 +4250,7 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
     } else if name.starts_with("si:") {
         matches!(base_name, "hash-set")
     } else {
-        false
+        matches!(base_name, "load-mlir")
     }
 }
 
@@ -4289,6 +4356,10 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
         let is_internal_marker = name.starts_with("sys::") && matches!(base_name, "read-time-eval" | "while");
         let is_extension_builtin = is_allowed_extension_builtin(name, base_name);
         if !is_internal_marker && !is_extension_builtin && !rlasp_runtime::is_cl_builtin(base_name) {
+            // Try JIT function registry as fallback (for functions loaded via load-mlir)
+            if let Some(result) = try_call_jit_function(base_name, args, env)? {
+                return Ok(result);
+            }
             if std::env::var("RLASP_DEBUG_UNDEFINED").is_ok() {
                 eprintln!("[undef] name={} args={:?}", name, args);
             }
@@ -5021,6 +5092,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 super::eval_io::call_io_builtin("format", &eval_args)
             },
             "load" => eval_load(args, env),
+            "load-mlir" => eval_load_mlir(args, env),
             "load-lib" => eval_load_lib(args, env),
             "defforeign" => eval_defforeign(args, env),
             "warn" => {

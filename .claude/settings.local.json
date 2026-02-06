@@ -69,7 +69,13 @@
       "Bash(/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/rlasp:*)",
       "Bash(lldb:*)",
       "Bash(/opt/homebrew/opt/llvm/bin/mlir-opt:*)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(RLASP_TRACE_BATCHES=1 RLASP_TRACE_FUNCALL=1 RLASP_TRACE_FUNCALL_LIMIT=50 timeout:*)",
+      "Bash(/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp:*)",
+      "Bash(while read line)",
+      "Bash(do echo \"$line\")",
+      "Bash(RLASP_TRACE_FUNCALL=1 RLASP_TRACE_FUNCALL_LIMIT=50 timeout:*)",
+      "Bash(RLASP_TRACE_BATCHES=1 target/release/irlasp:*)"
     ]
   }
 }

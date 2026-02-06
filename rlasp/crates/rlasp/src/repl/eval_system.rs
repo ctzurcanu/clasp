@@ -7,6 +7,47 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 
+/// Convert a JIT LispObject to an interpreter EvalResult
+pub(super) fn jit_lisp_object_to_eval_result(obj: &rlasp_runtime::LispObject) -> EvalResult {
+    use rlasp_runtime::{RString, Symbol, Cons};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    if obj.is_nil() {
+        return EvalResult::Nil;
+    }
+    if obj.raw() == rlasp_runtime::LispObject::t().raw() {
+        return EvalResult::Bool(true);
+    }
+    if let Some(n) = obj.as_fixnum() {
+        return EvalResult::Fixnum(n);
+    }
+    if obj.is_general() {
+        if let Some(ptr) = obj.as_general_ptr::<()>() {
+            if !ptr.is_null() {
+                if let Some(obj_type) = unsafe { TypeHeader::from_ptr(ptr) } {
+                    match obj_type {
+                        ObjectType::String => {
+                            let s = unsafe { &*(ptr as *const RString) };
+                            return EvalResult::String(s.as_str().to_string());
+                        }
+                        ObjectType::Symbol => {
+                            let s = unsafe { &*(ptr as *const Symbol) };
+                            return EvalResult::Symbol(s.name().to_string());
+                        }
+                        ObjectType::Cons => {
+                            // For cons cells, return a string representation for now
+                            return EvalResult::String(format!("{}", obj));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: string representation
+    EvalResult::String(format!("{}", obj))
+}
+
 pub(super) fn eval_funcall(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.is_empty() {
         return Err("funcall requires at least 1 argument (function)".to_string());
@@ -1233,9 +1274,11 @@ pub(super) fn eval_in_package(args: &[ASTNode]) -> Result<EvalResult, String> {
     let package_name = match &args[0] {
         ASTNode::Variable(name) => name.clone(),
         ASTNode::Constant(ConstantValue::String(s)) => s.clone(),
+        ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),  // Handle keyword symbols like :uiop/package
         ASTNode::Quote(quoted) => {
             match &**quoted {
                 ASTNode::Variable(name) => name.clone(),
+                ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
                 _ => return Err("in-package argument must be a symbol or string".to_string()),
             }
         }
@@ -1290,6 +1333,8 @@ pub(super) fn eval_boundp(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     };
 
     if env.contains_key(&symbol_name) {
+        Ok(EvalResult::Bool(true))
+    } else if rlasp_jit::intrinsics::is_dynamic_bound(&symbol_name) {
         Ok(EvalResult::Bool(true))
     } else {
         Ok(EvalResult::Nil)
@@ -1373,6 +1418,12 @@ pub(super) fn eval_symbol_value(args: &[ASTNode], env: &mut HashMap<String, Eval
         if let Some(val) = env.get(&qualified) {
             return Ok(val.clone());
         }
+    }
+
+    // 5. Check JIT dynamic bindings as fallback
+    if let Some(raw) = rlasp_jit::intrinsics::get_dynamic_value(&symbol_name) {
+        let obj = unsafe { rlasp_runtime::LispObject::from_raw(raw) };
+        return Ok(jit_lisp_object_to_eval_result(&obj));
     }
 
     Err(format!("Unbound variable: {}", symbol_name))
@@ -1666,6 +1717,49 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 
     // Return t (true) on success, as per Common Lisp spec
     Ok(EvalResult::Bool(true))
+}
+
+pub(super) fn eval_load_mlir(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("load-mlir requires a file path argument".to_string());
+    }
+
+    let evaluated = eval_with_env(&args[0], env)?;
+    let file_path = extract_pathname_from_eval(&evaluated)
+        .ok_or_else(|| "load-mlir argument must be a string or pathname".to_string())?;
+
+    let resolved_path = if std::path::Path::new(&file_path).is_absolute() {
+        file_path.clone()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&file_path).to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_path.clone())
+    };
+
+    if !std::path::Path::new(&resolved_path).exists() {
+        return Err(format!("load-mlir: file not found: {}", resolved_path));
+    }
+
+    // Look up cc_load_mlir at runtime (it's defined in irlasp main.rs)
+    use rlasp_runtime::LispObject;
+    use rlasp_jit::intrinsics::cc_make_string;
+
+    let sym = std::ffi::CString::new("cc_load_mlir").unwrap();
+    let fn_ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym.as_ptr()) };
+    if fn_ptr.is_null() {
+        return Err("load-mlir: cc_load_mlir not available (run with irlasp binary)".to_string());
+    }
+    let cc_load_mlir: extern "C" fn(usize) -> usize = unsafe { std::mem::transmute(fn_ptr) };
+
+    let path_raw = unsafe { cc_make_string(resolved_path.as_ptr(), resolved_path.len()) };
+    let result = cc_load_mlir(path_raw);
+    let result_obj = unsafe { LispObject::from_raw(result) };
+
+    if result_obj.is_nil() {
+        Err(format!("load-mlir: failed to load {}", resolved_path))
+    } else {
+        Ok(EvalResult::Bool(true))
+    }
 }
 
 pub(super) fn eval_load_lib(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -2921,6 +3015,11 @@ pub(super) fn eval_fboundp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
                     }
                     _ => {}
                 }
+            }
+
+            // Check JIT function registry
+            if rlasp_jit::intrinsics::is_jit_function(&name) {
+                return Ok(EvalResult::Boolean(true));
             }
 
             // Check if it's a builtin by trying to look it up

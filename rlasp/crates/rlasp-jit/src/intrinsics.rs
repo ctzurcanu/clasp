@@ -1977,13 +1977,31 @@ pub extern "C" fn cc_arg(args_and_env: usize, param_info: usize) -> usize {
                 }
             }
 
-            // Move to next pair (skip both key and value)
-            let rest = cons.cdr();
-            if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
-                let rest_cons = unsafe { &*rest_cons_ptr };
-                current = rest_cons.cdr();
+            // Check if current element looks like a keyword (starts with :)
+            let is_keyword = if let Some(key_sym_ptr) = cons.car().as_general_ptr::<rlasp_runtime::Symbol>() {
+                use rlasp_runtime::{TypeHeader, ObjectType};
+                if let Some(ObjectType::Symbol) = unsafe { TypeHeader::from_ptr(key_sym_ptr) } {
+                    let key_sym = unsafe { &*key_sym_ptr };
+                    key_sym.name().starts_with(':')
+                } else {
+                    false
+                }
             } else {
-                break;
+                false
+            };
+
+            if is_keyword {
+                // This was a keyword that didn't match - skip both key and value
+                let rest = cons.cdr();
+                if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
+                    let rest_cons = unsafe { &*rest_cons_ptr };
+                    current = rest_cons.cdr();
+                } else {
+                    break;
+                }
+            } else {
+                // Not a keyword (positional arg) - just skip this one element
+                current = cons.cdr();
             }
         }
 
@@ -2025,9 +2043,11 @@ pub extern "C" fn cc_arg(args_and_env: usize, param_info: usize) -> usize {
             let key = cons.car();
 
             // Check if this is the keyword we're looking for
+            let mut is_keyword = false;
             if let Some(key_sym_ptr) = key.as_general_ptr::<rlasp_runtime::Symbol>() {
                 let key_sym = unsafe { &*key_sym_ptr };
                 let key_name = key_sym.name().to_string();
+                is_keyword = key_name.starts_with(':');
 
                 if key_name == keyword_name || key_name == param_name {
                     // Found the keyword, return the next value
@@ -2039,13 +2059,18 @@ pub extern "C" fn cc_arg(args_and_env: usize, param_info: usize) -> usize {
                 }
             }
 
-            // Move to next pair (skip both key and value)
-            let rest = cons.cdr();
-            if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
-                let rest_cons = unsafe { &*rest_cons_ptr };
-                current = rest_cons.cdr();
+            if is_keyword {
+                // This was a keyword that didn't match - skip both key and value
+                let rest = cons.cdr();
+                if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
+                    let rest_cons = unsafe { &*rest_cons_ptr };
+                    current = rest_cons.cdr();
+                } else {
+                    break;
+                }
             } else {
-                break;
+                // Not a keyword (positional arg) - just skip this one element
+                current = cons.cdr();
             }
         }
 
@@ -2093,12 +2118,14 @@ pub extern "C" fn cc_arg_present(args_and_env: usize, param_info: usize) -> usiz
             let cons = unsafe { &*cons_ptr };
             let key = cons.car();
 
+            let mut is_keyword = false;
             if let Some(key_sym_ptr) = key.as_general_ptr::<rlasp_runtime::Symbol>() {
                 use rlasp_runtime::{TypeHeader, ObjectType};
                 if let Some(obj_type) = unsafe { TypeHeader::from_ptr(key_sym_ptr) } {
                     if obj_type == ObjectType::Symbol {
                         let key_sym = unsafe { &*key_sym_ptr };
                         let key_name = key_sym.name().to_string();
+                        is_keyword = key_name.starts_with(':');
                         if key_name == keyword_name || key_name == param_name {
                             return LispObject::t().raw();
                         }
@@ -2106,13 +2133,18 @@ pub extern "C" fn cc_arg_present(args_and_env: usize, param_info: usize) -> usiz
                 }
             }
 
-            // Skip key and value
-            let rest = cons.cdr();
-            if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
-                let rest_cons = unsafe { &*rest_cons_ptr };
-                current = rest_cons.cdr();
+            if is_keyword {
+                // Skip key and value
+                let rest = cons.cdr();
+                if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
+                    let rest_cons = unsafe { &*rest_cons_ptr };
+                    current = rest_cons.cdr();
+                } else {
+                    break;
+                }
             } else {
-                break;
+                // Not a keyword - just skip this one element
+                current = cons.cdr();
             }
         }
         return LispObject::nil().raw();
@@ -2137,19 +2169,25 @@ pub extern "C" fn cc_arg_present(args_and_env: usize, param_info: usize) -> usiz
         while let Some(cons_ptr) = current.as_cons_ptr() {
             let cons = unsafe { &*cons_ptr };
             let key = cons.car();
+            let mut is_keyword = false;
             if let Some(key_sym_ptr) = key.as_general_ptr::<rlasp_runtime::Symbol>() {
                 let key_sym = unsafe { &*key_sym_ptr };
                 let key_name = key_sym.name().to_string();
+                is_keyword = key_name.starts_with(':');
                 if key_name == keyword_name || key_name == param_name {
                     return LispObject::t().raw();
                 }
             }
-            let rest = cons.cdr();
-            if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
-                let rest_cons = unsafe { &*rest_cons_ptr };
-                current = rest_cons.cdr();
+            if is_keyword {
+                let rest = cons.cdr();
+                if let Some(rest_cons_ptr) = rest.as_cons_ptr() {
+                    let rest_cons = unsafe { &*rest_cons_ptr };
+                    current = rest_cons.cdr();
+                } else {
+                    break;
+                }
             } else {
-                break;
+                current = cons.cdr();
             }
         }
     }
@@ -3199,6 +3237,11 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
 
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
 
+    // NIL is self-evaluating
+    if sym_obj.is_nil() {
+        return LispObject::nil().raw();
+    }
+
     // Try to get symbol name
     let name = if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
         if sym_ptr.is_null() { return LispObject::nil().raw(); }
@@ -3209,16 +3252,161 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
         return LispObject::nil().raw();
     };
 
-    // Look up in dynamic bindings by name
+    // CL self-evaluating symbols
+    match name.as_str() {
+        "NIL" | "nil" => return LispObject::nil().raw(),
+        "T" | "t" => return LispObject::t().raw(),
+        _ => {}
+    }
+
+    // Look up in dynamic bindings by name (try both original case and uppercase for CL compatibility)
     DYNAMIC_BINDINGS.with(|bindings| {
-        if let Some(&value) = bindings.borrow().get(&name) {
+        let b = bindings.borrow();
+        if let Some(&value) = b.get(&name) {
+            value
+        } else if let Some(&value) = b.get(&name.to_uppercase()) {
+            value
+        } else if let Some(&value) = b.get(&name.to_lowercase()) {
             value
         } else {
-            // Not bound - warn and return nil
-            eprintln!("Warning: Unbound symbol: {}", name);
+            // Also try stripping package prefix
+            let base = strip_package_prefix(&name);
+            if base != name.as_str() {
+                if let Some(&value) = b.get(base) {
+                    return value;
+                }
+                if let Some(&value) = b.get(&base.to_uppercase()) {
+                    return value;
+                }
+                if let Some(&value) = b.get(&base.to_lowercase()) {
+                    return value;
+                }
+            }
+            // Unbound - return nil silently (CL would signal an error)
             LispObject::nil().raw()
         }
     })
+}
+
+/// Strip package qualifier from a symbol name (e.g., "asdf:foo" -> "foo", "asdf::bar" -> "bar")
+fn strip_package_prefix(name: &str) -> &str {
+    if let Some(pos) = name.rfind(':') {
+        &name[pos + 1..]
+    } else {
+        name
+    }
+}
+
+/// Check if a dynamic variable is bound by name (for interpreter bridge)
+pub fn is_dynamic_bound(name: &str) -> bool {
+    DYNAMIC_BINDINGS.with(|bindings| {
+        let b = bindings.borrow();
+        if b.contains_key(name) || b.contains_key(&name.to_uppercase()) || b.contains_key(&name.to_lowercase()) {
+            return true;
+        }
+        // Try with package prefix stripped (e.g., "asdf::*central-registry*" -> "*central-registry*")
+        let base = strip_package_prefix(name);
+        if base != name {
+            b.contains_key(base) || b.contains_key(&base.to_uppercase()) || b.contains_key(&base.to_lowercase())
+        } else {
+            false
+        }
+    })
+}
+
+/// Get dynamic variable value by name as raw usize (for interpreter bridge)
+/// Returns None if not bound
+pub fn get_dynamic_value(name: &str) -> Option<usize> {
+    DYNAMIC_BINDINGS.with(|bindings| {
+        let b = bindings.borrow();
+        b.get(name).copied()
+            .or_else(|| b.get(&name.to_uppercase()).copied())
+            .or_else(|| b.get(&name.to_lowercase()).copied())
+            .or_else(|| {
+                // Try with package prefix stripped
+                let base = strip_package_prefix(name);
+                if base != name {
+                    b.get(base).copied()
+                        .or_else(|| b.get(&base.to_uppercase()).copied())
+                        .or_else(|| b.get(&base.to_lowercase()).copied())
+                } else {
+                    None
+                }
+            })
+    })
+}
+
+/// JIT package registry - tracks packages created during JIT execution
+static JIT_PACKAGES: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// Register a package name in the JIT package registry
+pub fn register_jit_package(name: &str) {
+    let mut packages = JIT_PACKAGES.lock().unwrap();
+    packages.insert(name.to_uppercase());
+}
+
+/// Check if a package exists in the JIT package registry
+pub fn is_jit_package(name: &str) -> bool {
+    let packages = JIT_PACKAGES.lock().unwrap();
+    packages.contains(&name.to_uppercase())
+}
+
+/// Register a package at runtime from JIT code (called by defpackage/define-package)
+#[no_mangle]
+pub extern "C" fn cc_register_package(name_obj: usize) -> usize {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    let obj = unsafe { LispObject::from_raw(name_obj) };
+    let pkg_name = if let Some(ptr) = obj.as_general_ptr::<()>() {
+        if !ptr.is_null() {
+            match unsafe { TypeHeader::from_ptr(ptr) } {
+                Some(ObjectType::String) => {
+                    let s = unsafe { &*(ptr as *const RString) };
+                    s.as_str().to_string()
+                }
+                Some(ObjectType::Symbol) => {
+                    let sym = unsafe { &*(ptr as *const Symbol) };
+                    let name = sym.name();
+                    if name.starts_with(':') { name[1..].to_string() } else { name.to_string() }
+                }
+                _ => return LispObject::t().raw(),
+            }
+        } else {
+            return LispObject::t().raw();
+        }
+    } else {
+        return LispObject::t().raw();
+    };
+
+    register_jit_package(&pkg_name);
+    LispObject::t().raw()
+}
+
+/// Check if a function is in the JIT registry by name
+pub fn is_jit_function(name: &str) -> bool {
+    let registry = get_registry().lock().unwrap();
+    let fn_key = format!("%FN%{}", name);
+    let fn_key_upper = format!("%FN%{}", name.to_uppercase());
+    let fn_key_lower = format!("%FN%{}", name.to_lowercase());
+    if registry.contains_key(&fn_key) || registry.contains_key(name)
+        || registry.contains_key(&fn_key_upper) || registry.contains_key(&name.to_uppercase())
+        || registry.contains_key(&fn_key_lower) || registry.contains_key(&name.to_lowercase()) {
+        return true;
+    }
+    // Try with package prefix stripped (e.g., "asdf:load-system" -> "load-system")
+    let base = strip_package_prefix(name);
+    if base != name {
+        let fn_key = format!("%FN%{}", base);
+        let fn_key_upper = format!("%FN%{}", base.to_uppercase());
+        let fn_key_lower = format!("%FN%{}", base.to_lowercase());
+        registry.contains_key(&fn_key) || registry.contains_key(base)
+            || registry.contains_key(&fn_key_upper) || registry.contains_key(&base.to_uppercase())
+            || registry.contains_key(&fn_key_lower) || registry.contains_key(&base.to_lowercase())
+    } else {
+        false
+    }
 }
 
 /// Set the value of a dynamic/special variable
@@ -3304,6 +3492,303 @@ pub extern "C" fn cc_set_symbol_property(symbol: usize, key: usize, value: usize
     }
 
     value
+}
+
+// ============================================================================
+// Symbol Functions (CL Standard)
+// ============================================================================
+
+/// Generate a unique uninterned symbol (gensym)
+/// (gensym &optional prefix) -> symbol
+#[no_mangle]
+pub extern "C" fn cc_gensym(prefix: usize) -> usize {
+    use rlasp_runtime::Symbol;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let prefix_str = if prefix == 0 || unsafe { LispObject::from_raw(prefix) }.is_nil() {
+        "G".to_string()
+    } else {
+        let obj = unsafe { LispObject::from_raw(prefix) };
+        if let Some(str_ptr) = obj.as_general_ptr::<rlasp_runtime::RString>() {
+            if !str_ptr.is_null() {
+                let s = unsafe { &*str_ptr };
+                s.as_str().to_string()
+            } else {
+                "G".to_string()
+            }
+        } else if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
+            if !sym_ptr.is_null() {
+                let sym = unsafe { &*sym_ptr };
+                sym.name().to_string()
+            } else {
+                "G".to_string()
+            }
+        } else {
+            "G".to_string()
+        }
+    };
+
+    let counter = GENSYM_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let name = format!("{}:{}{}", "#", prefix_str, counter);
+    Symbol::allocate(name).raw()
+}
+
+/// Get the name of a symbol (symbol-name)
+/// (symbol-name symbol) -> string
+#[no_mangle]
+pub extern "C" fn cc_symbol_name(symbol: usize) -> usize {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    let sym_obj = unsafe { LispObject::from_raw(symbol) };
+
+    // Check if it's a General-tagged object
+    if !sym_obj.is_general() {
+        return RString::allocate(String::new()).raw();
+    }
+
+    let ptr = sym_obj.as_general_ptr::<()>().unwrap();
+    if ptr.is_null() {
+        return RString::allocate(String::new()).raw();
+    }
+
+    // Check type header to ensure it's actually a Symbol
+    let obj_type = unsafe { TypeHeader::from_ptr(ptr) };
+    if obj_type == Some(ObjectType::Symbol) {
+        let sym_ptr = ptr as *const Symbol;
+        let sym = unsafe { &*sym_ptr };
+        let name = sym.name();
+        return RString::allocate(name.to_string()).raw();
+    }
+
+    // Not a symbol - return empty string
+    RString::allocate(String::new()).raw()
+}
+
+/// CL string function: coerce to string
+/// (string x) -> string
+/// - If x is a string, return it
+/// - If x is a symbol, return its name (without leading colon for keywords)
+/// - If x is a character, return a 1-character string
+#[no_mangle]
+pub extern "C" fn cc_string(obj: usize) -> usize {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    let lisp_obj = unsafe { LispObject::from_raw(obj) };
+
+    if lisp_obj.is_nil() {
+        return RString::allocate("NIL".to_string()).raw();
+    }
+
+    if !lisp_obj.is_general() {
+        // Could be a character (fixnum-tagged)
+        if let Some(n) = lisp_obj.as_fixnum() {
+            if let Some(c) = char::from_u32(n as u32) {
+                return RString::allocate(c.to_string()).raw();
+            }
+        }
+        return RString::allocate(format!("{}", lisp_obj)).raw();
+    }
+
+    let ptr = lisp_obj.as_general_ptr::<()>().unwrap();
+    if ptr.is_null() {
+        return RString::allocate(String::new()).raw();
+    }
+
+    match unsafe { TypeHeader::from_ptr(ptr) } {
+        Some(ObjectType::String) => {
+            // Already a string - return as-is
+            obj
+        }
+        Some(ObjectType::Symbol) => {
+            let sym = unsafe { &*(ptr as *const Symbol) };
+            let name = sym.name();
+            // Strip leading colon for keywords
+            let clean = if name.starts_with(':') { &name[1..] } else { name };
+            RString::allocate(clean.to_string()).raw()
+        }
+        _ => {
+            RString::allocate(format!("{}", lisp_obj)).raw()
+        }
+    }
+}
+
+/// Intern a symbol in a package (intern)
+/// (intern name &optional package) -> symbol, status
+#[no_mangle]
+pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    // Get the name string
+    let name_str = {
+        let obj = unsafe { LispObject::from_raw(name) };
+        if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
+            if !str_ptr.is_null() {
+                unsafe {
+                    if TypeHeader::from_ptr(str_ptr) == Some(ObjectType::String) {
+                        let s = &*str_ptr;
+                        s.as_str().to_string()
+                    } else {
+                        return LispObject::nil().raw();
+                    }
+                }
+            } else {
+                return LispObject::nil().raw();
+            }
+        } else if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
+            if !sym_ptr.is_null() {
+                unsafe {
+                    if TypeHeader::from_ptr(sym_ptr) == Some(ObjectType::Symbol) {
+                        let sym = &*sym_ptr;
+                        sym.name().to_string()
+                    } else {
+                        return LispObject::nil().raw();
+                    }
+                }
+            } else {
+                return LispObject::nil().raw();
+            }
+        } else {
+            return LispObject::nil().raw();
+        }
+    };
+
+    // For now, just create a symbol (proper package interning would need more infrastructure)
+    Symbol::allocate(name_str.to_uppercase()).raw()
+}
+
+/// Find a symbol by name in a package (find-symbol)
+/// (find-symbol name &optional package) -> symbol or nil
+/// In CL this returns two values; we return just the symbol (or nil if not found).
+#[no_mangle]
+pub extern "C" fn cc_find_symbol(name: usize, package: usize) -> usize {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    // Get the name string
+    let name_str = {
+        let obj = unsafe { LispObject::from_raw(name) };
+        if obj.is_nil() {
+            return LispObject::nil().raw();
+        }
+        if let Some(ptr) = obj.as_general_ptr::<()>() {
+            if !ptr.is_null() {
+                match unsafe { TypeHeader::from_ptr(ptr) } {
+                    Some(ObjectType::String) => {
+                        let s = unsafe { &*(ptr as *const RString) };
+                        s.as_str().to_string()
+                    }
+                    Some(ObjectType::Symbol) => {
+                        let sym = unsafe { &*(ptr as *const Symbol) };
+                        let n = sym.name();
+                        if n.starts_with(':') { n[1..].to_string() } else { n.to_string() }
+                    }
+                    _ => return LispObject::nil().raw(),
+                }
+            } else {
+                return LispObject::nil().raw();
+            }
+        } else {
+            return LispObject::nil().raw();
+        }
+    };
+
+    let upper = name_str.to_uppercase();
+
+    // Check if it exists as a dynamic binding
+    let found_dynamic = DYNAMIC_BINDINGS.with(|bindings| {
+        let b = bindings.borrow();
+        b.contains_key(&name_str) || b.contains_key(&upper) || b.contains_key(&name_str.to_lowercase())
+    });
+
+    if found_dynamic {
+        return Symbol::allocate(upper).raw();
+    }
+
+    // Check if it exists as a function in the JIT registry
+    {
+        let registry = get_registry().lock().unwrap();
+        let fn_key = format!("%FN%{}", upper);
+        let fn_key_lower = format!("%FN%{}", name_str.to_lowercase());
+        if registry.contains_key(&fn_key) || registry.contains_key(&fn_key_lower) ||
+           registry.contains_key(&upper) || registry.contains_key(&name_str.to_lowercase()) {
+            return Symbol::allocate(upper).raw();
+        }
+    }
+
+    // Not found
+    LispObject::nil().raw()
+}
+
+/// Find a package by name (find-package)
+/// (find-package name) -> package or nil
+#[no_mangle]
+pub extern "C" fn cc_find_package(name: usize) -> usize {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    // Get the package name
+    let pkg_name = {
+        let obj = unsafe { LispObject::from_raw(name) };
+
+        // Check if it's a General-tagged object first
+        if !obj.is_general() {
+            return LispObject::nil().raw();
+        }
+
+        // Get the pointer and check type header to determine actual type
+        let ptr = obj.as_general_ptr::<()>().unwrap();
+        if ptr.is_null() {
+            return LispObject::nil().raw();
+        }
+
+        let obj_type = unsafe { TypeHeader::from_ptr(ptr) };
+
+        match obj_type {
+            Some(ObjectType::String) => {
+                let str_ptr = ptr as *const RString;
+                unsafe { (*str_ptr).as_str().to_string() }
+            }
+            Some(ObjectType::Symbol) => {
+                let sym_ptr = ptr as *const Symbol;
+                let sym = unsafe { &*sym_ptr };
+                let name = sym.name();
+                // Strip leading colon for keywords
+                if name.starts_with(':') {
+                    name[1..].to_string()
+                } else {
+                    name.to_string()
+                }
+            }
+            _ => return LispObject::nil().raw(),
+        }
+    };
+
+    // Check well-known packages and JIT package registry
+    let normalized = pkg_name.to_uppercase();
+    if normalized == "COMMON-LISP" || normalized == "CL" ||
+       normalized == "COMMON-LISP-USER" || normalized == "CL-USER" ||
+       normalized == "KEYWORD" || is_jit_package(&normalized) {
+        Symbol::allocate(format!("#<PACKAGE \"{}\">", normalized)).raw()
+    } else {
+        // Check if the name matches a prefix of a registered package (for nicknames)
+        // e.g., "ASDF" matches "ASDF/INTERFACE", "UIOP" matches "UIOP/DRIVER"
+        let packages = JIT_PACKAGES.lock().unwrap();
+        let prefix_match = packages.iter().find(|p| p.starts_with(&format!("{}/", normalized)));
+        if let Some(matched) = prefix_match {
+            let name = matched.clone();
+            drop(packages);
+            // Also register the nickname so future lookups are fast
+            register_jit_package(&normalized);
+            Symbol::allocate(format!("#<PACKAGE \"{}\">", name)).raw()
+        } else {
+            LispObject::nil().raw()
+        }
+    }
 }
 
 /// Box a function pointer as a LispObject
@@ -3852,6 +4337,109 @@ pub extern "C" fn cc_find(item: usize, sequence: usize) -> usize {
             return elem.raw();
         }
         current = cons.cdr();
+    }
+
+    LispObject::nil().raw()
+}
+
+/// (find item sequence &key start end from-end test test-not key)
+#[no_mangle]
+pub extern "C" fn cc_find_full(
+    item: usize,
+    sequence: usize,
+    start: usize,
+    end: usize,
+    from_end: usize,
+    test: usize,
+    test_not: usize,
+    key: usize,
+) -> usize {
+    let item_obj = unsafe { LispObject::from_raw(item) };
+    let seq_obj = unsafe { LispObject::from_raw(sequence) };
+    let start_obj = unsafe { LispObject::from_raw(start) };
+    let end_obj = unsafe { LispObject::from_raw(end) };
+    let from_end_obj = unsafe { LispObject::from_raw(from_end) };
+    let test_obj = unsafe { LispObject::from_raw(test) };
+    let test_not_obj = unsafe { LispObject::from_raw(test_not) };
+    let key_obj = unsafe { LispObject::from_raw(key) };
+
+    let start_idx = match start_obj.as_fixnum() {
+        Some(fx) if fx >= 0 => fx as usize,
+        _ => 0,
+    };
+    let end_idx_opt = match end_obj.as_fixnum() {
+        Some(fx) if fx >= 0 => Some(fx as usize),
+        _ => None,
+    };
+    let from_end_flag = !from_end_obj.is_nil();
+    let key_fn = if key_obj.is_nil() { None } else { Some(key_obj) };
+    let test_fn = if !test_not_obj.is_nil() {
+        Some((test_not_obj, true))
+    } else if !test_obj.is_nil() {
+        Some((test_obj, false))
+    } else {
+        None
+    };
+
+    let items = match sequence_to_vec(seq_obj) {
+        Some(v) => v,
+        None => return LispObject::nil().raw(),
+    };
+    let len = items.len();
+    let end_idx = end_idx_opt.unwrap_or(len).min(len);
+    if start_idx > end_idx {
+        return LispObject::nil().raw();
+    }
+
+    if from_end_flag {
+        if end_idx == 0 {
+            return LispObject::nil().raw();
+        }
+        let mut idx = end_idx as i64 - 1;
+        while idx >= start_idx as i64 {
+            let elem = items[idx as usize];
+            let key_elem = if let Some(k) = key_fn {
+                call_func_1(k, elem)
+            } else {
+                elem
+            };
+            let mut matches = if let Some((tf, _negate)) = test_fn {
+                truthy_obj(call_func_2(tf, item_obj, key_elem))
+            } else {
+                !unsafe { LispObject::from_raw(cc_equal(item_obj.raw(), key_elem.raw())) }.is_nil()
+            };
+            if let Some((_tf, negate)) = test_fn {
+                if negate {
+                    matches = !matches;
+                }
+            }
+            if matches {
+                return elem.raw();
+            }
+            idx -= 1;
+        }
+    } else {
+        for idx in start_idx..end_idx {
+            let elem = items[idx];
+            let key_elem = if let Some(k) = key_fn {
+                call_func_1(k, elem)
+            } else {
+                elem
+            };
+            let mut matches = if let Some((tf, _negate)) = test_fn {
+                truthy_obj(call_func_2(tf, item_obj, key_elem))
+            } else {
+                !unsafe { LispObject::from_raw(cc_equal(item_obj.raw(), key_elem.raw())) }.is_nil()
+            };
+            if let Some((_tf, negate)) = test_fn {
+                if negate {
+                    matches = !matches;
+                }
+            }
+            if matches {
+                return elem.raw();
+            }
+        }
     }
 
     LispObject::nil().raw()
@@ -5366,7 +5954,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
     let trace_limit = std::env::var("RLASP_TRACE_FUNCALL_LIMIT")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(200);
+        .unwrap_or(9000);
 
     let (_depth_guard, call_depth) = FuncallDepthGuard::enter();
 
@@ -5467,6 +6055,8 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
 
     // Look up function entry (release lock before calling)
     // Try both the raw name and with %FN% prefix (Lisp-2 function namespace)
+    // Also try case-insensitive variants since CL symbols are uppercase but
+    // MLIR-compiled functions may use lowercase names from source
     let func_entry = if let Some(ref name) = name_opt {
         let registry = get_registry().lock().unwrap();
         // First try direct name lookup
@@ -5475,7 +6065,38 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         } else {
             // Try with %FN% prefix for user-defined functions
             let fn_name = format!("%FN%{}", name);
-            registry.get(&fn_name).cloned()
+            if let Some(entry) = registry.get(&fn_name) {
+                Some(entry.clone())
+            } else {
+                // Try case-insensitive variants
+                let lower = name.to_lowercase();
+                let upper = name.to_uppercase();
+                let fn_lower = format!("%FN%{}", lower);
+                let fn_upper = format!("%FN%{}", upper);
+                registry.get(&lower).cloned()
+                    .or_else(|| registry.get(&upper).cloned())
+                    .or_else(|| registry.get(&fn_lower).cloned())
+                    .or_else(|| registry.get(&fn_upper).cloned())
+                    .or_else(|| {
+                        // Strip package prefix (e.g., "UIOP/PACKAGE:ENSURE-PACKAGE" -> "ENSURE-PACKAGE")
+                        let base = strip_package_prefix(name);
+                        if base != name {
+                            let base_lower = base.to_lowercase();
+                            let base_upper = base.to_uppercase();
+                            let fn_base = format!("%FN%{}", base);
+                            let fn_base_lower = format!("%FN%{}", base_lower);
+                            let fn_base_upper = format!("%FN%{}", base_upper);
+                            registry.get(base).cloned()
+                                .or_else(|| registry.get(&base_lower).cloned())
+                                .or_else(|| registry.get(&base_upper).cloned())
+                                .or_else(|| registry.get(&fn_base).cloned())
+                                .or_else(|| registry.get(&fn_base_lower).cloned())
+                                .or_else(|| registry.get(&fn_base_upper).cloned())
+                        } else {
+                            None
+                        }
+                    })
+            }
         }
     } else {
         None
@@ -6799,6 +7420,7 @@ pub fn init_standard_cl_variables() {
 
         // Modules
         b.insert("*modules*".to_string(), LispObject::nil().raw());
+        b.insert("*module-provider-functions*".to_string(), LispObject::nil().raw());
 
         // ASDF specific variables
         b.insert("*default-pathname-defaults*".to_string(), LispObject::nil().raw());
@@ -6882,6 +7504,20 @@ pub fn init_standard_cl_variables() {
         b.insert("package".to_string(), t_val);
         b.insert("random-state".to_string(), t_val);
         b.insert("restart".to_string(), t_val);
+
+        // Character subtypes
+        b.insert("base-char".to_string(), t_val);
+        b.insert("standard-char".to_string(), t_val);
+        b.insert("extended-char".to_string(), t_val);
+        b.insert("base-string".to_string(), t_val);
+        b.insert("simple-string".to_string(), t_val);
+        b.insert("simple-base-string".to_string(), t_val);
+
+        // SBCL-specific stream variables (ASDF references these)
+        let nil_val = LispObject::nil().raw();
+        b.insert("SB-SYS:*STDIN*".to_string(), nil_val);
+        b.insert("SB-SYS:*STDOUT*".to_string(), nil_val);
+        b.insert("SB-SYS:*STDERR*".to_string(), nil_val);
 
         // Lambda list keywords
         b.insert("&key".to_string(), Symbol::allocate("&key".to_string()).raw());
