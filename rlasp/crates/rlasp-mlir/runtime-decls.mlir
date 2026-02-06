@@ -202,10 +202,35 @@ func.func private @cc_set_symbol_value(i64, i64) -> i64
 func.func private @cc_get_symbol_property(i64, i64) -> i64
 func.func private @cc_set_symbol_property(i64, i64, i64) -> i64
 func.func private @cc_gensym(i64) -> i64
+func.func private @cc_gentemp(i64, i64) -> i64
 func.func private @cc_symbol_name(i64) -> i64
+func.func private @cc_symbol_function(i64) -> i64
+func.func private @cc_symbol_package(i64) -> i64
+func.func private @cc_symbol_plist(i64) -> i64
+func.func private @cc_get_property(i64, i64, i64) -> i64
+func.func private @cc_remprop(i64, i64) -> i64
+func.func private @cc_make_symbol_from_name(i64) -> i64
+func.func private @cc_copy_symbol(i64, i64) -> i64
 func.func private @cc_intern(i64, i64) -> i64
 func.func private @cc_find_symbol(i64, i64) -> i64
 func.func private @cc_find_package(i64) -> i64
+func.func private @cc_in_package(i64) -> i64
+func.func private @cc_package_name(i64) -> i64
+func.func private @cc_package_nicknames(i64) -> i64
+func.func private @cc_package_use_list(i64) -> i64
+func.func private @cc_package_used_by_list(i64) -> i64
+func.func private @cc_package_shadowing_symbols(i64) -> i64
+func.func private @cc_use_package(i64, i64) -> i64
+func.func private @cc_unuse_package(i64, i64) -> i64
+func.func private @cc_export(i64, i64) -> i64
+func.func private @cc_unexport(i64, i64) -> i64
+func.func private @cc_import(i64, i64) -> i64
+func.func private @cc_shadow(i64, i64) -> i64
+func.func private @cc_shadowing_import(i64, i64) -> i64
+func.func private @cc_unintern(i64, i64) -> i64
+func.func private @cc_delete_package(i64) -> i64
+func.func private @cc_rename_package(i64, i64, i64) -> i64
+func.func private @cc_list_all_packages() -> i64
 
 // Reduction
 func.func private @cc_reduce(i64, i64) -> i64

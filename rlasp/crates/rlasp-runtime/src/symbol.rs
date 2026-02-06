@@ -108,6 +108,16 @@ impl Symbol {
         self.plist.write().insert(key, value);
     }
 
+    /// Remove property from plist
+    pub fn remove_property(&self, key: &str) -> bool {
+        self.plist.write().remove(key).is_some()
+    }
+
+    /// Get plist as list of (key value ...) pairs, returns raw usize for use in JIT
+    pub fn plist_entries(&self) -> Vec<(String, LispObject)> {
+        self.plist.read().iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
     /// Allocate a symbol and return LispObject pointer
     pub fn allocate(name: impl Into<Arc<str>>) -> LispObject {
         let symbol = Box::new(Symbol::new(name));

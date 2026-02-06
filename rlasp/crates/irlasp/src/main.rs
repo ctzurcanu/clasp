@@ -980,6 +980,13 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                         for arg in args.iter().skip(1) {
                             collect_definitions_expanded(arg, defuns, user_functions, toplevel_forms);
                         }
+                    } else if name == "with-upgradability" {
+                        // ASDF macro: (with-upgradability (&optional) body...)
+                        // Semantically equivalent to (eval-when (:compile-toplevel :load-toplevel :execute) body...)
+                        // Skip first arg (options list), recurse into body forms
+                        for arg in args.iter().skip(1) {
+                            collect_definitions_expanded(arg, defuns, user_functions, toplevel_forms);
+                        }
                     } else if name == "defpackage" || name == "in-package" {
                         // Skip package directives
                     } else if name == "progn" {
@@ -1073,13 +1080,39 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 let expanded = match macroexpand_all_to_ast(&ast, &mut interp_env) {
                     Ok(exp) => exp,
                     Err(e) => {
-                        // Only warn for first 50 forms to avoid spam
-                        if form_count <= 50 {
-                            println!("[Warning: Macro expansion failed at form {}: {}]", form_count, e);
+                        if std::env::var("RLASP_DEBUG_EXPAND").is_ok() {
+                            eprintln!("[expand-fail] form {}: {}", form_count, e);
                         }
                         ast.clone()
                     }
                 };
+
+                // Debug: check if expanded form contains defgeneric
+                if std::env::var("RLASP_DEBUG_DEFGENERIC").is_ok() {
+                    fn contains_defgeneric(ast: &rlasp::ir::ASTNode) -> bool {
+                        match ast {
+                            rlasp::ir::ASTNode::Defgeneric { .. } => true,
+                            rlasp::ir::ASTNode::Call { function, args } => {
+                                if let rlasp::ir::ASTNode::Variable(n) = function.as_ref() {
+                                    if n == "defgeneric" { return true; }
+                                }
+                                args.iter().any(contains_defgeneric)
+                            }
+                            rlasp::ir::ASTNode::Progn { exprs } => exprs.iter().any(contains_defgeneric),
+                            _ => false,
+                        }
+                    }
+                    if contains_defgeneric(&expanded) {
+                        eprintln!("[defgeneric-trace] form {} expanded contains defgeneric: {:?}",
+                            form_count, &expanded);
+                    }
+                    if contains_defgeneric(&ast) && !contains_defgeneric(&expanded) {
+                        eprintln!("[defgeneric-LOST] form {} had defgeneric in AST but NOT in expanded!",
+                            form_count);
+                        eprintln!("  ast: {:?}", &ast);
+                        eprintln!("  expanded: {:?}", &expanded);
+                    }
+                }
 
                 // Step 3: Collect definitions for MLIR compilation
                 let toplevel_before = toplevel_forms.len();
@@ -1103,8 +1136,14 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             }
         }
     }
-    println!("[MLIR] Processing complete: {} bindings, {} defuns, {} toplevel forms",
-             interp_env.len(), defuns.len(), toplevel_forms.len());
+    // Count defgeneric forms in toplevel
+    let dg_count = toplevel_forms.iter().filter(|f| {
+        matches!(f, rlasp::ir::ASTNode::Defgeneric { .. })
+        || matches!(f, rlasp::ir::ASTNode::Call { function, .. }
+            if matches!(function.as_ref(), rlasp::ir::ASTNode::Variable(n) if n == "defgeneric"))
+    }).count();
+    println!("[MLIR] Processing complete: {} bindings, {} defuns, {} toplevel forms ({} defgeneric)",
+             interp_env.len(), defuns.len(), toplevel_forms.len(), dg_count);
 
     // Macros have already been expanded by macroexpand_all_to_ast
     // Use defuns and toplevel_forms directly (with alias for compatibility)
@@ -1319,6 +1358,31 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             cc_intern as *const (),
             cc_find_symbol as *const (),
             cc_find_package as *const (),
+            cc_in_package as *const (),
+            cc_package_name as *const (),
+            cc_package_nicknames as *const (),
+            cc_package_use_list as *const (),
+            cc_package_used_by_list as *const (),
+            cc_package_shadowing_symbols as *const (),
+            cc_use_package as *const (),
+            cc_unuse_package as *const (),
+            cc_export as *const (),
+            cc_unexport as *const (),
+            cc_import as *const (),
+            cc_shadow as *const (),
+            cc_shadowing_import as *const (),
+            cc_unintern as *const (),
+            cc_delete_package as *const (),
+            cc_rename_package as *const (),
+            cc_list_all_packages as *const (),
+            cc_symbol_function as *const (),
+            cc_symbol_package as *const (),
+            cc_symbol_plist as *const (),
+            cc_get_property as *const (),
+            cc_remprop as *const (),
+            cc_make_symbol_from_name as *const (),
+            cc_copy_symbol as *const (),
+            cc_gentemp as *const (),
             cc_add as *const (),
             cc_sub as *const (),
             cc_mul as *const (),

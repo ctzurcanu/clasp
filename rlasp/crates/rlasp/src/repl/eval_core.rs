@@ -1522,10 +1522,10 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                         env: Rc::new(RefCell::new(env.clone())),
                         dynamic_env: false,
                     };
-                    env.insert(accessor_name.clone(), getter);
+                    env.insert(format!("{}{}", FUNCTION_NS_PREFIX, accessor_name), getter);
 
                     // Also create setf function for accessor
-                    let setter_name = format!("(setf {})", accessor_name);
+                    let setter_name = format!("{}(setf {})", FUNCTION_NS_PREFIX, accessor_name);
                     let setter = EvalResult::Lambda {
                         params: vec!["new-value".to_string(), "obj".to_string()],
                         defaults: HashMap::new(),
@@ -1561,7 +1561,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                         env: Rc::new(RefCell::new(env.clone())),
                         dynamic_env: false,
                     };
-                    env.insert(reader_name.clone(), getter);
+                    env.insert(format!("{}{}", FUNCTION_NS_PREFIX, reader_name), getter);
                 }
 
                 if let Some(ref writer_name) = slot.writer {
@@ -1581,27 +1581,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                         env: Rc::new(RefCell::new(env.clone())),
                         dynamic_env: false,
                     };
-                    env.insert(writer_name.clone(), setter);
-                }
-
-                // If no accessor/reader specified, create one with slot name
-                if slot.accessor.is_none() && slot.reader.is_none() {
-                    let getter = EvalResult::Lambda {
-                        params: vec!["obj".to_string()],
-                        defaults: HashMap::new(),
-                        supplied_p_vars: HashMap::new(),
-                        key_params: HashMap::new(),
-                        body: vec![ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
-                            args: vec![
-                                ASTNode::Variable("obj".to_string()),
-                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                            ],
-                        }],
-                        env: Rc::new(RefCell::new(env.clone())),
-                        dynamic_env: false,
-                    };
-                    env.insert(slot_name.clone(), getter);
+                    env.insert(format!("{}{}", FUNCTION_NS_PREFIX, writer_name), setter);
                 }
             }
 
@@ -2647,6 +2627,92 @@ pub fn ast_to_result(ast: &ASTNode) -> Result<EvalResult, String> {
             }
             Ok(EvalResult::HashTable(Rc::new(RefCell::new(table))))
         }
+        ASTNode::Defgeneric { name, lambda_list } => {
+            // (defgeneric name (params...))
+            let params_list = lambda_list.iter()
+                .map(|p| EvalResult::Symbol(p.clone()))
+                .collect::<Vec<_>>();
+            let params_result = vec_to_list(&params_list)?;
+            let items = vec![
+                EvalResult::Symbol("defgeneric".to_string()),
+                EvalResult::Symbol(name.clone()),
+                params_result,
+            ];
+            vec_to_list(&items)
+        }
+        ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
+            // (defmethod name [qualifier] ((param specializer) ...) body...)
+            let mut items = vec![
+                EvalResult::Symbol("defmethod".to_string()),
+                EvalResult::Symbol(generic_name.clone()),
+            ];
+            if let Some(q) = qualifier {
+                items.push(EvalResult::Symbol(q.clone()));
+            }
+            // Build specialized lambda list: ((param1 specializer1) (param2 specializer2) ...)
+            let mut spec_params = Vec::new();
+            for (i, param) in params.iter().enumerate() {
+                if param.starts_with('&') {
+                    // &rest, &optional, &key - just a symbol
+                    spec_params.push(EvalResult::Symbol(param.clone()));
+                } else if i < specializers.len() && !specializers[i].is_empty() && specializers[i] != "T" {
+                    // (param specializer)
+                    let pair = vec![
+                        EvalResult::Symbol(param.clone()),
+                        EvalResult::Symbol(specializers[i].clone()),
+                    ];
+                    spec_params.push(vec_to_list(&pair)?);
+                } else {
+                    spec_params.push(EvalResult::Symbol(param.clone()));
+                }
+            }
+            items.push(vec_to_list(&spec_params)?);
+            for expr in body {
+                items.push(ast_to_result(expr)?);
+            }
+            vec_to_list(&items)
+        }
+        ASTNode::Defclass { name, superclasses, slots } => {
+            // (defclass name (superclasses...) ((slot-spec...) ...))
+            let supers_list = superclasses.iter()
+                .map(|s| EvalResult::Symbol(s.clone()))
+                .collect::<Vec<_>>();
+            let supers_result = vec_to_list(&supers_list)?;
+            // Build slot specifications
+            let mut slot_specs = Vec::new();
+            for slot in slots {
+                let mut slot_items = vec![EvalResult::Symbol(slot.name.clone())];
+                if let Some(ref initarg) = slot.initarg {
+                    slot_items.push(EvalResult::Symbol(":initarg".to_string()));
+                    slot_items.push(EvalResult::Symbol(initarg.clone()));
+                }
+                if let Some(ref initform) = slot.initform {
+                    slot_items.push(EvalResult::Symbol(":initform".to_string()));
+                    slot_items.push(ast_to_result(initform)?);
+                }
+                if let Some(ref accessor) = slot.accessor {
+                    slot_items.push(EvalResult::Symbol(":accessor".to_string()));
+                    slot_items.push(EvalResult::Symbol(accessor.clone()));
+                }
+                if let Some(ref reader) = slot.reader {
+                    slot_items.push(EvalResult::Symbol(":reader".to_string()));
+                    slot_items.push(EvalResult::Symbol(reader.clone()));
+                }
+                if let Some(ref writer) = slot.writer {
+                    slot_items.push(EvalResult::Symbol(":writer".to_string()));
+                    slot_items.push(EvalResult::Symbol(writer.clone()));
+                }
+                slot_specs.push(vec_to_list(&slot_items)?);
+            }
+            let slots_result = vec_to_list(&slot_specs)?;
+            let items = vec![
+                EvalResult::Symbol("defclass".to_string()),
+                EvalResult::Symbol(name.clone()),
+                supers_result,
+                slots_result,
+            ];
+            vec_to_list(&items)
+        }
         _ => {
             // For any remaining unhandled types, return NIL
             Ok(EvalResult::Nil)
@@ -2893,66 +2959,110 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                     // declaim returns NIL
                     return ASTNode::nil();
                 }
-                "defclass" => {
-                    // (defclass name (superclasses...) (slots...) options...)
-                    // Simplified: For benchmark, hardcode accessor creation for point class
-                    // Just create x and y accessors that we know the benchmark needs
-                    if args.len() >= 1 {
-                        if let ASTNode::Variable(class_name) = &args[0] {
-                            if class_name == "point" {
-                                // Hardcode accessors for point class used in benchmark
-                                return ASTNode::progn(vec![
-                                    ASTNode::setq(
-                                        "x".to_string(),
-                                        ASTNode::lambda(
-                                            vec!["obj".to_string()],
-                                            vec![ASTNode::Call {
-                                                function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                                args: vec![
-                                                    ASTNode::Quote(Box::new(ASTNode::Variable("x".to_string()))),
-                                                    ASTNode::Variable("obj".to_string()),
-                                                ],
-                                            }],
-                                        )
-                                    ),
-                                    ASTNode::setq(
-                                        "y".to_string(),
-                                        ASTNode::lambda(
-                                            vec!["obj".to_string()],
-                                            vec![ASTNode::Call {
-                                                function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                                args: vec![
-                                                    ASTNode::Quote(Box::new(ASTNode::Variable("y".to_string()))),
-                                                    ASTNode::Variable("obj".to_string()),
-                                                ],
-                                            }],
-                                        )
-                                    ),
-                                ]);
-                            }
-                        }
-                    }
-                    return ASTNode::nil();
-                }
                 "defgeneric" => {
                     // (defgeneric name lambda-list &rest options)
-                    // Simplified: create a stub generic function
+                    // Convert to proper ASTNode::Defgeneric for the eval handler
                     if args.len() >= 2 {
-                        let name_str = if let ASTNode::Variable(n) = &args[0] { n.clone() } else { return ast.clone(); };
-                        let params = extract_params(&args[1]);
-                        let body = vec![ASTNode::nil()];
-                        return ASTNode::setq(name_str, ASTNode::lambda(params, body));
+                        let name_str = match &args[0] {
+                            ASTNode::Variable(n) => n.clone(),
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+                            ASTNode::Call { function, args: setf_args } => {
+                                if let ASTNode::Variable(fn_name) = &**function {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                        if let ASTNode::Variable(setf_name) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else { return ast.clone(); }
+                                    } else { return ast.clone(); }
+                                } else { return ast.clone(); }
+                            }
+                            _ => return ast.clone(),
+                        };
+                        let lambda_list = extract_params(&args[1]);
+                        return ASTNode::Defgeneric { name: name_str, lambda_list };
                     }
+                    return ast.clone();
                 }
                 "defmethod" => {
-                    // (defmethod name specialized-lambda-list &rest body)
-                    // Simplified: treat like defun for now
+                    // (defmethod name [qualifier] specialized-lambda-list body...)
+                    // Convert to proper ASTNode::Defmethod for the eval handler
                     if args.len() >= 2 {
-                        let name_str = if let ASTNode::Variable(n) = &args[0] { n.clone() } else { return ast.clone(); };
-                        let params = extract_params(&args[1]);
-                        let body = args[2..].to_vec();
-                        return ASTNode::setq(name_str, ASTNode::lambda(params, body));
+                        let name_str = match &args[0] {
+                            ASTNode::Variable(n) => n.clone(),
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+                            ASTNode::Call { function, args: setf_args } => {
+                                if let ASTNode::Variable(fn_name) = &**function {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                        if let ASTNode::Variable(setf_name) = &setf_args[0] {
+                                            format!("(setf {})", setf_name)
+                                        } else { return ast.clone(); }
+                                    } else { return ast.clone(); }
+                                } else { return ast.clone(); }
+                            }
+                            _ => return ast.clone(),
+                        };
+                        // Check for optional qualifier (:before, :after, :around)
+                        let mut idx = 1;
+                        let qualifier = if idx < args.len() {
+                            if let ASTNode::Variable(q) = &args[idx] {
+                                if q.starts_with(':') {
+                                    idx += 1;
+                                    Some(q.clone())
+                                } else { None }
+                            } else if let ASTNode::Constant(ConstantValue::Symbol(q)) = &args[idx] {
+                                if q.starts_with(':') {
+                                    idx += 1;
+                                    Some(q.clone())
+                                } else { None }
+                            } else { None }
+                        } else { None };
+                        // Parse specialized lambda list
+                        let (params, specializers) = if idx < args.len() {
+                            extract_specialized_params(&args[idx])
+                        } else {
+                            (vec![], vec![])
+                        };
+                        idx += 1;
+                        let body = if idx < args.len() { args[idx..].to_vec() } else { vec![] };
+                        return ASTNode::Defmethod {
+                            generic_name: name_str,
+                            qualifier,
+                            specializers,
+                            params,
+                            body,
+                        };
                     }
+                    return ast.clone();
+                }
+                "defclass" => {
+                    // (defclass name (superclasses...) ((slot-spec...) ...) class-options...)
+                    // Convert to proper ASTNode::Defclass for the eval handler
+                    if args.len() >= 2 {
+                        let name_str = match &args[0] {
+                            ASTNode::Variable(n) => n.clone(),
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
+                            _ => return ast.clone(),
+                        };
+                        let superclasses = match &args[1] {
+                            ASTNode::Constant(ConstantValue::Nil) => vec![],
+                            ASTNode::Call { function, args: supers } => {
+                                let mut all = vec![&**function];
+                                all.extend(supers.iter());
+                                all.iter().filter_map(|s| {
+                                    if let ASTNode::Variable(n) = s { Some(n.clone()) } else { None }
+                                }).collect()
+                            }
+                            ASTNode::Variable(n) => vec![n.clone()],
+                            _ => vec![],
+                        };
+                        // Parse slots from args[2] if present
+                        let slots = if args.len() > 2 {
+                            parse_slot_specs_from_ast(&args[2])
+                        } else {
+                            vec![]
+                        };
+                        return ASTNode::Defclass { name: name_str, superclasses, slots };
+                    }
+                    return ast.clone();
                 }
                 "defpackage" => {
                     // (defpackage name &rest options)
@@ -3974,6 +4084,140 @@ fn expand_cond_clauses(clauses: &[ASTNode]) -> ASTNode {
 fn extract_params(ast: &ASTNode) -> Vec<String> {
     let (params, _, _, _) = extract_params_with_defaults(ast);
     params
+}
+
+/// Extract parameter names and specializers from a defmethod specialized lambda list.
+/// E.g., ((x point) (y point)) → (["x", "y"], ["point", "point"])
+/// E.g., ((system string) &optional error-p) → (["system", "error-p"], ["string", "t"])
+fn extract_specialized_params(ast: &ASTNode) -> (Vec<String>, Vec<String>) {
+    let mut params = vec![];
+    let mut specializers = vec![];
+    let items: Vec<&ASTNode> = match ast {
+        ASTNode::Call { function, args } => {
+            let mut v = vec![function.as_ref()];
+            v.extend(args.iter());
+            v
+        }
+        ASTNode::Constant(ConstantValue::Nil) => return (vec![], vec![]),
+        ASTNode::Variable(n) => {
+            params.push(n.clone());
+            specializers.push("t".to_string());
+            return (params, specializers);
+        }
+        _ => return (vec![], vec![]),
+    };
+    for item in items {
+        match item {
+            ASTNode::Variable(name) => {
+                if name.starts_with('&') { continue; } // skip &optional, &rest, etc.
+                params.push(name.clone());
+                specializers.push("t".to_string());
+            }
+            ASTNode::Call { function, args } => {
+                // (param-name specializer)
+                if let ASTNode::Variable(pname) = function.as_ref() {
+                    params.push(pname.clone());
+                    if let Some(ASTNode::Variable(spec)) = args.first() {
+                        specializers.push(spec.clone());
+                    } else if let Some(ASTNode::Constant(ConstantValue::Symbol(spec))) = args.first() {
+                        specializers.push(spec.clone());
+                    } else {
+                        specializers.push("t".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (params, specializers)
+}
+
+/// Parse slot specifications from a defclass slots AST.
+fn parse_slot_specs_from_ast(ast: &ASTNode) -> Vec<crate::ir::SlotSpec> {
+    use crate::ir::SlotSpec;
+    let items: Vec<&ASTNode> = match ast {
+        ASTNode::Constant(ConstantValue::Nil) => return vec![],
+        ASTNode::Call { function, args } => {
+            let mut v = vec![function.as_ref()];
+            v.extend(args.iter());
+            v
+        }
+        _ => return vec![],
+    };
+    let mut slots = vec![];
+    for item in items {
+        match item {
+            ASTNode::Variable(name) => {
+                slots.push(SlotSpec {
+                    name: name.clone(),
+                    initarg: None, initform: None,
+                    accessor: None, reader: None, writer: None,
+                });
+            }
+            ASTNode::Call { function, args } => {
+                // (slot-name :initarg :name :accessor name ...)
+                let slot_name = if let ASTNode::Variable(n) = function.as_ref() {
+                    n.clone()
+                } else { continue; };
+                let mut spec = SlotSpec {
+                    name: slot_name,
+                    initarg: None, initform: None,
+                    accessor: None, reader: None, writer: None,
+                };
+                let mut i = 0;
+                while i < args.len() {
+                    if let ASTNode::Variable(key) = &args[i] {
+                        let key_lower = key.to_lowercase();
+                        match key_lower.as_str() {
+                            ":initarg" => {
+                                if i + 1 < args.len() {
+                                    if let ASTNode::Variable(v) = &args[i + 1] {
+                                        spec.initarg = Some(v.clone());
+                                    }
+                                    i += 2; continue;
+                                }
+                            }
+                            ":initform" => {
+                                if i + 1 < args.len() {
+                                    spec.initform = Some(Box::new(args[i + 1].clone()));
+                                    i += 2; continue;
+                                }
+                            }
+                            ":accessor" => {
+                                if i + 1 < args.len() {
+                                    if let ASTNode::Variable(v) = &args[i + 1] {
+                                        spec.accessor = Some(v.clone());
+                                    }
+                                    i += 2; continue;
+                                }
+                            }
+                            ":reader" => {
+                                if i + 1 < args.len() {
+                                    if let ASTNode::Variable(v) = &args[i + 1] {
+                                        spec.reader = Some(v.clone());
+                                    }
+                                    i += 2; continue;
+                                }
+                            }
+                            ":writer" => {
+                                if i + 1 < args.len() {
+                                    if let ASTNode::Variable(v) = &args[i + 1] {
+                                        spec.writer = Some(v.clone());
+                                    }
+                                    i += 2; continue;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    i += 1;
+                }
+                slots.push(spec);
+            }
+            _ => {}
+        }
+    }
+    slots
 }
 
 /// Body destructuring pattern for macros
@@ -7715,6 +7959,56 @@ fn macroexpand_1_call_to_ast(
         result = eval_with_env(expr, &mut macro_env)?;
     }
 
+    // Debug: trace with-upgradability macro expansion for find-system
+    if std::env::var("RLASP_DEBUG_FIND_SYSTEM").is_ok() {
+        if let Some(name) = func_name {
+            let base = name.rsplit(':').next().unwrap_or(name);
+            let args_str = format!("{:?}", args);
+            if base.eq_ignore_ascii_case("with-upgradability") && args_str.contains("find-system") {
+                let result_str = format!("{:?}", result);
+                eprintln!("[find-system] with-upgradability args contain find-system");
+                // Check ensure-function-notinline binding
+                if let Some(efni) = macro_env.get(&format!("{}ensure-function-notinline", FUNCTION_NS_PREFIX)) {
+                    match efni {
+                        EvalResult::Lambda { params, body, .. } => {
+                            eprintln!("[find-system] ensure-function-notinline is LAMBDA params={:?} body={:?}", params, body.iter().map(|b| format!("{:?}", b)[..100.min(format!("{:?}", b).len())].to_string()).collect::<Vec<_>>());
+                        }
+                        _ => eprintln!("[find-system] ensure-function-notinline is: {}", efni),
+                    }
+                } else {
+                    eprintln!("[find-system] ensure-function-notinline NOT FOUND in env!");
+                    // Try other lookups
+                    let keys: Vec<_> = macro_env.keys().filter(|k| k.contains("ensure")).collect();
+                    eprintln!("[find-system]   env keys with 'ensure': {:?}", keys);
+                }
+                eprintln!("[find-system] macro body result (first 2000): {}", &result_str[..result_str.len().min(2000)]);
+                // Walk the result list and print each element
+                let mut current = result.clone();
+                let mut idx = 0;
+                loop {
+                    match current {
+                        EvalResult::Cons(car, cdr) => {
+                            match &*car.borrow() {
+                                EvalResult::Lambda { params, body, .. } => {
+                                    eprintln!("[find-system]   element {}: LAMBDA params={:?} body_len={} body[0]={:?}",
+                                        idx, params, body.len(),
+                                        if !body.is_empty() { format!("{:?}", body[0])[..200.min(format!("{:?}", body[0]).len())].to_string() } else { "empty".to_string() });
+                                }
+                                other => {
+                                    eprintln!("[find-system]   element {}: {:?}", idx, format!("{}", other)[..300.min(format!("{}", other).len())].to_string());
+                                }
+                            }
+                            current = cdr.borrow().clone();
+                            idx += 1;
+                            if idx > 10 { break; } // limit output
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+
     // Convert the result back to an AST
     let expanded_ast = result_to_ast(&result)?;
 
@@ -7769,8 +8063,37 @@ pub fn macroexpand_all_to_ast(ast: &ASTNode, env: &mut HashMap<String, EvalResul
                     if let EvalResult::Macro { params, body } = func_val {
                         // Expand this macro call
                         let expanded = macroexpand_1_call_to_ast(&params, &body, Some(name), args, env)?;
+                        // Debug: trace with-upgradability expansion before/after recursive expansion
+                        if std::env::var("RLASP_DEBUG_WUP2").is_ok()
+                            && base_name.eq_ignore_ascii_case("with-upgradability") {
+                            let has_dg = match &expanded {
+                                ASTNode::Call { args, .. } => args.iter().any(|a| {
+                                    format!("{:?}", a).contains("defgeneric")
+                                }),
+                                _ => format!("{:?}", expanded).contains("defgeneric"),
+                            };
+                            if has_dg {
+                                eprintln!("[wup2] BEFORE recursive expand, expanded head={:?}",
+                                    match &expanded {
+                                        ASTNode::Call { function, .. } => format!("{:?}", function),
+                                        ASTNode::Progn { .. } => "Progn".to_string(),
+                                        _ => format!("{:?}", std::mem::discriminant(&expanded)),
+                                    });
+                            }
+                        }
                         // Recursively expand the result
-                        return macroexpand_all_to_ast(&expanded, env);
+                        let final_result = macroexpand_all_to_ast(&expanded, env)?;
+                        if std::env::var("RLASP_DEBUG_WUP2").is_ok()
+                            && base_name.eq_ignore_ascii_case("with-upgradability") {
+                            let before_dg = format!("{:?}", expanded).contains("defgeneric");
+                            let after_dg = format!("{:?}", final_result).contains("defgeneric");
+                            if before_dg && !after_dg {
+                                eprintln!("[wup2] LOST defgeneric during recursive expansion!");
+                                eprintln!("[wup2] before: {:?}", &expanded);
+                                eprintln!("[wup2] after: {:?}", &final_result);
+                            }
+                        }
+                        return Ok(final_result);
                     }
                 }
             }

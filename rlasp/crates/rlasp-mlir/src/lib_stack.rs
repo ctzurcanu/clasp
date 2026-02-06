@@ -2366,7 +2366,7 @@ impl StackMLIRCodegen {
         let is_non_cl_macro_stub = matches!(
             base_name,
             "define-convenience-action-methods" | "defparameter*" | "defvar*" | "define-package"
-            | "load-mlir"
+            | "load-mlir" | "with-upgradability"
         );
         if !rlasp::is_cl_builtin(base_name) && !is_non_cl_macro_stub {
             return self.compile_user_function_call(base_name, args);
@@ -2770,6 +2770,28 @@ impl StackMLIRCodegen {
                         result, name_sym, specializers_list, method_ref, method_ref));
                 }
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                return Ok(());
+            }
+
+            // with-upgradability - ASDF macro wrapping definitions
+            // (with-upgradability (&optional) body...)
+            // Semantically: (eval-when (:compile-toplevel :load-toplevel :execute) body...)
+            "with-upgradability" => {
+                if args.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    return Ok(());
+                }
+                // Skip first arg (options list), evaluate body forms as progn
+                for (i, expr) in args[1..].iter().enumerate() {
+                    if i > 0 {
+                        let _tmp = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _tmp));
+                    }
+                    self.compile_expr(expr)?;
+                }
+                if args.len() == 1 {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
                 return Ok(());
             }
 
@@ -8210,19 +8232,372 @@ impl StackMLIRCodegen {
                 return Ok(());
             }
 
+            // Declarations - legitimately no-ops in compiled code
             "declare" | "ignore" | "ignorable" | "type" | "ftype" | "inline" | "notinline" |
-            "optimize" | "special" | "dynamic-extent" |
-            // Packages (remaining stubs - these need more complex implementation)
-            "in-package" | "use-package" | "unuse-package" | "export" | "unexport" |
-            "import" | "shadowing-import" | "shadow" |
-            "unintern" | "delete-package" | "rename-package" |
-            "package-name" | "package-nicknames" | "package-use-list" | "package-used-by-list" |
-            "package-shadowing-symbols" | "list-all-packages" |
-            // Symbols (remaining stubs)
-            "gentemp" | "symbol-package" |
-            "symbol-function" | "symbol-plist" | "get" | "remprop" | "make-symbol" | "copy-symbol" => {
-                // Stub: push NIL for unimplemented functions
+            "optimize" | "special" | "dynamic-extent" => {
                 self.writeln("func.call @stack_push_nil() : () -> ()");
+                Ok(())
+            }
+
+            // ---- Package functions ----
+            "in-package" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_in_package({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "use-package" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_use_package({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "unuse-package" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_unuse_package({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "export" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_export({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "unexport" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_unexport({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "import" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_import({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "shadow" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_shadow({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "shadowing-import" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_shadowing_import({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "unintern" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let pkg = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_unintern({}, {}) : (i64, i64) -> i64", r, a, pkg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "delete-package" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_delete_package({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "rename-package" => {
+                self.compile_expr(&args[0])?;
+                let a0 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a0));
+                self.compile_expr(&args[1])?;
+                let a1 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a1));
+                let a2 = if args.len() > 2 {
+                    self.compile_expr(&args[2])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_rename_package({}, {}, {}) : (i64, i64, i64) -> i64", r, a0, a1, a2));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "package-name" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_package_name({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "package-nicknames" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_package_nicknames({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "package-use-list" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_package_use_list({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "package-used-by-list" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_package_used_by_list({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "package-shadowing-symbols" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_package_shadowing_symbols({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "list-all-packages" => {
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_list_all_packages() : () -> i64", r));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+
+            // ---- Symbol functions ----
+            "symbol-function" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_symbol_function({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "symbol-package" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_symbol_package({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "symbol-plist" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_symbol_plist({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "get" => {
+                self.compile_expr(&args[0])?;
+                let a0 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a0));
+                self.compile_expr(&args[1])?;
+                let a1 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a1));
+                let a2 = if args.len() > 2 {
+                    self.compile_expr(&args[2])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_get_property({}, {}, {}) : (i64, i64, i64) -> i64", r, a0, a1, a2));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "remprop" => {
+                self.compile_expr(&args[0])?;
+                let a0 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a0));
+                self.compile_expr(&args[1])?;
+                let a1 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a1));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_remprop({}, {}) : (i64, i64) -> i64", r, a0, a1));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "make-symbol" => {
+                self.compile_expr(&args[0])?;
+                let a = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a));
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_make_symbol_from_name({}) : (i64) -> i64", r, a));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "copy-symbol" => {
+                self.compile_expr(&args[0])?;
+                let a0 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", a0));
+                let a1 = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_copy_symbol({}, {}) : (i64, i64) -> i64", r, a0, a1));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
+                Ok(())
+            }
+            "gentemp" => {
+                let a0 = if !args.is_empty() {
+                    self.compile_expr(&args[0])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let a1 = if args.len() > 1 {
+                    self.compile_expr(&args[1])?;
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", p));
+                    p
+                } else {
+                    let p = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", p));
+                    p
+                };
+                let r = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_gentemp({}, {}) : (i64, i64) -> i64", r, a0, a1));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", r));
                 Ok(())
             }
 

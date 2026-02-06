@@ -3337,19 +3337,93 @@ pub fn get_dynamic_value(name: &str) -> Option<usize> {
 }
 
 /// JIT package registry - tracks packages created during JIT execution
-static JIT_PACKAGES: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
-
-/// Register a package name in the JIT package registry
-pub fn register_jit_package(name: &str) {
-    let mut packages = JIT_PACKAGES.lock().unwrap();
-    packages.insert(name.to_uppercase());
+/// A real CL package with name, nicknames, use-list, symbols, etc.
+#[derive(Clone)]
+pub struct ClPackage {
+    pub name: String,
+    pub nicknames: Vec<String>,
+    pub use_list: Vec<String>,
+    pub used_by_list: Vec<String>,
+    pub exported_symbols: std::collections::HashSet<String>,
+    pub shadowing_symbols: std::collections::HashSet<String>,
+    pub internal_symbols: std::collections::HashSet<String>,
 }
 
-/// Check if a package exists in the JIT package registry
+impl ClPackage {
+    pub fn new(name: &str) -> Self {
+        ClPackage {
+            name: name.to_uppercase(),
+            nicknames: Vec::new(),
+            use_list: Vec::new(),
+            used_by_list: Vec::new(),
+            exported_symbols: std::collections::HashSet::new(),
+            shadowing_symbols: std::collections::HashSet::new(),
+            internal_symbols: std::collections::HashSet::new(),
+        }
+    }
+}
+
+static PACKAGE_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ClPackage>>> =
+    std::sync::LazyLock::new(|| {
+        let mut m = HashMap::new();
+        // Bootstrap standard CL packages
+        let mut cl = ClPackage::new("COMMON-LISP");
+        cl.nicknames.push("CL".to_string());
+        m.insert("COMMON-LISP".to_string(), cl);
+        let mut cl_user = ClPackage::new("COMMON-LISP-USER");
+        cl_user.nicknames.push("CL-USER".to_string());
+        cl_user.use_list.push("COMMON-LISP".to_string());
+        m.insert("COMMON-LISP-USER".to_string(), cl_user);
+        m.insert("KEYWORD".to_string(), ClPackage::new("KEYWORD"));
+        Mutex::new(m)
+    });
+
+/// Current package name (thread-local for CL *package* semantics)
+thread_local! {
+    static CURRENT_PACKAGE: std::cell::RefCell<String> = std::cell::RefCell::new("COMMON-LISP-USER".to_string());
+}
+
+/// Find a package by name or nickname
+fn find_package_entry(name: &str) -> Option<String> {
+    let normalized = name.to_uppercase();
+    let reg = PACKAGE_REGISTRY.lock().unwrap();
+    if reg.contains_key(&normalized) {
+        return Some(normalized);
+    }
+    // Check nicknames
+    for (canon_name, pkg) in reg.iter() {
+        for nick in &pkg.nicknames {
+            if nick.to_uppercase() == normalized {
+                return Some(canon_name.clone());
+            }
+        }
+    }
+    // Check prefix match (e.g., "ASDF" matches "ASDF/INTERFACE")
+    for canon_name in reg.keys() {
+        if canon_name.starts_with(&format!("{}/", normalized)) {
+            return Some(canon_name.clone());
+        }
+    }
+    None
+}
+
+/// Register a package name in the package registry
+pub fn register_jit_package(name: &str) {
+    let upper = name.to_uppercase();
+    let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+    reg.entry(upper).or_insert_with(|| ClPackage::new(name));
+}
+
+/// Check if a package exists in the package registry
 pub fn is_jit_package(name: &str) -> bool {
-    let packages = JIT_PACKAGES.lock().unwrap();
-    packages.contains(&name.to_uppercase())
+    drop(PACKAGE_REGISTRY.lock().unwrap()); // ensure initialized
+    find_package_entry(name).is_some()
+}
+
+/// Get all package names
+pub fn list_all_jit_packages() -> Vec<String> {
+    let reg = PACKAGE_REGISTRY.lock().unwrap();
+    reg.keys().cloned().collect()
 }
 
 /// Register a package at runtime from JIT code (called by defpackage/define-package)
@@ -3384,6 +3458,520 @@ pub extern "C" fn cc_register_package(name_obj: usize) -> usize {
     LispObject::t().raw()
 }
 
+// =====================================================================
+// CL Package Functions
+// =====================================================================
+
+/// (in-package name) - set *package* to the named package
+#[no_mangle]
+pub extern "C" fn cc_in_package(name_obj: usize) -> usize {
+    let pkg_name = extract_name_string(name_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        CURRENT_PACKAGE.with(|cp| *cp.borrow_mut() = canon.clone());
+        cc_find_package(name_obj)
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (package-name package) - return the name string of a package
+#[no_mangle]
+pub extern "C" fn cc_package_name(pkg_obj: usize) -> usize {
+    let pkg_name = extract_name_string(pkg_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        rlasp_runtime::RString::allocate(canon).raw()
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (package-nicknames package) - return list of nickname strings
+#[no_mangle]
+pub extern "C" fn cc_package_nicknames(pkg_obj: usize) -> usize {
+    let pkg_name = extract_name_string(pkg_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get(&canon) {
+            let mut list = cc_nil_value();
+            for nick in pkg.nicknames.iter().rev() {
+                let s = rlasp_runtime::RString::allocate(nick.clone()).raw();
+                list = cc_cons(s, list);
+            }
+            list
+        } else {
+            LispObject::nil().raw()
+        }
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (package-use-list package) - packages used by this package
+#[no_mangle]
+pub extern "C" fn cc_package_use_list(pkg_obj: usize) -> usize {
+    let pkg_name = extract_name_string(pkg_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get(&canon) {
+            let mut list = cc_nil_value();
+            for used in pkg.use_list.iter().rev() {
+                let s = rlasp_runtime::Symbol::allocate(format!("#<PACKAGE \"{}\">", used)).raw();
+                list = cc_cons(s, list);
+            }
+            list
+        } else {
+            LispObject::nil().raw()
+        }
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (package-used-by-list package) - packages that use this package
+#[no_mangle]
+pub extern "C" fn cc_package_used_by_list(pkg_obj: usize) -> usize {
+    let pkg_name = extract_name_string(pkg_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get(&canon) {
+            let mut list = cc_nil_value();
+            for user in pkg.used_by_list.iter().rev() {
+                let s = rlasp_runtime::Symbol::allocate(format!("#<PACKAGE \"{}\">", user)).raw();
+                list = cc_cons(s, list);
+            }
+            list
+        } else {
+            LispObject::nil().raw()
+        }
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (package-shadowing-symbols package) - shadowing symbols
+#[no_mangle]
+pub extern "C" fn cc_package_shadowing_symbols(pkg_obj: usize) -> usize {
+    let pkg_name = extract_name_string(pkg_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get(&canon) {
+            let mut list = cc_nil_value();
+            for sym in pkg.shadowing_symbols.iter() {
+                let s = rlasp_runtime::Symbol::allocate(sym.clone()).raw();
+                list = cc_cons(s, list);
+            }
+            list
+        } else {
+            LispObject::nil().raw()
+        }
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (use-package packages-to-use &optional package) - add to use-list
+#[no_mangle]
+pub extern "C" fn cc_use_package(packages_obj: usize, target_obj: usize) -> usize {
+    let target_name = if unsafe { LispObject::from_raw(target_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(target_obj)
+    };
+    let pkg_to_use = extract_name_string(packages_obj);
+
+    if let (Some(target_canon), Some(use_canon)) = (find_package_entry(&target_name), find_package_entry(&pkg_to_use)) {
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&target_canon) {
+            if !pkg.use_list.contains(&use_canon) {
+                pkg.use_list.push(use_canon.clone());
+            }
+        }
+        if let Some(pkg) = reg.get_mut(&use_canon) {
+            if !pkg.used_by_list.contains(&target_canon) {
+                pkg.used_by_list.push(target_canon);
+            }
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (unuse-package packages-to-unuse &optional package) - remove from use-list
+#[no_mangle]
+pub extern "C" fn cc_unuse_package(packages_obj: usize, target_obj: usize) -> usize {
+    let target_name = if unsafe { LispObject::from_raw(target_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(target_obj)
+    };
+    let pkg_to_remove = extract_name_string(packages_obj);
+
+    if let (Some(target_canon), Some(rem_canon)) = (find_package_entry(&target_name), find_package_entry(&pkg_to_remove)) {
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&target_canon) {
+            pkg.use_list.retain(|x| x != &rem_canon);
+        }
+        if let Some(pkg) = reg.get_mut(&rem_canon) {
+            pkg.used_by_list.retain(|x| x != &target_canon);
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (export symbols &optional package) - make symbols external
+#[no_mangle]
+pub extern "C" fn cc_export(symbols_obj: usize, pkg_obj: usize) -> usize {
+    let pkg_name = if unsafe { LispObject::from_raw(pkg_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(pkg_obj)
+    };
+
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let sym_names = collect_symbol_names(symbols_obj);
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&canon) {
+            for name in sym_names {
+                pkg.exported_symbols.insert(name);
+            }
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (unexport symbols &optional package) - make symbols internal
+#[no_mangle]
+pub extern "C" fn cc_unexport(symbols_obj: usize, pkg_obj: usize) -> usize {
+    let pkg_name = if unsafe { LispObject::from_raw(pkg_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(pkg_obj)
+    };
+
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let sym_names = collect_symbol_names(symbols_obj);
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&canon) {
+            for name in sym_names {
+                pkg.exported_symbols.remove(&name);
+            }
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (import symbols &optional package) - import symbols into package
+#[no_mangle]
+pub extern "C" fn cc_import(symbols_obj: usize, pkg_obj: usize) -> usize {
+    let pkg_name = if unsafe { LispObject::from_raw(pkg_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(pkg_obj)
+    };
+
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let sym_names = collect_symbol_names(symbols_obj);
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&canon) {
+            for name in sym_names {
+                pkg.internal_symbols.insert(name);
+            }
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (shadow symbols &optional package) - add to shadowing symbols
+#[no_mangle]
+pub extern "C" fn cc_shadow(symbols_obj: usize, pkg_obj: usize) -> usize {
+    let pkg_name = if unsafe { LispObject::from_raw(pkg_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(pkg_obj)
+    };
+
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let sym_names = collect_symbol_names(symbols_obj);
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&canon) {
+            for name in sym_names {
+                pkg.shadowing_symbols.insert(name);
+            }
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (shadowing-import symbols &optional package) - import and shadow
+#[no_mangle]
+pub extern "C" fn cc_shadowing_import(symbols_obj: usize, pkg_obj: usize) -> usize {
+    cc_shadow(symbols_obj, pkg_obj);
+    cc_import(symbols_obj, pkg_obj)
+}
+
+/// (unintern symbol &optional package) - remove symbol from package
+#[no_mangle]
+pub extern "C" fn cc_unintern(symbol_obj: usize, pkg_obj: usize) -> usize {
+    let pkg_name = if unsafe { LispObject::from_raw(pkg_obj) }.is_nil() {
+        CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+    } else {
+        extract_name_string(pkg_obj)
+    };
+    let sym_name = extract_name_string(symbol_obj).to_uppercase();
+
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(pkg) = reg.get_mut(&canon) {
+            pkg.internal_symbols.remove(&sym_name);
+            pkg.exported_symbols.remove(&sym_name);
+            pkg.shadowing_symbols.remove(&sym_name);
+            return LispObject::t().raw();
+        }
+    }
+    LispObject::nil().raw()
+}
+
+/// (delete-package package) - remove a package
+#[no_mangle]
+pub extern "C" fn cc_delete_package(pkg_obj: usize) -> usize {
+    let pkg_name = extract_name_string(pkg_obj);
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        // Remove from used-by lists of packages it uses
+        if let Some(pkg) = reg.get(&canon) {
+            let use_list = pkg.use_list.clone();
+            for used in use_list {
+                if let Some(used_pkg) = reg.get_mut(&used) {
+                    used_pkg.used_by_list.retain(|x| x != &canon);
+                }
+            }
+        }
+        reg.remove(&canon);
+        LispObject::t().raw()
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (rename-package package new-name &optional new-nicknames) -> package
+#[no_mangle]
+pub extern "C" fn cc_rename_package(pkg_obj: usize, new_name_obj: usize, new_nicks_obj: usize) -> usize {
+    let old_name = extract_name_string(pkg_obj);
+    let new_name = extract_name_string(new_name_obj).to_uppercase();
+
+    if let Some(canon) = find_package_entry(&old_name) {
+        let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+        if let Some(mut pkg) = reg.remove(&canon) {
+            pkg.name = new_name.clone();
+            // Collect nicknames from list
+            if !unsafe { LispObject::from_raw(new_nicks_obj) }.is_nil() {
+                pkg.nicknames = collect_symbol_names(new_nicks_obj);
+            }
+            reg.insert(new_name.clone(), pkg);
+        }
+        rlasp_runtime::Symbol::allocate(format!("#<PACKAGE \"{}\">", new_name)).raw()
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
+/// (list-all-packages) -> list of all packages
+#[no_mangle]
+pub extern "C" fn cc_list_all_packages() -> usize {
+    let reg = PACKAGE_REGISTRY.lock().unwrap();
+    let mut list = cc_nil_value();
+    for name in reg.keys() {
+        let pkg = rlasp_runtime::Symbol::allocate(format!("#<PACKAGE \"{}\">", name)).raw();
+        list = cc_cons(pkg, list);
+    }
+    list
+}
+
+// =====================================================================
+// CL Symbol Functions
+// =====================================================================
+
+/// (symbol-function symbol) - get function bound to symbol
+#[no_mangle]
+pub extern "C" fn cc_symbol_function(symbol_obj: usize) -> usize {
+    let name = extract_name_string(symbol_obj).to_uppercase();
+    let fn_key = format!("%FN%{}", name);
+    let registry = get_registry().lock().unwrap();
+    if registry.contains_key(&fn_key) || registry.contains_key(&name) {
+        // Return a function reference (the symbol itself serves as a function designator)
+        rlasp_runtime::Symbol::allocate(format!("#<FUNCTION {}>", name)).raw()
+    } else {
+        let fn_lower = format!("%FN%{}", name.to_lowercase());
+        if registry.contains_key(&fn_lower) || registry.contains_key(&name.to_lowercase()) {
+            rlasp_runtime::Symbol::allocate(format!("#<FUNCTION {}>", name)).raw()
+        } else {
+            drop(registry);
+            // Check generic functions
+            let gen_reg = crate::intrinsics_clos::get_generic_registry().lock().unwrap();
+            if gen_reg.contains_key(&name) || gen_reg.contains_key(&name.to_lowercase()) {
+                rlasp_runtime::Symbol::allocate(format!("#<GENERIC-FUNCTION {}>", name)).raw()
+            } else {
+                LispObject::nil().raw()
+            }
+        }
+    }
+}
+
+/// (symbol-package symbol) - get home package of symbol
+#[no_mangle]
+pub extern "C" fn cc_symbol_package(symbol_obj: usize) -> usize {
+    let name = extract_name_string(symbol_obj);
+    // If name contains package prefix, extract it
+    if let Some(pos) = name.find(':') {
+        let pkg_name = &name[..pos];
+        if !pkg_name.is_empty() {
+            return cc_find_package(rlasp_runtime::RString::allocate(pkg_name.to_string()).raw());
+        }
+    }
+    // Return current package
+    let current = CURRENT_PACKAGE.with(|cp| cp.borrow().clone());
+    rlasp_runtime::Symbol::allocate(format!("#<PACKAGE \"{}\">", current)).raw()
+}
+
+/// (symbol-plist symbol) - get property list of symbol
+#[no_mangle]
+pub extern "C" fn cc_symbol_plist(symbol_obj: usize) -> usize {
+    use rlasp_runtime::Symbol;
+    let lo = unsafe { LispObject::from_raw(symbol_obj) };
+    if let Some(sym_ptr) = lo.as_general_ptr::<Symbol>() {
+        if !sym_ptr.is_null() {
+            let sym = unsafe { &*sym_ptr };
+            let entries = sym.plist_entries();
+            let mut list = cc_nil_value();
+            for (key, value) in entries.iter().rev() {
+                list = cc_cons(value.raw(), list);
+                let key_sym = rlasp_runtime::Symbol::allocate(key.clone()).raw();
+                list = cc_cons(key_sym, list);
+            }
+            return list;
+        }
+    }
+    LispObject::nil().raw()
+}
+
+/// (get symbol indicator &optional default) - get property value
+#[no_mangle]
+pub extern "C" fn cc_get_property(symbol_obj: usize, indicator_obj: usize, _default_obj: usize) -> usize {
+    let result = cc_get_symbol_property(symbol_obj, indicator_obj);
+    if result == LispObject::nil().raw() && _default_obj != 0 {
+        let def = unsafe { LispObject::from_raw(_default_obj) };
+        if !def.is_nil() { return _default_obj; }
+    }
+    result
+}
+
+/// (remprop symbol indicator) - remove a property
+#[no_mangle]
+pub extern "C" fn cc_remprop(symbol_obj: usize, indicator_obj: usize) -> usize {
+    use rlasp_runtime::Symbol;
+    let lo = unsafe { LispObject::from_raw(symbol_obj) };
+    let key_name = extract_name_string(indicator_obj);
+    if let Some(sym_ptr) = lo.as_general_ptr::<Symbol>() {
+        if !sym_ptr.is_null() {
+            let sym = unsafe { &*sym_ptr };
+            sym.remove_property(&key_name);
+            return LispObject::t().raw();
+        }
+    }
+    LispObject::nil().raw()
+}
+
+/// (make-symbol name) - create an uninterned symbol
+#[no_mangle]
+pub extern "C" fn cc_make_symbol_from_name(name_obj: usize) -> usize {
+    let name = extract_name_string(name_obj);
+    rlasp_runtime::Symbol::allocate(name).raw()
+}
+
+/// (copy-symbol symbol &optional copy-props) - copy a symbol
+#[no_mangle]
+pub extern "C" fn cc_copy_symbol(symbol_obj: usize, _copy_props: usize) -> usize {
+    let name = extract_name_string(symbol_obj);
+    rlasp_runtime::Symbol::allocate(name).raw()
+}
+
+/// (gentemp &optional prefix package) - generate unique symbol
+#[no_mangle]
+pub extern "C" fn cc_gentemp(prefix_obj: usize, _pkg_obj: usize) -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static GENTEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let prefix = if unsafe { LispObject::from_raw(prefix_obj) }.is_nil() {
+        "T".to_string()
+    } else {
+        extract_name_string(prefix_obj)
+    };
+    let n = GENTEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+    rlasp_runtime::Symbol::allocate(format!("{}{}", prefix, n)).raw()
+}
+
+// =====================================================================
+// Helpers for extracting names from LispObjects
+// =====================================================================
+
+/// Extract a string from any LispObject (symbol name, string value, or repr)
+fn extract_name_string(obj: usize) -> String {
+    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::header::{TypeHeader, ObjectType};
+
+    let lo = unsafe { LispObject::from_raw(obj) };
+    if lo.is_nil() { return String::new(); }
+
+    if let Some(ptr) = lo.as_general_ptr::<()>() {
+        if !ptr.is_null() {
+            match unsafe { TypeHeader::from_ptr(ptr) } {
+                Some(ObjectType::String) => {
+                    let s = unsafe { &*(ptr as *const RString) };
+                    return s.as_str().to_string();
+                }
+                Some(ObjectType::Symbol) => {
+                    let sym = unsafe { &*(ptr as *const Symbol) };
+                    let name = sym.name();
+                    return if name.starts_with(':') { name[1..].to_string() }
+                           else if name.starts_with("#<PACKAGE \"") {
+                               // Extract package name from #<PACKAGE "FOO">
+                               name.trim_start_matches("#<PACKAGE \"")
+                                   .trim_end_matches("\">")
+                                   .to_string()
+                           } else { name.to_string() };
+                }
+                _ => {}
+            }
+        }
+    }
+    format!("{}", lo)
+}
+
+/// Collect symbol name strings from a single symbol or a list of symbols
+fn collect_symbol_names(obj: usize) -> Vec<String> {
+    let lo = unsafe { LispObject::from_raw(obj) };
+    if lo.is_nil() { return Vec::new(); }
+
+    // If it's a cons (list), collect from each element
+    if let Some(cons_ptr) = lo.as_cons_ptr() {
+        let mut names = Vec::new();
+        let mut current = lo;
+        loop {
+            if current.is_nil() { break; }
+            if let Some(cp) = current.as_cons_ptr() {
+                let cons = unsafe { &*cp };
+                names.push(extract_name_string(cons.car().raw()).to_uppercase());
+                current = cons.cdr();
+            } else {
+                names.push(extract_name_string(current.raw()).to_uppercase());
+                break;
+            }
+        }
+        names
+    } else {
+        vec![extract_name_string(obj).to_uppercase()]
+    }
+}
+
 /// Check if a function is in the JIT registry by name
 pub fn is_jit_function(name: &str) -> bool {
     let registry = get_registry().lock().unwrap();
@@ -3401,12 +3989,29 @@ pub fn is_jit_function(name: &str) -> bool {
         let fn_key = format!("%FN%{}", base);
         let fn_key_upper = format!("%FN%{}", base.to_uppercase());
         let fn_key_lower = format!("%FN%{}", base.to_lowercase());
-        registry.contains_key(&fn_key) || registry.contains_key(base)
+        if registry.contains_key(&fn_key) || registry.contains_key(base)
             || registry.contains_key(&fn_key_upper) || registry.contains_key(&base.to_uppercase())
-            || registry.contains_key(&fn_key_lower) || registry.contains_key(&base.to_lowercase())
-    } else {
-        false
+            || registry.contains_key(&fn_key_lower) || registry.contains_key(&base.to_lowercase()) {
+            return true;
+        }
     }
+    drop(registry);
+
+    // Also check the generic function (CLOS) registry
+    let gen_reg = crate::intrinsics_clos::get_generic_registry().lock().unwrap();
+    let names_to_check: Vec<String> = {
+        let base = strip_package_prefix(name);
+        let mut v = vec![
+            name.to_string(), name.to_uppercase(), name.to_lowercase(),
+        ];
+        if base != name {
+            v.push(base.to_string());
+            v.push(base.to_uppercase());
+            v.push(base.to_lowercase());
+        }
+        v
+    };
+    names_to_check.iter().any(|n| gen_reg.contains_key(n))
 }
 
 /// Set the value of a dynamic/special variable
@@ -3768,26 +4373,10 @@ pub extern "C" fn cc_find_package(name: usize) -> usize {
         }
     };
 
-    // Check well-known packages and JIT package registry
-    let normalized = pkg_name.to_uppercase();
-    if normalized == "COMMON-LISP" || normalized == "CL" ||
-       normalized == "COMMON-LISP-USER" || normalized == "CL-USER" ||
-       normalized == "KEYWORD" || is_jit_package(&normalized) {
-        Symbol::allocate(format!("#<PACKAGE \"{}\">", normalized)).raw()
+    if let Some(canon) = find_package_entry(&pkg_name) {
+        Symbol::allocate(format!("#<PACKAGE \"{}\">", canon)).raw()
     } else {
-        // Check if the name matches a prefix of a registered package (for nicknames)
-        // e.g., "ASDF" matches "ASDF/INTERFACE", "UIOP" matches "UIOP/DRIVER"
-        let packages = JIT_PACKAGES.lock().unwrap();
-        let prefix_match = packages.iter().find(|p| p.starts_with(&format!("{}/", normalized)));
-        if let Some(matched) = prefix_match {
-            let name = matched.clone();
-            drop(packages);
-            // Also register the nickname so future lookups are fast
-            register_jit_package(&normalized);
-            Symbol::allocate(format!("#<PACKAGE \"{}\">", name)).raw()
-        } else {
-            LispObject::nil().raw()
-        }
+        LispObject::nil().raw()
     }
 }
 

@@ -75,7 +75,9 @@
       "Bash(while read line)",
       "Bash(do echo \"$line\")",
       "Bash(RLASP_TRACE_FUNCALL=1 RLASP_TRACE_FUNCALL_LIMIT=50 timeout:*)",
-      "Bash(RLASP_TRACE_BATCHES=1 target/release/irlasp:*)"
+      "Bash(RLASP_TRACE_BATCHES=1 target/release/irlasp:*)",
+      "Bash(for str in str6491 str6492 str6493 str6494 str6516 str4758 str4767 str4768 str4769 str4791)",
+      "Bash(do grep \"@$str\\(\" /private/tmp/asdf.mlir)"
     ]
   }
 }
