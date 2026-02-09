@@ -249,29 +249,55 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         "char-name" => match args.get(0) {
             Some(EvalResult::Character(c)) => {
                 let name = match c {
-                    ' ' => "Space",
-                    '\n' => "Newline",
-                    '\t' => "Tab",
-                    '\r' => "Return",
+                    ' ' => "Space".to_string(),
+                    '\n' => "Newline".to_string(),
+                    '\t' => "Tab".to_string(),
+                    '\r' => "Return".to_string(),
+                    '\u{0008}' => "Backspace".to_string(),
+                    '\u{000C}' => "Page".to_string(),
+                    '\u{007F}' => "Rubout".to_string(),
+                    '\u{0000}' => "Nul".to_string(),
+                    '\u{001B}' => "Escape".to_string(),
+                    '\u{0007}' => "Bell".to_string(),
                     _ if c.is_ascii_graphic() => return Ok(EvalResult::Nil),
-                    _ => return Ok(EvalResult::Nil),
+                    _ => format!("U{:04X}", *c as u32),
                 };
-                Ok(EvalResult::String(name.to_string()))
+                Ok(EvalResult::String(name))
             },
             _ => Err("char-name requires a character".to_string()),
         },
 
         "name-char" => match args.get(0) {
             Some(EvalResult::String(s)) | Some(EvalResult::Symbol(s)) => {
-                let ch = match s.to_lowercase().as_str() {
-                    "space" => ' ',
-                    "newline" => '\n',
-                    "tab" => '\t',
-                    "return" => '\r',
-                    _ if s.len() == 1 => s.chars().next().unwrap(),
-                    _ => return Ok(EvalResult::Nil),
+                let name = if s.starts_with(':') { &s[1..] } else { s.as_str() };
+                let ch = match name.to_lowercase().as_str() {
+                    "space" => Some(' '),
+                    "newline" | "linefeed" => Some('\n'),
+                    "tab" => Some('\t'),
+                    "return" => Some('\r'),
+                    "backspace" => Some('\u{0008}'),
+                    "page" | "formfeed" => Some('\u{000C}'),
+                    "rubout" | "delete" => Some('\u{007F}'),
+                    "nul" | "null" => Some('\u{0000}'),
+                    "escape" | "esc" => Some('\u{001B}'),
+                    "bell" | "bel" => Some('\u{0007}'),
+                    _ if name.len() == 1 => Some(name.chars().next().unwrap()),
+                    _ => {
+                        // Try parsing as "U+XXXX" or hex code point
+                        let hex = if name.starts_with("U+") || name.starts_with("u+") {
+                            &name[2..]
+                        } else if name.starts_with("U") || name.starts_with("u") {
+                            &name[1..]
+                        } else {
+                            name
+                        };
+                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+                    }
                 };
-                Ok(EvalResult::Character(ch))
+                match ch {
+                    Some(c) => Ok(EvalResult::Character(c)),
+                    None => Ok(EvalResult::Nil),
+                }
             },
             _ => Err("name-char requires a string".to_string()),
         },

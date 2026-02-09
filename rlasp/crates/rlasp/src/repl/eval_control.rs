@@ -1,11 +1,16 @@
 /// Control flow operations: do, dolist, dotimes, return
 
-use super::eval_types::{EvalResult, RETURN_VALUE};
+use super::eval_types::{EvalResult, RETURN_VALUE, primary_value};
 use super::eval_core::eval_with_env;
 use crate::ir::{ASTNode, ConstantValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
+
+fn condition_true(value: &EvalResult) -> bool {
+    let primary = primary_value(value.clone());
+    !matches!(primary, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
+}
 
 /// Setf expander entry - stores either a simple updater function name
 /// or a complex expansion (lambda-list, store-vars, body)
@@ -54,12 +59,18 @@ pub fn eval_defsetf(args: &[ASTNode], _env: &mut HashMap<String, EvalResult>) ->
         _ => return Err("defsetf: first argument must be a symbol".to_string()),
     };
 
-    // Check if this is simple form (2 args) or complex form (3+ args)
-    if args.len() == 2 {
-        // Simple form: (defsetf accessor updater)
+    // Simple form:
+    //   (defsetf accessor updater)
+    //   (defsetf accessor updater "docstring")
+    let is_simple_form = matches!(&args[1], ASTNode::Variable(_))
+        && (args.len() == 2
+            || (args.len() == 3
+                && matches!(&args[2], ASTNode::Constant(ConstantValue::String(_)))));
+
+    if is_simple_form {
         let updater = match &args[1] {
             ASTNode::Variable(name) => name.clone(),
-            _ => return Err("defsetf: updater must be a symbol".to_string()),
+            _ => unreachable!(),
         };
         register_setf_expander(&accessor, SetfExpander::Simple(updater));
     } else {
@@ -361,7 +372,7 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
 
         // Check end test
         let test_result = eval_with_env(&end_test, &mut loop_env)?;
-        if !matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
+        if condition_true(&test_result) {
             // End test is true, evaluate result forms
             let mut result = EvalResult::Nil;
             for form in &result_forms {
@@ -713,7 +724,7 @@ pub(super) fn eval_while(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
         let test_result = eval_with_env(test, env)?;
 
         // Check if test is nil or false
-        let is_nil = matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
+        let is_nil = !condition_true(&test_result);
         if is_nil {
             break;
         }
@@ -738,7 +749,7 @@ pub(super) fn eval_assert(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     let test_result = eval_with_env(test_form, env)?;
 
     // Check if test is false
-    if matches!(test_result, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
+    if !condition_true(&test_result) {
         return Err(format!("Assertion failed: {:?}", test_form));
     }
 
@@ -866,7 +877,17 @@ fn check_typespec_matches(value: &EvalResult, typespec: &ASTNode, env: &mut Hash
     }
 }
 
-fn eql_values(a: &EvalResult, b: &EvalResult) -> bool {
+/// EQ comparison (pointer identity for cons, otherwise same as eql)
+pub(super) fn eq_values(a: &EvalResult, b: &EvalResult) -> bool {
+    match (a, b) {
+        (EvalResult::Cons(car1, cdr1), EvalResult::Cons(car2, cdr2)) => {
+            Rc::ptr_eq(car1, car2) && Rc::ptr_eq(cdr1, cdr2)
+        }
+        _ => eql_values(a, b),
+    }
+}
+
+pub(super) fn eql_values(a: &EvalResult, b: &EvalResult) -> bool {
     match (a, b) {
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Boolean(x), EvalResult::Boolean(y)) => x == y,
@@ -1085,47 +1106,20 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         return Err("incf requires at least 1 argument".to_string());
     }
 
-    let delta = if args.len() > 1 {
+    let place = &args[0];
+    let delta = super::eval_types::primary_value(if args.len() > 1 {
         eval_with_env(&args[1], env)?
     } else {
         EvalResult::Fixnum(1)
-    };
+    });
 
-    let place = &args[0];
-
-    // Check for car/cdr accessors first
-    if let ASTNode::Call { function, args: place_args } = place {
-        if let ASTNode::Variable(func_name) = &**function {
-            if place_args.len() == 1 && is_car_cdr_accessor(func_name) {
-                let cons = eval_with_env(&place_args[0], env)?;
-                return navigate_and_incf(func_name, cons, delta);
-            }
-        }
-    }
-
-    // Get current value from place
-    let current_val = match place {
-        ASTNode::Variable(name) => {
-            env.get(name).cloned().unwrap_or(EvalResult::Fixnum(0))
-        }
+    // For historical compatibility, unbound variables and absent gethash values
+    // behave as if initialized to 0 for INCF.
+    let current_val = super::eval_types::primary_value(match place {
+        ASTNode::Variable(name) => env.get(name).cloned().unwrap_or(EvalResult::Fixnum(0)),
         ASTNode::Call { function, args: place_args } => {
             if let ASTNode::Variable(func_name) = &**function {
                 match func_name.as_str() {
-                    "aref" if place_args.len() >= 2 => {
-                        let array = eval_with_env(&place_args[0], env)?;
-                        let index = eval_with_env(&place_args[1], env)?;
-                        let idx = match index {
-                            EvalResult::Fixnum(n) if n >= 0 => n as usize,
-                            _ => return Err("aref index must be a non-negative integer".to_string()),
-                        };
-                        match array {
-                            EvalResult::Array(ref arr) => {
-                                arr.borrow().get(idx).cloned()
-                                    .ok_or_else(|| format!("aref index {} out of bounds", idx))?
-                            }
-                            _ => return Err("incf aref: not an array".to_string()),
-                        }
-                    }
                     "gethash" if place_args.len() >= 2 => {
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
@@ -1142,16 +1136,15 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             _ => return Err("incf gethash: not a hash table".to_string()),
                         }
                     }
-                    _ => return Err(format!("incf: unsupported place form: {}", func_name)),
+                    _ => eval_with_env(place, env)?,
                 }
             } else {
-                return Err("incf: complex place forms not yet supported".to_string());
+                eval_with_env(place, env)?
             }
         }
-        _ => return Err("incf: unsupported place form".to_string()),
-    };
+        _ => eval_with_env(place, env)?,
+    });
 
-    // Add delta to current value
     let new_val = match (current_val, delta) {
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => EvalResult::Fixnum(a + b),
         (EvalResult::Float(a), EvalResult::Float(b)) => EvalResult::Float(a + b),
@@ -1160,33 +1153,34 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         _ => return Err("incf requires numeric arguments".to_string()),
     };
 
-    // Set new value back to place
-    match place {
-        ASTNode::Variable(name) => {
-            env.insert(name.clone(), new_val.clone());
-        }
+    let setf_args = vec![
+        place.clone(),
+        super::eval_system::result_to_ast_quoted(&new_val)?,
+    ];
+    eval_setf(&setf_args, env)?;
+
+    Ok(new_val)
+}
+
+pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (decf place [delta])
+    if args.is_empty() {
+        return Err("decf requires at least 1 argument".to_string());
+    }
+
+    let place = &args[0];
+    let delta = super::eval_types::primary_value(if args.len() > 1 {
+        eval_with_env(&args[1], env)?
+    } else {
+        EvalResult::Fixnum(1)
+    });
+
+    // Keep parity with INCF behavior for historical tests.
+    let current_val = super::eval_types::primary_value(match place {
+        ASTNode::Variable(name) => env.get(name).cloned().unwrap_or(EvalResult::Fixnum(0)),
         ASTNode::Call { function, args: place_args } => {
             if let ASTNode::Variable(func_name) = &**function {
                 match func_name.as_str() {
-                    "aref" if place_args.len() >= 2 => {
-                        let array = eval_with_env(&place_args[0], env)?;
-                        let index = eval_with_env(&place_args[1], env)?;
-                        let idx = match index {
-                            EvalResult::Fixnum(n) if n >= 0 => n as usize,
-                            _ => return Err("aref index must be a non-negative integer".to_string()),
-                        };
-                        match array {
-                            EvalResult::Array(ref arr) => {
-                                let mut array_mut = arr.borrow_mut();
-                                if idx < array_mut.len() {
-                                    array_mut[idx] = new_val.clone();
-                                } else {
-                                    return Err(format!("aref index {} out of bounds", idx));
-                                }
-                            }
-                            _ => return Err("incf aref: not an array".to_string()),
-                        }
-                    }
                     "gethash" if place_args.len() >= 2 => {
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
@@ -1198,39 +1192,19 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         };
                         match ht {
                             EvalResult::HashTable(ref table) => {
-                                table.borrow_mut().insert(key_str, new_val.clone());
+                                table.borrow().get(&key_str).cloned().unwrap_or(EvalResult::Fixnum(0))
                             }
-                            _ => return Err("incf gethash: not a hash table".to_string()),
+                            _ => return Err("decf gethash: not a hash table".to_string()),
                         }
                     }
-                    _ => return Err(format!("incf: unsupported place form: {}", func_name)),
+                    _ => eval_with_env(place, env)?,
                 }
+            } else {
+                eval_with_env(place, env)?
             }
         }
-        _ => {}
-    }
-
-    Ok(new_val)
-}
-
-pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (decf place [delta])
-    if args.is_empty() {
-        return Err("decf requires at least 1 argument".to_string());
-    }
-
-    let place = match &args[0] {
-        ASTNode::Variable(name) => name.clone(),
-        _ => return Err("decf place must be a variable".to_string()),
-    };
-
-    let delta = if args.len() > 1 {
-        eval_with_env(&args[1], env)?
-    } else {
-        EvalResult::Fixnum(1)
-    };
-
-    let current_val = env.get(&place).cloned().unwrap_or(EvalResult::Fixnum(0));
+        _ => eval_with_env(place, env)?,
+    });
 
     let new_val = match (current_val, delta) {
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => EvalResult::Fixnum(a - b),
@@ -1240,7 +1214,12 @@ pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         _ => return Err("decf requires numeric arguments".to_string()),
     };
 
-    env.insert(place, new_val.clone());
+    let setf_args = vec![
+        place.clone(),
+        super::eval_system::result_to_ast_quoted(&new_val)?,
+    ];
+    eval_setf(&setf_args, env)?;
+
     Ok(new_val)
 }
 
@@ -1343,6 +1322,10 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                     last_value = value.clone();
                 } else {
                     env.insert(var_name.clone(), value.clone());
+                    // Also update global dynamic store for special variables
+                    if super::eval_types::is_special_variable(var_name) {
+                        super::eval_types::set_dynamic_var(var_name, value.clone());
+                    }
                     last_value = value.clone();
                 }
             }
@@ -1627,30 +1610,28 @@ pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<Strin
         return Err("multiple-value-bind requires at least 2 arguments".to_string());
     }
 
-    // Parse variable list
+    fn collect_var_names(node: &ASTNode, out: &mut Vec<String>) -> Result<(), String> {
+        match node {
+            ASTNode::Constant(crate::ir::ConstantValue::Nil) => Ok(()),
+            ASTNode::Variable(name) => {
+                out.push(name.clone());
+                Ok(())
+            }
+            ASTNode::Call { function, args } => {
+                collect_var_names(function, out)?;
+                for arg in args {
+                    collect_var_names(arg, out)?;
+                }
+                Ok(())
+            }
+            _ => Err("multiple-value-bind: invalid variable list".to_string()),
+        }
+    }
+
+    // Parse variable list.
     let var_list = &args[0];
     let mut var_names = Vec::new();
-
-    match var_list {
-        ASTNode::Constant(crate::ir::ConstantValue::Nil) => {
-            // No variables to bind
-        }
-        ASTNode::Call { function, args: var_args } => {
-            // Extract variable names from the list
-            if let ASTNode::Variable(first_var) = &**function {
-                var_names.push(first_var.clone());
-            }
-            for var_node in var_args {
-                if let ASTNode::Variable(var_name) = var_node {
-                    var_names.push(var_name.clone());
-                }
-            }
-        }
-        ASTNode::Variable(name) => {
-            var_names.push(name.clone());
-        }
-        _ => return Err("multiple-value-bind: invalid variable list".to_string()),
-    }
+    collect_var_names(var_list, &mut var_names)?;
 
     // Evaluate the values form
     let values_form = &args[1];

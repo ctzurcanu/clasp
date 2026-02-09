@@ -1,11 +1,31 @@
 /// System and utility functions for the evaluator
 
-use super::eval_types::{EvalResult, GENSYM_COUNTER, structural_equal};
+use super::eval_types::{EvalResult, GENSYM_COUNTER, structural_equal, primary_value};
 use super::eval_core::{eval_with_env, ast_to_result};
 use crate::ir::{ASTNode, ConstantValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
+
+thread_local! {
+    static ARRAY_DIMS: RefCell<HashMap<usize, Vec<usize>>> = RefCell::new(HashMap::new());
+}
+
+fn array_key(arr: &Rc<RefCell<Vec<EvalResult>>>) -> usize {
+    Rc::as_ptr(arr) as usize
+}
+
+fn set_array_dims(arr: &Rc<RefCell<Vec<EvalResult>>>, dims: Vec<usize>) {
+    ARRAY_DIMS.with(|m| {
+        m.borrow_mut().insert(array_key(arr), dims);
+    });
+}
+
+pub(super) fn get_array_dims(arr: &Rc<RefCell<Vec<EvalResult>>>) -> Vec<usize> {
+    ARRAY_DIMS.with(|m| {
+        m.borrow().get(&array_key(arr)).cloned().unwrap_or_else(|| vec![arr.borrow().len()])
+    })
+}
 
 /// Convert a JIT LispObject to an interpreter EvalResult
 pub(super) fn jit_lisp_object_to_eval_result(obj: &rlasp_runtime::LispObject) -> EvalResult {
@@ -840,6 +860,51 @@ pub(crate) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                         }
                         return Ok(ASTNode::UnquoteSplicing(Box::new(args[0].clone())));
                     }
+                    "setq" => {
+                        // (setq var1 val1 [var2 val2 ...])
+                        // Handle single pair: (setq var val) => Setq { var, value }
+                        // Handle multiple pairs: (setq v1 e1 v2 e2) => Progn { Setq, Setq, ... }
+                        if args.len() >= 2 && args.len() % 2 == 0 {
+                            let mut setqs = Vec::new();
+                            for pair in args.chunks(2) {
+                                if let ASTNode::Variable(var) = &pair[0] {
+                                    setqs.push(ASTNode::Setq {
+                                        var: var.clone(),
+                                        value: Box::new(pair[1].clone()),
+                                    });
+                                } else {
+                                    // Not a simple variable — fall through to Call
+                                    setqs.clear();
+                                    break;
+                                }
+                            }
+                            if !setqs.is_empty() {
+                                if setqs.len() == 1 {
+                                    return Ok(setqs.pop().unwrap());
+                                } else {
+                                    return Ok(ASTNode::Progn { exprs: setqs });
+                                }
+                            }
+                        }
+                    }
+                    "setf" | "psetq" | "psetf" | "defun" | "defmacro" | "defvar" | "defparameter" |
+                    "defconstant" | "defclass" | "defgeneric" | "defmethod" | "defstruct" |
+                    "block" | "return-from" | "return" | "tagbody" | "go" |
+                    "catch" | "throw" | "unwind-protect" | "handler-case" | "handler-bind" |
+                    "multiple-value-bind" | "multiple-value-setq" | "multiple-value-call" |
+                    "the" | "locally" | "declare" | "declaim" | "proclaim" |
+                    "cond" | "case" | "ecase" | "typecase" | "etypecase" |
+                    "when" | "unless" | "and" | "or" | "not" |
+                    "do" | "do*" | "dolist" | "loop" |
+                    "flet" | "labels" | "macrolet" | "symbol-macrolet" |
+                    "ignore-errors" | "with-open-file" | "with-output-to-string" |
+                    "with-input-from-string" | "prog1" | "prog2" | "progv" |
+                    "multiple-value-list" | "multiple-value-prog1" |
+                    "with-hash-table-iterator" | "destructuring-bind" |
+                    "eval-when" | "load-time-value" | "in-package" => {
+                        // These are all special forms/macros that eval_core handles as Call nodes
+                        // Fall through to generic Call handling — eval_core recognizes them
+                    }
                     // read-time-eval is handled as a call and evaluated in eval_core
                     // when the full environment is available
                     _ => {}
@@ -893,6 +958,45 @@ pub(crate) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
                 function: Box::new(ASTNode::Variable("find-package".to_string())),
                 args: vec![ASTNode::Constant(ConstantValue::String(name.clone()))],
             })
+        }
+        EvalResult::Bignum(n) => {
+            // Convert bignum: try to fit in fixnum, else use string representation
+            if let Ok(val) = i64::try_from(n) {
+                Ok(ASTNode::fixnum(val))
+            } else {
+                // Use parse-integer to reconstruct
+                Ok(ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("parse-integer".to_string())),
+                    args: vec![ASTNode::Constant(ConstantValue::String(n.to_string()))],
+                })
+            }
+        }
+        EvalResult::Ratio(r) => {
+            // Represent as (/ numerator denominator)
+            let num_str = r.numerator_ref().to_string();
+            let den_str = r.denominator_ref().to_string();
+            Ok(ASTNode::Call {
+                function: Box::new(ASTNode::Variable("/".to_string())),
+                args: vec![
+                    ASTNode::Constant(ConstantValue::String(num_str)),
+                    ASTNode::Constant(ConstantValue::String(den_str)),
+                ],
+            })
+        }
+        EvalResult::Complex(re, im) => {
+            Ok(ASTNode::Call {
+                function: Box::new(ASTNode::Variable("complex".to_string())),
+                args: vec![ASTNode::float(*re), ASTNode::float(*im)],
+            })
+        }
+        EvalResult::Condition(_) => Ok(ASTNode::nil()),
+        EvalResult::HashTable(_) => Ok(ASTNode::nil()),
+        EvalResult::Instance(_) => Ok(ASTNode::nil()),
+        EvalResult::BuiltinFunction(name) => {
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(name.clone()))))
+        }
+        EvalResult::GenericFunction(gf) => {
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(gf.borrow().name.clone()))))
         }
         _ => Err(format!("Cannot convert {:?} to AST (variant {})", result, eval_result_variant(result))),
     }
@@ -1151,9 +1255,17 @@ fn deep_equal(a: &EvalResult, b: &EvalResult) -> bool {
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
         (EvalResult::Float(a), EvalResult::Float(b)) => a == b,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
+        (EvalResult::Bool(a), EvalResult::Boolean(b)) | (EvalResult::Boolean(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::String(a), EvalResult::String(b)) => a == b,
         (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
+        (EvalResult::Character(a), EvalResult::Character(b)) => a == b,
+        (EvalResult::Array(a), EvalResult::Array(b)) => {
+            let a = a.borrow();
+            let b = b.borrow();
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| deep_equal(x, y))
+        }
         (EvalResult::Cons(car1, cdr1), EvalResult::Cons(car2, cdr2)) => {
             deep_equal(&car1.borrow(), &car2.borrow()) && deep_equal(&cdr1.borrow(), &cdr2.borrow())
         }
@@ -1196,23 +1308,30 @@ pub(super) fn eval_gensym(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         return Err("gensym requires 0 or 1 arguments".to_string());
     }
 
-    let prefix = if args.is_empty() {
-        "G".to_string()
+    let (prefix, explicit_suffix) = if args.is_empty() {
+        ("G".to_string(), None)
     } else {
         match eval_with_env(&args[0], env)? {
-            EvalResult::String(s) => s,
-            EvalResult::Symbol(s) => s,
-            _ => return Err("gensym argument must be a string or symbol".to_string()),
+            EvalResult::String(s) => (s, None),
+            EvalResult::Symbol(s) => (s, None),
+            EvalResult::Fixnum(n) => ("G".to_string(), Some(n.to_string())),
+            EvalResult::Bignum(b) => ("G".to_string(), Some(b.to_string())),
+            _ => return Err("gensym argument must be a string, symbol, or integer".to_string()),
         }
     };
 
-    let counter = GENSYM_COUNTER.with(|c| {
-        let mut counter = c.borrow_mut();
-        *counter += 1;
-        *counter
-    });
+    let suffix = if let Some(s) = explicit_suffix {
+        s
+    } else {
+        let counter = GENSYM_COUNTER.with(|c| {
+            let mut counter = c.borrow_mut();
+            *counter += 1;
+            *counter
+        });
+        counter.to_string()
+    };
 
-    Ok(EvalResult::Symbol(format!("#:{}{}", prefix, counter)))
+    Ok(EvalResult::Symbol(format!("#:{}{}", prefix, suffix)))
 }
 
 pub(super) fn eval_compile(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1507,11 +1626,11 @@ pub(super) fn eval_print(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     if args.is_empty() {
         return Err("print requires at least 1 argument".to_string());
     }
-
-    let val = eval_with_env(&args[0], env)?;
-    println!("{}", val);
-
-    Ok(val)
+    let mut eval_args = Vec::with_capacity(args.len());
+    for arg in args {
+        eval_args.push(eval_with_env(arg, env)?);
+    }
+    super::eval_io::call_io_builtin("print", &eval_args)
 }
 
 pub(super) fn eval_format(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -1657,19 +1776,37 @@ fn extract_pathname_from_eval(val: &EvalResult) -> Option<String> {
     }
 }
 
+fn normalize_logical_pathname(path: &str) -> String {
+    let mut normalized = path.to_string();
+
+    if normalized.starts_with("#P\"") && normalized.ends_with('"') && normalized.len() >= 4 {
+        normalized = normalized[3..normalized.len() - 1].to_string();
+    } else if normalized.starts_with('"') && normalized.ends_with('"') && normalized.len() >= 2 {
+        normalized = normalized[1..normalized.len() - 1].to_string();
+    }
+
+    if normalized.starts_with("sys:") {
+        let mut rest = &normalized[4..];
+        if let Some(stripped) = rest.strip_prefix("src;lisp;") {
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("src/lisp/") {
+            rest = stripped;
+        }
+        normalized = format!("./{}", rest);
+    }
+
+    normalized.replace(';', "/")
+}
+
 pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.is_empty() {
         return Err("load requires a file path argument".to_string());
     }
 
     let evaluated = eval_with_env(&args[0], env)?;
-    let mut file_path = extract_pathname_from_eval(&evaluated)
+    let file_path = extract_pathname_from_eval(&evaluated)
         .ok_or_else(|| "load argument must be a string or pathname".to_string())?;
-
-    // Translate logical pathnames
-    if file_path.starts_with("sys:") {
-        file_path = file_path.replacen("sys:", "./", 1);
-    }
+    let file_path = normalize_logical_pathname(&file_path);
 
     // Resolve relative paths against current directory for *load-pathname*
     let resolved_path = if std::path::Path::new(&file_path).is_absolute() {
@@ -1727,6 +1864,7 @@ pub(super) fn eval_load_mlir(args: &[ASTNode], env: &mut HashMap<String, EvalRes
     let evaluated = eval_with_env(&args[0], env)?;
     let file_path = extract_pathname_from_eval(&evaluated)
         .ok_or_else(|| "load-mlir argument must be a string or pathname".to_string())?;
+    let file_path = normalize_logical_pathname(&file_path);
 
     let resolved_path = if std::path::Path::new(&file_path).is_absolute() {
         file_path.clone()
@@ -2083,18 +2221,26 @@ pub(super) fn eval_functionp(args: &[ASTNode], env: &mut HashMap<String, EvalRes
 
     let obj = eval_with_env(&args[0], env)?;
 
-    match obj {
-        EvalResult::Lambda { .. } => Ok(EvalResult::Bool(true)),
+    fn is_function(val: &EvalResult) -> bool {
+        matches!(val,
+            EvalResult::Lambda { .. } |
+            EvalResult::BuiltinFunction(_) |
+            EvalResult::GenericFunction(_) |
+            EvalResult::ForeignFunction(_)
+        )
+    }
+
+    match &obj {
+        _ if is_function(&obj) => Ok(EvalResult::Bool(true)),
         EvalResult::Symbol(name) => {
-            // Check if symbol is bound to a function
-            if let Some(val) = env.get(&name) {
-                match val {
-                    EvalResult::Lambda { .. } => Ok(EvalResult::Bool(true)),
-                    _ => Ok(EvalResult::Nil),
+            // Check if symbol is bound to a function in %FN% namespace
+            let fn_key = format!("%FN%{}", name);
+            if let Some(val) = env.get(&fn_key).or_else(|| env.get(name.as_str())) {
+                if is_function(val) {
+                    return Ok(EvalResult::Bool(true));
                 }
-            } else {
-                Ok(EvalResult::Nil)
             }
+            Ok(EvalResult::Nil)
         }
         _ => Ok(EvalResult::Nil),
     }
@@ -2107,12 +2253,12 @@ pub(super) fn eval_make_hash_table(_args: &[ASTNode], _env: &mut HashMap<String,
 }
 
 pub(super) fn eval_hash_table_p(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err("hash-table-p requires 1 argument".to_string());
     }
     let obj = eval_with_env(&args[0], env)?;
     match obj {
-        EvalResult::HashTable(_) => Ok(EvalResult::Bool(true)),
+        EvalResult::HashTable(_) => Ok(EvalResult::Boolean(true)),
         _ => Ok(EvalResult::Nil),
     }
 }
@@ -2130,7 +2276,16 @@ fn key_to_typed_string(key: &EvalResult) -> Result<String, String> {
         }
         EvalResult::String(s) => Ok(format!("str:{}", s)),
         EvalResult::Fixnum(n) => Ok(format!("num:{}", n)),
-        _ => Err("gethash key must be a symbol, string, or number".to_string()),
+        EvalResult::Character(c) => Ok(format!("chr:{}", *c as u32)),
+        EvalResult::Float(f) => Ok(format!("flt:{}", f.to_bits())),
+        EvalResult::Bignum(b) => Ok(format!("big:{}", b)),
+        EvalResult::Nil => Ok("nil:".to_string()),
+        EvalResult::Bool(b) => Ok(format!("bool:{}", b)),
+        EvalResult::Cons(_, _) => {
+            // Use debug representation for list keys (identity-based)
+            Ok(format!("list:{:?}", key))
+        }
+        _ => Ok(format!("obj:{:?}", key)),
     }
 }
 
@@ -2163,13 +2318,14 @@ pub(super) fn eval_gethash(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::HashTable(map) => {
             let result = map.borrow().get(&key_str).cloned();
             match result {
-                Some(val) => Ok(val),
+                Some(val) => Ok(EvalResult::MultipleValues(vec![val, EvalResult::Bool(true)])),
                 None => {
-                    if args.len() == 3 {
-                        eval_with_env(&args[2], env)
+                    let default = if args.len() == 3 {
+                        eval_with_env(&args[2], env)?
                     } else {
-                        Ok(EvalResult::Nil)
-                    }
+                        EvalResult::Nil
+                    };
+                    Ok(EvalResult::MultipleValues(vec![default, EvalResult::Nil]))
                 }
             }
         }
@@ -2228,6 +2384,34 @@ pub(super) fn eval_clrhash(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             Ok(EvalResult::HashTable(map))
         }
         _ => Err("clrhash requires a hash table".to_string()),
+    }
+}
+
+pub(super) fn eval_copy_hash_table(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("copy-hash-table requires 1 argument (hash-table)".to_string());
+    }
+    let ht = eval_with_env(&args[0], env)?;
+    match ht {
+        EvalResult::HashTable(map) => {
+            let new_map = map.borrow().clone();
+            Ok(EvalResult::HashTable(std::rc::Rc::new(std::cell::RefCell::new(new_map))))
+        }
+        _ => Err("copy-hash-table requires a hash table".to_string()),
+    }
+}
+
+pub(super) fn eval_copy_structure(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("copy-structure requires 1 argument".to_string());
+    }
+    let val = eval_with_env(&args[0], env)?;
+    match val {
+        EvalResult::HashTable(map) => {
+            let new_map = map.borrow().clone();
+            Ok(EvalResult::HashTable(std::rc::Rc::new(std::cell::RefCell::new(new_map))))
+        }
+        _ => Err("copy-structure: argument is not a structure".to_string()),
     }
 }
 
@@ -2417,15 +2601,93 @@ pub(super) fn eval_parse_integer(args: &[ASTNode], env: &mut HashMap<String, Eva
         return Err("parse-integer requires a string".to_string());
     }
 
-    match eval_with_env(&args[0], env)? {
-        EvalResult::String(s) => {
-            s.trim().parse::<i64>()
-                .map(EvalResult::Fixnum)
-                .or_else(|_| s.trim().parse::<f64>().map(|n| EvalResult::Float(n)))
-                .map_err(|_| format!("Cannot parse '{}' as integer", s))
+    let s = match eval_with_env(&args[0], env)? {
+        EvalResult::String(s) => s,
+        _ => return Err("parse-integer requires a string".to_string()),
+    };
+
+    // Parse keyword args
+    let mut radix: u32 = 10;
+    let mut start: usize = 0;
+    let mut end: usize = s.len();
+    let mut junk_allowed = false;
+
+    let mut i = 1;
+    while i + 1 < args.len() {
+        let key = match eval_with_env(&args[i], env)? {
+            EvalResult::Symbol(k) => k.to_uppercase(),
+            _ => { i += 1; continue; }
+        };
+        let val = eval_with_env(&args[i + 1], env)?;
+        match key.as_str() {
+            ":RADIX" => if let EvalResult::Fixnum(n) = val { radix = n as u32; },
+            ":START" => if let EvalResult::Fixnum(n) = val { start = n as usize; },
+            ":END" => match val {
+                EvalResult::Fixnum(n) => end = n as usize,
+                EvalResult::Nil => {} // nil means use string length
+                _ => {}
+            },
+            ":JUNK-ALLOWED" => junk_allowed = !matches!(val, EvalResult::Nil),
+            _ => {}
         }
-        _ => Err("parse-integer requires a string".to_string()),
+        i += 2;
     }
+
+    let substr = &s[start..end.min(s.len())];
+    let trimmed = substr.trim();
+
+    // Handle sign
+    let (is_neg, digits) = if trimmed.starts_with('-') {
+        (true, trimmed[1..].trim_start())
+    } else if trimmed.starts_with('+') {
+        (false, trimmed[1..].trim_start())
+    } else {
+        (false, trimmed)
+    };
+
+    // Parse digits with given radix
+    let mut value: i64 = 0;
+    let mut parsed_any = false;
+    let mut end_pos = start;
+    for (idx, ch) in substr.char_indices() {
+        if ch.is_whitespace() {
+            if parsed_any { end_pos = start + idx; break; }
+            continue;
+        }
+        if ch == '+' || ch == '-' {
+            if parsed_any {
+                end_pos = start + idx;
+                break;
+            }
+            continue;
+        }
+        if let Some(d) = ch.to_digit(radix) {
+            value = value * radix as i64 + d as i64;
+            parsed_any = true;
+            end_pos = start + idx + ch.len_utf8();
+        } else {
+            if junk_allowed {
+                end_pos = start + idx;
+                break;
+            }
+            return Err(format!("Cannot parse '{}' as integer with radix {}", substr, radix));
+        }
+    }
+    if !parsed_any && !junk_allowed {
+        end_pos = start + substr.len();
+    }
+    if !parsed_any {
+        if junk_allowed {
+            return Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Fixnum(end_pos as i64)]));
+        }
+        return Err(format!("Cannot parse '{}' as integer", substr));
+    }
+    if is_neg { value = -value; }
+    // If no early break, end_pos is end of substring
+    if end_pos <= start && parsed_any {
+        end_pos = end.min(s.len());
+    }
+    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(value), EvalResult::Fixnum(end_pos as i64)]))
 }
 
 pub(super) fn eval_sxhash(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -2462,10 +2724,28 @@ pub(super) fn eval_values_list(args: &[ASTNode], env: &mut HashMap<String, EvalR
     }
 
     let list = eval_with_env(&args[0], env)?;
-    match list {
-        EvalResult::Cons(car, _) => Ok(car.borrow().clone()),
-        EvalResult::Nil => Ok(EvalResult::Nil),
-        _ => Ok(list),
+    // Collect all elements of the list into a Vec
+    let mut vals = Vec::new();
+    let mut cur = list;
+    loop {
+        match cur {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                vals.push(car.borrow().clone());
+                cur = cdr.borrow().clone();
+            }
+            _ => {
+                vals.push(cur);
+                break;
+            }
+        }
+    }
+    if vals.is_empty() {
+        Ok(EvalResult::MultipleValues(vec![]))
+    } else if vals.len() == 1 {
+        Ok(vals.into_iter().next().unwrap())
+    } else {
+        Ok(EvalResult::MultipleValues(vals))
     }
 }
 
@@ -2732,7 +3012,40 @@ pub(super) fn eval_fdefinition(args: &[ASTNode], env: &mut HashMap<String, EvalR
 
             Err(format!("Undefined function: {}", name))
         }
-        _ => Err("fdefinition requires a symbol".to_string()),
+        EvalResult::Cons(car, cdr) => {
+            // Handle (setf name) function names
+            let car_val = car.borrow();
+            if let EvalResult::Symbol(s) = &*car_val {
+                if s.eq_ignore_ascii_case("setf") {
+                    // Extract the name from (setf name)
+                    let cdr_val = cdr.borrow();
+                    if let EvalResult::Cons(name_rc, _) = &*cdr_val {
+                        let name_val = name_rc.borrow();
+                        if let EvalResult::Symbol(setf_name) = &*name_val {
+                            // Look up (setf name) as a function
+                            let fn_key = format!("{}(setf {})", super::eval_core::FUNCTION_NS_PREFIX, setf_name.to_lowercase());
+                            if let Some(func) = env.get(&fn_key).cloned() {
+                                return Ok(func);
+                            }
+                            // Also try setf-name pattern
+                            let setf_fn_key = format!("{}setf-{}", super::eval_core::FUNCTION_NS_PREFIX, setf_name.to_lowercase());
+                            if let Some(func) = env.get(&setf_fn_key).cloned() {
+                                return Ok(func);
+                            }
+                            // For defstruct setters, try the value namespace
+                            let setter_key = format!("(setf {})", setf_name.to_lowercase());
+                            if let Some(func) = env.get(&setter_key).cloned() {
+                                return Ok(func);
+                            }
+                            // Clasp-compatible: return a generic setf function placeholder
+                            return Ok(EvalResult::Symbol(format!("#<SETF {}>", setf_name)));
+                        }
+                    }
+                }
+            }
+            Err("fdefinition requires a function name".to_string())
+        }
+        _ => Err("fdefinition requires a symbol or (setf name)".to_string()),
     }
 }
 
@@ -2954,10 +3267,18 @@ fn eval_equalp_values(a: &EvalResult, b: &EvalResult) -> bool {
     match (a, b) {
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
+        (EvalResult::Bool(a), EvalResult::Boolean(b)) | (EvalResult::Boolean(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
         (EvalResult::Float(a), EvalResult::Float(b)) => (a - b).abs() < f64::EPSILON,
         (EvalResult::String(a), EvalResult::String(b)) => a.eq_ignore_ascii_case(b),
-        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
+        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a.eq_ignore_ascii_case(b),
+        (EvalResult::Character(a), EvalResult::Character(b)) => a == b,
+        (EvalResult::Array(a_arr), EvalResult::Array(b_arr)) => {
+            let a = a_arr.borrow();
+            let b = b_arr.borrow();
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| eval_equalp_values(x, y))
+        }
         (EvalResult::Cons(a_car, a_cdr), EvalResult::Cons(b_car, b_cdr)) => {
             eval_equalp_values(&a_car.borrow(), &b_car.borrow()) &&
             eval_equalp_values(&a_cdr.borrow(), &b_cdr.borrow())
@@ -3041,7 +3362,27 @@ pub(super) fn eval_fboundp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             );
             Ok(EvalResult::Boolean(is_builtin))
         }
-        _ => Err("fboundp requires a symbol".to_string()),
+        EvalResult::Cons(car, cdr) => {
+            // Handle (setf name) function names
+            let first = car.borrow().clone();
+            if let EvalResult::Symbol(s) = &first {
+                if s.eq_ignore_ascii_case("SETF") || s.eq_ignore_ascii_case(":SETF") {
+                    let rest = cdr.borrow().clone();
+                    if let EvalResult::Cons(name_rc, _) = rest {
+                        let name = name_rc.borrow().clone();
+                        if let EvalResult::Symbol(fname) = name {
+                            let fn_key = format!("%FN%(SETF {})", fname.to_uppercase());
+                            if env.contains_key(&fn_key) {
+                                return Ok(EvalResult::Boolean(true));
+                            }
+                        }
+                    }
+                    return Ok(EvalResult::Nil);
+                }
+            }
+            Ok(EvalResult::Nil)
+        }
+        _ => Ok(EvalResult::Nil), // CL spec: fboundp on non-valid-function-name returns NIL
     }
 }
 
@@ -3117,13 +3458,17 @@ pub fn eval_typep(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Re
     let object = eval_with_env(&args[0], env)?;
     let type_spec = eval_with_env(&args[1], env)?;
 
+    let normalize_type_name = |name: &str| -> String {
+        name.rsplit(':').next().unwrap_or(name).to_uppercase()
+    };
+
     // Get the type specifier name
     let type_name = match &type_spec {
-        EvalResult::Symbol(name) => name.to_uppercase(),
+        EvalResult::Symbol(name) => normalize_type_name(name),
         EvalResult::Cons(car, _) => {
             // Compound type specifier like (and ...) or (or ...)
             match &*car.borrow() {
-                EvalResult::Symbol(name) => name.to_uppercase(),
+                EvalResult::Symbol(name) => normalize_type_name(name),
                 _ => return Ok(EvalResult::Boolean(false)),
             }
         }
@@ -3188,7 +3533,9 @@ pub fn eval_typep(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Re
         other => {
             // Check if it's a user-defined class
             if let EvalResult::Instance(inst) = &object {
-                inst.class_name.to_uppercase() == other || is_instance_of_class(inst, other)
+                let inst_class = normalize_type_name(&inst.class_name);
+                inst_class == other || super::eval_types::is_subclass(&inst.class_name, other)
+                    || is_instance_of_class(inst, other)
             } else {
                 false
             }
@@ -3406,6 +3753,39 @@ pub(super) fn result_to_ast_quoted(result: &EvalResult) -> Result<ASTNode, Strin
                 args: vec![ASTNode::Constant(crate::ir::ConstantValue::String(name.clone()))],
             })
         }
+        EvalResult::Boolean(true) => Ok(ASTNode::t()),
+        EvalResult::Boolean(false) => Ok(ASTNode::nil()),
+        EvalResult::Bignum(n) => {
+            // Convert bignum to string and parse back
+            Ok(ASTNode::Constant(crate::ir::ConstantValue::String(n.to_string())))
+        }
+        EvalResult::Ratio(r) => {
+            Ok(ASTNode::Constant(crate::ir::ConstantValue::String(format!("{}/{}", r.numerator_ref(), r.denominator_ref()))))
+        }
+        EvalResult::Complex(re, im) => {
+            Ok(ASTNode::Constant(crate::ir::ConstantValue::String(format!("#C({} {})", re, im))))
+        }
+        EvalResult::BuiltinFunction(name) => {
+            // Quote as a symbol so it round-trips through function lookup
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(name.clone()))))
+        }
+        EvalResult::GenericFunction(gf) => {
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(gf.borrow().name.clone()))))
+        }
+        EvalResult::HashTable(_) => {
+            // Can't meaningfully convert hash tables to AST; use a quoted symbol placeholder
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable("#<HASH-TABLE>".to_string()))))
+        }
+        EvalResult::Condition(_) => {
+            // Conditions can appear in ignore-errors results; represent as NIL in AST
+            Ok(ASTNode::nil())
+        }
+        EvalResult::Instance(inst) => {
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(format!("#<{}>", inst.class_name)))))
+        }
+        EvalResult::ModifyMacro { name, .. } => {
+            Ok(ASTNode::Quote(Box::new(ASTNode::variable(name.clone()))))
+        }
         _ => Err(format!("Cannot convert {:?} to AST for funcall", result)),
     }
 }
@@ -3424,112 +3804,444 @@ pub(super) fn eval_make_string(args: &[ASTNode], env: &mut HashMap<String, EvalR
     };
 
     // Get initial-element if provided (default is space character)
-    let initial_char = if args.len() > 1 {
-        let init_val = eval_with_env(&args[1], env)?;
-        match init_val {
-            EvalResult::Character(c) => c,
-            EvalResult::String(s) if s.len() == 1 => s.chars().next().unwrap(),
-            _ => ' ',
-        }
-    } else {
-        ' '
+    let normalize_key = |raw: &str| -> String {
+        raw.rsplit(':')
+            .next()
+            .unwrap_or(raw)
+            .trim_start_matches(':')
+            .to_ascii_lowercase()
     };
+    let mut initial_char = ' ';
+    if args.len() > 1 {
+        let mut handled_keyword = false;
+        let mut i = 1usize;
+        while i + 1 < args.len() {
+            let key = match &args[i] {
+                ASTNode::Variable(s) => normalize_key(s),
+                ASTNode::Constant(ConstantValue::Symbol(s)) => normalize_key(s),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            if key == "initial-element" {
+                let init_val = eval_with_env(&args[i + 1], env)?;
+                initial_char = match init_val {
+                    EvalResult::Character(c) => c,
+                    EvalResult::String(s) if s.chars().count() == 1 => s.chars().next().unwrap(),
+                    _ => ' ',
+                };
+                handled_keyword = true;
+            }
+            i += 2;
+        }
+
+        // Backward-compatible non-keyword second argument
+        if !handled_keyword && args.len() == 2 {
+            let init_val = eval_with_env(&args[1], env)?;
+            initial_char = match init_val {
+                EvalResult::Character(c) => c,
+                EvalResult::String(s) if s.chars().count() == 1 => s.chars().next().unwrap(),
+                _ => ' ',
+            };
+        }
+    }
 
     Ok(EvalResult::String(initial_char.to_string().repeat(size)))
 }
 
 pub(super) fn eval_make_array(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (make-array size &key initial-element initial-contents)
+    // (make-array dimensions &key initial-element initial-contents displaced-to displaced-index-offset)
     if args.is_empty() {
         return Err("make-array requires at least 1 argument".to_string());
     }
 
     let size_val = eval_with_env(&args[0], env)?;
-    let size = match size_val {
-        EvalResult::Fixnum(n) if n >= 0 => n as usize,
+    let dims: Vec<usize> = match size_val {
+        EvalResult::Fixnum(n) if n >= 0 => vec![n as usize],
+        EvalResult::Nil => vec![1], // rank-0 arrays represented with one storage slot
         EvalResult::Cons(_, _) => {
-            // Multi-dimensional array - for now, just use first dimension
-            // Full implementation would create nested arrays
-            if let EvalResult::Cons(car, _) = size_val {
-                match &*car.borrow() {
-                    EvalResult::Fixnum(n) if *n >= 0 => *n as usize,
-                    _ => 0,
+            let mut dims = Vec::new();
+            let mut current = size_val;
+            loop {
+                match current {
+                    EvalResult::Cons(car, cdr) => {
+                        match &*car.borrow() {
+                            EvalResult::Fixnum(n) if *n >= 0 => dims.push(*n as usize),
+                            _ => return Err("make-array dimensions must be non-negative integers".to_string()),
+                        }
+                        current = cdr.borrow().clone();
+                    }
+                    EvalResult::Nil => break,
+                    _ => return Err("make-array dimensions must be a proper list".to_string()),
                 }
-            } else {
-                0
             }
+            if dims.is_empty() { vec![0] } else { dims }
         }
         _ => return Err("make-array size must be a non-negative integer or list of dimensions".to_string()),
     };
+    let size = dims.iter().copied().product::<usize>();
 
-    let mut array = Vec::with_capacity(size);
+    let mut initial_element: Option<EvalResult> = None;
+    let mut initial_contents: Option<EvalResult> = None;
+    let mut displaced_to: Option<EvalResult> = None;
+    let mut displaced_offset: usize = 0;
 
-    // Check for :initial-contents keyword
-    let mut has_initial_contents = false;
-    for i in 1..args.len() {
-        if let ASTNode::Variable(kw) = &args[i] {
-            if kw == ":initial-contents" && i + 1 < args.len() {
-                let contents = eval_with_env(&args[i + 1], env)?;
-                // Convert list to vector
-                let mut current = contents;
+    let mut i = 1usize;
+    while i + 1 < args.len() {
+        let key = match &args[i] {
+            ASTNode::Variable(s) => s.rsplit(':').next().unwrap_or(s).trim_start_matches(':').to_ascii_lowercase(),
+            ASTNode::Constant(ConstantValue::Symbol(s)) => s.rsplit(':').next().unwrap_or(s).trim_start_matches(':').to_ascii_lowercase(),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        match key.as_str() {
+            "initial-element" => initial_element = Some(eval_with_env(&args[i + 1], env)?),
+            "initial-contents" => initial_contents = Some(eval_with_env(&args[i + 1], env)?),
+            "displaced-to" => displaced_to = Some(eval_with_env(&args[i + 1], env)?),
+            "displaced-index-offset" => {
+                displaced_offset = match eval_with_env(&args[i + 1], env)? {
+                    EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                    _ => return Err("make-array :displaced-index-offset must be a non-negative integer".to_string()),
+                };
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+
+    fn flatten_contents(src: &EvalResult, out: &mut Vec<EvalResult>) {
+        match src {
+            EvalResult::Cons(car, cdr) => {
+                flatten_contents(&car.borrow(), out);
+                flatten_contents(&cdr.borrow(), out);
+            }
+            EvalResult::Array(arr) => {
+                for elem in arr.borrow().iter() {
+                    flatten_contents(elem, out);
+                }
+            }
+            EvalResult::String(s) => {
+                for ch in s.chars() {
+                    out.push(EvalResult::Character(ch));
+                }
+            }
+            EvalResult::Nil => {}
+            other => out.push(other.clone()),
+        }
+    }
+
+    let array = if let Some(displaced) = displaced_to {
+        let source: Vec<EvalResult> = match displaced {
+            EvalResult::Array(a) => a.borrow().clone(),
+            EvalResult::String(s) => s.chars().map(EvalResult::Character).collect(),
+            EvalResult::Cons(_, _) => {
+                let mut flat = Vec::new();
+                flatten_contents(&displaced, &mut flat);
+                flat
+            }
+            _ => return Err("make-array :displaced-to requires an array, string, or list".to_string()),
+        };
+
+        let mut out = Vec::with_capacity(size);
+        for j in 0..size {
+            out.push(source.get(displaced_offset + j).cloned().unwrap_or(EvalResult::Nil));
+        }
+        out
+    } else if let Some(contents) = initial_contents {
+        let mut flat = Vec::new();
+        flatten_contents(&contents, &mut flat);
+        if flat.len() < size {
+            flat.resize(size, EvalResult::Nil);
+        } else if flat.len() > size {
+            flat.truncate(size);
+        }
+        flat
+    } else {
+        vec![initial_element.unwrap_or(EvalResult::Nil); size]
+    };
+
+    let result = EvalResult::Array(Rc::new(RefCell::new(array)));
+    if let EvalResult::Array(ref arr) = result {
+        set_array_dims(arr, dims);
+    }
+    Ok(result)
+}
+
+pub(super) fn eval_aref(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // (aref array &rest indices)
+    if args.is_empty() {
+        return Err("aref requires at least 1 argument".to_string());
+    }
+
+    let array = eval_with_env(&args[0], env)?;
+    let mut indices = Vec::new();
+    for arg in &args[1..] {
+        let idx = match eval_with_env(arg, env)? {
+            EvalResult::Fixnum(n) if n >= 0 => n as usize,
+            _ => return Err("aref index must be a non-negative integer".to_string()),
+        };
+        indices.push(idx);
+    }
+
+    match array {
+        EvalResult::Array(ref arr) => {
+            let dims = get_array_dims(arr);
+            let idx = if indices.is_empty() {
+                if arr.borrow().len() == 1 {
+                    0
+                } else {
+                    return Err("aref requires an index for non-rank-0 arrays".to_string());
+                }
+            } else if indices.len() == 1 {
+                indices[0]
+            } else {
+                if dims.len() != indices.len() {
+                    return Err("aref: wrong number of subscripts".to_string());
+                }
+                let mut linear = 0usize;
+                for (i, sub) in indices.iter().copied().enumerate() {
+                    let dim = dims[i];
+                    if sub >= dim {
+                        return Err(format!("aref: index {} out of bounds for axis {}", sub, i));
+                    }
+                    linear = linear * dim + sub;
+                }
+                linear
+            };
+            let array_ref = arr.borrow();
+            array_ref.get(idx)
+                .cloned()
+                .ok_or_else(|| {
+                    let len = array_ref.len();
+                    let hi = len.saturating_sub(1);
+                    format!(
+                        "aref index {} out of bounds (expected 0-{}, type (INTEGER 0 ({})))",
+                        idx, hi, len
+                    )
+                })
+        }
+        EvalResult::String(ref s) => {
+            if indices.len() != 1 {
+                return Err("aref on string requires exactly one index".to_string());
+            }
+            let idx = indices[0];
+            // Support string as array of characters
+            s.chars().nth(idx)
+                .map(EvalResult::Character)
+                .ok_or_else(|| {
+                    let len = s.chars().count();
+                    let hi = len.saturating_sub(1);
+                    format!(
+                        "aref index {} out of bounds (expected 0-{}, type (INTEGER 0 ({})))",
+                        idx, hi, len
+                    )
+                })
+        }
+        _ => Err("aref: first argument must be an array or string".to_string()),
+    }
+}
+
+pub(super) fn eval_array_dimension(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 2 {
+        return Err("array-dimension requires 2 arguments".to_string());
+    }
+    let arr = eval_with_env(&args[0], env)?;
+    let axis = match eval_with_env(&args[1], env)? {
+        EvalResult::Fixnum(n) if n >= 0 => n as usize,
+        _ => return Err("array-dimension axis must be a non-negative integer".to_string()),
+    };
+    match arr {
+        EvalResult::Array(a) => {
+            let dims = get_array_dims(&a);
+            dims.get(axis)
+                .map(|d| EvalResult::Fixnum(*d as i64))
+                .ok_or_else(|| "array-dimension axis out of bounds".to_string())
+        }
+        EvalResult::String(s) => {
+            if axis == 0 {
+                Ok(EvalResult::Fixnum(s.chars().count() as i64))
+            } else {
+                Err("array-dimension axis out of bounds".to_string())
+            }
+        }
+        _ => Err("array-dimension requires an array".to_string()),
+    }
+}
+
+pub(super) fn eval_array_dimensions(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("array-dimensions requires 1 argument".to_string());
+    }
+    let arr = eval_with_env(&args[0], env)?;
+    let dims = match arr {
+        EvalResult::Array(a) => get_array_dims(&a),
+        EvalResult::String(s) => vec![s.chars().count()],
+        _ => return Err("array-dimensions requires an array".to_string()),
+    };
+    let mut out = EvalResult::Nil;
+    for d in dims.into_iter().rev() {
+        out = EvalResult::Cons(
+            Rc::new(RefCell::new(EvalResult::Fixnum(d as i64))),
+            Rc::new(RefCell::new(out)),
+        );
+    }
+    Ok(out)
+}
+
+pub(super) fn eval_array_total_size(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("array-total-size requires 1 argument".to_string());
+    }
+    let arr = eval_with_env(&args[0], env)?;
+    match arr {
+        EvalResult::Array(a) => Ok(EvalResult::Fixnum(a.borrow().len() as i64)),
+        EvalResult::String(s) => Ok(EvalResult::Fixnum(s.chars().count() as i64)),
+        _ => Err("array-total-size requires an array".to_string()),
+    }
+}
+
+pub(super) fn eval_adjust_array(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("adjust-array requires at least 2 arguments".to_string());
+    }
+    let arr = eval_with_env(&args[0], env)?;
+    let (old_vals, old_dims) = match arr {
+        EvalResult::Array(a) => {
+            let dims = get_array_dims(&a);
+            (a.borrow().clone(), dims)
+        }
+        EvalResult::Cons(_, _) | EvalResult::Nil => {
+            fn list_to_vec(mut cur: EvalResult) -> Result<Vec<EvalResult>, String> {
+                let mut out = Vec::new();
                 loop {
-                    match current {
+                    match cur {
                         EvalResult::Cons(car, cdr) => {
-                            array.push(car.borrow().clone());
-                            current = cdr.borrow().clone();
+                            out.push(car.borrow().clone());
+                            cur = cdr.borrow().clone();
                         }
                         EvalResult::Nil => break,
-                        _ => break,
+                        _ => return Err("adjust-array requires an array".to_string()),
                     }
                 }
-                has_initial_contents = true;
-                break;
-            } else if kw == ":initial-element" && i + 1 < args.len() {
-                let init_val = eval_with_env(&args[i + 1], env)?;
-                array = vec![init_val; size];
-                has_initial_contents = true;
+                Ok(out)
+            }
+
+            let top = list_to_vec(arr)?;
+            if top.iter().all(|v| matches!(v, EvalResult::Cons(_, _) | EvalResult::Nil)) {
+                let mut rows = Vec::new();
+                let mut width: Option<usize> = None;
+                for row in top {
+                    let vals = list_to_vec(row)?;
+                    if let Some(w) = width {
+                        if vals.len() != w {
+                            return Err("adjust-array requires rectangular nested list".to_string());
+                        }
+                    } else {
+                        width = Some(vals.len());
+                    }
+                    rows.extend(vals);
+                }
+                let h = rows.len();
+                let w = width.unwrap_or(0);
+                let dims = if w == 0 { vec![0, 0] } else { vec![h / w, w] };
+                (rows, dims)
+            } else {
+                let len = top.len();
+                (top, vec![len])
+            }
+        }
+        _ => return Err("adjust-array requires an array".to_string()),
+    };
+
+    let new_dims_val = eval_with_env(&args[1], env)?;
+    let new_dims: Vec<usize> = match new_dims_val {
+        EvalResult::Fixnum(n) if n >= 0 => vec![n as usize],
+        EvalResult::Cons(_, _) => {
+            let mut dims = Vec::new();
+            let mut cur = new_dims_val;
+            loop {
+                match cur {
+                    EvalResult::Cons(car, cdr) => {
+                        match &*car.borrow() {
+                            EvalResult::Fixnum(n) if *n >= 0 => dims.push(*n as usize),
+                            _ => return Err("adjust-array dimensions must be non-negative integers".to_string()),
+                        }
+                        cur = cdr.borrow().clone();
+                    }
+                    EvalResult::Nil => break,
+                    _ => return Err("adjust-array dimensions must be a proper list".to_string()),
+                }
+            }
+            if dims.is_empty() { vec![0] } else { dims }
+        }
+        _ => return Err("adjust-array dimensions must be an integer or list".to_string()),
+    };
+
+    let mut initial_element = EvalResult::Nil;
+    let mut i = 2usize;
+    while i + 1 < args.len() {
+        let is_initial_element = match &args[i] {
+            ASTNode::Variable(k) => k.eq_ignore_ascii_case(":initial-element"),
+            ASTNode::Constant(ConstantValue::Symbol(k)) => k.eq_ignore_ascii_case(":initial-element"),
+            _ => false,
+        };
+        if is_initial_element {
+            initial_element = eval_with_env(&args[i + 1], env)?;
+        }
+        i += 2;
+    }
+
+    let new_size = new_dims.iter().copied().product::<usize>();
+    let mut out = vec![initial_element; new_size];
+
+    fn row_major_index(coords: &[usize], dims: &[usize]) -> usize {
+        let mut idx = 0usize;
+        for (c, d) in coords.iter().zip(dims.iter()) {
+            idx = idx * *d + *c;
+        }
+        idx
+    }
+
+    let rank = old_dims.len().min(new_dims.len());
+    let overlap: Vec<usize> = (0..rank)
+        .map(|ix| old_dims[ix].min(new_dims[ix]))
+        .collect();
+    if rank == 0 {
+        if !old_vals.is_empty() && !out.is_empty() {
+            out[0] = old_vals[0].clone();
+        }
+    } else if !overlap.contains(&0) {
+        let mut coords = vec![0usize; rank];
+        loop {
+            let old_idx = row_major_index(&coords, &old_dims[..rank]);
+            let new_idx = row_major_index(&coords, &new_dims[..rank]);
+            if old_idx < old_vals.len() && new_idx < out.len() {
+                out[new_idx] = old_vals[old_idx].clone();
+            }
+
+            let mut carry = true;
+            for pos in (0..rank).rev() {
+                coords[pos] += 1;
+                if coords[pos] < overlap[pos] {
+                    carry = false;
+                    break;
+                }
+                coords[pos] = 0;
+            }
+            if carry {
                 break;
             }
         }
     }
 
-    if !has_initial_contents {
-        // Fill with NIL
-        array = vec![EvalResult::Nil; size];
+    let result = EvalResult::Array(Rc::new(RefCell::new(out)));
+    if let EvalResult::Array(ref a) = result {
+        set_array_dims(a, new_dims);
     }
-
-    Ok(EvalResult::Array(Rc::new(RefCell::new(array))))
-}
-
-pub(super) fn eval_aref(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (aref array index)
-    if args.len() < 2 {
-        return Err("aref requires at least 2 arguments".to_string());
-    }
-
-    let array = eval_with_env(&args[0], env)?;
-    let index = eval_with_env(&args[1], env)?;
-
-    let idx = match index {
-        EvalResult::Fixnum(n) if n >= 0 => n as usize,
-        _ => return Err("aref index must be a non-negative integer".to_string()),
-    };
-
-    match array {
-        EvalResult::Array(ref arr) => {
-            let array_ref = arr.borrow();
-            array_ref.get(idx)
-                .cloned()
-                .ok_or_else(|| format!("aref index {} out of bounds (array length {})", idx, array_ref.len()))
-        }
-        EvalResult::String(ref s) => {
-            // Support string as array of characters
-            s.chars().nth(idx)
-                .map(EvalResult::Character)
-                .ok_or_else(|| format!("aref index {} out of bounds (string length {})", idx, s.len()))
-        }
-        _ => Err("aref: first argument must be an array or string".to_string()),
-    }
+    Ok(result)
 }
 
 pub(super) fn eval_truncate(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -3654,12 +4366,12 @@ pub(super) fn eval_values(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     // (values &rest args)
     // Returns multiple values
     if args.is_empty() {
-        return Ok(EvalResult::Nil);
+        return Ok(EvalResult::MultipleValues(vec![]));
     }
 
     let mut vals = Vec::new();
     for arg in args {
-        vals.push(eval_with_env(arg, env)?);
+        vals.push(primary_value(eval_with_env(arg, env)?));
     }
 
     if vals.len() == 1 {

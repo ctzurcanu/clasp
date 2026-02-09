@@ -131,6 +131,7 @@ pub struct Package {
     internal_symbols: HashMap<String, bool>,
     use_list: Vec<String>,  // Packages this package uses (inherits from)
     shadowing_symbols: Vec<String>,  // Symbols that shadow inherited symbols
+    locked: bool,
 }
 
 impl Package {
@@ -142,6 +143,7 @@ impl Package {
             internal_symbols: HashMap::new(),
             use_list: Vec::new(),
             shadowing_symbols: Vec::new(),
+            locked: false,
         }
     }
 
@@ -275,27 +277,80 @@ pub fn package_uses_cl(pkg_name: &str) -> bool {
     })
 }
 
+fn package_designator_key(arg: &EvalResult) -> Result<String, String> {
+    match arg {
+        EvalResult::Package(name) => Ok(name.to_uppercase()),
+        EvalResult::String(name) | EvalResult::Symbol(name) => {
+            if name.starts_with(':') {
+                Ok(name[1..].to_uppercase())
+            } else if let Some((_, tail)) = name.rsplit_once(':') {
+                Ok(tail.to_uppercase())
+            } else {
+                Ok(name.to_uppercase())
+            }
+        }
+        _ => Err("package designator must be a package, symbol, or string".to_string()),
+    }
+}
+
+fn designator_to_package_name(arg: &EvalResult) -> Result<String, String> {
+    let key = package_designator_key(arg)?;
+    let canonical = PACKAGES.with(|p| {
+        p.borrow()
+            .get(&key)
+            .map(|pkg| pkg.get_name().to_string())
+    });
+    Ok(canonical.unwrap_or(key))
+}
+
+fn designator_to_nickname(arg: &EvalResult) -> Result<String, String> {
+    match arg {
+        EvalResult::String(name) | EvalResult::Symbol(name) => {
+            if name.starts_with(':') {
+                Ok(name[1..].to_uppercase())
+            } else {
+                Ok(name.to_uppercase())
+            }
+        }
+        _ => Err("nickname designator must be a symbol or string".to_string()),
+    }
+}
+
 pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
         "packagep" => {
-            // Check if object is a package
-            // For simplicity, we don't have package objects, so always false
-            Ok(EvalResult::Boolean(false))
+            // Check if object is (or designates) a package.
+            let is_pkg = match args.get(0) {
+                Some(EvalResult::Package(name)) => {
+                    let key = name.to_uppercase();
+                    PACKAGES.with(|p| p.borrow().contains_key(&key))
+                }
+                Some(EvalResult::String(_)) | Some(EvalResult::Symbol(_)) => {
+                    match package_designator_key(&args[0]) {
+                        Ok(key) => PACKAGES.with(|p| p.borrow().contains_key(&key)),
+                        Err(_) => false,
+                    }
+                }
+                _ => false,
+            };
+            Ok(EvalResult::Boolean(is_pkg))
         }
 
         "find-package" => {
             // (find-package name)
             match args.get(0) {
                 Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    // Strip leading colon for keywords and # for uninterned symbols
-                    let pkg_name = if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else if name.starts_with('#') {
-                        // Uninterned symbol like #:uiop
-                        name.trim_start_matches('#').trim_start_matches(':').to_uppercase()
+                    // Accept plain names, keyword symbols, and package-qualified symbols.
+                    let raw = if name.starts_with('#') {
+                        name.trim_start_matches('#').trim_start_matches(':')
+                    } else if let Some((_, tail)) = name.rsplit_once(':') {
+                        tail
+                    } else if let Some(tail) = name.strip_prefix(':') {
+                        tail
                     } else {
-                        name.to_uppercase()
+                        name.as_str()
                     };
+                    let pkg_name = raw.to_uppercase();
                     // Look up the package and return its canonical name
                     PACKAGES.with(|p| {
                         let packages = p.borrow();
@@ -313,7 +368,17 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     })
                 }
                 // Package object passed directly
-                Some(EvalResult::Package(name)) => Ok(EvalResult::Package(name.clone())),
+                Some(EvalResult::Package(name)) => {
+                    let key = name.to_uppercase();
+                    PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        if let Some(pkg) = packages.get(&key) {
+                            Ok(EvalResult::Package(pkg.get_name().to_string()))
+                        } else {
+                            Ok(EvalResult::Nil)
+                        }
+                    })
+                }
                 // NIL means no package - return NIL
                 Some(EvalResult::Nil) | None => Ok(EvalResult::Nil),
                 _ => Err("find-package requires a string or symbol".to_string()),
@@ -323,16 +388,25 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "package-name" => {
             // (package-name package) - return the name of the given package
             match args.get(0) {
-                Some(EvalResult::Package(name)) => Ok(EvalResult::String(name.clone())),
+                Some(EvalResult::Package(name)) => {
+                    let key = name.to_uppercase();
+                    PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        if let Some(pkg) = packages.get(&key) {
+                            Ok(EvalResult::String(pkg.get_name().to_string()))
+                        } else {
+                            Ok(EvalResult::Nil)
+                        }
+                    })
+                }
                 Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    // If given a string/symbol, look up the package first
-                    let pkg_name = if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else {
-                        name.to_uppercase()
-                    };
-                    let found = PACKAGES.with(|p| p.borrow().contains_key(&pkg_name));
-                    if found {
+                    let pkg_key = package_designator_key(&args[0])?;
+                    let canonical = PACKAGES.with(|p| {
+                        p.borrow()
+                            .get(&pkg_key)
+                            .map(|pkg| pkg.get_name().to_string())
+                    });
+                    if let Some(pkg_name) = canonical {
                         Ok(EvalResult::String(pkg_name))
                     } else {
                         Err(format!("No package named {}", name))
@@ -372,6 +446,106 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             }
         }
 
+        "package-add-nickname" => {
+            if args.len() < 2 {
+                return Err("package-add-nickname requires package and nickname".to_string());
+            }
+            let pkg_name = designator_to_package_name(&args[0])?;
+            let nickname = designator_to_nickname(&args[1])?;
+            PACKAGES.with(|p| {
+                let mut packages = p.borrow_mut();
+                if !packages.contains_key(&pkg_name) {
+                    return Err(format!("No package named {}", pkg_name));
+                }
+                if packages.contains_key(&nickname) {
+                    return Err(format!("Nickname {} is already in use", nickname));
+                }
+
+                let mut pkg = packages.get(&pkg_name).cloned().unwrap();
+                if pkg.nicknames.iter().any(|n| n.eq_ignore_ascii_case(&nickname)) {
+                    return Err(format!("Package {} already has nickname {}", pkg_name, nickname));
+                }
+                pkg.nicknames.push(nickname.clone());
+                packages.insert(pkg_name.clone(), pkg.clone());
+                packages.insert(nickname.clone(), pkg);
+                Ok(EvalResult::String(nickname))
+            })
+        }
+
+        "package-remove-nickname" => {
+            if args.len() < 2 {
+                return Err("package-remove-nickname requires package and nickname".to_string());
+            }
+            let pkg_name = designator_to_package_name(&args[0])?;
+            let nickname = designator_to_nickname(&args[1])?;
+            PACKAGES.with(|p| {
+                let mut packages = p.borrow_mut();
+                let mut pkg = match packages.get(&pkg_name).cloned() {
+                    Some(p) => p,
+                    None => return Err(format!("No package named {}", pkg_name)),
+                };
+
+                let before = pkg.nicknames.len();
+                pkg.nicknames.retain(|n| !n.eq_ignore_ascii_case(&nickname));
+                if pkg.nicknames.len() == before {
+                    return Ok(EvalResult::Nil);
+                }
+                packages.remove(&nickname.to_uppercase());
+                packages.insert(pkg_name.clone(), pkg.clone());
+                for nick in pkg.nicknames.iter() {
+                    packages.insert(nick.to_uppercase(), pkg.clone());
+                }
+                Ok(EvalResult::String(nickname))
+            })
+        }
+
+        "lock-package" => {
+            if args.is_empty() {
+                return Err("lock-package requires a package designator".to_string());
+            }
+            let pkg_name = designator_to_package_name(&args[0])?;
+            PACKAGES.with(|p| {
+                let mut packages = p.borrow_mut();
+                for pkg in packages.values_mut() {
+                    if pkg.get_name() == pkg_name {
+                        pkg.locked = true;
+                    }
+                }
+            });
+            Ok(EvalResult::Boolean(true))
+        }
+
+        "unlock-package" => {
+            if args.is_empty() {
+                return Err("unlock-package requires a package designator".to_string());
+            }
+            let pkg_name = designator_to_package_name(&args[0])?;
+            PACKAGES.with(|p| {
+                let mut packages = p.borrow_mut();
+                for pkg in packages.values_mut() {
+                    if pkg.get_name() == pkg_name {
+                        pkg.locked = false;
+                    }
+                }
+            });
+            Ok(EvalResult::Boolean(true))
+        }
+
+        "package-locked-p" => {
+            if args.is_empty() {
+                return Err("package-locked-p requires a package designator".to_string());
+            }
+            let pkg_name = designator_to_package_name(&args[0])?;
+            let locked = PACKAGES.with(|p| {
+                p.borrow()
+                    .values()
+                    .find(|pkg| pkg.get_name() == pkg_name)
+                    .map(|pkg| pkg.locked)
+                    .unwrap_or(false)
+            });
+            Ok(EvalResult::Boolean(locked))
+        }
+
         "list-all-packages" => {
             // Return list of all packages
             PACKAGES.with(|p| {
@@ -402,7 +576,7 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         let mut packages = p.borrow_mut();
                         packages.insert(pkg_name.clone(), Package::new(&pkg_name, vec![]));
                     });
-                    Ok(EvalResult::Symbol(pkg_name))
+                    Ok(EvalResult::Package(pkg_name))
                 }
                 _ => Err("make-package requires a package name".to_string()),
             }
@@ -701,15 +875,8 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // (rename-package package new-name &optional new-nicknames)
             // Rename a package
             let old_pkg_name = match args.get(0) {
-                Some(EvalResult::Package(name)) => name.clone(),
-                Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else {
-                        name.to_uppercase()
-                    }
-                }
-                _ => return Err("rename-package requires a package designator".to_string()),
+                Some(arg) => designator_to_package_name(arg)?,
+                None => return Err("rename-package requires a package designator".to_string()),
             };
 
             // Get new name from second arg
@@ -762,20 +929,39 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Update the package registry
             PACKAGES.with(|p| {
                 let mut packages = p.borrow_mut();
-                if let Some(mut pkg) = packages.remove(&old_pkg_name) {
+                if let Some(mut pkg) = packages.get(&old_pkg_name).cloned() {
+                    let old_canonical_name = pkg.get_name().to_string();
+                    let mut compatibility_aliases: Vec<String> = packages
+                        .iter()
+                        .filter_map(|(key, existing_pkg)| {
+                            if existing_pkg.get_name() == old_canonical_name {
+                                Some(key.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !compatibility_aliases.contains(&old_pkg_name) {
+                        compatibility_aliases.push(old_pkg_name.clone());
+                    }
+
+                    // Remove all mappings for the old canonical package.
+                    packages.retain(|_, existing_pkg| existing_pkg.get_name() != old_canonical_name);
+
                     // Update package name and nicknames
                     pkg.name = new_name.clone();
                     pkg.nicknames = new_nicknames.clone();
 
-                    // Remove old nickname entries
-                    packages.retain(|k, _| k != &old_pkg_name);
-
-                    // Insert with new name
+                    // Insert canonical name and nicknames.
                     packages.insert(new_name.clone(), pkg.clone());
-
-                    // Add nickname entries
                     for nick in &new_nicknames {
                         packages.insert(nick.clone(), pkg.clone());
+                    }
+
+                    // Keep legacy aliases so existing package objects (captured by name)
+                    // continue to designate the same package across renames.
+                    for alias in compatibility_aliases {
+                        packages.insert(alias, pkg.clone());
                     }
                 }
             });
@@ -992,12 +1178,15 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "delete-package" => {
             // (delete-package package)
             match args.get(0) {
-                Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
+                Some(arg @ (EvalResult::String(_) | EvalResult::Symbol(_) | EvalResult::Package(_))) => {
+                    let pkg_name = designator_to_package_name(arg)?;
                     PACKAGES.with(|p| {
-                        p.borrow_mut().remove(&name.to_uppercase());
+                        let mut packages = p.borrow_mut();
+                        packages.retain(|_, pkg| pkg.get_name() != pkg_name);
                     });
                     Ok(EvalResult::Boolean(true))
                 }
+                Some(EvalResult::Nil) => Ok(EvalResult::Nil),
                 _ => Err("delete-package requires a package designator".to_string()),
             }
         }

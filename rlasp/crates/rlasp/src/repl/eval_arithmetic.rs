@@ -9,6 +9,27 @@ use std::cell::RefCell;
 use malachite::Integer;
 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
+// Helper: canonicalize a complex result per CL rules
+// If imag is 0 and both inputs were exact (not float), return real part as integer/ratio
+fn canonicalize_complex(re: f64, im: f64, had_float_input: bool) -> EvalResult {
+    if im == 0.0 && !had_float_input {
+        // Try to return as exact integer
+        if re == re.floor() && re.abs() < i64::MAX as f64 {
+            return EvalResult::Fixnum(re as i64);
+        }
+        return EvalResult::Float(re);
+    }
+    if im == 0.0 && had_float_input {
+        return EvalResult::Float(re);
+    }
+    EvalResult::Complex(re, im)
+}
+
+// Check if a value has float type (for complex canonicalization)
+fn is_float_type(val: &EvalResult) -> bool {
+    matches!(val, EvalResult::Float(_) | EvalResult::Complex(_, _))
+}
+
 // Helper to convert numeric EvalResult to (real, imag) complex pair
 fn to_complex(val: &EvalResult) -> Option<(f64, f64)> {
     match val {
@@ -50,6 +71,7 @@ pub(super) fn eval_add_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
 
     // If any complex, do complex arithmetic
     if has_complex {
+        let had_float = evaluated_args.iter().any(|v| matches!(v, EvalResult::Float(_)));
         let mut sum_re = 0.0;
         let mut sum_im = 0.0;
         for val in &evaluated_args {
@@ -61,7 +83,7 @@ pub(super) fn eval_add_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 None => return Err("+ requires numeric arguments".to_string()),
             }
         }
-        return Ok(EvalResult::Complex(sum_re, sum_im));
+        return Ok(canonicalize_complex(sum_re, sum_im, had_float));
     }
 
     let mut sum_bigint = Integer::from(0);
@@ -141,13 +163,14 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
 
     // Complex arithmetic
     if has_complex {
+        let had_float = evaluated_args.iter().any(|v| matches!(v, EvalResult::Float(_)));
         let first = to_complex(&evaluated_args[0])
             .ok_or_else(|| "- requires numeric arguments".to_string())?;
         let mut result_re = first.0;
         let mut result_im = first.1;
 
         if evaluated_args.len() == 1 {
-            return Ok(EvalResult::Complex(-result_re, -result_im));
+            return Ok(canonicalize_complex(-result_re, -result_im, had_float));
         }
 
         for val in &evaluated_args[1..] {
@@ -159,7 +182,7 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 None => return Err("- requires numeric arguments".to_string()),
             }
         }
-        return Ok(EvalResult::Complex(result_re, result_im));
+        return Ok(canonicalize_complex(result_re, result_im, had_float));
     }
 
     let first = evaluated_args.remove(0);
@@ -259,6 +282,7 @@ pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
 
     // Complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
     if has_complex {
+        let had_float = evaluated_args.iter().any(|v| matches!(v, EvalResult::Float(_)));
         let mut result_re = 1.0;
         let mut result_im = 0.0;
 
@@ -274,7 +298,7 @@ pub(super) fn eval_mul_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
                 None => return Err("* requires numeric arguments".to_string()),
             }
         }
-        return Ok(EvalResult::Complex(result_re, result_im));
+        return Ok(canonicalize_complex(result_re, result_im, had_float));
     }
 
     let mut product_bigint = Integer::from(1);
@@ -339,41 +363,101 @@ pub(super) fn eval_div_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
         return Err("/ requires at least one argument".to_string());
     }
 
-    let first = eval_with_env(&args[0], env)?;
+    // Evaluate all args first to check for complex
+    let mut evaluated_args = Vec::new();
+    let mut has_complex = false;
+    let mut has_float_input = false;
+    for arg in args {
+        let val = primary_value(eval_with_env(arg, env)?);
+        if matches!(val, EvalResult::Complex(_, _)) {
+            has_complex = true;
+        }
+        if matches!(val, EvalResult::Float(_)) {
+            has_float_input = true;
+        }
+        evaluated_args.push(val);
+    }
+
+    // Complex division: (a+bi)/(c+di) = ((ac+bd)+(bc-ad)i)/(c²+d²)
+    if has_complex {
+        let first = to_complex(&evaluated_args[0])
+            .ok_or_else(|| "/ requires numeric arguments".to_string())?;
+        let mut result_re = first.0;
+        let mut result_im = first.1;
+
+        if evaluated_args.len() == 1 {
+            // (/ z) = 1/z
+            let denom = result_re * result_re + result_im * result_im;
+            if denom == 0.0 {
+                return Err("Division by zero".to_string());
+            }
+            result_re = result_re / denom;
+            result_im = -result_im / denom;
+            return Ok(canonicalize_complex(result_re, result_im, has_float_input));
+        }
+
+        for val in &evaluated_args[1..] {
+            match to_complex(val) {
+                Some((re, im)) => {
+                    let denom = re * re + im * im;
+                    if denom == 0.0 {
+                        return Err("Division by zero".to_string());
+                    }
+                    let new_re = (result_re * re + result_im * im) / denom;
+                    let new_im = (result_im * re - result_re * im) / denom;
+                    result_re = new_re;
+                    result_im = new_im;
+                }
+                None => return Err("/ requires numeric arguments".to_string()),
+            }
+        }
+        return Ok(canonicalize_complex(result_re, result_im, has_float_input));
+    }
+
+    let first = evaluated_args.remove(0);
 
     // If any argument is a float, do float division
-    let has_float = matches!(first, EvalResult::Float(_)) || args[1..].iter().any(|arg| {
-        if let Ok(val) = eval_with_env(arg, env) {
-            matches!(val, EvalResult::Float(_))
-        } else {
-            false
-        }
-    });
+    let has_float = matches!(first, EvalResult::Float(_)) || has_float_input;
 
     if has_float {
         // Float division
-        let mut result = match first {
-            EvalResult::Fixnum(n) => n as f64,
-            EvalResult::Float(f) => f,
+        let mut result = match &first {
+            EvalResult::Fixnum(n) => *n as f64,
+            EvalResult::Float(f) => *f,
+            EvalResult::Bignum(b) => {
+                use malachite::num::conversion::traits::RoundingFrom;
+                use malachite::rounding_modes::RoundingMode;
+                f64::rounding_from(b, RoundingMode::Nearest).0
+            }
+            EvalResult::Ratio(r) => {
+                use malachite::num::conversion::traits::RoundingFrom;
+                use malachite::rounding_modes::RoundingMode;
+                f64::rounding_from(r, RoundingMode::Nearest).0
+            }
             _ => return Err("/ requires numeric arguments".to_string()),
         };
 
-        if args.len() == 1 {
-            if result == 0.0 {
-                return Err("Division by zero".to_string());
-            }
+        if evaluated_args.is_empty() {
+            // (/ x) = 1/x
             return Ok(EvalResult::Float(1.0 / result));
         }
 
-        for arg in &args[1..] {
-            let divisor = match eval_with_env(arg, env)? {
-                EvalResult::Fixnum(n) => n as f64,
-                EvalResult::Float(f) => f,
+        for val in &evaluated_args {
+            let divisor = match val {
+                EvalResult::Fixnum(n) => *n as f64,
+                EvalResult::Float(f) => *f,
+                EvalResult::Bignum(b) => {
+                    use malachite::num::conversion::traits::RoundingFrom;
+                    use malachite::rounding_modes::RoundingMode;
+                    f64::rounding_from(b, RoundingMode::Nearest).0
+                }
+                EvalResult::Ratio(r) => {
+                    use malachite::num::conversion::traits::RoundingFrom;
+                    use malachite::rounding_modes::RoundingMode;
+                    f64::rounding_from(r, RoundingMode::Nearest).0
+                }
                 _ => return Err("/ requires numeric arguments".to_string()),
             };
-            if divisor == 0.0 {
-                return Err("Division by zero".to_string());
-            }
             result /= divisor;
         }
 
@@ -382,32 +466,39 @@ pub(super) fn eval_div_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
         // Rational division - create ratio
         let mut ratio = match first {
             EvalResult::Fixnum(n) => Rational::from(n),
+            EvalResult::Bignum(b) => Rational::from(b),
             EvalResult::Ratio(r) => r,
             _ => return Err("/ requires numeric arguments".to_string()),
         };
 
-        if args.len() == 1 {
+        if evaluated_args.is_empty() {
             // (/ n) = 1/n
             if ratio == 0 {
                 return Err("Division by zero".to_string());
             }
             ratio = Rational::from(1) / ratio;
             if ratio.denominator_ref() == &1 {
-                let num = ratio.numerator_ref();
-                if i64::convertible_from(num) {
-                    return Ok(EvalResult::Fixnum(i64::exact_from(num)));
+                let num = Integer::from(ratio.numerator_ref().clone());
+                if i64::convertible_from(&num) {
+                    return Ok(EvalResult::Fixnum(i64::exact_from(&num)));
                 }
             }
             return Ok(EvalResult::Ratio(ratio));
         }
 
-        for arg in &args[1..] {
-            let divisor = match eval_with_env(arg, env)? {
+        for val in evaluated_args {
+            let divisor = match val {
                 EvalResult::Fixnum(n) => {
                     if n == 0 {
                         return Err("Division by zero".to_string());
                     }
                     Rational::from(n)
+                }
+                EvalResult::Bignum(b) => {
+                    if b == Integer::from(0) {
+                        return Err("Division by zero".to_string());
+                    }
+                    Rational::from(b)
                 }
                 EvalResult::Ratio(r) => {
                     if r == 0 {
@@ -432,6 +523,67 @@ pub(super) fn eval_div_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
     }
 }
 
+// Convert any numeric EvalResult to Rational for comparison
+fn to_rational_for_cmp(v: &EvalResult) -> Option<malachite::Rational> {
+    match v {
+        EvalResult::Fixnum(n) => Some(malachite::Rational::from(*n)),
+        EvalResult::Bignum(b) => Some(malachite::Rational::from(b.clone())),
+        EvalResult::Ratio(r) => Some(r.clone()),
+        EvalResult::Float(f) => {
+            // Use f64 comparison directly for floats
+            None
+        }
+        EvalResult::Nil => Some(malachite::Rational::from(0)),
+        _ => None,
+    }
+}
+
+fn to_f64_for_cmp(v: &EvalResult) -> Option<f64> {
+    match v {
+        EvalResult::Fixnum(n) => Some(*n as f64),
+        EvalResult::Float(f) => Some(*f),
+        EvalResult::Bignum(b) => Some(b.to_string().parse::<f64>().unwrap_or(0.0)),
+        EvalResult::Ratio(r) => {
+            let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+            let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0);
+            Some(n / d)
+        }
+        EvalResult::Nil => Some(0.0),
+        _ => None,
+    }
+}
+
+fn numeric_equal(a: &EvalResult, b: &EvalResult) -> Result<bool, String> {
+    // Handle complex numbers
+    match (a, b) {
+        (EvalResult::Complex(ar, ai), EvalResult::Complex(br, bi)) => {
+            return Ok(ar == br && ai == bi);
+        }
+        (EvalResult::Complex(ar, ai), _) => {
+            if *ai != 0.0 { return Ok(false); }
+            // Compare real part only
+            return numeric_equal(&EvalResult::Float(*ar), b);
+        }
+        (_, EvalResult::Complex(br, bi)) => {
+            if *bi != 0.0 { return Ok(false); }
+            return numeric_equal(a, &EvalResult::Float(*br));
+        }
+        _ => {}
+    }
+    // If both can be rational (no floats), compare exactly
+    if !matches!(a, EvalResult::Float(_)) && !matches!(b, EvalResult::Float(_)) {
+        match (to_rational_for_cmp(a), to_rational_for_cmp(b)) {
+            (Some(ra), Some(rb)) => return Ok(ra == rb),
+            _ => {}
+        }
+    }
+    // Float comparison
+    match (to_f64_for_cmp(a), to_f64_for_cmp(b)) {
+        (Some(fa), Some(fb)) => Ok(fa == fb),
+        _ => Err("= requires numeric arguments".to_string()),
+    }
+}
+
 pub(super) fn eval_eq_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.len() < 2 {
         return Err("= requires at least two arguments".to_string());
@@ -439,37 +591,8 @@ pub(super) fn eval_eq_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalR
     let first = eval_with_env(&args[0], env)?;
     for arg in &args[1..] {
         let val = eval_with_env(arg, env)?;
-        match (&first, &val) {
-            (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => {
-                if a != b {
-                    return Ok(EvalResult::Nil);
-                }
-            }
-            (EvalResult::Float(a), EvalResult::Float(b)) => {
-                if (a - b).abs() > f64::EPSILON {
-                    return Ok(EvalResult::Nil);
-                }
-            }
-            (EvalResult::Fixnum(a), EvalResult::Float(b)) | (EvalResult::Float(b), EvalResult::Fixnum(a)) => {
-                if (*a as f64 - b).abs() > f64::EPSILON {
-                    return Ok(EvalResult::Nil);
-                }
-            }
-            // Treat nil as 0 (runtime limitation: nil == fixnum 0)
-            (EvalResult::Nil, EvalResult::Fixnum(b)) | (EvalResult::Fixnum(b), EvalResult::Nil) => {
-                if *b != 0 {
-                    return Ok(EvalResult::Nil);
-                }
-            }
-            (EvalResult::Nil, EvalResult::Float(b)) | (EvalResult::Float(b), EvalResult::Nil) => {
-                if b.abs() > f64::EPSILON {
-                    return Ok(EvalResult::Nil);
-                }
-            }
-            (EvalResult::Nil, EvalResult::Nil) => {
-                // Both nil, considered equal to 0
-            }
-            _ => return Err("= requires numeric arguments".to_string()),
+        if !numeric_equal(&first, &val)? {
+            return Ok(EvalResult::Nil);
         }
     }
     Ok(EvalResult::Bool(true))
@@ -484,36 +607,8 @@ pub(super) fn eval_ne_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalR
         for j in i+1..args.len() {
             let val_i = eval_with_env(&args[i], env)?;
             let val_j = eval_with_env(&args[j], env)?;
-            match (&val_i, &val_j) {
-                (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => {
-                    if a == b {
-                        return Ok(EvalResult::Nil);
-                    }
-                }
-                (EvalResult::Float(a), EvalResult::Float(b)) => {
-                    if (a - b).abs() <= f64::EPSILON {
-                        return Ok(EvalResult::Nil);
-                    }
-                }
-                (EvalResult::Fixnum(a), EvalResult::Float(b)) | (EvalResult::Float(b), EvalResult::Fixnum(a)) => {
-                    if (*a as f64 - b).abs() <= f64::EPSILON {
-                        return Ok(EvalResult::Nil);
-                    }
-                }
-                (EvalResult::Nil, EvalResult::Fixnum(b)) | (EvalResult::Fixnum(b), EvalResult::Nil) => {
-                    if *b == 0 {
-                        return Ok(EvalResult::Nil);
-                    }
-                }
-                (EvalResult::Nil, EvalResult::Float(b)) | (EvalResult::Float(b), EvalResult::Nil) => {
-                    if b.abs() <= f64::EPSILON {
-                        return Ok(EvalResult::Nil);
-                    }
-                }
-                (EvalResult::Nil, EvalResult::Nil) => {
-                    return Ok(EvalResult::Nil);
-                }
-                _ => return Err("/= requires numeric arguments".to_string()),
+            if numeric_equal(&val_i, &val_j)? {
+                return Ok(EvalResult::Nil);
             }
         }
     }
@@ -542,25 +637,31 @@ pub(super) fn eval_eq_lisp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
 }
 
+fn numeric_cmp(a: &EvalResult, b: &EvalResult) -> Result<std::cmp::Ordering, String> {
+    // If both can be rational (no floats), compare exactly
+    if !matches!(a, EvalResult::Float(_)) && !matches!(b, EvalResult::Float(_)) {
+        match (to_rational_for_cmp(a), to_rational_for_cmp(b)) {
+            (Some(ra), Some(rb)) => return Ok(ra.cmp(&rb)),
+            _ => {}
+        }
+    }
+    // Float comparison
+    match (to_f64_for_cmp(a), to_f64_for_cmp(b)) {
+        (Some(fa), Some(fb)) => {
+            fa.partial_cmp(&fb).ok_or_else(|| "comparison with NaN".to_string())
+        }
+        _ => Err("comparison requires numeric arguments".to_string()),
+    }
+}
+
 pub(super) fn eval_lt_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    use malachite::Rational;
     if args.len() < 2 {
         return Err("< requires at least two arguments".to_string());
     }
     let mut prev = eval_with_env(&args[0], env)?;
     for arg in &args[1..] {
         let curr = eval_with_env(arg, env)?;
-        let cmp = match (&prev, &curr) {
-            (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a < b,
-            (EvalResult::Float(a), EvalResult::Float(b)) => a < b,
-            (EvalResult::Fixnum(a), EvalResult::Float(b)) => (*a as f64) < *b,
-            (EvalResult::Float(a), EvalResult::Fixnum(b)) => *a < (*b as f64),
-            (EvalResult::Ratio(a), EvalResult::Ratio(b)) => a < b,
-            (EvalResult::Fixnum(a), EvalResult::Ratio(b)) => &Rational::from(*a) < b,
-            (EvalResult::Ratio(a), EvalResult::Fixnum(b)) => a < &Rational::from(*b),
-            _ => return Err("< requires numeric arguments".to_string()),
-        };
-        if !cmp {
+        if numeric_cmp(&prev, &curr)? != std::cmp::Ordering::Less {
             return Ok(EvalResult::Nil);
         }
         prev = curr;
@@ -569,24 +670,13 @@ pub(super) fn eval_lt_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalR
 }
 
 pub(super) fn eval_gt_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    use malachite::Rational;
     if args.len() < 2 {
         return Err("> requires at least two arguments".to_string());
     }
     let mut prev = eval_with_env(&args[0], env)?;
     for arg in &args[1..] {
         let curr = eval_with_env(arg, env)?;
-        let cmp = match (&prev, &curr) {
-            (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a > b,
-            (EvalResult::Float(a), EvalResult::Float(b)) => a > b,
-            (EvalResult::Fixnum(a), EvalResult::Float(b)) => (*a as f64) > *b,
-            (EvalResult::Float(a), EvalResult::Fixnum(b)) => *a > (*b as f64),
-            (EvalResult::Ratio(a), EvalResult::Ratio(b)) => a > b,
-            (EvalResult::Fixnum(a), EvalResult::Ratio(b)) => &Rational::from(*a) > b,
-            (EvalResult::Ratio(a), EvalResult::Fixnum(b)) => a > &Rational::from(*b),
-            _ => return Err("> requires numeric arguments".to_string()),
-        };
-        if !cmp {
+        if numeric_cmp(&prev, &curr)? != std::cmp::Ordering::Greater {
             return Ok(EvalResult::Nil);
         }
         prev = curr;
@@ -595,24 +685,13 @@ pub(super) fn eval_gt_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalR
 }
 
 pub(super) fn eval_le_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    use malachite::Rational;
     if args.len() < 2 {
         return Err("<= requires at least two arguments".to_string());
     }
     let mut prev = eval_with_env(&args[0], env)?;
     for arg in &args[1..] {
         let curr = eval_with_env(arg, env)?;
-        let cmp = match (&prev, &curr) {
-            (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a <= b,
-            (EvalResult::Float(a), EvalResult::Float(b)) => a <= b,
-            (EvalResult::Fixnum(a), EvalResult::Float(b)) => (*a as f64) <= *b,
-            (EvalResult::Float(a), EvalResult::Fixnum(b)) => *a <= (*b as f64),
-            (EvalResult::Ratio(a), EvalResult::Ratio(b)) => a <= b,
-            (EvalResult::Fixnum(a), EvalResult::Ratio(b)) => &Rational::from(*a) <= b,
-            (EvalResult::Ratio(a), EvalResult::Fixnum(b)) => a <= &Rational::from(*b),
-            _ => return Err("<= requires numeric arguments".to_string()),
-        };
-        if !cmp {
+        if numeric_cmp(&prev, &curr)? == std::cmp::Ordering::Greater {
             return Ok(EvalResult::Nil);
         }
         prev = curr;
@@ -621,24 +700,13 @@ pub(super) fn eval_le_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalR
 }
 
 pub(super) fn eval_ge_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    use malachite::Rational;
     if args.len() < 2 {
         return Err(">= requires at least two arguments".to_string());
     }
     let mut prev = eval_with_env(&args[0], env)?;
     for arg in &args[1..] {
         let curr = eval_with_env(arg, env)?;
-        let cmp = match (&prev, &curr) {
-            (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a >= b,
-            (EvalResult::Float(a), EvalResult::Float(b)) => a >= b,
-            (EvalResult::Fixnum(a), EvalResult::Float(b)) => (*a as f64) >= *b,
-            (EvalResult::Float(a), EvalResult::Fixnum(b)) => *a >= (*b as f64),
-            (EvalResult::Ratio(a), EvalResult::Ratio(b)) => a >= b,
-            (EvalResult::Fixnum(a), EvalResult::Ratio(b)) => &Rational::from(*a) >= b,
-            (EvalResult::Ratio(a), EvalResult::Fixnum(b)) => a >= &Rational::from(*b),
-            _ => return Err(">= requires numeric arguments".to_string()),
-        };
-        if !cmp {
+        if numeric_cmp(&prev, &curr)? == std::cmp::Ordering::Less {
             return Ok(EvalResult::Nil);
         }
         prev = curr;
@@ -651,9 +719,26 @@ pub(super) fn eval_one_plus(args: &[ASTNode], env: &mut HashMap<String, EvalResu
         return Err("1+ requires 1 argument".to_string());
     }
     match eval_with_env(&args[0], env)? {
-        EvalResult::Fixnum(n) => Ok(EvalResult::Fixnum(n + 1)),
+        EvalResult::Fixnum(n) => {
+            match n.checked_add(1) {
+                Some(result) => Ok(EvalResult::Fixnum(result)),
+                None => Ok(EvalResult::Bignum(malachite::Integer::from(n) + malachite::Integer::from(1))),
+            }
+        }
+        EvalResult::Bignum(n) => Ok(EvalResult::Bignum(n + malachite::Integer::from(1))),
         EvalResult::Float(f) => Ok(EvalResult::Float(f + 1.0)),
-        EvalResult::Nil => Ok(EvalResult::Fixnum(1)), // Treat nil as 0 (runtime limitation)
+        EvalResult::Complex(re, im) => Ok(EvalResult::Complex(re + 1.0, im)),
+        EvalResult::Ratio(r) => {
+            let result = r + malachite::Rational::from(1);
+            if result.denominator_ref() == &1u32 {
+                let num = malachite::Integer::from(result.numerator_ref().clone());
+                use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+                if i64::convertible_from(&num) { Ok(EvalResult::Fixnum(i64::exact_from(&num))) } else { Ok(EvalResult::Bignum(num)) }
+            } else {
+                Ok(EvalResult::Ratio(result))
+            }
+        }
+        EvalResult::Nil => Ok(EvalResult::Fixnum(1)),
         _ => Err("1+ requires a number".to_string()),
     }
 }
@@ -663,9 +748,26 @@ pub(super) fn eval_one_minus(args: &[ASTNode], env: &mut HashMap<String, EvalRes
         return Err("1- requires 1 argument".to_string());
     }
     match eval_with_env(&args[0], env)? {
-        EvalResult::Fixnum(n) => Ok(EvalResult::Fixnum(n - 1)),
+        EvalResult::Fixnum(n) => {
+            match n.checked_sub(1) {
+                Some(result) => Ok(EvalResult::Fixnum(result)),
+                None => Ok(EvalResult::Bignum(malachite::Integer::from(n) - malachite::Integer::from(1))),
+            }
+        }
+        EvalResult::Bignum(n) => Ok(EvalResult::Bignum(n - malachite::Integer::from(1))),
         EvalResult::Float(f) => Ok(EvalResult::Float(f - 1.0)),
-        EvalResult::Nil => Ok(EvalResult::Fixnum(-1)), // Treat nil as 0 (runtime limitation)
+        EvalResult::Complex(re, im) => Ok(EvalResult::Complex(re - 1.0, im)),
+        EvalResult::Ratio(r) => {
+            let result = r - malachite::Rational::from(1);
+            if result.denominator_ref() == &1u32 {
+                let num = malachite::Integer::from(result.numerator_ref().clone());
+                use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+                if i64::convertible_from(&num) { Ok(EvalResult::Fixnum(i64::exact_from(&num))) } else { Ok(EvalResult::Bignum(num)) }
+            } else {
+                Ok(EvalResult::Ratio(result))
+            }
+        }
+        EvalResult::Nil => Ok(EvalResult::Fixnum(-1)),
         _ => Err("1- requires a number".to_string()),
     }
 }
@@ -830,27 +932,91 @@ pub(super) fn eval_floor(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
         None
     };
 
-    match (num, divisor) {
-        (EvalResult::Fixnum(n), None) => Ok(EvalResult::Fixnum(n)),
-        (EvalResult::Float(n), None) => Ok(EvalResult::Fixnum(n.floor() as i64)),
-        (EvalResult::Ratio(r), None) => {
-            // Floor of a ratio: largest integer <= ratio
-            // Convert to float, take floor
-            let num_str = r.numerator_ref().to_string();
-            let denom_str = r.denominator_ref().to_string();
-            let num_f64: f64 = num_str.parse().unwrap_or(0.0);
-            let denom_f64: f64 = denom_str.parse().unwrap_or(1.0);
-            let result = (num_f64 / denom_f64).floor() as i64;
-            Ok(EvalResult::Fixnum(result))
+    use malachite::Rational;
+    use malachite::Integer;
+    use malachite::num::conversion::traits::ExactFrom;
+    use malachite::num::conversion::traits::ConvertibleFrom;
+
+    // Helper: convert to Rational
+    fn to_rational(v: &EvalResult) -> Option<Rational> {
+        match v {
+            EvalResult::Fixnum(n) => Some(Rational::from(*n)),
+            EvalResult::Bignum(b) => Some(Rational::from(b.clone())),
+            EvalResult::Ratio(r) => Some(r.clone()),
+            _ => None,
         }
-        (EvalResult::Fixnum(n), Some(EvalResult::Fixnum(d))) => {
-            if d == 0 {
-                return Err("Division by zero".to_string());
-            }
-            Ok(EvalResult::Fixnum(n / d))
-        }
-        _ => Err("floor type mismatch".to_string()),
     }
+
+    // Check for float involvement
+    let has_float = matches!(&num, EvalResult::Float(_)) ||
+        matches!(&divisor, Some(EvalResult::Float(_)));
+
+    if has_float {
+        let n_f = match &num {
+            EvalResult::Float(f) => *f,
+            EvalResult::Fixnum(n) => *n as f64,
+            EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
+            EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+            _ => return Err("floor: not a number".to_string()),
+        };
+        let d_f = match &divisor {
+            Some(EvalResult::Float(f)) => *f,
+            Some(EvalResult::Fixnum(n)) => *n as f64,
+            Some(EvalResult::Bignum(b)) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
+            Some(EvalResult::Ratio(r)) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+            None => 1.0,
+            _ => return Err("floor: not a number".to_string()),
+        };
+        if d_f == 0.0 { return Err("Division by zero".to_string()); }
+        let quotient = (n_f / d_f).floor();
+        let remainder = n_f - quotient * d_f;
+        let q_i64 = quotient as i64;
+        return Ok(EvalResult::MultipleValues(vec![
+            EvalResult::Fixnum(q_i64),
+            EvalResult::Float(remainder),
+        ]));
+    }
+
+    // Rational path
+    let n_r = to_rational(&num).ok_or_else(|| "floor: not a number".to_string())?;
+    let d_r = match &divisor {
+        Some(v) => to_rational(v).ok_or_else(|| "floor: not a number".to_string())?,
+        None => Rational::from(1),
+    };
+    if d_r == Rational::from(0) { return Err("Division by zero".to_string()); }
+
+    let ratio = &n_r / &d_r;
+    // Floor: largest integer <= ratio
+    // For a/b where b > 0: if a >= 0, floor = a / b; if a < 0, floor = (a - b + 1) / b
+    let num = Integer::from(ratio.numerator_ref().clone());
+    let den = Integer::from(ratio.denominator_ref().clone());
+    let q_int = if den == Integer::from(1) {
+        num
+    } else if num >= Integer::from(0) {
+        &num / &den
+    } else {
+        (&num - &den + Integer::from(1)) / &den
+    };
+    let q_rational = Rational::from(q_int.clone());
+    let remainder = &n_r - &(&q_rational * &d_r);
+    let q_val = if i64::convertible_from(&q_int) {
+        EvalResult::Fixnum(i64::exact_from(&q_int))
+    } else {
+        EvalResult::Bignum(q_int)
+    };
+    let rem_val = if remainder == Rational::from(0) {
+        EvalResult::Fixnum(0)
+    } else if remainder.denominator_ref() == &1u32 {
+        let rem_int = Integer::from(remainder.numerator_ref().clone());
+        if i64::convertible_from(&rem_int) {
+            EvalResult::Fixnum(i64::exact_from(&rem_int))
+        } else {
+            EvalResult::Bignum(rem_int)
+        }
+    } else {
+        EvalResult::Ratio(remainder)
+    };
+    Ok(EvalResult::MultipleValues(vec![q_val, rem_val]))
 }
 
 pub(super) fn eval_ceiling(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -864,28 +1030,155 @@ pub(super) fn eval_ceiling(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         None
     };
 
-    match (num, divisor) {
-        (EvalResult::Fixnum(n), None) => Ok(EvalResult::Fixnum(n)),
-        (EvalResult::Float(n), None) => Ok(EvalResult::Fixnum(n.ceil() as i64)),
-        (EvalResult::Ratio(r), None) => {
-            // Ceiling of a ratio: smallest integer >= ratio
-            // Convert to float, take ceiling
-            let num_str = r.numerator_ref().to_string();
-            let denom_str = r.denominator_ref().to_string();
-            let num_f64: f64 = num_str.parse().unwrap_or(0.0);
-            let denom_f64: f64 = denom_str.parse().unwrap_or(1.0);
-            let result = (num_f64 / denom_f64).ceil() as i64;
-            Ok(EvalResult::Fixnum(result))
+    use malachite::Rational;
+    use malachite::Integer;
+    use malachite::num::conversion::traits::ExactFrom;
+    use malachite::num::conversion::traits::ConvertibleFrom;
+
+    fn to_rational(v: &EvalResult) -> Option<Rational> {
+        match v {
+            EvalResult::Fixnum(n) => Some(Rational::from(*n)),
+            EvalResult::Bignum(b) => Some(Rational::from(b.clone())),
+            EvalResult::Ratio(r) => Some(r.clone()),
+            _ => None,
         }
-        (EvalResult::Fixnum(n), Some(EvalResult::Fixnum(d))) => {
-            if d == 0 {
-                return Err("Division by zero".to_string());
-            }
-            let result = (n as f64 / d as f64).ceil() as i64;
-            Ok(EvalResult::Fixnum(result))
-        }
-        _ => Err("ceiling type mismatch".to_string()),
     }
+
+    let has_float = matches!(&num, EvalResult::Float(_)) ||
+        matches!(&divisor, Some(EvalResult::Float(_)));
+
+    if has_float {
+        let n_f = match &num {
+            EvalResult::Float(f) => *f,
+            EvalResult::Fixnum(n) => *n as f64,
+            EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
+            EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+            _ => return Err("ceiling: not a number".to_string()),
+        };
+        let d_f = match &divisor {
+            Some(EvalResult::Float(f)) => *f,
+            Some(EvalResult::Fixnum(n)) => *n as f64,
+            Some(EvalResult::Bignum(b)) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
+            Some(EvalResult::Ratio(r)) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+            None => 1.0,
+            _ => return Err("ceiling: not a number".to_string()),
+        };
+        if d_f == 0.0 { return Err("Division by zero".to_string()); }
+        let quotient = (n_f / d_f).ceil();
+        let remainder = n_f - quotient * d_f;
+        let q_i64 = quotient as i64;
+        return Ok(EvalResult::MultipleValues(vec![
+            EvalResult::Fixnum(q_i64),
+            EvalResult::Float(remainder),
+        ]));
+    }
+
+    let n_r = to_rational(&num).ok_or_else(|| "ceiling: not a number".to_string())?;
+    let d_r = match &divisor {
+        Some(v) => to_rational(v).ok_or_else(|| "ceiling: not a number".to_string())?,
+        None => Rational::from(1),
+    };
+    if d_r == Rational::from(0) { return Err("Division by zero".to_string()); }
+
+    let ratio = &n_r / &d_r;
+    // Ceiling: smallest integer >= ratio
+    // For a/b where b > 0: if a % b == 0, ceil = a / b; else ceil = floor(a/b) + 1
+    let num = Integer::from(ratio.numerator_ref().clone());
+    let den = Integer::from(ratio.denominator_ref().clone());
+    let q_int = if den == Integer::from(1) {
+        num
+    } else if num >= Integer::from(0) {
+        (&num + &den - Integer::from(1)) / &den
+    } else {
+        &num / &den  // truncation towards zero IS ceiling for negatives
+    };
+    let q_rational = Rational::from(q_int.clone());
+    let remainder = &n_r - &(&q_rational * &d_r);
+    let q_val = if i64::convertible_from(&q_int) {
+        EvalResult::Fixnum(i64::exact_from(&q_int))
+    } else {
+        EvalResult::Bignum(q_int)
+    };
+    let rem_val = if remainder == Rational::from(0) {
+        EvalResult::Fixnum(0)
+    } else if remainder.denominator_ref() == &1u32 {
+        let rem_int = Integer::from(remainder.numerator_ref().clone());
+        if i64::convertible_from(&rem_int) {
+            EvalResult::Fixnum(i64::exact_from(&rem_int))
+        } else {
+            EvalResult::Bignum(rem_int)
+        }
+    } else {
+        EvalResult::Ratio(remainder)
+    };
+    Ok(EvalResult::MultipleValues(vec![q_val, rem_val]))
+}
+
+// Helper to convert EvalResult to f64
+fn eval_to_f64(v: &EvalResult) -> Result<f64, String> {
+    match v {
+        EvalResult::Fixnum(n) => Ok(*n as f64),
+        EvalResult::Float(f) => Ok(*f),
+        EvalResult::Bignum(b) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            Ok(f64::rounding_from(b, RoundingMode::Nearest).0)
+        }
+        EvalResult::Ratio(r) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            Ok(f64::rounding_from(r, RoundingMode::Nearest).0)
+        }
+        _ => Err("not a number".to_string()),
+    }
+}
+
+pub(super) fn eval_ffloor(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() || args.len() > 2 {
+        return Err("ffloor requires 1 or 2 arguments".to_string());
+    }
+    let n = eval_to_f64(&eval_with_env(&args[0], env)?)?;
+    let d = if args.len() == 2 { eval_to_f64(&eval_with_env(&args[1], env)?)? } else { 1.0 };
+    if d == 0.0 { return Err("Division by zero".to_string()); }
+    let q = (n / d).floor();
+    let r = n - q * d;
+    Ok(EvalResult::MultipleValues(vec![EvalResult::Float(q), EvalResult::Float(r)]))
+}
+
+pub(super) fn eval_fceiling(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() || args.len() > 2 {
+        return Err("fceiling requires 1 or 2 arguments".to_string());
+    }
+    let n = eval_to_f64(&eval_with_env(&args[0], env)?)?;
+    let d = if args.len() == 2 { eval_to_f64(&eval_with_env(&args[1], env)?)? } else { 1.0 };
+    if d == 0.0 { return Err("Division by zero".to_string()); }
+    let q = (n / d).ceil();
+    let r = n - q * d;
+    Ok(EvalResult::MultipleValues(vec![EvalResult::Float(q), EvalResult::Float(r)]))
+}
+
+pub(super) fn eval_ftruncate(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() || args.len() > 2 {
+        return Err("ftruncate requires 1 or 2 arguments".to_string());
+    }
+    let n = eval_to_f64(&eval_with_env(&args[0], env)?)?;
+    let d = if args.len() == 2 { eval_to_f64(&eval_with_env(&args[1], env)?)? } else { 1.0 };
+    if d == 0.0 { return Err("Division by zero".to_string()); }
+    let q = (n / d).trunc();
+    let r = n - q * d;
+    Ok(EvalResult::MultipleValues(vec![EvalResult::Float(q), EvalResult::Float(r)]))
+}
+
+pub(super) fn eval_fround(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() || args.len() > 2 {
+        return Err("fround requires 1 or 2 arguments".to_string());
+    }
+    let n = eval_to_f64(&eval_with_env(&args[0], env)?)?;
+    let d = if args.len() == 2 { eval_to_f64(&eval_with_env(&args[1], env)?)? } else { 1.0 };
+    if d == 0.0 { return Err("Division by zero".to_string()); }
+    let q = (n / d).round();
+    let r = n - q * d;
+    Ok(EvalResult::MultipleValues(vec![EvalResult::Float(q), EvalResult::Float(r)]))
 }
 
 pub(super) fn eval_ash(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -921,13 +1214,35 @@ pub(super) fn eval_logbitp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     let index = eval_with_env(&args[0], env)?;
     let integer = eval_with_env(&args[1], env)?;
 
-    match (index, integer) {
-        (EvalResult::Fixnum(i), EvalResult::Fixnum(n)) => {
-            if i < 0 || i >= 64 {
-                return Err("logbitp: index out of range".to_string());
+    let idx = match &index {
+        EvalResult::Fixnum(i) => {
+            if *i < 0 { return Err("logbitp: index must be non-negative".to_string()); }
+            *i as u64
+        }
+        EvalResult::Bignum(b) => {
+            // Very large index - for positive numbers all high bits are 0, for negative all are 1
+            match &integer {
+                EvalResult::Fixnum(n) => return Ok(EvalResult::Boolean(*n < 0)),
+                EvalResult::Bignum(bn) => return Ok(EvalResult::Boolean(*bn < malachite::Integer::from(0))),
+                _ => return Err("logbitp requires integer arguments".to_string()),
             }
-            let bit_set = (n & (1 << i)) != 0;
-            Ok(EvalResult::Bool(bit_set))
+        }
+        _ => return Err("logbitp requires integer arguments".to_string()),
+    };
+
+    match &integer {
+        EvalResult::Fixnum(n) => {
+            if idx >= 64 {
+                // For fixnum, bits above 63 follow the sign
+                Ok(EvalResult::Boolean(*n < 0))
+            } else {
+                Ok(EvalResult::Boolean((*n & (1_i64 << idx)) != 0))
+            }
+        }
+        EvalResult::Bignum(b) => {
+            use malachite::num::logic::traits::BitAccess;
+            let bit_set = b.get_bit(idx);
+            Ok(EvalResult::Boolean(bit_set))
         }
         _ => Err("logbitp requires integer arguments".to_string()),
     }
@@ -943,54 +1258,84 @@ pub(super) fn eval_sqrt(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     let num = match val {
         EvalResult::Fixnum(n) => n as f64,
         EvalResult::Float(f) => f,
+        EvalResult::Bignum(b) => {
+            let s = b.to_string();
+            s.parse::<f64>().unwrap_or(f64::INFINITY)
+        }
+        EvalResult::Ratio(r) => {
+            let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+            let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0);
+            n / d
+        }
         _ => return Err("sqrt requires a numeric argument".to_string()),
     };
 
     if num < 0.0 {
-        return Err("sqrt: negative argument not supported".to_string());
+        // Return complex number for negative sqrt
+        return Ok(EvalResult::Complex(0.0, (-num).sqrt()));
     }
 
     Ok(EvalResult::Float(num.sqrt()))
 }
 
 pub(super) fn eval_complex(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (complex real imaginary)
-    if args.len() != 2 {
-        return Err("complex requires 2 arguments (real and imaginary parts)".to_string());
+    // (complex real &optional imaginary)
+    if args.is_empty() || args.len() > 2 {
+        return Err("complex requires 1-2 arguments (real and optional imaginary parts)".to_string());
     }
 
     let real = primary_value(eval_with_env(&args[0], env)?);
-    let imag = primary_value(eval_with_env(&args[1], env)?);
+    let imag = if args.len() == 2 {
+        primary_value(eval_with_env(&args[1], env)?)
+    } else {
+        EvalResult::Fixnum(0)
+    };
+
+    // Check if imaginary is zero for rational inputs (CL canonicalization)
+    let imag_is_zero = match &imag {
+        EvalResult::Fixnum(0) => true,
+        EvalResult::Bignum(b) => *b == Integer::from(0),
+        EvalResult::Ratio(r) => *r == malachite::Rational::from(0),
+        EvalResult::Float(f) => *f == 0.0,
+        _ => false,
+    };
+    let real_is_rational = matches!(&real, EvalResult::Fixnum(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_));
+    let imag_is_rational = matches!(&imag, EvalResult::Fixnum(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_));
+
+    // CL rule: (complex a 0) for rational a returns a, not #c(a 0)
+    if imag_is_zero && real_is_rational && imag_is_rational {
+        return Ok(real);
+    }
 
     // Convert to f64
-    let real_f64 = match real {
-        EvalResult::Fixnum(n) => n as f64,
-        EvalResult::Float(f) => f,
-        EvalResult::Bignum(ref b) => {
-            use malachite::num::conversion::traits::ConvertibleFrom;
-            if f64::convertible_from(b) {
-                use malachite::num::conversion::traits::RoundingFrom;
-                use malachite::rounding_modes::RoundingMode;
-                f64::rounding_from(b, RoundingMode::Nearest).0
-            } else {
-                return Err("complex: real part too large for float conversion".to_string());
-            }
+    let real_f64 = match &real {
+        EvalResult::Fixnum(n) => *n as f64,
+        EvalResult::Float(f) => *f,
+        EvalResult::Bignum(b) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            f64::rounding_from(b, RoundingMode::Nearest).0
+        }
+        EvalResult::Ratio(r) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            f64::rounding_from(r, RoundingMode::Nearest).0
         }
         _ => return Err("complex: real part must be a number".to_string()),
     };
 
-    let imag_f64 = match imag {
-        EvalResult::Fixnum(n) => n as f64,
-        EvalResult::Float(f) => f,
-        EvalResult::Bignum(ref b) => {
-            use malachite::num::conversion::traits::ConvertibleFrom;
-            if f64::convertible_from(b) {
-                use malachite::num::conversion::traits::RoundingFrom;
-                use malachite::rounding_modes::RoundingMode;
-                f64::rounding_from(b, RoundingMode::Nearest).0
-            } else {
-                return Err("complex: imaginary part too large for float conversion".to_string());
-            }
+    let imag_f64 = match &imag {
+        EvalResult::Fixnum(n) => *n as f64,
+        EvalResult::Float(f) => *f,
+        EvalResult::Bignum(b) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            f64::rounding_from(b, RoundingMode::Nearest).0
+        }
+        EvalResult::Ratio(r) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            f64::rounding_from(r, RoundingMode::Nearest).0
         }
         _ => return Err("complex: imaginary part must be a number".to_string()),
     };

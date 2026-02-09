@@ -44,6 +44,8 @@ pub fn register_numeric_builtins(env: &mut HashMap<String, EvalResult>) {
     env.insert("round".to_string(), EvalResult::BuiltinFunction("round".to_string()));
     env.insert("ffloor".to_string(), EvalResult::BuiltinFunction("ffloor".to_string()));
     env.insert("fceiling".to_string(), EvalResult::BuiltinFunction("fceiling".to_string()));
+    env.insert("ftruncate".to_string(), EvalResult::BuiltinFunction("ftruncate".to_string()));
+    env.insert("fround".to_string(), EvalResult::BuiltinFunction("fround".to_string()));
 
     // Logical operations on integers
     env.insert("logand".to_string(), EvalResult::BuiltinFunction("logand".to_string()));
@@ -129,36 +131,79 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         },
 
         // Predicates
-        "numberp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Float(_))))),
+        "numberp" => Ok(EvalResult::Boolean(matches!(args.get(0),
+            Some(EvalResult::Float(_)) | Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) |
+            Some(EvalResult::Ratio(_)) | Some(EvalResult::Complex(_, _))))),
         "integerp" => Ok(EvalResult::Boolean(match args.get(0) {
+            Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) => true,
             Some(EvalResult::Float(n)) => n.fract() == 0.0,
             _ => false,
         })),
         "floatp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Float(_))))),
+        "rationalp" => Ok(EvalResult::Boolean(matches!(args.get(0),
+            Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) | Some(EvalResult::Ratio(_))))),
+        "realp" => Ok(EvalResult::Boolean(matches!(args.get(0),
+            Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) | Some(EvalResult::Float(_)) | Some(EvalResult::Ratio(_))))),
+        "complexp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Complex(_, _))))),
         "zerop" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n == 0)),
             Some(EvalResult::Float(n)) => Ok(EvalResult::Boolean(*n == 0.0)),
+            Some(EvalResult::Bignum(n)) => Ok(EvalResult::Boolean(*n == 0)),
             _ => Err("zerop requires a number".to_string()),
         },
         "plusp" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n > 0)),
             Some(EvalResult::Float(n)) => Ok(EvalResult::Boolean(*n > 0.0)),
+            Some(EvalResult::Bignum(n)) => Ok(EvalResult::Boolean(*n > 0)),
             _ => Err("plusp requires a number".to_string()),
         },
         "minusp" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n < 0)),
             Some(EvalResult::Float(n)) => Ok(EvalResult::Boolean(*n < 0.0)),
+            Some(EvalResult::Bignum(n)) => Ok(EvalResult::Boolean(*n < 0)),
             _ => Err("minusp requires a number".to_string()),
         },
         "evenp" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n % 2 == 0)),
             Some(EvalResult::Float(n)) if n.fract() == 0.0 => Ok(EvalResult::Boolean((*n as i64) % 2 == 0)),
+            Some(EvalResult::Bignum(n)) => {
+                use malachite::num::arithmetic::traits::DivisibleBy;
+                Ok(EvalResult::Boolean(n.divisible_by(&malachite::Integer::from(2))))
+            },
             _ => Err("evenp requires an integer".to_string()),
         },
         "oddp" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n % 2 != 0)),
             Some(EvalResult::Float(n)) if n.fract() == 0.0 => Ok(EvalResult::Boolean((*n as i64) % 2 != 0)),
+            Some(EvalResult::Bignum(n)) => {
+                use malachite::num::arithmetic::traits::DivisibleBy;
+                Ok(EvalResult::Boolean(!n.divisible_by(&malachite::Integer::from(2))))
+            },
             _ => Err("oddp requires an integer".to_string()),
         },
 
         // Math functions
         "abs" => match args.get(0) {
+            Some(EvalResult::Fixnum(n)) => {
+                if *n == i64::MIN {
+                    // i64::MIN.abs() overflows - promote to bignum
+                    let big = malachite::Integer::from(*n);
+                    let abs_val = if big < malachite::Integer::from(0) { -big } else { big };
+                    Ok(EvalResult::Bignum(abs_val))
+                } else {
+                    Ok(EvalResult::Fixnum(n.abs()))
+                }
+            }
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.abs())),
+            Some(EvalResult::Bignum(b)) => {
+                let abs_val = if *b < malachite::Integer::from(0) { -b } else { b.clone() };
+                Ok(EvalResult::Bignum(abs_val))
+            }
+            Some(EvalResult::Ratio(r)) => {
+                let abs_val = if *r < malachite::Rational::from(0) { -r } else { r.clone() };
+                Ok(EvalResult::Ratio(abs_val))
+            }
+            Some(EvalResult::Complex(re, im)) => Ok(EvalResult::Float((re * re + im * im).sqrt())),
             _ => Err("abs requires a number".to_string()),
         },
         "sqrt" => match args.get(0) {
@@ -169,11 +214,29 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         },
         "exp" => match args.get(0) {
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.exp())),
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Float((*n as f64).exp())),
             _ => Err("exp requires a number".to_string()),
         },
-        "log" => match args.get(0) {
-            Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.ln())),
-            _ => Err("log requires a number".to_string()),
+        "log" => {
+            let val = args.get(0).ok_or_else(|| "log requires a number".to_string())?;
+            let num = match val {
+                EvalResult::Float(n) => *n,
+                EvalResult::Fixnum(n) => *n as f64,
+                EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(f64::INFINITY) }
+                EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+                _ => return Err("log requires a number".to_string()),
+            };
+            if args.len() == 2 {
+                let base = match &args[1] {
+                    EvalResult::Float(n) => *n,
+                    EvalResult::Fixnum(n) => *n as f64,
+                    EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(f64::INFINITY) }
+                    _ => return Err("log: base must be a number".to_string()),
+                };
+                Ok(EvalResult::Float(num.ln() / base.ln()))
+            } else {
+                Ok(EvalResult::Float(num.ln()))
+            }
         },
         "sin" => match args.get(0) {
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.sin())),
@@ -213,13 +276,49 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         },
 
         // Rounding
-        "truncate" => match args.get(0) {
-            Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.trunc())),
-            _ => Err("truncate requires a number".to_string()),
+        "truncate" => {
+            // This path is for BuiltinFunction call with pre-evaluated args
+            if args.is_empty() { return Err("truncate requires at least 1 argument".to_string()); }
+            let num = &args[0];
+            let div = args.get(1);
+            match (num, div) {
+                (EvalResult::Float(n), None) => {
+                    let q = n.trunc();
+                    let r = n - q;
+                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q as i64), EvalResult::Float(r)]))
+                }
+                (EvalResult::Fixnum(n), None) => {
+                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(*n), EvalResult::Fixnum(0)]))
+                }
+                (EvalResult::Fixnum(n), Some(EvalResult::Fixnum(d))) if *d != 0 => {
+                    let q = n / d;
+                    let r = n - q * d;
+                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q), EvalResult::Fixnum(r)]))
+                }
+                _ => Err("truncate: unsupported argument types".to_string()),
+            }
         },
-        "round" => match args.get(0) {
-            Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.round())),
-            _ => Err("round requires a number".to_string()),
+        "round" => {
+            if args.is_empty() { return Err("round requires at least 1 argument".to_string()); }
+            let num = &args[0];
+            let div = args.get(1);
+            match (num, div) {
+                (EvalResult::Float(n), None) => {
+                    let q = n.round();
+                    let r = n - q;
+                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q as i64), EvalResult::Float(r)]))
+                }
+                (EvalResult::Fixnum(n), None) => {
+                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(*n), EvalResult::Fixnum(0)]))
+                }
+                (EvalResult::Fixnum(n), Some(EvalResult::Fixnum(d))) if *d != 0 => {
+                    // Round to nearest, ties to even
+                    let q = (*n as f64 / *d as f64).round() as i64;
+                    let r = n - q * d;
+                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q), EvalResult::Fixnum(r)]))
+                }
+                _ => Err("round: unsupported argument types".to_string()),
+            }
         },
 
         // Integer operations
@@ -281,48 +380,192 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             Ok(EvalResult::Float(min_val))
         }
 
-        "expt" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Float(base)), Some(EvalResult::Float(power))) => {
-                Ok(EvalResult::Float(base.powf(*power)))
+        "expt" => {
+            if args.len() != 2 {
+                return Err("expt requires 2 arguments".to_string());
             }
-            (Some(EvalResult::Fixnum(base)), Some(EvalResult::Fixnum(power))) => {
-                if *power >= 0 {
-                    use malachite::num::arithmetic::traits::Pow;
-                    let result = Integer::from(*base).pow(*power as u64);
-                    // Check if result fits in i64, otherwise return Bignum
-                    if i64::convertible_from(&result) {
-                        Ok(EvalResult::Fixnum(i64::exact_from(&result)))
-                    } else {
-                        Ok(EvalResult::Bignum(result))
+            let base = &args[0];
+            let power = &args[1];
+            let has_complex = matches!(base, EvalResult::Complex(_, _)) || matches!(power, EvalResult::Complex(_, _));
+            let has_float = matches!(base, EvalResult::Float(_)) || matches!(power, EvalResult::Float(_));
+
+            if has_complex {
+                // Complex exponentiation: base^power using e^(power * ln(base))
+                let (br, bi) = match base {
+                    EvalResult::Complex(r, i) => (*r, *i),
+                    EvalResult::Fixnum(n) => (*n as f64, 0.0),
+                    EvalResult::Float(f) => (*f, 0.0),
+                    _ => return Err("expt: not a number".to_string()),
+                };
+                let (pr, pi) = match power {
+                    EvalResult::Complex(r, i) => (*r, *i),
+                    EvalResult::Fixnum(n) => (*n as f64, 0.0),
+                    EvalResult::Float(f) => (*f, 0.0),
+                    _ => return Err("expt: not a number".to_string()),
+                };
+                // If power is an integer, use repeated multiplication for exactness
+                if pi == 0.0 && pr == pr.floor() && pr.abs() < 1000.0 {
+                    let n = pr as i64;
+                    if n >= 0 {
+                        let mut re = 1.0_f64;
+                        let mut im = 0.0_f64;
+                        for _ in 0..n {
+                            let new_re = re * br - im * bi;
+                            let new_im = re * bi + im * br;
+                            re = new_re;
+                            im = new_im;
+                        }
+                        // Canonicalize: if imaginary is ~0 and base was exact, return integer
+                        if im.abs() < 1e-10 && bi == 0.0 {
+                            let r = re.round();
+                            if (re - r).abs() < 1e-10 {
+                                return Ok(EvalResult::Fixnum(r as i64));
+                            }
+                        }
+                        if im.abs() < 1e-10 && !has_float {
+                            im = 0.0;
+                            let r = re.round();
+                            if (re - r).abs() < 1e-10 {
+                                return Ok(EvalResult::Fixnum(r as i64));
+                            }
+                        }
+                        if im == 0.0 {
+                            return Ok(EvalResult::Float(re));
+                        }
+                        return Ok(EvalResult::Complex(re, im));
                     }
+                }
+                // General case: use polar form
+                let mag = (br * br + bi * bi).sqrt();
+                let angle = bi.atan2(br);
+                let ln_mag = mag.ln();
+                // ln(base) = ln_mag + angle*i
+                // power * ln(base) = (pr*ln_mag - pi*angle) + (pr*angle + pi*ln_mag)*i
+                let exp_re = pr * ln_mag - pi * angle;
+                let exp_im = pr * angle + pi * ln_mag;
+                let result_mag = exp_re.exp();
+                let re = result_mag * exp_im.cos();
+                let im = result_mag * exp_im.sin();
+                if im.abs() < 1e-10 {
+                    Ok(EvalResult::Float(re))
                 } else {
-                    Ok(EvalResult::Float((*base as f64).powf(*power as f64)))
+                    Ok(EvalResult::Complex(re, im))
+                }
+            } else {
+                match (base, power) {
+                    (EvalResult::Float(b), EvalResult::Float(p)) => {
+                        Ok(EvalResult::Float(b.powf(*p)))
+                    }
+                    (EvalResult::Fixnum(b), EvalResult::Fixnum(p)) => {
+                        if *p >= 0 {
+                            use malachite::num::arithmetic::traits::Pow;
+                            let result = Integer::from(*b).pow(*p as u64);
+                            if i64::convertible_from(&result) {
+                                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+                            } else {
+                                Ok(EvalResult::Bignum(result))
+                            }
+                        } else {
+                            // Negative integer exponent: return ratio
+                            use malachite::Rational;
+                            use malachite::num::arithmetic::traits::Pow;
+                            let base_r = Rational::from(*b);
+                            let result = Rational::from(1) / Rational::from(Integer::from(*b).pow((-*p) as u64));
+                            if result.denominator_ref() == &1u32 {
+                                let n = Integer::from(result.numerator_ref().clone());
+                                if i64::convertible_from(&n) {
+                                    Ok(EvalResult::Fixnum(i64::exact_from(&n)))
+                                } else {
+                                    Ok(EvalResult::Bignum(n))
+                                }
+                            } else {
+                                Ok(EvalResult::Ratio(result))
+                            }
+                        }
+                    }
+                    (EvalResult::Fixnum(b), EvalResult::Float(p)) => {
+                        Ok(EvalResult::Float((*b as f64).powf(*p)))
+                    }
+                    (EvalResult::Float(b), EvalResult::Fixnum(p)) => {
+                        Ok(EvalResult::Float(b.powf(*p as f64)))
+                    }
+                    (EvalResult::Ratio(b), EvalResult::Fixnum(p)) => {
+                        use malachite::Rational;
+                        use malachite::num::arithmetic::traits::Pow;
+                        if *p >= 0 {
+                            let num = Integer::from(b.numerator_ref().clone()).pow(*p as u64);
+                            let den = Integer::from(b.denominator_ref().clone()).pow(*p as u64);
+                            let result = Rational::from(num) / Rational::from(den);
+                            if result.denominator_ref() == &1u32 {
+                                let n = Integer::from(result.numerator_ref().clone());
+                                if i64::convertible_from(&n) {
+                                    Ok(EvalResult::Fixnum(i64::exact_from(&n)))
+                                } else {
+                                    Ok(EvalResult::Bignum(n))
+                                }
+                            } else {
+                                Ok(EvalResult::Ratio(result))
+                            }
+                        } else {
+                            // Negative: flip and raise to positive power
+                            let num = Integer::from(b.denominator_ref().clone()).pow((-*p) as u64);
+                            let den = Integer::from(b.numerator_ref().clone()).pow((-*p) as u64);
+                            let result = Rational::from(num) / Rational::from(den);
+                            Ok(EvalResult::Ratio(result))
+                        }
+                    }
+                    _ => {
+                        // Fallback: convert to f64
+                        let b = match base {
+                            EvalResult::Fixnum(n) => *n as f64,
+                            EvalResult::Float(f) => *f,
+                            EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
+                            EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+                            _ => return Err("expt: not a number".to_string()),
+                        };
+                        let p = match power {
+                            EvalResult::Fixnum(n) => *n as f64,
+                            EvalResult::Float(f) => *f,
+                            EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
+                            EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+                            _ => return Err("expt: not a number".to_string()),
+                        };
+                        Ok(EvalResult::Float(b.powf(p)))
+                    }
                 }
             }
-            _ => Err("expt requires two numbers".to_string()),
-        },
+        }
 
         "gcd" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             if args.is_empty() {
                 return Ok(EvalResult::Fixnum(0));
             }
-            fn gcd_two(a: i64, b: i64) -> i64 {
-                if b == 0 { a.abs() } else { gcd_two(b, a % b) }
+            fn gcd_big(a: &Integer, b: &Integer) -> Integer {
+                use malachite::num::arithmetic::traits::Gcd;
+                let au = a.unsigned_abs_ref().clone();
+                let bu = b.unsigned_abs_ref().clone();
+                Integer::from(au.gcd(bu))
             }
-            let mut result = match args[0] {
-                EvalResult::Fixnum(i) => i,
-                EvalResult::Float(n) => n as i64,
+            let mut result = match &args[0] {
+                EvalResult::Fixnum(i) => Integer::from(*i),
+                EvalResult::Bignum(b) => b.clone(),
                 _ => return Err("gcd requires integers".to_string()),
             };
             for arg in &args[1..] {
                 let val = match arg {
-                    EvalResult::Fixnum(i) => *i,
-                    EvalResult::Float(n) => *n as i64,
+                    EvalResult::Fixnum(i) => Integer::from(*i),
+                    EvalResult::Bignum(b) => b.clone(),
                     _ => return Err("gcd requires integers".to_string()),
                 };
-                result = gcd_two(result, val);
+                result = gcd_big(&result, &val);
             }
-            Ok(EvalResult::Fixnum(result))
+            if i64::convertible_from(&result) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+            } else {
+                Ok(EvalResult::Bignum(result))
+            }
         }
 
         "lcm" => {
@@ -363,6 +606,20 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             }
             Some(EvalResult::Fixnum(n)) => {
                 Ok(EvalResult::Fixnum(if *n > 0 { 1 } else if *n < 0 { -1 } else { 0 }))
+            }
+            Some(EvalResult::Bignum(b)) => {
+                Ok(EvalResult::Fixnum(if *b > malachite::Integer::from(0) { 1 } else if *b < malachite::Integer::from(0) { -1 } else { 0 }))
+            }
+            Some(EvalResult::Ratio(r)) => {
+                Ok(EvalResult::Fixnum(if *r > malachite::Rational::from(0) { 1 } else if *r < malachite::Rational::from(0) { -1 } else { 0 }))
+            }
+            Some(EvalResult::Complex(re, im)) => {
+                let mag = (re * re + im * im).sqrt();
+                if mag == 0.0 {
+                    Ok(EvalResult::Complex(0.0, 0.0))
+                } else {
+                    Ok(EvalResult::Complex(re / mag, im / mag))
+                }
             }
             _ => Err("signum requires a number".to_string()),
         },
@@ -495,8 +752,14 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "integer-length" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => {
-                let bits = if *n == 0 { 0 } else { 64 - n.abs().leading_zeros() as i64 };
+                let bits = if *n == 0 { 0 } else if *n == i64::MIN { 63 } else { 64 - n.abs().leading_zeros() as i64 };
                 Ok(EvalResult::Fixnum(bits))
+            }
+            Some(EvalResult::Bignum(b)) => {
+                use malachite::num::logic::traits::SignificantBits;
+                let abs_b = b.unsigned_abs_ref();
+                let bits = abs_b.significant_bits();
+                Ok(EvalResult::Fixnum(bits as i64))
             }
             _ => Err("integer-length requires an integer".to_string()),
         },
@@ -520,6 +783,24 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 let r = (hasher.finish() as f64 / u64::MAX as f64) * n;
                 Ok(EvalResult::Float(r))
             }
+            Some(EvalResult::Bignum(b)) if *b > malachite::Integer::from(0) => {
+                // For bignum, generate a random number in range [0, b)
+                use std::collections::hash_map::RandomState;
+                use std::hash::{BuildHasher, Hash, Hasher};
+                use malachite::Integer;
+                use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+                let s = RandomState::new();
+                let mut hasher = s.build_hasher();
+                std::time::SystemTime::now().hash(&mut hasher);
+                let hash_val = hasher.finish();
+                // Simple modular reduction - not cryptographically uniform but sufficient
+                let r = Integer::from(hash_val) % b;
+                if i64::convertible_from(&r) {
+                    Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                } else {
+                    Ok(EvalResult::Bignum(r))
+                }
+            }
             _ => Err("random requires a positive number".to_string()),
         },
 
@@ -527,90 +808,169 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         // Bitwise logic operations
         "logand" => {
-            let mut result = -1_i64;
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            let mut result = Integer::from(-1);
             for arg in args {
                 match arg {
-                    EvalResult::Fixnum(n) => result &= n,
+                    EvalResult::Fixnum(n) => result &= Integer::from(*n),
+                    EvalResult::Bignum(b) => result &= b,
                     _ => return Err("logand requires integers".to_string()),
                 }
             }
-            Ok(EvalResult::Fixnum(result))
+            if i64::convertible_from(&result) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+            } else {
+                Ok(EvalResult::Bignum(result))
+            }
         },
 
         "logior" => {
-            let mut result = 0_i64;
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            let mut result = Integer::from(0);
             for arg in args {
                 match arg {
-                    EvalResult::Fixnum(n) => result |= n,
+                    EvalResult::Fixnum(n) => result |= Integer::from(*n),
+                    EvalResult::Bignum(b) => result |= b,
                     _ => return Err("logior requires integers".to_string()),
                 }
             }
-            Ok(EvalResult::Fixnum(result))
+            if i64::convertible_from(&result) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+            } else {
+                Ok(EvalResult::Bignum(result))
+            }
         },
 
         "logxor" => {
-            let mut result = 0_i64;
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            let mut result = Integer::from(0);
             for arg in args {
                 match arg {
-                    EvalResult::Fixnum(n) => result ^= n,
+                    EvalResult::Fixnum(n) => result ^= Integer::from(*n),
+                    EvalResult::Bignum(b) => result ^= b,
                     _ => return Err("logxor requires integers".to_string()),
                 }
             }
-            Ok(EvalResult::Fixnum(result))
-        },
-
-        "lognot" => match args.get(0) {
-            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(!n)),
-            _ => Err("lognot requires an integer".to_string()),
-        },
-
-        "logandc1" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(!a & b))
+            if i64::convertible_from(&result) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+            } else {
+                Ok(EvalResult::Bignum(result))
             }
-            _ => Err("logandc1 requires two integers".to_string()),
         },
 
-        "logandc2" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(a & !b))
+        "lognot" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            match args.get(0) {
+                Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(!n)),
+                Some(EvalResult::Bignum(b)) => {
+                    let r = !b;
+                    if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) }
+                }
+                _ => Err("lognot requires an integer".to_string()),
             }
-            _ => Err("logandc2 requires two integers".to_string()),
         },
 
-        "logorc1" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(!a | b))
+        "logandc1" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            fn to_int(v: &EvalResult) -> Option<Integer> {
+                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
             }
-            _ => Err("logorc1 requires two integers".to_string()),
+            match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
+                (Some(a), Some(b)) => { let r = !a & b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                _ => Err("logandc1 requires two integers".to_string()),
+            }
         },
 
-        "logorc2" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(a | !b))
+        "logandc2" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            fn to_int(v: &EvalResult) -> Option<Integer> {
+                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
             }
-            _ => Err("logorc2 requires two integers".to_string()),
+            match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
+                (Some(a), Some(b)) => { let r = a & !b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                _ => Err("logandc2 requires two integers".to_string()),
+            }
         },
 
-        "lognand" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(!(a & b)))
+        "logorc1" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            fn to_int(v: &EvalResult) -> Option<Integer> {
+                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
             }
-            _ => Err("lognand requires two integers".to_string()),
+            match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
+                (Some(a), Some(b)) => { let r = !a | b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                _ => Err("logorc1 requires two integers".to_string()),
+            }
         },
 
-        "lognor" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(!(a | b)))
+        "logorc2" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            fn to_int(v: &EvalResult) -> Option<Integer> {
+                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
             }
-            _ => Err("lognor requires two integers".to_string()),
+            match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
+                (Some(a), Some(b)) => { let r = a | !b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                _ => Err("logorc2 requires two integers".to_string()),
+            }
         },
 
-        "logeqv" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Fixnum(a)), Some(EvalResult::Fixnum(b))) => {
-                Ok(EvalResult::Fixnum(!(a ^ b)))
+        "lognand" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            fn to_int(v: &EvalResult) -> Option<Integer> {
+                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
             }
-            _ => Err("logeqv requires two integers".to_string()),
+            match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
+                (Some(a), Some(b)) => { let r = !(a & b); if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                _ => Err("lognand requires two integers".to_string()),
+            }
+        },
+
+        "lognor" => {
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            fn to_int(v: &EvalResult) -> Option<Integer> {
+                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+            }
+            match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
+                (Some(a), Some(b)) => { let r = !(a | b); if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                _ => Err("lognor requires two integers".to_string()),
+            }
+        },
+
+        "logeqv" => {
+            // (logeqv) = -1, (logeqv x) = x, (logeqv a b ...) = !xor of all
+            use malachite::Integer;
+            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
+            if args.is_empty() {
+                return Ok(EvalResult::Fixnum(-1));
+            }
+            let mut result = match &args[0] {
+                EvalResult::Fixnum(n) => Integer::from(*n),
+                EvalResult::Bignum(b) => b.clone(),
+                _ => return Err("logeqv requires integers".to_string()),
+            };
+            for arg in &args[1..] {
+                let val = match arg {
+                    EvalResult::Fixnum(n) => Integer::from(*n),
+                    EvalResult::Bignum(b) => b.clone(),
+                    _ => return Err("logeqv requires integers".to_string()),
+                };
+                result = !(&result ^ &val);
+            }
+            if i64::convertible_from(&result) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+            } else {
+                Ok(EvalResult::Bignum(result))
+            }
         },
 
         "logcount" => match args.get(0) {

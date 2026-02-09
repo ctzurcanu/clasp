@@ -1758,13 +1758,25 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
 }
 
 fn normalize_path_string(raw: &str) -> String {
-    if raw.starts_with("#P\"") && raw.ends_with('"') && raw.len() >= 4 {
-        return raw[3..raw.len() - 1].to_string();
+    let mut normalized = if raw.starts_with("#P\"") && raw.ends_with('"') && raw.len() >= 4 {
+        raw[3..raw.len() - 1].to_string()
+    } else if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+        raw[1..raw.len() - 1].to_string()
+    } else {
+        raw.to_string()
+    };
+
+    if normalized.starts_with("sys:") {
+        let mut rest = &normalized[4..];
+        if let Some(stripped) = rest.strip_prefix("src;lisp;") {
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("src/lisp/") {
+            rest = stripped;
+        }
+        normalized = format!("./{}", rest);
     }
-    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
-        return raw[1..raw.len() - 1].to_string();
-    }
-    raw.to_string()
+
+    normalized.replace(';', "/")
 }
 
 fn extract_pathname_string(obj: rlasp_runtime::LispObject) -> Option<String> {

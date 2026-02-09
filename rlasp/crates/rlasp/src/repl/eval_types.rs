@@ -13,37 +13,150 @@ thread_local! {
     pub(super) static GENSYM_COUNTER: RefCell<u64> = RefCell::new(0);
     /// Class registry: maps class name -> list of superclass names
     pub static CLASS_HIERARCHY: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+    /// Global dynamic variable store for special variables (*earmuffs*)
+    pub(super) static DYNAMIC_VARS: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
+}
+
+/// Check if a variable name looks like a CL special/dynamic variable
+pub fn is_special_variable(name: &str) -> bool {
+    name.len() >= 3 && name.starts_with('*') && name.ends_with('*') && name != "*"
+}
+
+/// Get a dynamic variable value from the global store
+pub fn get_dynamic_var(name: &str) -> Option<EvalResult> {
+    DYNAMIC_VARS.with(|dv| dv.borrow().get(name).cloned())
+}
+
+/// Set a dynamic variable value in the global store
+pub fn set_dynamic_var(name: &str, value: EvalResult) {
+    DYNAMIC_VARS.with(|dv| {
+        dv.borrow_mut().insert(name.to_string(), value);
+    });
 }
 
 /// Register a class with its superclasses
 pub fn register_class_hierarchy(class_name: &str, superclasses: Vec<String>) {
+    let class_upper_full = class_name.to_uppercase();
+    let class_upper = class_name.rsplit(':').next().unwrap_or(class_name).to_uppercase();
+    let normalized_supers: Vec<String> = superclasses
+        .iter()
+        .map(|s| s.rsplit(':').next().unwrap_or(s).to_uppercase())
+        .collect();
+
     CLASS_HIERARCHY.with(|h| {
-        h.borrow_mut().insert(class_name.to_uppercase(), superclasses);
+        let mut h = h.borrow_mut();
+        h.insert(class_upper.clone(), normalized_supers.clone());
+        if class_upper_full != class_upper {
+            h.insert(class_upper_full, normalized_supers);
+        }
     });
 }
 
 /// Check if a class is a subclass of another (including itself)
 pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
-    let class_upper = class_name.to_uppercase();
-    let super_upper = superclass_name.to_uppercase();
+    let class_upper_full = class_name.to_uppercase();
+    let class_upper = class_name.rsplit(':').next().unwrap_or(class_name).to_uppercase();
+    let super_upper = superclass_name.rsplit(':').next().unwrap_or(superclass_name).to_uppercase();
 
     // T matches everything
     if super_upper == "T" {
         return true;
     }
 
+    // Built-in type relationships needed for CL method dispatch.
+    // In CL, NIL is both NULL and a SYMBOL/LIST/SEQUENCE/BOOLEAN.
+    if class_upper == "NULL" {
+        if matches!(
+            super_upper.as_str(),
+            "SYMBOL" | "LIST" | "SEQUENCE" | "BOOLEAN" | "ATOM"
+        ) {
+            return true;
+        }
+    }
+
+    // CONS is a LIST and a SEQUENCE in CL.
+    if class_upper == "CONS" {
+        if matches!(super_upper.as_str(), "LIST" | "SEQUENCE") {
+            return true;
+        }
+    }
+
+    // Numeric tower relationships.
+    if class_upper == "FIXNUM" {
+        if matches!(super_upper.as_str(), "INTEGER" | "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if class_upper == "BIGNUM" {
+        if matches!(super_upper.as_str(), "INTEGER" | "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if class_upper == "INTEGER" {
+        if matches!(super_upper.as_str(), "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if class_upper == "RATIO" {
+        if matches!(super_upper.as_str(), "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if class_upper == "RATIONAL" {
+        if matches!(super_upper.as_str(), "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if matches!(class_upper.as_str(), "FLOAT" | "SINGLE-FLOAT" | "DOUBLE-FLOAT" | "SHORT-FLOAT" | "LONG-FLOAT") {
+        if matches!(super_upper.as_str(), "FLOAT" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if class_upper == "COMPLEX" {
+        if super_upper == "NUMBER" {
+            return true;
+        }
+    }
+
+    // Common sequence/container relationships.
+    if class_upper == "STRING" {
+        if matches!(super_upper.as_str(), "VECTOR" | "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if class_upper == "SIMPLE-STRING" {
+        if matches!(super_upper.as_str(), "STRING" | "VECTOR" | "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if class_upper == "VECTOR" {
+        if matches!(super_upper.as_str(), "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if class_upper == "SIMPLE-VECTOR" {
+        if matches!(super_upper.as_str(), "VECTOR" | "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if class_upper == "KEYWORD" && super_upper == "SYMBOL" {
+        return true;
+    }
+
     // Same class
-    if class_upper == super_upper {
+    if class_upper == super_upper || class_upper_full == super_upper {
         return true;
     }
 
     // Check hierarchy
     CLASS_HIERARCHY.with(|h| {
         let h = h.borrow();
-        if let Some(supers) = h.get(&class_upper) {
-            for s in supers {
-                if is_subclass(s, &super_upper) {
-                    return true;
+        for key in [&class_upper, &class_upper_full] {
+            if let Some(supers) = h.get(key) {
+                for s in supers {
+                    if is_subclass(s, &super_upper) {
+                        return true;
+                    }
                 }
             }
         }

@@ -534,7 +534,7 @@ fn method_matches(specializers: &[String], arg_classes: &[String]) -> bool {
     }
 
     for (spec, arg_class) in specializers.iter().zip(arg_classes.iter()) {
-        if spec != "T" && !spec.eq_ignore_ascii_case(arg_class) {
+        if !spec.eq_ignore_ascii_case("T") && !is_class_subtype(arg_class, spec) {
             return false;
         }
     }
@@ -1274,24 +1274,104 @@ fn get_class_of_object(obj: LispObject) -> String {
 
 /// Check if a class is a subtype of another (simple parent check)
 fn is_class_subtype(child_class: &str, parent_class: &str) -> bool {
-    if child_class.eq_ignore_ascii_case(parent_class) {
+    fn normalize(name: &str) -> String {
+        name.rsplit(':').next().unwrap_or(name).to_uppercase()
+    }
+
+    let child = normalize(child_class);
+    let parent = normalize(parent_class);
+
+    if child == parent {
         return true;
     }
-    if parent_class.eq_ignore_ascii_case("T") {
+    if parent == "T" {
+        return true;
+    }
+
+    // Built-in subtype relationships.
+    if child == "NULL" {
+        if matches!(parent.as_str(), "SYMBOL" | "LIST" | "SEQUENCE" | "BOOLEAN" | "ATOM") {
+            return true;
+        }
+    }
+    if child == "CONS" {
+        if matches!(parent.as_str(), "LIST" | "SEQUENCE") {
+            return true;
+        }
+    }
+    if child == "FIXNUM" {
+        if matches!(parent.as_str(), "INTEGER" | "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if child == "BIGNUM" {
+        if matches!(parent.as_str(), "INTEGER" | "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if child == "INTEGER" {
+        if matches!(parent.as_str(), "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if child == "RATIO" {
+        if matches!(parent.as_str(), "RATIONAL" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if child == "RATIONAL" {
+        if matches!(parent.as_str(), "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if matches!(child.as_str(), "FLOAT" | "SINGLE-FLOAT" | "DOUBLE-FLOAT" | "SHORT-FLOAT" | "LONG-FLOAT") {
+        if matches!(parent.as_str(), "FLOAT" | "REAL" | "NUMBER") {
+            return true;
+        }
+    }
+    if child == "COMPLEX" && parent == "NUMBER" {
+        return true;
+    }
+    if child == "STRING" {
+        if matches!(parent.as_str(), "VECTOR" | "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if child == "SIMPLE-STRING" {
+        if matches!(parent.as_str(), "STRING" | "VECTOR" | "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if child == "VECTOR" {
+        if matches!(parent.as_str(), "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if child == "SIMPLE-VECTOR" {
+        if matches!(parent.as_str(), "VECTOR" | "SEQUENCE" | "ARRAY") {
+            return true;
+        }
+    }
+    if child == "KEYWORD" && parent == "SYMBOL" {
         return true;
     }
 
     // Check class hierarchy
-    let class_registry = get_class_registry().lock().unwrap();
-    if let Some(&class_ptr) = class_registry.get(&child_class.to_uppercase()) {
-        let class = unsafe { &*class_ptr };
-        for super_name in class.direct_superclasses() {
-            if super_name.eq_ignore_ascii_case(parent_class) {
+    let superclasses: Option<Vec<String>> = {
+        let class_registry = get_class_registry().lock().unwrap();
+        if let Some(&class_ptr) = class_registry.get(&child) {
+            let class = unsafe { &*class_ptr };
+            Some(class.direct_superclasses().iter().map(|s| s.to_string()).collect())
+        } else {
+            None
+        }
+    };
+
+    if let Some(supers) = superclasses {
+        for super_name in supers {
+            if is_class_subtype(&super_name, &parent) {
                 return true;
             }
-            // Recursively check superclass
-            drop(class_registry);
-            return is_class_subtype(super_name, parent_class);
         }
     }
 

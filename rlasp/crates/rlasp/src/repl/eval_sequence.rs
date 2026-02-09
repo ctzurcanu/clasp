@@ -55,11 +55,31 @@ pub fn call_sequence_builtin(
         "copy-seq" => {
             match args.get(0) {
                 Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
-                Some(EvalResult::Cons(car, cdr)) => {
-                    Ok(EvalResult::Cons(
-                        Rc::new(RefCell::new(car.borrow().clone())),
-                        Rc::new(RefCell::new(cdr.borrow().clone()))
-                    ))
+                Some(EvalResult::Array(arr)) => {
+                    Ok(EvalResult::Array(Rc::new(RefCell::new(arr.borrow().clone()))))
+                }
+                Some(EvalResult::Cons(_, _)) => {
+                    let mut items = Vec::new();
+                    let mut current = args[0].clone();
+                    loop {
+                        match current {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(car, cdr) => {
+                                items.push(car.borrow().clone());
+                                current = cdr.borrow().clone();
+                            }
+                            _ => return Err("copy-seq requires a proper list".to_string()),
+                        }
+                    }
+
+                    let mut result = EvalResult::Nil;
+                    for item in items.into_iter().rev() {
+                        result = EvalResult::Cons(
+                            Rc::new(RefCell::new(item)),
+                            Rc::new(RefCell::new(result)),
+                        );
+                    }
+                    Ok(result)
                 }
                 Some(EvalResult::Nil) => Ok(EvalResult::Nil),
                 _ => Err("copy-seq requires a sequence".to_string()),
@@ -114,13 +134,133 @@ pub fn call_sequence_builtin(
 
         "fill" => {
             // (fill sequence item &key start end)
-            // For simplicity, fill entire sequence
-            match (args.get(0), args.get(1)) {
-                (Some(EvalResult::String(_)), Some(EvalResult::Character(ch))) => {
-                    // Can't really modify string in place, return error
-                    Err("fill on string not supported (strings are immutable)".to_string())
+            if args.len() < 2 {
+                return Err("fill requires at least sequence and item".to_string());
+            }
+
+            let sequence = args[0].clone();
+            let item = args[1].clone();
+
+            let normalize_key = |raw: &str| -> String {
+                raw.rsplit(':')
+                    .next()
+                    .unwrap_or(raw)
+                    .trim_start_matches(':')
+                    .to_ascii_lowercase()
+            };
+            let parse_index = |val: &EvalResult, key: &str| -> Result<usize, String> {
+                match val {
+                    EvalResult::Fixnum(n) if *n >= 0 => Ok(*n as usize),
+                    EvalResult::Float(f) if *f >= 0.0 => Ok(*f as usize),
+                    _ => Err(format!("fill: {} must be a non-negative integer", key)),
                 }
-                _ => Err("fill not fully implemented".to_string()),
+            };
+
+            let mut start = 0usize;
+            let mut end: Option<usize> = None;
+            let mut i = 2usize;
+            while i + 1 < args.len() {
+                if let EvalResult::Symbol(key) = &args[i] {
+                    let key = normalize_key(key);
+                    match key.as_str() {
+                        "start" => start = parse_index(&args[i + 1], "start")?,
+                        "end" => end = Some(parse_index(&args[i + 1], "end")?),
+                        _ => {}
+                    }
+                }
+                i += 2;
+            }
+
+            match sequence {
+                EvalResult::String(mut s) => {
+                    let mut chars: Vec<char> = s.chars().collect();
+                    let len = chars.len();
+                    let end_idx = end.unwrap_or(len);
+                    if start > len || end_idx > len {
+                        return Err("fill: start/end out of bounds".to_string());
+                    }
+                    if start > end_idx {
+                        return Err("fill: start must be <= end".to_string());
+                    }
+                    let fill_char = match item {
+                        EvalResult::Character(c) => c,
+                        EvalResult::String(ref one) if one.chars().count() == 1 => one.chars().next().unwrap(),
+                        _ => return Err("fill on string requires a character item".to_string()),
+                    };
+                    for idx in start..end_idx {
+                        chars[idx] = fill_char;
+                    }
+                    s = chars.into_iter().collect();
+                    Ok(EvalResult::String(s))
+                }
+                EvalResult::Array(arr) => {
+                    let mut cells = arr.borrow_mut();
+                    let len = cells.len();
+                    let end_idx = end.unwrap_or(len);
+                    if start > len || end_idx > len {
+                        return Err("fill: start/end out of bounds".to_string());
+                    }
+                    if start > end_idx {
+                        return Err("fill: start must be <= end".to_string());
+                    }
+
+                    let is_bit_vector = !cells.is_empty()
+                        && cells.iter().all(|elem| {
+                            matches!(elem,
+                                EvalResult::Fixnum(0) | EvalResult::Fixnum(1) |
+                                EvalResult::Bool(true) | EvalResult::Bool(false) |
+                                EvalResult::Boolean(true) | EvalResult::Boolean(false) |
+                                EvalResult::Nil)
+                        });
+
+                    let fill_item = if is_bit_vector {
+                        match item {
+                            EvalResult::Fixnum(0) => EvalResult::Fixnum(0),
+                            EvalResult::Fixnum(1) => EvalResult::Fixnum(1),
+                            EvalResult::Bool(b) | EvalResult::Boolean(b) => {
+                                EvalResult::Fixnum(if b { 1 } else { 0 })
+                            }
+                            EvalResult::Nil => EvalResult::Fixnum(0),
+                            _ => return Err("fill: bit-vector item must be 0 or 1".to_string()),
+                        }
+                    } else {
+                        item
+                    };
+
+                    for idx in start..end_idx {
+                        cells[idx] = fill_item.clone();
+                    }
+                    drop(cells);
+                    Ok(EvalResult::Array(arr))
+                }
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    let mut cells: Vec<Rc<RefCell<EvalResult>>> = Vec::new();
+                    let mut current = sequence.clone();
+                    loop {
+                        match current {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(car, cdr) => {
+                                cells.push(car.clone());
+                                current = cdr.borrow().clone();
+                            }
+                            _ => return Err("fill requires a proper list".to_string()),
+                        }
+                    }
+
+                    let len = cells.len();
+                    let end_idx = end.unwrap_or(len);
+                    if start > len || end_idx > len {
+                        return Err("fill: start/end out of bounds".to_string());
+                    }
+                    if start > end_idx {
+                        return Err("fill: start must be <= end".to_string());
+                    }
+                    for idx in start..end_idx {
+                        *cells[idx].borrow_mut() = item.clone();
+                    }
+                    Ok(sequence)
+                }
+                _ => Err("fill requires a sequence".to_string()),
             }
         }
 

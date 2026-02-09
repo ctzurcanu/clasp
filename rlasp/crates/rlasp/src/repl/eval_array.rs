@@ -39,16 +39,9 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
         }
 
         "vector" => {
-            // (vector &rest objects)
-            // For now, return a list
-            let mut result = EvalResult::Nil;
-            for arg in args.iter().rev() {
-                result = EvalResult::Cons(
-                    Rc::new(RefCell::new(arg.clone())),
-                    Rc::new(RefCell::new(result))
-                );
-            }
-            Ok(result)
+            // (vector &rest objects) - create a simple vector
+            let elements: Vec<EvalResult> = args.to_vec();
+            Ok(EvalResult::Array(Rc::new(RefCell::new(elements))))
         }
 
         // Array access
@@ -153,8 +146,8 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
         }
 
         "array-displacement" => {
-            // Return (displaced-to, displaced-index-offset) or (nil, 0)
-            Ok(EvalResult::Nil)
+            // Return (values nil 0) for non-displaced arrays
+            Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Fixnum(0)]))
         }
 
         // Aliases with different naming conventions (camelCase)

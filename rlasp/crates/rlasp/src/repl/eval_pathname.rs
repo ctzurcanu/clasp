@@ -382,15 +382,58 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             let path2 = args.get(1).and_then(extract_pathname_string);
             match (path1, path2) {
                 (Some(p1), Some(p2)) => {
-                    let p1_buf = PathBuf::from(&p1);
-                    let p2_buf = PathBuf::from(&p2);
-                    if p1_buf.is_absolute() {
-                        Ok(make_pathname_object_from_string(&p1))
-                    } else {
-                        Ok(make_pathname_object_from_string(
-                            &p2_buf.join(p1_buf).to_string_lossy().to_string(),
-                        ))
+                    let has_filename = |p: &str| -> bool {
+                        !p.is_empty()
+                            && !p.ends_with('/')
+                            && !p.ends_with(';')
+                            && !p.ends_with(':')
+                    };
+
+                    let split_dir_file = |p: &str| -> (String, String) {
+                        if p.is_empty() {
+                            return (String::new(), String::new());
+                        }
+
+                        if p.ends_with('/') || p.ends_with(';') || p.ends_with(':') {
+                            return (p.to_string(), String::new());
+                        }
+
+                        if let Some(idx) = p.rfind(|c| c == '/' || c == ';') {
+                            let (dir, file) = p.split_at(idx + 1);
+                            (dir.to_string(), file.to_string())
+                        } else {
+                            (String::new(), p.to_string())
+                        }
+                    };
+
+                    let is_absolute_like = |p: &str| -> bool { p.starts_with('/') };
+
+                    if is_absolute_like(&p1) {
+                        return Ok(make_pathname_object_from_string(&p1));
                     }
+
+                    let (p1_dir, p1_file) = split_dir_file(&p1);
+                    let (p2_dir, p2_file) = split_dir_file(&p2);
+
+                    let merged = if has_filename(&p1) {
+                        if p1_dir.is_empty() {
+                            format!("{}{}", p2_dir, p1_file)
+                        } else {
+                            p1
+                        }
+                    } else if !p1_dir.is_empty() {
+                        if p2_file.is_empty() {
+                            p1_dir
+                        } else {
+                            format!("{}{}", p1_dir, p2_file)
+                        }
+                    } else if p2.is_empty() {
+                        p1
+                    } else {
+                        p2
+                    };
+
+                    Ok(make_pathname_object_from_string(&merged))
                 }
                 (Some(p1), None) => Ok(make_pathname_object_from_string(&p1)),
                 _ => Err("merge-pathnames requires pathname arguments".to_string()),

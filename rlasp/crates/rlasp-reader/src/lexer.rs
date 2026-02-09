@@ -79,8 +79,8 @@ impl Lexer {
                 if self.current_char() == ':' {
                     self.advance();
                     Ok(Token::new(TokenKind::DoubleColon, start_pos))
-                } else if self.is_symbol_start(self.current_char()) {
-                    // :keyword
+                } else if self.is_symbol_start(self.current_char()) || self.current_char() == '\\' {
+                    // :keyword (possibly with escaped chars like :\.)
                     let name = self.read_symbol_name();
                     Ok(Token::new(TokenKind::Keyword(name), start_pos))
                 } else {
@@ -100,6 +100,32 @@ impl Lexer {
             }
             _ if ch.is_ascii_digit() || ch == '-' || ch == '+' => {
                 self.read_number_or_symbol(start_pos)
+            }
+            '\\' => {
+                // Single escape character — next char is part of symbol name (case-preserved)
+                self.advance();
+                let escaped = self.current_char();
+                if escaped == '\0' {
+                    return Err(ReaderError::UnexpectedEof);
+                }
+                self.advance();
+                let mut name = String::new();
+                name.push(escaped);
+                // Continue reading symbol chars
+                while self.pos < self.input.len() {
+                    let c = self.current_char();
+                    if c == '\\' {
+                        self.advance();
+                        let esc = self.current_char();
+                        if esc != '\0' { name.push(esc); self.advance(); }
+                    } else if self.is_constituent_char(c) {
+                        name.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                Ok(Token::new(TokenKind::Symbol(name), start_pos))
             }
             _ if self.is_symbol_start(ch) => {
                 let name = self.read_symbol_name();
@@ -298,7 +324,13 @@ impl Lexer {
             }
             '*' => {
                 self.advance();
-                Ok(Token::new(TokenKind::HashStar, start_pos))
+                // Consume raw bit payload directly so leading zeros are preserved.
+                let mut bits = String::new();
+                while matches!(self.current_char(), '0' | '1') {
+                    bits.push(self.current_char());
+                    self.advance();
+                }
+                Ok(Token::new(TokenKind::HashStar(bits), start_pos))
             }
             c if c.is_ascii_digit() => {
                 // Read all consecutive digits
@@ -507,7 +539,8 @@ impl Lexer {
         }
 
         // Handle named characters
-        let ch = match name.to_lowercase().as_str() {
+        let lower_name = name.to_lowercase();
+        let ch = match lower_name.as_str() {
             "newline" => '\n',
             "space" => ' ',
             "tab" => '\t',
@@ -523,7 +556,7 @@ impl Lexer {
             "esc" | "escape" => '\x1B',
             // For unsupported Unicode character names or long names, return a placeholder space
             _ if name.contains('_') || name.len() > 15 => ' ',
-            s if s.len() == 1 => s.chars().next().unwrap(),
+            _ if name.chars().count() == 1 => name.chars().next().unwrap(),
             _ => {
                 // For unrecognized names, return a space instead of erroring
                 // This allows more files to parse even if they use non-standard character names

@@ -132,6 +132,10 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                     }
                     Ok(result)
                 }
+                (Some(EvalResult::Bignum(_)), Some(_)) => {
+                    // Bignum index is always past the end of any list
+                    Ok(EvalResult::Nil)
+                }
                 _ => Err("nthcdr requires a non-negative integer and a list".to_string()),
             }
         }
@@ -305,6 +309,10 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                         }
                         _ => Ok(EvalResult::Nil),
                     }
+                }
+                (Some(_), Some(EvalResult::Bignum(_))) => {
+                    // Bignum count is always >= list length, return nil
+                    Ok(EvalResult::Nil)
                 }
                 _ => Err("nbutlast requires a list and optional count".to_string()),
             }

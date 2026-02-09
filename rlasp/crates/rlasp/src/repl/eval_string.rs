@@ -16,6 +16,22 @@ fn get_string_designator(arg: &EvalResult) -> Result<String, String> {
             }
         }
         EvalResult::Character(c) => Ok(c.to_string()),
+        EvalResult::Array(arr) => {
+            // rlasp currently represents many character vectors as Array.
+            // Treat contiguous character elements as a string; stop at NIL.
+            let mut out = String::new();
+            for elem in arr.borrow().iter() {
+                match elem {
+                    EvalResult::Character(c) => out.push(*c),
+                    EvalResult::String(s) if s.chars().count() == 1 => out.push(s.chars().next().unwrap()),
+                    EvalResult::Nil => break,
+                    _ => {
+                        return Err(format!("Expected a string designator, got {:?}", arg));
+                    }
+                }
+            }
+            Ok(out)
+        }
         _ => Err(format!("Expected a string designator, got {:?}", arg)),
     }
 }
@@ -75,9 +91,9 @@ pub fn register_string_builtins(env: &mut HashMap<String, EvalResult>) {
 
 pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
-        "stringp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::String(_))))),
+        "stringp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::String(_) | EvalResult::Array(_))))),
 
-        "simple-string-p" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::String(_))))),
+        "simple-string-p" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::String(_) | EvalResult::Array(_))))),
 
         "make-string" => match args.get(0) {
             Some(EvalResult::Float(n)) if *n >= 0.0 => {
@@ -92,104 +108,154 @@ pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult
         },
 
         "string" => match args.get(0) {
-            Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
-            Some(EvalResult::Symbol(s)) => {
-                // For keywords (start with :), strip the colon and uppercase
-                let name = if s.starts_with(':') {
-                    s[1..].to_uppercase()
-                } else {
-                    s.to_uppercase()
+            Some(v) => Ok(EvalResult::String(get_string_designator(v)?)),
+            None => Err("string requires a string designator".to_string()),
+        },
+
+        // String comparison - CL spec compliant
+        "string=" | "string/=" | "string<" | "string>" | "string<=" | "string>=" |
+        "string-equal" | "string-not-equal" | "string-lessp" | "string-greaterp" |
+        "string-not-greaterp" | "string-not-lessp" => {
+            if args.len() < 2 {
+                return Err(format!("{} requires at least two arguments", name));
+            }
+            let a_str = get_string_designator(&args[0])?;
+            let b_str = get_string_designator(&args[1])?;
+
+            // Parse keyword args: :start1 :end1 :start2 :end2
+            let mut start1 = 0usize;
+            let mut end1 = a_str.len();
+            let mut start2 = 0usize;
+            let mut end2 = b_str.len();
+            let mut i = 2;
+            while i + 1 < args.len() {
+                let key = match &args[i] {
+                    EvalResult::Symbol(s) => s.to_uppercase(),
+                    _ => { i += 1; continue; }
                 };
-                Ok(EvalResult::String(name))
-            },
-            Some(EvalResult::Nil) => Ok(EvalResult::String("NIL".to_string())),
-            Some(EvalResult::Character(c)) => Ok(EvalResult::String(c.to_string())),
-            _ => Err("string requires a string designator".to_string()),
-        },
+                let val = match &args[i + 1] {
+                    EvalResult::Fixnum(n) => *n as usize,
+                    EvalResult::Nil => { i += 2; continue; }
+                    _ => { i += 2; continue; }
+                };
+                match key.as_str() {
+                    ":START1" => start1 = val,
+                    ":END1" => end1 = val,
+                    ":START2" => start2 = val,
+                    ":END2" => end2 = val,
+                    _ => {}
+                }
+                i += 2;
+            }
 
-        // String comparison
-        "string=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a == b))
-            },
-            _ => Err("string= requires two strings".to_string()),
-        },
+            let case_sensitive = matches!(name, "string=" | "string/=" | "string<" | "string>" | "string<=" | "string>=");
+            let a_chars: Vec<char> = a_str.chars().collect();
+            let b_chars: Vec<char> = b_str.chars().collect();
+            let end1 = end1.min(a_chars.len());
+            let end2 = end2.min(b_chars.len());
+            let start1 = start1.min(end1);
+            let start2 = start2.min(end2);
+            let a_sub: Vec<char> = a_chars[start1..end1].to_vec();
+            let b_sub: Vec<char> = b_chars[start2..end2].to_vec();
 
-        "string/=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a != b))
-            },
-            _ => Err("string/= requires two strings".to_string()),
-        },
+            // Find first mismatch position
+            let mut mismatch_pos: Option<usize> = None;
+            for k in 0..a_sub.len().min(b_sub.len()) {
+                let (ca, cb) = if case_sensitive {
+                    (a_sub[k], b_sub[k])
+                } else {
+                    (a_sub[k].to_ascii_lowercase(), b_sub[k].to_ascii_lowercase())
+                };
+                if ca != cb {
+                    mismatch_pos = Some(k);
+                    break;
+                }
+            }
+            if mismatch_pos.is_none() && a_sub.len() != b_sub.len() {
+                mismatch_pos = Some(a_sub.len().min(b_sub.len()));
+            }
 
-        "string<" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a < b))
-            },
-            _ => Err("string< requires two strings".to_string()),
-        },
-
-        "string>" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a > b))
-            },
-            _ => Err("string> requires two strings".to_string()),
-        },
-
-        "string<=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a <= b))
-            },
-            _ => Err("string<= requires two strings".to_string()),
-        },
-
-        "string>=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a >= b))
-            },
-            _ => Err("string>= requires two strings".to_string()),
-        },
-
-        "string-equal" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a.to_lowercase() == b.to_lowercase()))
-            },
-            _ => Err("string-equal requires two strings".to_string()),
-        },
-
-        "string-not-equal" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a.to_lowercase() != b.to_lowercase()))
-            },
-            _ => Err("string-not-equal requires two strings".to_string()),
-        },
-
-        "string-lessp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a.to_lowercase() < b.to_lowercase()))
-            },
-            _ => Err("string-lessp requires two strings".to_string()),
-        },
-
-        "string-greaterp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a.to_lowercase() > b.to_lowercase()))
-            },
-            _ => Err("string-greaterp requires two strings".to_string()),
-        },
-
-        "string-not-greaterp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a.to_lowercase() <= b.to_lowercase()))
-            },
-            _ => Err("string-not-greaterp requires two strings".to_string()),
-        },
-
-        "string-not-lessp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::String(a)), Some(EvalResult::String(b))) => {
-                Ok(EvalResult::Boolean(a.to_lowercase() >= b.to_lowercase()))
-            },
-            _ => Err("string-not-lessp requires two strings".to_string()),
+            let result = match name {
+                "string=" | "string-equal" => {
+                    if mismatch_pos.is_none() { EvalResult::Bool(true) } else { EvalResult::Nil }
+                }
+                "string/=" | "string-not-equal" => {
+                    match mismatch_pos {
+                        Some(pos) => EvalResult::Fixnum((start1 + pos) as i64),
+                        None => EvalResult::Nil,
+                    }
+                }
+                "string<" | "string-lessp" => {
+                    match mismatch_pos {
+                        Some(pos) => {
+                            let ca = a_sub.get(pos).copied();
+                            let cb = b_sub.get(pos).copied();
+                            let less = match (ca, cb) {
+                                (None, Some(_)) => true,  // a shorter
+                                (Some(a), Some(b)) => {
+                                    if case_sensitive { a < b } else { a.to_ascii_lowercase() < b.to_ascii_lowercase() }
+                                }
+                                _ => false,
+                            };
+                            if less { EvalResult::Fixnum((start1 + pos) as i64) } else { EvalResult::Nil }
+                        }
+                        None => EvalResult::Nil, // equal
+                    }
+                }
+                "string>" | "string-greaterp" => {
+                    match mismatch_pos {
+                        Some(pos) => {
+                            let ca = a_sub.get(pos).copied();
+                            let cb = b_sub.get(pos).copied();
+                            let greater = match (ca, cb) {
+                                (Some(_), None) => true,  // b shorter
+                                (Some(a), Some(b)) => {
+                                    if case_sensitive { a > b } else { a.to_ascii_lowercase() > b.to_ascii_lowercase() }
+                                }
+                                _ => false,
+                            };
+                            if greater { EvalResult::Fixnum((start1 + pos) as i64) } else { EvalResult::Nil }
+                        }
+                        None => EvalResult::Nil,
+                    }
+                }
+                "string<=" | "string-not-greaterp" => {
+                    match mismatch_pos {
+                        None => EvalResult::Fixnum((start1 + a_sub.len()) as i64), // equal => return end
+                        Some(pos) => {
+                            let ca = a_sub.get(pos).copied();
+                            let cb = b_sub.get(pos).copied();
+                            let le = match (ca, cb) {
+                                (None, Some(_)) => true,
+                                (Some(a), Some(b)) => {
+                                    if case_sensitive { a < b } else { a.to_ascii_lowercase() < b.to_ascii_lowercase() }
+                                }
+                                _ => false,
+                            };
+                            if le { EvalResult::Fixnum((start1 + pos) as i64) } else { EvalResult::Nil }
+                        }
+                    }
+                }
+                "string>=" | "string-not-lessp" => {
+                    match mismatch_pos {
+                        None => EvalResult::Fixnum((start1 + a_sub.len()) as i64),
+                        Some(pos) => {
+                            let ca = a_sub.get(pos).copied();
+                            let cb = b_sub.get(pos).copied();
+                            let ge = match (ca, cb) {
+                                (Some(_), None) => true,
+                                (Some(a), Some(b)) => {
+                                    if case_sensitive { a > b } else { a.to_ascii_lowercase() > b.to_ascii_lowercase() }
+                                }
+                                _ => false,
+                            };
+                            if ge { EvalResult::Fixnum((start1 + pos) as i64) } else { EvalResult::Nil }
+                        }
+                    }
+                }
+                _ => EvalResult::Nil,
+            };
+            Ok(result)
         },
 
         // String case conversion

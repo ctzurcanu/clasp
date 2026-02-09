@@ -4,7 +4,29 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
+pub fn class_slots_key(class_name: &str) -> String {
+    format!("*class-slots-{}*", class_name.to_uppercase())
+}
+
+pub fn class_initargs_key(class_name: &str) -> String {
+    format!("*class-initargs-{}*", class_name.to_uppercase())
+}
+
+pub fn class_supers_key(class_name: &str) -> String {
+    format!("*class-supers-{}*", class_name.to_uppercase())
+}
+
+fn normalize_slot_name(raw: &str) -> String {
+    let base = raw.rsplit(':').next().unwrap_or(raw);
+    let stripped = base.strip_prefix(':').unwrap_or(base);
+    stripped.to_ascii_lowercase()
+}
+
+pub fn call_clos_builtin(
+    name: &str,
+    args: &[EvalResult],
+    env: &mut HashMap<String, EvalResult>
+) -> Result<EvalResult, String> {
     match name {
         "make-instance" => {
             // (make-instance class-name &rest initargs)
@@ -15,23 +37,70 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
                 _ => return Err("make-instance: first argument must be a class name".to_string()),
             };
 
-            // Parse initargs which are keyword-value pairs like :x 10 :y 20
+            // Start with defaults from class metadata (including inherited slots).
             let mut slots = HashMap::new();
+            let mut initarg_to_slot: HashMap<String, String> = HashMap::new();
+
+            fn collect_class_lineage(
+                class_name: &str,
+                env: &HashMap<String, EvalResult>,
+                lineage: &mut Vec<String>,
+                visiting: &mut std::collections::HashSet<String>,
+            ) {
+                let key = class_name.to_uppercase();
+                if !visiting.insert(key.clone()) {
+                    return;
+                }
+
+                if let Some(EvalResult::Array(supers)) = env.get(&class_supers_key(class_name)) {
+                    let supers_vec = supers.borrow().clone();
+                    for sup in supers_vec {
+                        if let EvalResult::Symbol(sup_name) = sup {
+                            collect_class_lineage(&sup_name, env, lineage, visiting);
+                        }
+                    }
+                }
+
+                lineage.push(class_name.to_string());
+            }
+
+            let mut lineage = Vec::new();
+            let mut visiting = std::collections::HashSet::new();
+            collect_class_lineage(&class_name, env, &mut lineage, &mut visiting);
+
+            for cls in &lineage {
+                if let Some(EvalResult::HashTable(slot_defaults)) = env.get(&class_slots_key(cls)) {
+                    for (slot_name, default_val) in slot_defaults.borrow().iter() {
+                        if !matches!(default_val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case(":unbound")) {
+                            slots.insert(normalize_slot_name(slot_name), default_val.clone());
+                        }
+                    }
+                }
+                if let Some(EvalResult::HashTable(initargs_map)) = env.get(&class_initargs_key(cls)) {
+                    for (initarg_name, slot_name_val) in initargs_map.borrow().iter() {
+                        if let EvalResult::Symbol(slot_name) = slot_name_val {
+                            initarg_to_slot.insert(
+                                normalize_slot_name(initarg_name),
+                                normalize_slot_name(slot_name),
+                            );
+                        }
+                    }
+                }
+            }
 
             // Skip the class name (first arg) and process initargs
             let mut i = 1;
             while i < args.len() {
                 if let EvalResult::Symbol(key) = &args[i] {
-                    // Strip the leading colon if present (e.g., ":x" -> "x")
-                    let slot_name = if key.starts_with(':') {
-                        &key[1..]
-                    } else {
-                        key.as_str()
-                    };
+                    let initarg = normalize_slot_name(key);
+                    let slot_name = initarg_to_slot
+                        .get(&initarg)
+                        .cloned()
+                        .unwrap_or(initarg);
 
                     // Get the value (next argument)
                     if i + 1 < args.len() {
-                        slots.insert(slot_name.to_string(), args[i + 1].clone());
+                        slots.insert(slot_name, args[i + 1].clone());
                         i += 2;
                     } else {
                         i += 1;
@@ -69,13 +138,14 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         "typep" => {
             // (typep object type) - check if object is of type
             use super::eval_types::class_of;
+            use super::eval_types::is_subclass;
             if args.len() < 2 {
                 return Err("typep requires 2 arguments".to_string());
             }
             let obj_class = class_of(&args[0]);
             let type_name = match &args[1] {
-                EvalResult::Symbol(s) => s.to_uppercase(),
-                EvalResult::String(s) => s.to_uppercase(),
+                EvalResult::Symbol(s) => s.rsplit(':').next().unwrap_or(s).to_uppercase(),
+                EvalResult::String(s) => s.rsplit(':').next().unwrap_or(s).to_uppercase(),
                 _ => return Err("typep: type must be a symbol".to_string()),
             };
 
@@ -84,6 +154,7 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
             // In Common Lisp, NIL is both a symbol and a list
             let matches = type_name == "T"
                 || obj_class.eq_ignore_ascii_case(&type_name)
+                || is_subclass(&obj_class, &type_name)
                 || (type_name == "NUMBER" && matches!(args[0], EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_) | EvalResult::Complex(_, _)))
                 || (type_name == "INTEGER" && matches!(args[0], EvalResult::Fixnum(_) | EvalResult::Bignum(_)))
                 || (type_name == "REAL" && matches!(args[0], EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)))
@@ -105,11 +176,20 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
             let type1 = match &args[0] {
                 EvalResult::Symbol(s) => s.to_uppercase(),
                 EvalResult::Nil => "NULL".to_string(),
+                EvalResult::Cons(_, _) => {
+                    // Compound type specifier like (CONS ...), (AND ...), (MEMBER ...) etc.
+                    // Return (values NIL NIL) — unknown
+                    return Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Nil]));
+                }
                 _ => return Err("subtypep: type must be a symbol".to_string()),
             };
             let type2 = match &args[1] {
                 EvalResult::Symbol(s) => s.to_uppercase(),
                 EvalResult::Nil => "NULL".to_string(),
+                EvalResult::Cons(_, _) => {
+                    // Compound type specifier — return (values NIL NIL) — unknown
+                    return Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Nil]));
+                }
                 _ => return Err("subtypep: type must be a symbol".to_string()),
             };
 
@@ -172,9 +252,12 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
                 }
             };
 
-            // Return T if subtype relationship is known, NIL otherwise
-            // Second value is T if we're certain about the result
-            Ok(EvalResult::Boolean(is_subtype))
+            // Return (values subtype-p valid-p) per CL spec
+            // valid-p is T when we are certain about the result
+            Ok(EvalResult::MultipleValues(vec![
+                EvalResult::Boolean(is_subtype),
+                EvalResult::Boolean(true),  // We're certain for simple type names
+            ]))
         }
 
         "slot-value" => {
@@ -185,15 +268,8 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
             let object = &args[0];
             let slot_name = match &args[1] {
-                EvalResult::Symbol(s) => {
-                    // Strip leading colon if present
-                    if s.starts_with(':') {
-                        s[1..].to_string()
-                    } else {
-                        s.to_string()
-                    }
-                }
-                EvalResult::String(s) => s.clone(),
+                EvalResult::Symbol(s) => normalize_slot_name(s),
+                EvalResult::String(s) => normalize_slot_name(s),
                 _ => return Err("slot-value: slot-name must be a symbol or string".to_string()),
             };
 
@@ -225,14 +301,8 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
             let object = &args[0];
             let slot_name = match &args[1] {
-                EvalResult::Symbol(s) => {
-                    if s.starts_with(':') {
-                        s[1..].to_string()
-                    } else {
-                        s.to_string()
-                    }
-                }
-                EvalResult::String(s) => s.clone(),
+                EvalResult::Symbol(s) => normalize_slot_name(s),
+                EvalResult::String(s) => normalize_slot_name(s),
                 _ => return Err("set-slot-value: slot-name must be a symbol or string".to_string()),
             };
             let new_value = args[2].clone();
@@ -258,14 +328,8 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
             let object = &args[0];
             let slot_name = match &args[1] {
-                EvalResult::Symbol(s) => {
-                    if s.starts_with(':') {
-                        s[1..].to_string()
-                    } else {
-                        s.to_string()
-                    }
-                }
-                EvalResult::String(s) => s.clone(),
+                EvalResult::Symbol(s) => normalize_slot_name(s),
+                EvalResult::String(s) => normalize_slot_name(s),
                 _ => return Err("slot-boundp: slot-name must be a symbol or string".to_string()),
             };
 
@@ -319,14 +383,8 @@ pub fn call_clos_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
             let object = &args[0];
             let slot_name = match &args[1] {
-                EvalResult::Symbol(s) => {
-                    if s.starts_with(':') {
-                        s[1..].to_string()
-                    } else {
-                        s.to_string()
-                    }
-                }
-                EvalResult::String(s) => s.clone(),
+                EvalResult::Symbol(s) => normalize_slot_name(s),
+                EvalResult::String(s) => normalize_slot_name(s),
                 _ => return Err("slot-makunbound: slot-name must be a symbol or string".to_string()),
             };
 

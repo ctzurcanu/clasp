@@ -394,29 +394,22 @@ impl Parser {
                 Ok(LispObject::nil())
             }
 
-            TokenKind::HashStar => {
-                // Bit vector: #*01101
-                self.advance()?; // skip #*
-                // Read the bit string (0s and 1s)
-                if let TokenKind::Symbol(bits) = &self.current_token.kind {
-                    let bits_str = bits.clone();
-                    self.advance()?;
-                    // Convert to vector of integers (0 and 1)
-                    let mut elements = Vec::new();
-                    for ch in bits_str.chars() {
-                        match ch {
-                            '0' => elements.push(LispObject::fixnum(0)),
-                            '1' => elements.push(LispObject::fixnum(1)),
-                            _ => return Err(ReaderError::InvalidSyntax {
-                                msg: format!("Invalid bit vector: contains '{}'", ch),
-                                pos: self.current_token.pos,
-                            }),
-                        }
+            TokenKind::HashStar(bits_str) => {
+                // Bit vector: #*01101 (payload already lexed to preserve leading zeros)
+                let bits_str = bits_str.clone();
+                self.advance()?;
+                let mut elements = Vec::new();
+                for ch in bits_str.chars() {
+                    match ch {
+                        '0' => elements.push(LispObject::fixnum(0)),
+                        '1' => elements.push(LispObject::fixnum(1)),
+                        _ => return Err(ReaderError::InvalidSyntax {
+                            msg: format!("Invalid bit vector: contains '{}'", ch),
+                            pos: self.current_token.pos,
+                        }),
                     }
-                    return Ok(RVector::allocate(elements));
                 }
-                // Empty bit vector #*
-                Ok(RVector::allocate(Vec::new()))
+                Ok(RVector::allocate(elements))
             }
 
             TokenKind::HashDigit(_dim) => {

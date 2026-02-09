@@ -44,7 +44,7 @@ pub enum TokenKind {
     HashMinus,       // #- - feature conditional
     HashBackslash,   // #\ - character
     HashColon,       // #: - uninterned symbol
-    HashStar,        // #* - bit vector
+    HashStar(String), // #*<bits> - bit vector literal payload (0/1 chars)
     HashDigit(u8),   // #0-9 - array dimension or reader macro
     HashC,           // #C - complex number
     HashP,           // #P - pathname
@@ -100,7 +100,7 @@ impl fmt::Display for TokenKind {
             TokenKind::HashMinus => write!(f, "#-"),
             TokenKind::HashBackslash => write!(f, "#\\"),
             TokenKind::HashColon => write!(f, "#:"),
-            TokenKind::HashStar => write!(f, "#*"),
+            TokenKind::HashStar(bits) => write!(f, "#*{}", bits),
             TokenKind::HashDigit(n) => write!(f, "#{}", n),
             TokenKind::HashC => write!(f, "#C"),
             TokenKind::HashP => write!(f, "#P"),

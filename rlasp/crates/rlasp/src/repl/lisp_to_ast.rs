@@ -165,8 +165,16 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     let car = cons.car();
     let cdr = cons.cdr();
 
-    // Check for quote
-    if car.is_general() && !car.is_number() {
+    // Check for quote - MUST verify type header before casting to Symbol
+    let car_is_symbol = if car.is_general() && !car.is_number() {
+        if let Some(ptr) = car.as_general_ptr::<u8>() {
+            if !ptr.is_null() {
+                matches!(unsafe { TypeHeader::from_ptr(ptr) }, Some(ObjectType::Symbol))
+            } else { false }
+        } else { false }
+    } else { false };
+
+    if car_is_symbol {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
@@ -228,8 +236,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         }
     }
 
-    // Check for special forms
-    if car.is_general() && !car.is_number() {
+    // Check for special forms - reuse car_is_symbol check from above
+    if car_is_symbol {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
@@ -802,16 +810,30 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             return Err("defstruct requires at least a name".to_string());
                         }
 
+                        let extract_symbol_name = |node: &ASTNode| -> Option<String> {
+                            match node {
+                                ASTNode::Variable(n) => Some(n.clone()),
+                                ASTNode::Constant(ConstantValue::Symbol(s)) => {
+                                    if let Some(rest) = s.strip_prefix(':') {
+                                        Some(rest.to_string())
+                                    } else {
+                                        Some(s.clone())
+                                    }
+                                }
+                                _ => None,
+                            }
+                        };
+
                         // Parse struct name (can be symbol or (name options))
                         let struct_name = match &args[0] {
                             ASTNode::Variable(n) => n.clone(),
+                            ASTNode::Constant(ConstantValue::Symbol(s)) => {
+                                s.strip_prefix(':').unwrap_or(s).to_string()
+                            }
                             ASTNode::Call { function, .. } => {
                                 // (name options...) form - extract name
-                                if let ASTNode::Variable(n) = &**function {
-                                    n.clone()
-                                } else {
-                                    return Err("defstruct name must be a symbol".to_string());
-                                }
+                                extract_symbol_name(function)
+                                    .ok_or_else(|| "defstruct name must be a symbol".to_string())?
                             }
                             _ => return Err("defstruct name must be a symbol or (name options)".to_string()),
                         };
@@ -838,8 +860,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                 }
                                 ASTNode::Call { function, args: slot_args } => {
                                     // (slot-name default-value) form
-                                    if let ASTNode::Variable(slot_name) = &**function {
-                                        slot_names.push(slot_name.clone());
+                                    if let Some(slot_name) = extract_symbol_name(function) {
+                                        slot_names.push(slot_name);
                                         if !slot_args.is_empty() {
                                             slot_defaults.push(slot_args[0].clone());
                                         } else {
@@ -924,16 +946,21 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         );
                         forms.push(ASTNode::setq(format!("{}-p", struct_name), predicate_lambda));
 
-                        // 3. Accessors: (setq STRUCT-SLOT (lambda (obj) (gethash 'slot obj)))
+                        // 3. Accessors: (setq STRUCT-SLOT (lambda (obj) (values (gethash 'slot obj))))
+                        // Wrap in (values ...) to strip gethash's secondary "found-p" value
                         for slot_name in &slot_names {
+                            let gethash_call = ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("gethash".to_string())),
+                                args: vec![
+                                    ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                                    ASTNode::Variable("obj".to_string()),
+                                ],
+                            };
                             let accessor_lambda = ASTNode::lambda(
                                 vec!["obj".to_string()],
                                 vec![ASTNode::Call {
-                                    function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                    args: vec![
-                                        ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                                        ASTNode::Variable("obj".to_string()),
-                                    ],
+                                    function: Box::new(ASTNode::Variable("values".to_string())),
+                                    args: vec![gethash_call],
                                 }],
                             );
                             forms.push(ASTNode::setq(format!("{}-{}", struct_name, slot_name), accessor_lambda));
@@ -1031,42 +1058,55 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                             let mut reader: Option<String> = None;
                                             let mut writer: Option<String> = None;
 
+                                            fn slot_opt_key(node: &ASTNode) -> Option<String> {
+                                                let raw = match node {
+                                                    ASTNode::Variable(s) => s.as_str(),
+                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => s.as_str(),
+                                                    _ => return None,
+                                                };
+                                                let base = raw.rsplit(':').next().unwrap_or(raw);
+                                                Some(base.to_ascii_lowercase())
+                                            }
+
+                                            fn slot_opt_symbol(node: &ASTNode) -> Option<String> {
+                                                match node {
+                                                    ASTNode::Variable(s) => Some(s.clone()),
+                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+                                                    _ => None,
+                                                }
+                                            }
+
                                             let mut i = 0;
                                             while i < slot_options.len() {
-                                                if let ASTNode::Variable(option_name) = &slot_options[i] {
-                                                    if option_name.starts_with(':') {
-                                                        let option_key = option_name.as_str();
-                                                        if i + 1 < slot_options.len() {
-                                                            match option_key {
-                                                                ":initarg" => {
-                                                                    if let ASTNode::Variable(val) = &slot_options[i + 1] {
-                                                                        initarg = Some(val.clone());
-                                                                    }
+                                                if let Some(option_key) = slot_opt_key(&slot_options[i]) {
+                                                    if i + 1 < slot_options.len() {
+                                                        match option_key.as_str() {
+                                                            "initarg" => {
+                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
+                                                                    initarg = Some(val);
                                                                 }
-                                                                ":initform" => {
-                                                                    initform = Some(Box::new(slot_options[i + 1].clone()));
-                                                                }
-                                                                ":accessor" => {
-                                                                    if let ASTNode::Variable(val) = &slot_options[i + 1] {
-                                                                        accessor = Some(val.clone());
-                                                                    }
-                                                                }
-                                                                ":reader" => {
-                                                                    if let ASTNode::Variable(val) = &slot_options[i + 1] {
-                                                                        reader = Some(val.clone());
-                                                                    }
-                                                                }
-                                                                ":writer" => {
-                                                                    if let ASTNode::Variable(val) = &slot_options[i + 1] {
-                                                                        writer = Some(val.clone());
-                                                                    }
-                                                                }
-                                                                _ => {}
                                                             }
-                                                            i += 2;
-                                                        } else {
-                                                            i += 1;
+                                                            "initform" => {
+                                                                initform = Some(Box::new(slot_options[i + 1].clone()));
+                                                            }
+                                                            "accessor" => {
+                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
+                                                                    accessor = Some(val);
+                                                                }
+                                                            }
+                                                            "reader" => {
+                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
+                                                                    reader = Some(val);
+                                                                }
+                                                            }
+                                                            "writer" => {
+                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
+                                                                    writer = Some(val);
+                                                                }
+                                                            }
+                                                            _ => {}
                                                         }
+                                                        i += 2;
                                                     } else {
                                                         i += 1;
                                                     }

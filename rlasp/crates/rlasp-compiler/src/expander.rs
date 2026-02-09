@@ -21,7 +21,17 @@ impl Expander {
             return None;
         }
 
-        // Try to get as symbol
+        // MUST check type header before casting to Symbol
+        // Other general objects (Vector, etc.) would crash if cast to Symbol
+        let ptr = obj.as_general_ptr::<u8>()?;
+        if ptr.is_null() {
+            return None;
+        }
+        let obj_type = unsafe { rlasp_runtime::header::TypeHeader::from_ptr(ptr) }?;
+        if !matches!(obj_type, rlasp_runtime::header::ObjectType::Symbol) {
+            return None;
+        }
+
         let symbol_ptr = obj.as_general_ptr::<rlasp_runtime::Symbol>()?;
         if symbol_ptr.is_null() {
             return None;

@@ -63,6 +63,17 @@ pub struct ConditionInstance {
     pub slots: HashMap<String, EvalResult>,
 }
 
+/// Create a simple-error condition from a message string
+pub fn make_simple_error(msg: &str) -> EvalResult {
+    let mut slots = HashMap::new();
+    slots.insert("FORMAT-CONTROL".to_string(), EvalResult::String(msg.to_string()));
+    slots.insert("FORMAT-ARGUMENTS".to_string(), EvalResult::Nil);
+    EvalResult::Condition(Rc::new(RefCell::new(ConditionInstance {
+        type_name: "SIMPLE-ERROR".to_string(),
+        slots,
+    })))
+}
+
 /// Global condition type registry
 thread_local! {
     pub static CONDITION_TYPES: RefCell<HashMap<String, ConditionType>> = {

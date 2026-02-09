@@ -84,6 +84,10 @@ impl Reader {
         }
     }
 
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
     fn read_list(&mut self) -> Result<ASTNode, ReadError> {
         self.consume('(')?;
         self.skip_whitespace();
@@ -421,6 +425,29 @@ impl Reader {
                 self.advance();
                 self.read_number_with_radix(2)
             }
+            'C' | 'c' => {
+                // Complex number literal #C(real imag)
+                self.advance();
+                if self.peek() != '(' {
+                    return Err(ReadError::UnexpectedChar(self.peek()));
+                }
+                self.advance(); // consume '('
+                self.skip_whitespace();
+                let real_node = self.read()?;
+                self.skip_whitespace();
+                let imag_node = self.read()?;
+                self.skip_whitespace();
+                if self.peek() == ')' {
+                    self.advance();
+                } else {
+                    return Err(ReadError::UnexpectedChar(self.peek()));
+                }
+                // Emit (complex real imag)
+                Ok(ASTNode::Call {
+                    function: Box::new(ASTNode::variable("complex".to_string())),
+                    args: vec![real_node, imag_node],
+                })
+            }
             _ => Err(ReadError::UnexpectedChar(ch)),
         }
     }
@@ -439,11 +466,12 @@ impl Reader {
         }
 
         // Convert named characters
-        let ch = match name.to_lowercase().as_str() {
+        let lower_name = name.to_lowercase();
+        let ch = match lower_name.as_str() {
             "newline" => '\n',
             "space" => ' ',
             "tab" => '\t',
-            s if s.len() == 1 => s.chars().next().unwrap(),
+            _ if name.chars().count() == 1 => name.chars().next().unwrap(),
             _ => return Err(ReadError::InvalidNumber(format!("Unknown character: {}", name))),
         };
 
@@ -465,12 +493,8 @@ impl Reader {
         }
         self.advance();
 
-        // Vectors are represented as quoted lists for now
-        let list = ASTNode::Call {
-            function: Box::new(ASTNode::variable("vector".to_string())),
-            args: elements,
-        };
-        Ok(ASTNode::Quote(Box::new(list)))
+        // Vector literal #(a b c) -> ASTNode::Vector([a, b, c])
+        Ok(ASTNode::Vector(elements))
     }
 
     // Special form parsers
