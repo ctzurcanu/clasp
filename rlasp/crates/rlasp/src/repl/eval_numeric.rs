@@ -627,6 +627,15 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "float" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Float(*n as f64)),
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
+            Some(EvalResult::Bignum(b)) => {
+                let s = b.to_string();
+                Ok(EvalResult::Float(s.parse::<f64>().unwrap_or(f64::INFINITY)))
+            }
+            Some(EvalResult::Ratio(r)) => {
+                let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0);
+                Ok(EvalResult::Float(n / d))
+            }
             _ => Err("float requires a number".to_string()),
         },
 

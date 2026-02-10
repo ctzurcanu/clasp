@@ -259,7 +259,7 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
                     '\u{0000}' => "Nul".to_string(),
                     '\u{001B}' => "Escape".to_string(),
                     '\u{0007}' => "Bell".to_string(),
-                    _ if c.is_ascii_graphic() => return Ok(EvalResult::Nil),
+                    _ if c.is_ascii_graphic() => c.to_string(),
                     _ => format!("U{:04X}", *c as u32),
                 };
                 Ok(EvalResult::String(name))
@@ -269,7 +269,7 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
         "name-char" => match args.get(0) {
             Some(EvalResult::String(s)) | Some(EvalResult::Symbol(s)) => {
-                let name = if s.starts_with(':') { &s[1..] } else { s.as_str() };
+                let name = if s.starts_with(':') && s.len() > 1 { &s[1..] } else { s.as_str() };
                 let ch = match name.to_lowercase().as_str() {
                     "space" => Some(' '),
                     "newline" | "linefeed" => Some('\n'),

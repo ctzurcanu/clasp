@@ -2520,7 +2520,9 @@ fn compile_ast_to_llvm<'ctx>(
                 Ok(loaded)
             } else {
                 // Handle special variables
-                match name.as_str() {
+                let lookup_name = name.rsplit(':').next().unwrap_or(name.as_str());
+                let lookup_name_lower = lookup_name.to_ascii_lowercase();
+                match lookup_name_lower.as_str() {
                     "t" => {
                         let t_fn = codegen.module().get_function("cc_t")
                             .ok_or("cc_t not found")?;
@@ -2529,7 +2531,7 @@ fn compile_ast_to_llvm<'ctx>(
                         let result = call_site.as_any_value_enum().into_int_value();
                         Ok(result.into())
                     }
-                    "nil" => {
+                    "nil" | "null" => {
                         let nil_fn = codegen.module().get_function("cc_nil")
                             .ok_or("cc_nil not found")?;
                         let call_site = codegen.builder().build_call(nil_fn, &[], "nil")
@@ -2544,6 +2546,16 @@ fn compile_ast_to_llvm<'ctx>(
                         let box_fn = codegen.module().get_function("cc_box_fixnum")
                             .ok_or("cc_box_fixnum not found")?;
                         let call = codegen.builder().build_call(box_fn, &[const_val.into()], "box_ns")
+                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                        Ok(call.as_any_value_enum().into_int_value().into())
+                    }
+                    "char-code-limit" => {
+                        // Keep in sync with interpreter char model (Rust char excludes surrogates).
+                        let i64_type = context.i64_type();
+                        let const_val = i64_type.const_int(55_296, false);
+                        let box_fn = codegen.module().get_function("cc_box_fixnum")
+                            .ok_or("cc_box_fixnum not found")?;
+                        let call = codegen.builder().build_call(box_fn, &[const_val.into()], "box_char_code_limit")
                             .map_err(|e| format!("Failed to build call: {:?}", e))?;
                         Ok(call.as_any_value_enum().into_int_value().into())
                     }

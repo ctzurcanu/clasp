@@ -597,11 +597,21 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
 
             if let Some(path_str) = args.get(0).and_then(extract_pathname_string) {
-                let physical_path = if path_str.starts_with("sys:") || path_str == "sys:" {
-                    ".".to_string()
-                } else {
-                    path_str
-                };
+                let mut physical_path = path_str;
+                if physical_path.starts_with("sys:") {
+                    let mut rest = &physical_path[4..];
+                    if let Some(stripped) = rest.strip_prefix("src;lisp;") {
+                        rest = stripped;
+                    } else if let Some(stripped) = rest.strip_prefix("src/lisp/") {
+                        rest = stripped;
+                    }
+                    physical_path = if rest.is_empty() {
+                        ".".to_string()
+                    } else {
+                        format!("./{}", rest)
+                    };
+                }
+                physical_path = physical_path.replace(';', "/");
                 return Ok(make_pathname_object_from_string(&physical_path));
             }
 

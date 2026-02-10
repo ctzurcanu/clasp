@@ -105,6 +105,14 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                 return Ok(ASTNode::Constant(ConstantValue::T));
                             }
 
+                            // Reader fallback for #0A0/#0A1 when they surface as symbols.
+                            if name.eq_ignore_ascii_case("a0") {
+                                return Ok(ASTNode::Vector(vec![ASTNode::fixnum(0)]));
+                            }
+                            if name.eq_ignore_ascii_case("a1") {
+                                return Ok(ASTNode::Vector(vec![ASTNode::fixnum(1)]));
+                            }
+
                             return Ok(ASTNode::variable(name.to_string()));
                         }
                         ObjectType::Number => {

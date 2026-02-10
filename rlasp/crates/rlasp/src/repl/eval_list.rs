@@ -39,6 +39,89 @@ pub(super) fn eval_cdr(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) 
     }
 }
 
+pub(super) fn is_car_cdr_accessor_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "first" | "second" | "third" | "fourth" | "fifth" | "sixth" | "seventh" | "eighth" | "ninth" | "tenth"
+    ) {
+        return true;
+    }
+    if lower == "car" || lower == "cdr" {
+        return true;
+    }
+    lower.len() >= 3
+        && lower.starts_with('c')
+        && lower.ends_with('r')
+        && lower[1..lower.len() - 1]
+            .chars()
+            .all(|ch| ch == 'a' || ch == 'd')
+}
+
+fn canonical_car_cdr_accessor(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let canonical = match lower.as_str() {
+        "first" => "car".to_string(),
+        "second" => "cadr".to_string(),
+        "third" => "caddr".to_string(),
+        "fourth" => "cadddr".to_string(),
+        "fifth" => "caddddr".to_string(),
+        "sixth" => "cadddddr".to_string(),
+        "seventh" => "caddddddr".to_string(),
+        "eighth" => "cadddddddr".to_string(),
+        "ninth" => "caddddddddr".to_string(),
+        "tenth" => "cadddddddddr".to_string(),
+        _ => lower.clone(),
+    };
+
+    if is_car_cdr_accessor_name(&canonical) {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
+pub(super) fn eval_car_cdr_accessor(
+    name: &str,
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err(format!("{} requires 1 argument", name));
+    }
+
+    let accessor = canonical_car_cdr_accessor(name)
+        .ok_or_else(|| format!("{} is not a valid car/cdr accessor", name))?;
+    let mut current = eval_with_env(&args[0], env)?;
+    let ops: Vec<char> = if accessor == "car" {
+        vec!['a']
+    } else if accessor == "cdr" {
+        vec!['d']
+    } else {
+        accessor
+            .chars()
+            .skip(1)
+            .take(accessor.len().saturating_sub(2))
+            .collect()
+    };
+
+    for op in ops.into_iter().rev() {
+        current = match current {
+            EvalResult::Cons(car, cdr) => {
+                if op == 'a' {
+                    car.borrow().clone()
+                } else {
+                    cdr.borrow().clone()
+                }
+            }
+            EvalResult::Nil => EvalResult::Nil,
+            _ => return Err(format!("{} requires a list", accessor)),
+        };
+    }
+
+    Ok(current)
+}
+
 pub(super) fn eval_caar(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.len() != 1 {
         return Err("caar requires 1 argument".to_string());
@@ -271,9 +354,13 @@ pub(super) fn eval_last(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 }
 
 pub(super) fn eval_list(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // Evaluate arguments left-to-right (CL compatibility), then build the list.
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        values.push(eval_with_env(arg, env)?);
+    }
     let mut result = EvalResult::Nil;
-    for arg in args.iter().rev() {
-        let val = eval_with_env(arg, env)?;
+    for val in values.into_iter().rev() {
         result = EvalResult::Cons(Rc::new(RefCell::new(val)), Rc::new(RefCell::new(result)));
     }
     Ok(result)
@@ -2300,6 +2387,24 @@ pub(super) fn eval_subseq(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         }
         let subseq: String = chars[start..end_idx].iter().collect();
         return Ok(EvalResult::String(subseq));
+    }
+    if let EvalResult::Array(arr) = sequence {
+        let arr_ref = arr.borrow();
+        let end_idx = end.unwrap_or(arr_ref.len()).min(arr_ref.len());
+        if start > end_idx {
+            return Err("subseq: invalid start/end indices".to_string());
+        }
+        let slice = &arr_ref[start..end_idx];
+        if slice.iter().all(|e| matches!(e, EvalResult::Character(_))) {
+            let mut s = String::new();
+            for elem in slice {
+                if let EvalResult::Character(c) = elem {
+                    s.push(*c);
+                }
+            }
+            return Ok(EvalResult::String(s));
+        }
+        return Ok(EvalResult::Array(Rc::new(RefCell::new(slice.to_vec()))));
     }
 
     // Collect elements

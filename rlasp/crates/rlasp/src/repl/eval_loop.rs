@@ -80,6 +80,7 @@ fn is_loop_keyword_any(node: &ASTNode) -> bool {
             "with" | ":with" |
             "for" | ":for" |
             "as" | ":as" |
+            "and" | ":and" |
             "in" | ":in" |
             "on" | ":on" |
             "across" | ":across" |
@@ -305,7 +306,7 @@ impl<'a> LoopParser<'a> {
 
         if is_loop_keyword(node, "with") {
             self.parse_with()
-        } else if is_loop_keyword(node, "for") || is_loop_keyword(node, "as") {
+        } else if is_loop_keyword(node, "for") || is_loop_keyword(node, "as") || is_loop_keyword(node, "and") {
             self.parse_for()
         } else if is_loop_keyword(node, "when") || is_loop_keyword(node, "if") {
             self.parse_when()
@@ -1368,7 +1369,39 @@ impl<'a> LoopParser<'a> {
             // Numeric iteration - support multiple iterators
             // Build termination condition from iterators that have an end value
             // All iterators get step expressions
-            let mut while_body = body;
+            let mut while_body = Vec::new();
+
+            // Support mixed iteration like:
+            //   (loop for i from 0 and n in list ...)
+            // by binding list vars before body and advancing the list each iteration.
+            if iter_list.is_some() {
+                if let Some((car_var, cdr_var)) = &destructure {
+                    while_body.push(ASTNode::setq(
+                        car_var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("caar".to_string())),
+                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                        },
+                    ));
+                    while_body.push(ASTNode::setq(
+                        cdr_var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("cdar".to_string())),
+                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                        },
+                    ));
+                } else if let Some(var) = &iter_var {
+                    while_body.push(ASTNode::setq(
+                        var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("car".to_string())),
+                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                        },
+                    ));
+                }
+            }
+
+            while_body.extend(body);
 
             // Add step expressions for ALL numeric iterators
             for (var, _start, _end, step, _inclusive, _down) in numeric_iters.iter().rev() {
@@ -1379,6 +1412,24 @@ impl<'a> LoopParser<'a> {
                         function: Box::new(ASTNode::Variable("+".to_string())),
                         args: vec![ASTNode::Variable(var.clone()), step_expr],
                     }
+                ));
+            }
+
+            if iter_list.is_some() {
+                let next_list = if let Some(step) = &iter_step {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                    }
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                        args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                    }
+                };
+                while_body.push(ASTNode::setq(
+                    "__loop_list__".to_string(),
+                    next_list,
                 ));
             }
 
@@ -1398,6 +1449,10 @@ impl<'a> LoopParser<'a> {
                     function: Box::new(ASTNode::Variable(cmp_op.to_string())),
                     args: vec![ASTNode::Variable(var.clone()), end.clone()],
                 });
+            }
+
+            if iter_list.is_some() {
+                conditions.push(ASTNode::Variable("__loop_list__".to_string()));
             }
 
             let condition = if conditions.is_empty() {

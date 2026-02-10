@@ -532,12 +532,82 @@ pub fn call_sequence_builtin(
 
         "count-if" => {
             // (count-if predicate sequence)
-            Err("count-if not implemented yet - needs function calling".to_string())
+            if args.len() < 2 {
+                return Err("count-if requires predicate and sequence".to_string());
+            }
+            let predicate = &args[0];
+            let seq = &args[1];
+
+            let items: Vec<EvalResult> = match seq {
+                EvalResult::Nil => Vec::new(),
+                EvalResult::Cons(_, _) => {
+                    let mut out = Vec::new();
+                    let mut cur = seq.clone();
+                    loop {
+                        match cur {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(car, cdr) => {
+                                out.push(car.borrow().clone());
+                                cur = cdr.borrow().clone();
+                            }
+                            _ => return Err("count-if requires a proper sequence".to_string()),
+                        }
+                    }
+                    out
+                }
+                EvalResult::Array(arr) => arr.borrow().clone(),
+                EvalResult::String(s) => s.chars().map(EvalResult::Character).collect(),
+                _ => return Err("count-if requires a sequence".to_string()),
+            };
+
+            let mut count = 0i64;
+            for item in items {
+                let result = apply_function(predicate, &[item], env)?;
+                if !matches!(result, EvalResult::Nil) {
+                    count += 1;
+                }
+            }
+            Ok(EvalResult::Fixnum(count))
         }
 
         "count-if-not" => {
             // (count-if-not predicate sequence)
-            Err("count-if-not not implemented yet - needs function calling".to_string())
+            if args.len() < 2 {
+                return Err("count-if-not requires predicate and sequence".to_string());
+            }
+            let predicate = &args[0];
+            let seq = &args[1];
+
+            let items: Vec<EvalResult> = match seq {
+                EvalResult::Nil => Vec::new(),
+                EvalResult::Cons(_, _) => {
+                    let mut out = Vec::new();
+                    let mut cur = seq.clone();
+                    loop {
+                        match cur {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(car, cdr) => {
+                                out.push(car.borrow().clone());
+                                cur = cdr.borrow().clone();
+                            }
+                            _ => return Err("count-if-not requires a proper sequence".to_string()),
+                        }
+                    }
+                    out
+                }
+                EvalResult::Array(arr) => arr.borrow().clone(),
+                EvalResult::String(s) => s.chars().map(EvalResult::Character).collect(),
+                _ => return Err("count-if-not requires a sequence".to_string()),
+            };
+
+            let mut count = 0i64;
+            for item in items {
+                let result = apply_function(predicate, &[item], env)?;
+                if matches!(result, EvalResult::Nil) {
+                    count += 1;
+                }
+            }
+            Ok(EvalResult::Fixnum(count))
         }
 
         "map" => {

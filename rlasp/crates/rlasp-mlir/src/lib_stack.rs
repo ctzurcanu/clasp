@@ -2430,9 +2430,7 @@ impl StackMLIRCodegen {
                             ASTNode::Variable(name) => name.clone(),
                             ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
                             _ => {
-                                eprintln!("[STUB] defun: skipping function with non-symbol name {:?}", args[0]);
-                                self.writeln("func.call @stack_push_nil() : () -> ()");
-                                return Ok(());
+                                anyhow::bail!("defun: unsupported quoted function name {:?}", args[0]);
                             }
                         }
                     }
@@ -2440,28 +2438,32 @@ impl StackMLIRCodegen {
                         // Handle (setf name) style function names
                         if let ASTNode::Variable(func_name) = function.as_ref() {
                             if func_name == "setf" && call_args.len() == 1 {
-                                if let ASTNode::Variable(name) = &call_args[0] {
-                                    format!("(setf {})", name)
-                                } else {
-                                    eprintln!("[STUB] defun: skipping function with complex setf name {:?}", args[0]);
-                                    self.writeln("func.call @stack_push_nil() : () -> ()");
-                                    return Ok(());
-                                }
+                                let target_name = match &call_args[0] {
+                                    ASTNode::Variable(name) => name.clone(),
+                                    ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
+                                    ASTNode::Quote(inner) => match inner.as_ref() {
+                                        ASTNode::Variable(name) => name.clone(),
+                                        ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
+                                        _ => anyhow::bail!(
+                                            "defun: unsupported setf function name {:?}",
+                                            call_args[0]
+                                        ),
+                                    },
+                                    _ => anyhow::bail!(
+                                        "defun: unsupported setf function name {:?}",
+                                        call_args[0]
+                                    ),
+                                };
+                                format!("(setf {})", target_name)
                             } else {
-                                eprintln!("[STUB] defun: skipping function with call-style name {:?}", args[0]);
-                                self.writeln("func.call @stack_push_nil() : () -> ()");
-                                return Ok(());
+                                anyhow::bail!("defun: unsupported call-style function name {:?}", args[0]);
                             }
                         } else {
-                            eprintln!("[STUB] defun: skipping function with non-symbol name {:?}", args[0]);
-                            self.writeln("func.call @stack_push_nil() : () -> ()");
-                            return Ok(());
+                            anyhow::bail!("defun: function name must be a symbol {:?}", args[0]);
                         }
                     }
                     _ => {
-                        eprintln!("[STUB] defun: skipping function with non-symbol name {:?}", args[0]);
-                        self.writeln("func.call @stack_push_nil() : () -> ()");
-                        return Ok(());
+                        anyhow::bail!("defun: function name must be a symbol {:?}", args[0]);
                     }
                 };
                 // Add %FN% prefix to match how irlasp extracts defuns
@@ -3840,11 +3842,9 @@ impl StackMLIRCodegen {
                         };
 
                         if let Err(e) = self.compile_function(&lambda_name, params, defaults, supplied_p_vars, key_params, &body_expr) {
-                            eprintln!("[STUB] function: failed to compile lambda: {}", e);
                             self.output = saved_output;
                             self.indent_level = saved_indent;
-                            self.writeln("func.call @stack_push_nil() : () -> ()");
-                            return Ok(());
+                            return Err(e);
                         }
 
                         // Get the generated function definition and add to pending functions
@@ -3926,12 +3926,10 @@ impl StackMLIRCodegen {
                                 return Ok(());
                             }
                         }
-                        eprintln!("[STUB] function: complex call expression {:?}", args[0]);
-                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                        anyhow::bail!("function: unsupported call expression {:?}", args[0]);
                     }
                     _ => {
-                        eprintln!("[STUB] function: unsupported argument {:?}", args[0]);
-                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                        anyhow::bail!("function: unsupported argument {:?}", args[0]);
                     }
                 }
                 return Ok(());
@@ -5298,12 +5296,7 @@ impl StackMLIRCodegen {
                                 // Push result
                                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                             } else {
-                                // Unsupported c[ad]+r setf
-                                eprintln!("[STUB] setf: unsupported c[ad]+r place");
-                                self.compile_expr(value)?;
-                                let _discard = self.fresh_ssa();
-                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _discard));
-                                self.writeln("func.call @stack_push_nil() : () -> ()");
+                                anyhow::bail!("setf: unsupported c[ad]+r place");
                             }
                         }
 
@@ -6310,6 +6303,22 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = func.call @cc_car({}) : (i64) -> i64", car1, val));
                 let result = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_cdr({}) : (i64) -> i64", result, car1));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "cddar" => {
+                // (cddar x) = (cdr (cdr (car x)))
+                if args.len() != 1 { anyhow::bail!("cddar requires exactly 1 argument"); }
+                self.compile_expr(&args[0])?;
+                let val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
+                let car1 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_car({}) : (i64) -> i64", car1, val));
+                let cdr1 = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_cdr({}) : (i64) -> i64", cdr1, car1));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_cdr({}) : (i64) -> i64", result, cdr1));
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -7578,8 +7587,9 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
-            // Remaining stubs for less common functions
-            // Note: typep, subtypep, arrayp, vectorp, hash-table-p are implemented later
+            // Less common builtins: compile as dynamic runtime calls so behavior
+            // is consistent with the interpreter/builtin dispatch.
+            // Note: typep, subtypep, arrayp, vectorp, hash-table-p are implemented later.
             "simple-vector-p" | "bit-vector-p" |
             "simple-bit-vector-p" | "simple-string-p" |
             "readtablep" | "compiled-function-p" |
@@ -7603,9 +7613,7 @@ impl StackMLIRCodegen {
             "get-properties" | "remf" |
             "maplist" | "mapl" | "mapcan" | "mapcon" |
             "map-into" | "notany" | "notevery" => {
-                eprintln!("[STUB] {} not yet implemented", func_name);
-                self.writeln("func.call @stack_push_nil() : () -> ()");
-                Ok(())
+                self.compile_user_function_call(base_name, args)
             }
 
             "mod" => {
@@ -8927,7 +8935,9 @@ impl StackMLIRCodegen {
             // Format (variadic)
             "format" => {
                 if args.len() < 2 {
-                    anyhow::bail!("format requires at least 2 arguments");
+                    // Be permissive in MLIR lowering and defer exact argument checking
+                    // to runtime evaluation for unusual macro-expanded call shapes.
+                    return self.compile_user_function_call(base_name, args);
                 }
 
                 // Evaluate destination

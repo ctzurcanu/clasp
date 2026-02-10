@@ -222,6 +222,11 @@ fn encode_return_value(val: &EvalResult) -> String {
 
 // Decode the "RETURN:TYPE:value" format from eval_return
 fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
+    let e = e
+        .split(" (callee ast:")
+        .next()
+        .unwrap_or(e)
+        .trim();
     if e == "RETURN:NIL" {
         Ok(EvalResult::Nil)
     } else if e.starts_with("RETURN:FIXNUM:") {
@@ -241,7 +246,7 @@ fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
         Ok(EvalResult::String(e[14..].to_string()))
     } else if e.starts_with("RETURN:SYMBOL:") {
         Ok(EvalResult::Symbol(e[14..].to_string()))
-    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e == "RETURN:COMPLEX" {
+    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e.starts_with("RETURN:COMPLEX") {
         RETURN_VALUE.with(|rv| {
             rv.borrow_mut().take().ok_or_else(|| "return value not found".to_string())
         })
@@ -251,6 +256,12 @@ fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
 }
 
 fn decode_return_value(encoded: String) -> Result<EvalResult, String> {
+    let encoded = encoded
+        .split(" (callee ast:")
+        .next()
+        .unwrap_or(encoded.as_str())
+        .trim()
+        .to_string();
     if encoded == "NIL" {
         Ok(EvalResult::Nil)
     } else if encoded.starts_with("FIXNUM:") {
@@ -270,7 +281,7 @@ fn decode_return_value(encoded: String) -> Result<EvalResult, String> {
         Ok(EvalResult::String(encoded[7..].to_string()))
     } else if encoded.starts_with("SYMBOL:") {
         Ok(EvalResult::Symbol(encoded[7..].to_string()))
-    } else if encoded == "COMPLEX" {
+    } else if encoded.starts_with("COMPLEX") {
         RETURN_VALUE.with(|rv| {
             rv.borrow_mut().take()
                 .ok_or_else(|| "return value not found".to_string())
@@ -1332,6 +1343,32 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
             // (gethash key ht) or (aref array index)
             ASTNode::Call { function, args: place_args } => {
                 if let ASTNode::Variable(func_name) = &**function {
+                    let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                    if base_name.eq_ignore_ascii_case("atomic") && !place_args.is_empty() {
+                        // (setf (mp:atomic PLACE &key ...) value) -> (setf PLACE value)
+                        let nested_setf = ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("setf".to_string())),
+                            args: vec![
+                                place_args[0].clone(),
+                                super::eval_system::result_to_ast_quoted(&value)?,
+                            ],
+                        };
+                        last_value = eval_with_env(&nested_setf, env)?;
+                    } else if func_name == "stream-element-type" && !place_args.is_empty() {
+                        let stream = eval_with_env(&place_args[0], env)?;
+                        let _ = super::eval_io::call_io_builtin(
+                            "set-stream-element-type",
+                            &[stream, value.clone()],
+                        )?;
+                        last_value = value.clone();
+                    } else if func_name == "stream-external-format" && !place_args.is_empty() {
+                        let stream = eval_with_env(&place_args[0], env)?;
+                        let _ = super::eval_io::call_io_builtin(
+                            "set-stream-external-format",
+                            &[stream, value.clone()],
+                        )?;
+                        last_value = value.clone();
+                    } else
                     if func_name == "gethash" && place_args.len() >= 2 {
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
@@ -1369,7 +1406,7 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             env.insert(sym_name, value.clone());
                         }
                         last_value = value.clone();
-                    } else if func_name == "aref" && place_args.len() >= 2 {
+                    } else if (func_name == "aref" || func_name == "svref") && place_args.len() >= 2 {
                         // For (setf (aref array-var index) value), get the array from environment
                         let array_result = eval_with_env(&place_args[0], env)?;
                         let index = eval_with_env(&place_args[1], env)?;
@@ -1455,17 +1492,23 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             }
                             _ => return Err("setf char: first argument must be a string".to_string()),
                         }
-                    } else if (func_name == "car" || func_name == "cdr" ||
-                               func_name == "caar" || func_name == "cadr" ||
-                               func_name == "cdar" || func_name == "cddr" ||
-                               func_name == "caaar" || func_name == "caadr" ||
-                               func_name == "cadar" || func_name == "caddr" ||
-                               func_name == "cdaar" || func_name == "cdadr" ||
-                               func_name == "cddar" || func_name == "cdddr") &&
-                              place_args.len() >= 1 {
+                    } else if super::eval_list::is_car_cdr_accessor_name(base_name) && place_args.len() >= 1 {
                         // (setf (car list) value) or (setf (cadr list) value), etc.
                         // Evaluate the list expression
                         let list_result = eval_with_env(&place_args[0], env)?;
+                        let canonical_accessor = match base_name.to_ascii_lowercase().as_str() {
+                            "first" => "car".to_string(),
+                            "second" => "cadr".to_string(),
+                            "third" => "caddr".to_string(),
+                            "fourth" => "cadddr".to_string(),
+                            "fifth" => "caddddr".to_string(),
+                            "sixth" => "cadddddr".to_string(),
+                            "seventh" => "caddddddr".to_string(),
+                            "eighth" => "cadddddddr".to_string(),
+                            "ninth" => "caddddddddr".to_string(),
+                            "tenth" => "cadddddddddr".to_string(),
+                            _ => base_name.to_ascii_lowercase(),
+                        };
 
                         // Navigate to the correct cons cell based on the accessor
                         fn navigate_and_set(accessor: &str, cons: EvalResult, value: EvalResult) -> Result<EvalResult, String> {
@@ -1523,7 +1566,7 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             }
                         }
 
-                        last_value = navigate_and_set(func_name, list_result, value.clone())?;
+                        last_value = navigate_and_set(&canonical_accessor, list_result, value.clone())?;
                     } else if let Some(expander) = get_setf_expander(func_name) {
                         // User-defined setf expander from defsetf
                         match expander {

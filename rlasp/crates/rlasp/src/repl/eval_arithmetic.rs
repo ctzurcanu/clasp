@@ -627,6 +627,17 @@ pub(super) fn eval_eq_lisp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
+        (EvalResult::BuiltinFunction(a), EvalResult::BuiltinFunction(b)) => a == b,
+        (
+            EvalResult::Lambda { env: a_env, .. },
+            EvalResult::Lambda { env: b_env, .. },
+        ) => Rc::ptr_eq(a_env, b_env),
+        (EvalResult::GenericFunction(a), EvalResult::GenericFunction(b)) => Rc::ptr_eq(a, b),
+        (EvalResult::ForeignFunction(a), EvalResult::ForeignFunction(b)) => Rc::ptr_eq(a, b),
+        (EvalResult::Array(a), EvalResult::Array(b)) => Rc::ptr_eq(a, b),
+        (EvalResult::HashTable(a), EvalResult::HashTable(b)) => Rc::ptr_eq(a, b),
+        (EvalResult::Cons(ac, ad), EvalResult::Cons(bc, bd)) => Rc::ptr_eq(ac, bc) && Rc::ptr_eq(ad, bd),
         _ => false,
     };
 

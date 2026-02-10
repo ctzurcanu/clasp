@@ -65,7 +65,21 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
         }
 
         "row-major-aref" => {
-            Err("row-major-aref not implemented yet".to_string())
+            match (args.get(0), args.get(1)) {
+                (Some(EvalResult::Array(arr)), Some(EvalResult::Fixnum(idx))) if *idx >= 0 => {
+                    arr.borrow()
+                        .get(*idx as usize)
+                        .cloned()
+                        .ok_or_else(|| "row-major-aref index out of bounds".to_string())
+                }
+                (Some(EvalResult::String(s)), Some(EvalResult::Fixnum(idx))) if *idx >= 0 => {
+                    s.chars()
+                        .nth(*idx as usize)
+                        .map(EvalResult::Character)
+                        .ok_or_else(|| "row-major-aref index out of bounds".to_string())
+                }
+                _ => Err("row-major-aref requires array and integer index".to_string()),
+            }
         }
 
         // Array information
