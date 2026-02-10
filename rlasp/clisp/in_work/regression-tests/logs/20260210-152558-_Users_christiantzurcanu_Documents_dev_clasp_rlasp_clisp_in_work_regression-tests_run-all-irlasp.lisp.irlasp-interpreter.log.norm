@@ -1,0 +1,4576 @@
+
+
+Running defcallback-native suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/defcallback-native.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/defcallback-native.fasl
+
+Passed cffi-defcallback
+
+
+Running lowlevel suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel.fasl
+
+Failed compile-2-low-level
+
+Unexpected error
+~tNIL
+while evaluating
+~t(with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;lowlevel-source.lisp" :verbose NIL :print NIL))
+
+
+Running fastgf suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/fastgf.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/fastgf.fasl
+
+Passed dispatch-integer
+
+Passed dispatch-string
+
+Passed dispatch-symbol
+
+Passed dispatch-no-applicable-method
+
+
+Running array0 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/array0.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/array0.fasl
+
+Passed array-dimension0
+
+Passed make-sequence-simple-string
+
+Passed make-sequence-simple-base-string
+
+Passed typep-make-simple-array
+
+Passed typep-make-fill-pointer-vector-nonsimple
+
+Passed typep-make-fill-pointer-vector-nonsimple-vector
+
+Passed typep-make-adjustable-array
+
+Passed typep-make-adjustable-array-nonsimple
+
+Passed typep-make-adjustable-array-non-simple-vector
+
+Passed adjust-array0
+
+Passed make-array-0
+
+Passed make-array-1
+
+Passed make-array-2
+
+Passed make-array-3
+
+Passed make-array-4
+
+Passed make-array-5
+
+Passed make-array-6
+
+Passed aref-nil-array
+
+Passed setf-aref-nil-array
+
+Passed fill-pointer-nil-array
+
+Passed simple-array-out-of-bounds-message
+
+#<ARRAY> 
+Passed complex-displacement-asv
+
+Passed array-too-big
+
+Passed array-too-big-list
+
+Passed array-wrong-dimension-list-a
+
+Passed array-wrong-dimension-list-b
+
+Passed array-wrong-dimension-list-c
+
+Passed array-too-big-not-inline
+
+Passed array-too-big-list-not-inline
+
+Passed array-wrong-dimension-list-a-not-inline
+
+Passed array-wrong-dimension-list-b-not-inline
+
+Passed array-wrong-dimension-list-c-not-inline
+
+Passed issue-1253
+
+Passed issue-1253-a
+
+Passed issue-1253-b
+
+
+Running tests01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/tests01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/tests01.fasl
+
+Passed cxx-derivability
+
+Passed equal-bit-vector
+
+Passed equalp-ub8-vector
+
+Passed string=0
+
+Passed string=1
+
+Passed equalp-bit-vector
+
+Passed sbit
+
+Passed integer-to-string-positive
+
+Passed integer-to-string-negative
+
+
+Running finalizers suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/finalizers.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/finalizers.fasl
+
+Passed finalizers-cons
+
+Passed finalizers-cons-remove
+
+Passed finalizers-general
+
+Passed finalizers-general-remove
+
+
+Running strings01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/strings01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/strings01.fasl
+
+Passed reverse-string
+
+Passed subseq-oob
+
+Passed strings-with-nul0
+
+Passed strings-with-nul1
+
+Passed concatenate-with-nul0
+
+Passed concatenate-with-nul1
+
+Passed copy-seq-with-nul0
+
+Passed string=-with-nul0
+
+Passed parse-integer0
+
+Passed parse-integer1
+
+Passed parse-integer2
+
+Passed parse-integer3
+
+Passed parse-integer3a
+
+Passed parse-integer4
+
+Passed parse-integer5
+
+Passed parse-integer6
+
+Passed parse-integer7
+
+Passed parse-integer8
+
+Passed parse-integer9
+
+Passed parse-integer10
+
+Passed parse-integer11
+
+Passed type-of-string
+
+Passed copy-to-simple-base-string0
+
+Passed copy-to-simple-base-string1
+
+Passed copy-to-simple-base-string2
+
+Passed copy-to-simple-base-string3
+
+Passed copy-to-simple-base-string4
+
+Passed copy-to-simple-base-string5
+
+Passed closest-sequence-type0
+
+Passed closest-sequence-type1
+
+Passed eql-1
+
+Passed eql-2
+
+Passed babel-simple-strings-1
+
+Passed babel-simple-strings-2
+
+
+Running cons01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/cons01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/cons01.fasl
+
+Passed adjoin-1
+
+Passed adjoin-2
+
+Passed adjoin-3
+
+Passed pushnew-1
+
+Passed pushnew-2
+
+Passed pushnew-3
+
+Passed ansi-pushnew.14a
+
+Passed ansi-pushnew.14b
+
+Passed get-properties.error.5
+
+Passed ldiff-1
+
+Passed ldiff.error.1
+
+Passed ldiff.error.2
+
+Passed ldiff.error.3
+
+Passed ldiff.error.4
+
+Passed ldiff.error.5
+
+Passed map-1
+
+Passed map-2
+
+Passed map-3
+
+Passed map-4
+
+Passed map-5
+
+Passed map-6
+
+Passed last.8
+
+Passed last-ansi-1
+
+Passed last-ansi-2
+
+Passed last-ansi-3
+
+Passed last-ansi-4
+
+Passed last-ansi-5
+
+Passed last-ansi-6
+
+Passed last-ansi-7
+
+Passed last-ansi-8
+
+Passed acons.3
+
+Passed append.7
+
+Passed member-if.error.8
+
+Passed assoc-if.error.12
+
+Passed assoc-if-not.error.12
+
+Passed remf-failure-cl-http
+
+Passed list-length-symbol
+
+Passed list-length.error.1
+
+Passed endp.error.6
+
+Passed endp.a
+
+Passed endp.b
+
+Passed endp.c
+
+Passed endp.a.1
+
+Passed endp.b.1
+
+Passed endp.c.1
+
+
+Running sequences01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/sequences01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/sequences01.fasl
+
+Passed subseq-oob1
+
+Passed subseq-oob2
+
+Passed subseq0
+
+Passed last-1
+
+Passed last-2
+
+Passed last-3
+
+Passed last-4
+
+Passed last-5
+
+Passed last-6
+
+Passed butlast-1
+
+Passed nbutlast-1
+
+Passed butlast-2
+
+Passed nbutlast-2
+
+Passed nth-1
+
+Passed nth-2
+
+Passed nth-3
+
+Passed nthcdr-1
+
+Passed nthcdr-2
+
+Passed nthcdr-3
+
+Passed write-sequence-1a
+
+Passed write-sequence-1b
+
+Passed write-sequence-1c
+
+Passed write-sequence-2
+
+Passed write-sequence-3
+
+Passed write-sequence-4
+
+Passed write-sequence-5
+
+Passed read-sequence-1
+
+Passed read-sequence-2
+
+Passed read-sequence-3
+
+Passed read-sequence-4
+
+Passed nsubst-1
+
+Passed nsubst-2
+
+Passed nsubst-3
+
+Passed nsubst-4
+
+Passed elt-1
+
+Passed elt-2
+
+Passed elt-3
+
+Passed elt-4
+
+Passed elt-5
+
+Passed elt-5a
+
+Passed elt-5b
+
+Passed elt-6
+
+Passed elt-7
+
+Passed elt-8
+
+Passed elt-9
+
+Passed elt-10
+
+Passed elt-11
+
+Passed elt-12
+
+Passed elt-13
+
+Passed fill-1
+
+Passed fill-1a
+
+Passed fill-2
+
+Passed fill-3
+
+Passed fill-4
+
+Passed fill-5
+
+Passed fill-6
+
+Passed fill-7
+
+Passed fill-8
+
+Passed fill-9
+
+Passed fill-10
+
+Passed fill-11
+
+Passed fill-12
+
+Passed fill-13
+
+Passed fill-13b
+
+Passed fill-14
+
+Passed fill-15
+
+Passed fill-16
+
+Passed search-sequence-1
+
+Passed search-sequence-2
+
+Passed search-sequence-3
+
+Passed equalp-1
+
+Passed equalp-2
+
+Passed equalp-2a
+
+Passed equalp-2b
+
+Passed equalp-2c
+
+Passed equalp-2d
+
+Passed equalp-clhs-1
+
+Passed equalp-clhs-2a
+
+Passed equalp-clhs-2b
+
+Passed equalp-3
+
+Passed equalp-4
+
+Passed equalp-5
+
+Passed equalp-6
+
+Passed equalp-7
+
+Passed equalp-8
+
+Passed equalp-9
+
+Passed nreverse-1
+
+Passed reverse-1
+
+Passed nreverse-2
+
+Passed assoc-1
+
+Passed assoc-compiler-macro
+
+Passed assoc-2-error
+
+Passed assoc-2-error-no-compiler-macro
+
+Passed make-list-1
+
+Passed make-sequence-1
+
+Passed make-sequence-1a
+
+Passed make-sequence-2
+
+Passed make-sequence-2a
+
+Passed make-sequence-3
+
+Passed make-sequence-3a
+
+Passed find-1
+
+Passed find-1a
+
+Passed find-2
+
+Passed find-2a
+
+Passed remove-if-1
+
+Passed position-1
+
+Passed position-2
+
+Passed stable-sort.error.11
+
+Passed nreverse-bit-vector.2-a
+
+Passed nreverse-bit-vector.2-b
+
+Passed nreverse-bit-vector.2-c
+
+Passed nreverse-bit-vector.3
+
+Passed nreverse-vector.8
+
+Passed every.error.14
+
+Passed some.error.14
+
+Passed sequence-clx-compile-notinline
+
+Passed sequence-clx-compile-inline
+
+Passed can-map-to-specialized-vectors-0
+
+Passed can-map-to-specialized-vectors-1
+
+Passed can-map-to-specialized-vectors-2
+
+Passed can-map-to-specialized-vectors-3
+
+Passed can-map-to-specialized-vectors-4
+
+
+Running clos suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/clos.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/clos.fasl
+
+Passed accessor-too-many-args-1
+
+Passed defclass-1
+
+Failed jit-function-name-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((sym (gensym)) (method (eval (backquote (defmethod (setf (unquote sym)) ((x T) (y cons)) (setf (car y) x)))))) (declare (ignore method)) (values (fboundp sym) (let ((x (cons 1 2))) (list (funcall (fdefinition (backquote (setf (unquote sym)))) 3 x) x))))
+
+Passed defclass-2
+
+Failed issue-698
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (foo-bar (make-array 23 :adjustable T))))
+
+Passed make-instance.error.5
+
+Passed slot-missing-2-simplified
+
+Failed make-load-form-saving-slots-defstruct
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((object (make-foo-make-load-form-saving-slots :a (quote foo) :b (quote (1 2)) :c 23))) (multiple-value-bind (form-allocation form-initialisation) (make-load-form-saving-slots object) (let ((new-object (eval form-allocation))) (eval (subst new-object object form-initialisation)) (eq (class-of object) (class-of new-object)))))))
+
+Failed make-load-form-saving-slots-class
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((object (make-instance (quote foo-make-load-form-saving-slots-class)))) (multiple-value-bind (form-allocation form-initialisation) (make-load-form-saving-slots object) (let ((new-object (eval form-allocation))) (eval (subst new-object object form-initialisation)) (eq (class-of object) (class-of new-object)))))))
+
+Passed defclass-error-options-1
+
+Passed defclass-error-options-2
+
+Passed slot-exists-p-gives-single-value-slot-exists
+
+Passed slot-exists-p-gives-single-value-slot-not-exists
+
+Passed slot-exists-p-gives-single-value-slot-not-exists-build-in-class
+
+Failed slot-exists-p-other-arguments
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (notany (function (lambda (object) (slot-exists-p object (quote foo)))) (list 42 42 (quote c) "324789" (code-char 65) (vector 1 2 3) (make-hash-table)))))
+
+Passed find-method-eql
+
+Passed test-issue-1031
+
+Passed clos-lambda-list-congruent-allow-other-keys
+
+Passed eql-specializers-from-irc
+
+Failed issue-1244
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (typep (clos:ensure-class-using-class NIL (gentemp)) (quote standard-class))))
+
+Passed class-slot-inheritance
+
+Failed dispatch-miss-perf
+
+Unexpected error
+~tNIL
+while evaluating
+~t(progn (fmakunbound (quote dispatch-miss-perf.f)) (defmethod dispatch-miss-perf.f (x) x) (defmethod dispatch-miss-perf.f ((x integer)) x) (let ((objects (list (quote (1)) (quote generic-function) (vector) "hello" 13 3.2 (ratio 4 3) (complex 1 2) #\d (make-hash-table) (function dispatch-miss-perf.f) *readtable* *package* *load-pathname* *terminal-io* *random-state*))) (mapc (function dispatch-miss-perf.f) objects) (clos:with-profiling (dispatch-miss-perf.f) (:report NIL) (mapc (function dispatch-miss-perf.f) objects) (clos:profiling-data (function dispatch-miss-perf.f)))))
+
+
+Running mop suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mop.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mop.fasl
+
+Passed mop.generics.fboundp
+
+Passed mop.nongenerics.fboundp
+
+Passed mop.writers.nonfboundp
+
+
+Running update-instance-abort suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/update-instance-abort.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/update-instance-abort.fasl
+
+Passed uifrc.abort.1
+
+Passed uifrc.abort.2
+
+Failed uifrc.abort.3
+
+Unexpected error
+~tNIL
+while evaluating
+~t(slot-value *uifrc-foo* (quote slot))
+
+Passed uifdc.abort.1
+
+Passed uifdc-abort.2
+
+Passed uifdc.abort.3
+
+Passed uifdc-abort.4
+
+Failed uifdc.abort.5
+
+Unexpected error
+~tNIL
+while evaluating
+~t(progn (change-class *uifdc-foo* (quote uifdc-bar)) (slot-value *uifdc-foo* (quote slot)))
+
+Passed uifdc.abort.6
+
+
+Running numbers suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.fasl
+
+Passed fixnum-double-high
+
+Passed fixnum-double-low
+
+Passed fixnum-single-high
+
+Passed fixnum-single-low
+
+Passed oddp-1
+
+Passed oddp-2
+
+Passed oddp-3
+
+Passed oddp-4
+
+Passed oddp-5
+
+Passed random-0
+
+Passed random-1
+
+Passed random-2
+
+Passed random-3
+
+Passed random-4
+
+Passed random-5
+
+Passed random-6
+
+Passed random-4a
+
+Passed random-5a
+
+Passed random-6a
+
+Passed random-7
+
+Passed random-7a
+
+Passed random-7b
+
+Passed random-7c
+
+Passed eq-1
+
+Passed eq-2
+
+Passed eq-3
+
+Passed eq-4
+
+Passed eq-5
+
+Passed eq-6
+
+Passed neq-1
+
+Passed neq-2
+
+Passed neq-3
+
+Passed neq-4
+
+Passed neq-5
+
+Passed neq-6
+
+Passed neq-7
+
+Passed neq-8
+
+Passed eq-7
+
+Passed /=.order.3
+
+Passed ratios-1
+
+Passed ratios-2
+
+Passed ratios-3
+
+Passed ratios-4
+
+Passed ratios-5
+
+Passed integer-length.1
+
+Passed integer-length.2
+
+Passed integer-length.3
+
+Passed integer-length.4
+
+Passed boole-1
+
+Passed boole-2
+
+Passed boole-3
+
+Passed boole-4
+
+Passed boole-5
+
+Passed boole-6
+
+Passed boole-7
+
+Passed boole-8
+
+Passed floor-ratio-1
+
+Passed floor-ratio-2
+
+Passed floor-ratio-3
+
+Passed floor-ratio-4
+
+Passed floor-ratio-5
+
+Passed floor-ratio-6
+
+Passed floor-ratio-float-1
+
+Passed ceiling-ratio-1
+
+Passed floor-7
+
+Passed floor-ceiling-2
+
+Passed floor-truncate-1
+
+Passed floor-truncate-2
+
+Passed floor-mpf-1
+
+Failed floor-remainder-contagion
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for fun in (quote (floor ceiling truncate round ffloor fceiling ftruncate fround)) nconc (loop for args in (quote ((3 2) (3 2) (3 (ratio 4 7)) ((ratio 31 30) 2) (3 2) (3 2) (3 2))) for rtype in (quote (single-float single-float single-float single-float double-float double-float double-float)) unless (typep (nth-value 1 (apply fun args)) rtype) collect (cons fun args)))
+
+Failed ffloor-quotient-contagion
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for fun in (quote (ffloor fceiling ftruncate fround)) nconc (loop for args in (quote ((3 2) (3 (ratio 4 7)) ((ratio 31 30) 2) (3 2) (3 2) (3 (ratio 4 7)) ((ratio 31 30) 2) (3 2) (3 2) (3 2))) for rtype in (quote (single-float single-float single-float single-float single-float single-float single-float double-float double-float double-float)) unless (typep (apply fun args) rtype) collect (cons fun args)))
+
+Passed negate-most-negative-fixnum-1
+
+Passed reciprocal-1
+
+Passed reciprocal-0
+
+Passed reciprocal-0-1
+
+Passed reciprocal-2
+
+Passed abs-1
+
+Passed complex-1
+
+Passed make-complex-0
+
+Passed expt-complex-1
+
+Passed times-complex-2
+
+Passed complex-float-1
+
+Passed complex-rational-1
+
+Passed complex-float-3
+
+Passed complex-float-4
+
+Passed complex-float-5
+
+Passed complex-float-6
+
+Passed complex-float-7
+
+Passed complex-float-8
+
+Passed complex-float-9
+
+Passed complex-float-10
+
+Passed complex-float-11
+
+Passed complex-float-12
+
+Passed complex-float-13
+
+Passed ash-1
+
+Passed logbitp-1
+
+Passed logbitp-2
+
+Passed logbitp-3
+
+Passed logbitp-4
+
+Passed logbitp-5
+
+Passed logbitp-6
+
+Passed gcd-1
+
+Passed gcd-2
+
+Passed gcd-3
+
+Passed gcd-4
+
+Passed gcd-5
+
+Passed gcd-6
+
+Passed ltv-complex-0
+
+Passed ltv-complex-1
+
+Passed ltv-complex-2
+
+Passed ltv-complex-3
+
+Passed ltv-complex-4
+
+Passed infinity-1
+
+Passed infinity-2
+
+Passed infinity-3
+
+Passed infinity-4
+
+Passed infinity-5
+
+Passed infinity-6
+
+Passed infinity-7
+
+Passed infinity-8
+
+Passed infinity-9
+
+Passed nan-1
+
+Passed nan-2
+
+Passed nan-3
+
+Passed nan-4
+
+Passed signum-1
+
+Passed signum-1a
+
+Passed signum-2
+
+Passed signum-2a
+
+Passed signum-3
+
+Failed sqrt-big-ratio-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (ext:with-float-traps-masked (:invalid :overflow :underflow :divide-by-zero) (let ((result (sqrt 28022395738783732117648967388274923619871355234097921/122167958641777737216225939000892255646232346624))) (and (typep result (quote float)) (not (ext:float-nan-p result)))))))
+
+Passed sqrt-bignum-should-fit-in-single-float-1
+
+Passed sqrt-bignum-does-not-fit-in-single-float-overflow-1
+
+Passed sqrt-bignum-should-fit-in-single-float-overflow-2
+
+Passed number-compare-1
+
+Passed number-compare-2
+
+Passed number-compare-3
+
+Passed number-compare-4
+
+Passed number-compare-5
+
+Passed number-compare-6
+
+Passed max-1
+
+Passed max-2
+
+Passed max-2a
+
+Passed max-3
+
+Passed min-1
+
+Passed min-2
+
+Passed min-2a
+
+Passed min-3
+
+Passed number-comparison-real-1
+
+Passed number-comparison-real-2
+
+Passed number-comparison-real-3
+
+Passed number-comparison-real-4
+
+Passed number-comparison-real-7
+
+Passed number-comparison-real-8
+
+Passed number-comparison-real-9
+
+Passed number-comparison-real-10
+
+Passed number-comparison-number-11
+
+Passed number-comparison-number-12
+
+Passed number-comparison-number-13
+
+Passed number-comparison-number-14
+
+Passed number-comparison-real-1a
+
+Passed number-comparison-real-2a
+
+Passed number-comparison-real-3a
+
+Passed number-comparison-real-4a
+
+Passed number-comparison-real-7a
+
+Passed number-comparison-real-8a
+
+Passed number-comparison-real-9a
+
+Passed number-comparison-real-10a
+
+Passed number-comparison-number-11a
+
+Passed number-comparison-number-12a
+
+Passed number-comparison-number-13a
+
+Passed number-comparison-number-14a
+
+Passed complex-reciprocal
+
+Passed number-unary-operations-1-inline
+
+Passed number-unary-operations-1-notinline
+
+Passed log-functions-1
+
+Passed log-functions-2
+
+Passed log-functions-3
+
+Passed log-functions-4
+
+Passed log-functions-5
+
+Passed log-functions-5a
+
+Passed log-functions-5b
+
+Passed logand.1
+
+Passed logand.2
+
+Passed logand.3
+
+Passed logand.order.2.simple
+
+Passed logand.3a
+
+Passed logand.3b
+
+Passed logand.3c
+
+Passed logand.3d
+
+Passed logand.5.simple
+
+Passed logandc1.1
+
+Passed logandc1.2
+
+Passed logandc1.3
+
+Passed logandc1.4.simple
+
+Passed logandc2.1
+
+Passed logandc2.2
+
+Passed logandc2.3
+
+Passed logandc2.4.simple
+
+Passed logeqv.1
+
+Passed logeqv.2
+
+Passed logeqv.3
+
+Passed logeqv.3a
+
+Passed logeqv.5.simple
+
+Passed logeqv.5.simple.inline
+
+Passed logior.1
+
+Passed logior.2
+
+Passed logior.3
+
+Passed logior.3a
+
+Passed logior.5.simple
+
+Passed lognand.1
+
+Passed lognand.2
+
+Passed lognand.3
+
+Passed lognand.3a
+
+Passed lognand.4.simple
+
+Passed lognor.1
+
+Passed lognor.2
+
+Passed lognor.3
+
+Passed lognor.3a
+
+Passed lognor.4.simple
+
+Passed logorc1.1
+
+Passed logorc1.2
+
+Passed logorc1.3
+
+Passed logorc1.4
+
+Passed logorc1.4a
+
+Passed logorc1.4.simple
+
+Passed logorc2.1
+
+Passed logorc2.2
+
+Passed logorc2.3
+
+Passed logorc2.4
+
+Passed logorc2.4a
+
+Passed logorc2.4.simple
+
+Passed logxor.1
+
+Passed logxor.2
+
+Passed logxor.3
+
+Passed logxor.3a
+
+Passed logxor.4.simple
+
+Passed logxor.5.simple
+
+Passed log-bignum
+
+Passed load-log-bignum
+
+Failed big-ratio-coerce
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((result (coerce 6795704571147613088400718678381656244393117734249898937417419069310191575883868986428455446312916068568665979830007649804543533991572608932250835738151489076845330821569858726908084574701882988127547528934585469826755385222874837210418773111903651670205662000421193529634355863606092768847694362480173879256904596515653328461457501880112334566400744016842783001773321772818609367618076742443023275354232092047563787771643659430278130974461062642384241926963624924919867161137264969829092223075246982819340445538562498073940878705520674737984170082956322173496241162764552348099573721983300906273607793253095492671040351/2500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 (quote single-float)))) (and (floatp result) (not (ext:float-nan-p result))))))
+
+Passed ratio-error-from-#clasp
+
+Failed all-div-mult-plus-minus-combinations
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((operands (list 23 0 (/ 3 2) 1.23 1.23 (complex 2 3))) (results NIL) (print NIL) (compare NIL) (results-from-sbcl (list 0 (complex 4 6) (complex -5 12) 1 (complex 0.77 3) (complex 3.23 3) (complex 2.46 3.69) (complex 1.6260163 2.4390244) (complex 0.77 3) (complex 3.23 3) (complex 2.46 3.69) (complex 1.6260162601626016 2.4390243902439024) (complex (ratio 1 2) 3) (complex (ratio 7 2) 3) (complex 3 (ratio 9 2)) (complex (ratio 4 3) 2) (complex 2 3) (complex 2 3) (complex (parse-integer "9223372036854775808") (parse-integer "13835058055282163712")) (complex (ratio 1 -2305843009213693952) (ratio 3 0)) (complex -21 3) (complex 25 3) (complex 46 69) (complex (ratio 2 23) (ratio 3 23)) (complex -0.77 -3) (complex 3.23 3) (complex 2.46 3.69) (complex 0.18923077 -0.28384614) 0 2.46 1.5129 1 1.907348634588857 2.4600000190734863 1.5129000234603882 1.0000000155068995 -0.26999998 2.73 1.845 0.82 -4.611686 4.611686 5.672374 2.6671374 -21.77 24.23 28.29 0.053478263 (complex -0.77 -3) (complex 3.23 3) (complex 2.46 3.69) (complex 0.18923076923076923 -0.28384615384615386) -1.907348634588857 2.4600000190734863 1.5129000234603882 0.9999999844931008 0 2.46 1.5129 1 -0.27 2.73 1.845 0.82 -4.611686018427388 4.611686018427388 5.672373802665687 2.667137344314341 -21.77 24.23 28.29 0.05347826086956522 (complex (ratio -1 2) -3) (complex (ratio 7 2) 3) (complex 3 (ratio 9 2)) (complex (ratio 3 13) (ratio -9 26)) 0.26999998 2.73 1.845 1.2195122 0.27 2.73 1.845 1.2195121951219512 0 3 (ratio 9 4) 1 (ratio 3 2) 9223372036854775811/2 -2305843009213693952 3/9223372036854775808 (ratio -43 2) (ratio 49 2) (ratio 69 2) (ratio 3 46) (complex -2 -3) (complex 2 3) (complex (parse-integer "9223372036854775808") (parse-integer "13835058055282163712")) (complex 9223372036854775808/13 -13835058055282163712/13) 4.611686 4.611686 5.672374 3.7493382 4.611686018427388 4.611686018427388 5.672373802665687 3.74933822636373 (ratio -3 2) 9223372036854775811/2 -2305843009213693952 9223372036854775808/3 0 (parse-integer "9223372036854775808") (parse-integer "21267647932558653966460912964485513216") 1 -23 23 (parse-integer "106068778423829921792") (ratio 0 23) (complex 21 -3) (complex 25 3) (complex 46 69) (complex (ratio 46 13) (ratio -69 13)) 21.77 24.23 28.29 18.699186 21.77 24.23 28.29 18.69918699186992 (ratio 43 2) (ratio 49 2) (ratio 69 2) (ratio 46 3) 23 23 (parse-integer "106068778423829921792") (ratio 23 0) 0 46 529 1)) (no-error-p T)) NIL (if compare (progn (loop for x in results for y in results-from-sbcl unless (equal x y) do (format T "Diff ~a with ~a~2%" x y))) NIL) (values no-error-p))))
+
+Passed float-constants-1
+
+Passed float-constants-2
+
+Passed float-constants-3
+
+Passed float-constants-4
+
+Passed float-constants-1-negative
+
+Passed float-constants-2-negative
+
+Passed float-constants-3-negative
+
+Passed float-constants-4-negative
+
+Passed float-constants-5
+
+Passed float-constants-5-negative
+
+Passed random-short
+
+Passed random-single
+
+Passed random-double
+
+Passed random-long
+
+Passed issue-1257
+
+Passed issue-1258
+
+
+Running ehkiller suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ehkiller.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ehkiller.fasl
+
+Passed eh-foo
+
+Passed eh-bar
+
+Passed eh-baz
+
+
+Running package suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/package.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/package.fasl
+
+Passed unexport-designators
+
+Passed package-designator-character
+
+Failed unintern-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(unintern T)
+
+Failed unintern-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(unintern NIL)
+
+Passed unintern-3
+
+Passed unintern-4
+
+Passed unintern-5
+
+Passed unintern-6
+
+Passed unintern-7
+
+Passed nicknames-1
+
+Passed nicknames-2
+
+Passed shadowing-import-1
+
+Passed nicknames-3
+
+Passed packages-1
+
+Passed defpackage-1
+
+Passed defpackage-2
+
+Passed issue-699
+
+Passed issue-699-generic
+
+Passed add-nickname-happy-path
+
+Passed add-nickname-inexisting-package
+
+Passed add-nickname-already-in-use
+
+Passed add-nickname-twice
+
+Passed remove-nickname-happy-path
+
+Passed remove-nickname-inexistant-nickname
+
+Passed remove-nickname-of-other-package
+
+Passed remove-nickname-inexisting-package-existing-nickname
+
+Passed remove-nickname-inexisting-package-inexisting-nickname
+
+Passed import-same-symbol-twice
+
+Passed import-different-symbol-same-name-twice
+
+Passed export-not-accessible-symbol
+
+Passed export-not-accessible-symbol-continue
+
+Passed export-name_conflict_in_other_package
+
+Passed import-uninterned-symbol-set-home-package
+
+Passed continuable-error-for-make-package-existing-package
+
+Passed continuable-error-for-make-package-existing-package-in-nicknames
+
+Passed delete-package-in-use
+
+Passed continuable-error-for-delete-package-use-package
+
+Failed find-all-symbols.1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for package in (list-all-packages) append (let ((failures NIL)) (do-symbols (sym package failures) (if (eql (symbol-package sym) package) (progn (let* ((name (symbol-name sym)) (similar (find-all-symbols name)) (similar2 (find-all-symbols sym))) (if (not (and (member sym similar) (subsetp similar similar2) (subsetp similar2 similar) (loop for sym2 in similar always (string= name (symbol-name sym2))))) (progn (push sym failures)) NIL))) NIL))))
+
+Passed delete-package-use-packages-correctly
+
+Passed import-conflict-0
+
+Passed import-conflict-1
+
+Passed import-conflict-2
+NC0 is locked: NIL
+Passed import-conflict-3
+
+Passed export-conflict-0
+
+Passed export-conflict-1
+
+Passed export-conflict-2
+
+Passed export-conflict-3
+
+Passed export-conflict-4
+
+Passed export-conflict-5
+
+Passed export-conflict-6
+
+Passed export-conflict-7
+
+Passed export-conflict-8
+
+Passed export-conflict-9
+
+Passed export-conflict-10
+
+Passed export-conflict-11
+
+Passed use-package-conflict-0
+
+Passed use-package-conflict-1
+
+Passed use-package-conflict-2
+
+Passed use-package-conflict-3
+
+Passed use-package-conflict-4
+
+Passed use-package-conflict-5
+
+Passed unintern-conflict-0
+
+Passed unintern-conflict-1
+
+Passed unintern-conflict-2
+
+Passed unintern-conflict-3
+
+Passed locked_is_locked
+
+Passed locked-shadow
+
+Passed locked-import
+
+Passed locked-import-nop
+
+Passed locked-unintern
+
+Passed locked-export
+
+Passed locked-export-nop
+
+Passed locked-unexport
+
+Passed locked-use
+
+Passed locked-unuse
+
+Passed locked-rename
+
+Passed locked-delete
+
+Passed locked-add-nickname
+
+Passed locked-remove-nickname
+
+Passed locked-remove-nickname-nop
+
+Passed locked-intern
+
+Passed locked-special
+
+Passed locked-fdefinition
+
+Passed locked-fmakunbound
+
+Passed locked-macro
+
+Passed locked-compiler-macro
+
+Passed locked-defconstant
+
+Passed unlocked_is_locked
+
+Passed unlocked-shadow
+
+Passed unlocked-import
+
+Passed unlocked-export
+
+Passed unlocked-unexport
+
+Passed unlocked-unintern
+
+Passed unlocked-use
+
+Passed unlocked-unuse
+
+Passed unlocked-rename
+
+Passed unlocked-add-nickname
+
+Passed unlocked-remove-nickname
+
+Passed unlocked-intern
+
+Passed unlocked-special
+
+Passed unlocked-symbol-value
+
+Passed unlocked-fdefinition
+
+Passed unlocked-fmakunbound
+
+Passed unlocked-macro
+
+Passed unlocked-compiler-macro
+
+Passed unlocked-delete
+
+
+Running structures suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.fasl
+
+Passed defstruct-predicate
+
+Passed copy-structure
+
+Passed structure-no-keyword-name-normal
+
+Passed structure-keyword-name-normal
+
+Passed structure-keyword-name-list
+
+Passed structure-keyword-name-vector
+
+Passed structure-use-readonly-value-positive
+
+Passed structure-use-readonly-value-negative
+
+Passed structure-use-readonly-value-implicit
+
+Failed struct-test-07-5.simplified
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((obj (make-struct-test-07 :a07 23 :b07 42))) (values (a07 obj) (b07 obj)))
+
+Passed struct-test-15/10
+
+Passed struct-test-15/10a
+
+Passed struct-test-15/10b
+
+Passed struct-test-38-2
+
+Failed struct-test-45
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (eval (quote (defstruct (struct-test-47 (:type list) (:initial-offset 3) (:include struct-test-45)) c47 d47)))))
+
+Failed sbcl-cross-compile-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (eval (quote (progn (defstruct (ifoo-1 (:include foo-2 (bar 43)))) t)))))
+
+Failed sbcl-cross-compile-3
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (eval (quote (progn (defstruct (ifoo-2 (:include foo-2 (bar 43 :read-only t)))) t)))))
+
+Passed sbcl-cross-compile-4
+
+Failed include-level-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((before (fdefinition (quote node-tail-p)))) (eval (quote (defstruct (valued-node (:conc-name node-) (:include node))))) (eql before (fdefinition (quote node-tail-p))))))
+
+Passed include-level-2a
+
+Failed include-level-2b
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (progn (eval (quote (defstruct (combination (:include valued-node))))) (fboundp (quote combination-tail-p)))))
+
+Failed include-level-3
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((before (fdefinition (quote bar0-a)))) (eval (quote (defstruct (bar2 (:include bar1) (:conc-name bar0-)) c))) (eql before (fdefinition (quote bar0-a))))))
+
+Passed include-level-3a
+
+Passed include-level-4
+
+Passed include-level-5
+
+Failed include-level-5a
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((object (make-sub-sub-blah1 :a 1 :b 2 :c 3))) (values (sub-sub-blah1-a object) (sub-sub-blah1-b object) (sub-sub-blah1-c object) (setf (sub-sub-blah1-b object) 23) (setf (sub-sub-blah1-b object) 42) object))))
+
+Failed struct-test-56
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((s (make-struct-test-56 :a55 1 :b55 2 :c55 3 :d56 4 :e56 5))) (and (struct-test-56-p s) (= (struct-test-56-a55 s) 1) (= (struct-test-56-b55 s) 2) (= (struct-test-56-c55 s) 3) (= (struct-test-56-d56 s) 4) (= (struct-test-56-e56 s) 5)))))
+
+Passed struct-make-instance
+
+Passed struct-slot-value.1
+
+Failed struct-slot-value.2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((obj (make-instance (quote struct-clos)))) (setf (slot-value obj (quote foo)) 5) (values (slot-value obj (quote foo)) (slot-value obj (quote bar))))
+
+
+Running symbol0 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/symbol0.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/symbol0.fasl
+
+Passed test-make-symbol-error-0
+
+Passed test-make-symbol-error-1
+
+Passed test-make-symbol-error-2
+
+Passed test-make-symbol-0
+
+Passed test-make-symbol-1
+
+Passed makunbound-1
+
+Passed gensym-2
+
+Passed gensym-3
+
+Passed gensym-4
+
+Passed gensym-5
+
+Passed gensym-6
+
+Passed gensym-7
+
+Passed gensym-8
+
+Passed gensym-9
+
+Passed gensym-10
+
+Passed gentemp-1
+
+Passed build-sbcl-1
+
+Passed build-sbcl-2
+
+Passed 978-symbols-common-lisp-exported
+
+Passed fboundp.8
+
+
+Running string-comparison0 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/string-comparison0.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/string-comparison0.fasl
+
+Passed test-string-comparisonl-0
+
+Passed test-string-comparisonl-1
+
+Passed test-string-comparisonl-2
+
+Passed test-string-comparisonl-3
+
+Passed test-string-comparisonl-4
+
+Passed test-string-comparisonl-5
+
+Passed test-string-comparisonl-6
+
+Passed test-string-comparisonl-7
+
+Passed test-string-comparisonl-8
+
+Passed test-string-comparisonl-9
+
+Passed test-string-comparisonl-10
+
+Passed test-string-comparisonl-11
+
+Passed test-string-comparisonl-12
+
+Passed test-string-comparisonl-13
+
+Passed test-string-comparisonl-14
+
+Passed test-string-comparisonl-15
+
+Passed test-string-comparisonl-16
+
+Passed test-string-comparisonl-17
+
+Passed test-string-comparisonl-18
+
+Passed test-string-comparisonl-19
+
+Passed test-string-comparisonl-20
+
+Passed test-string-comparisonl-21
+
+Passed test-string-comparisonl-22
+
+Passed test-string-comparisonl-23
+
+Passed test-string-comparisonl-24
+
+Passed test-string-comparisonl-25
+
+Passed test-string-comparisonl-26
+
+Passed test-string-comparisonl-27
+
+Passed test-string-comparisonl-28
+
+Passed test-string-comparisonl-29
+
+Passed test-string-comparisonl-30
+
+Passed test-string-comparisonl-31
+
+Passed test-string-comparisonl-32
+
+Passed test-string-comparisonl-33
+
+Passed test-string-comparisonl-34
+
+Passed test-string-comparisonl-35
+
+Passed test-string-comparisonl-36
+
+Passed test-string-comparisonl-37
+
+Passed test-string-comparisonl-38
+
+Passed test-string-comparisonl-39
+
+Passed test-string-comparisonl-40
+
+Passed test-string-comparisonl-41
+
+Passed test-string-comparisonl-42
+
+Passed test-string-comparisonl-43
+
+Passed test-string-comparisonl-44
+
+Passed test-string-comparisonl-45
+
+Passed test-string-comparisonl-46
+
+Passed test-string-comparisonl-47
+
+Passed test-string-comparisonl-48
+
+Passed test-string-comparisonl-49
+
+Passed test-string-comparisonl-50
+
+Passed test-string-comparisonl-51
+
+Passed test-string-comparisonl-52
+
+Passed test-string-comparisonl-53
+
+Passed test-string-comparisonl-54
+
+Passed test-string-comparisonl-55
+
+Passed test-string-comparisonl-56
+
+Passed test-string-comparisonl-57
+
+Passed test-string-comparisonl-58
+
+Passed test-string-comparisonl-59
+
+Passed test-string-comparisonl-60
+
+Passed test-string-comparisonl-61
+
+Passed test-string-comparisonl-62
+
+Passed test-string-comparisonl-63
+
+Passed test-string-comparisonl-64
+
+Passed test-string-comparisonl-65
+
+Passed test-string-comparisonl-66
+
+Passed test-string-comparisonl-67
+
+Passed test-string-comparisonl-68
+
+Passed test-string-comparisonl-69
+
+Passed test-string-comparisonl-70
+
+Passed test-string-comparisonl-71
+
+Passed test-string-comparisonl-72
+
+Passed test-string-comparisonl-73
+
+Passed test-string-comparisonl-74
+
+Passed test-string-comparisonl-75
+
+Passed test-string-comparisonl-76
+
+Passed test-string-comparisonl-77
+
+Passed test-string-comparisonl-78
+
+Passed test-string-comparisonl-79
+
+Passed test-string-comparisonl-80
+
+Passed test-string-comparisonl-81
+
+Passed test-string-comparisonl-82
+
+Passed test-string-comparisonl-83
+
+Passed test-string-comparisonl-84
+
+Passed test-string-comparisonl-85
+
+Passed test-string-comparisonl-86
+
+Passed test-string-comparisonl-87
+
+Passed test-string-comparisonl-88
+
+Passed test-string-comparisonl-89
+
+Passed test-string-comparisonl-90
+
+Passed test-string-comparisonl-91
+
+Passed test-string-comparisonl-92
+
+Passed test-string-comparisonl-93
+
+Passed test-string-comparisonl-94
+
+Passed test-string-comparisonl-95
+
+Passed test-string-comparisonl-96
+
+Passed test-string-comparisonl-97
+
+Passed test-string-comparisonl-98
+
+Passed test-string-comparisonl-99
+
+Passed test-string-comparisonl-100
+
+Passed test-string-comparisonl-101
+
+Passed test-string-comparisonl-102
+
+Passed test-string-comparisonl-103
+
+Passed test-string-comparisonl-104
+
+Passed test-string-comparisonl-105
+
+Passed test-string-comparisonl-106
+
+Passed test-string-comparisonl-107
+
+Passed test-string-comparisonl-108
+
+Passed test-string-comparisonl-109
+
+Passed test-string-comparisonl-110
+
+Passed test-string-comparisonl-111
+
+Passed test-string-comparisonl-112
+
+Passed test-string-comparisonl-113
+
+Passed test-string-comparisonl-114
+
+Passed test-string-comparisonl-115
+
+Passed test-string-comparisonl-116
+
+Passed test-string-comparisonl-117
+
+Passed test-string-comparisonl-118
+
+Passed test-string-comparisonl-119
+
+Passed test-string-comparisonl-120
+
+Passed test-string-comparisonl-121
+
+Passed test-string-comparisonl-122
+
+Passed test-string-comparisonl-123
+
+Passed test-string-comparisonl-124
+
+Passed test-string-comparisonl-125
+
+Passed test-string-comparisonl-126
+
+Passed test-string-comparisonl-127
+
+Passed test-string-comparisonl-128
+
+Passed test-string-comparisonl-129
+
+Passed test-string-comparisonl-130
+
+Passed test-string-comparisonl-131
+
+Passed test-string-comparisonl-132
+
+Passed test-string-comparisonl-133
+
+Passed test-string-comparisonl-134
+
+Passed test-string-comparisonl-135
+
+Passed test-string-comparisonl-136
+
+Passed test-string-comparisonl-137
+
+Passed test-string-comparisonl-138
+
+Passed test-string-comparisonl-139
+
+Passed test-string-comparisonl-140
+
+Passed test-string-comparisonl-141
+
+Passed test-string-comparisonl-142
+
+Passed test-string-comparisonl-143
+
+Passed test-string-comparisonl-144
+
+Passed test-string-comparisonl-145
+
+Passed test-string-comparisonl-146
+
+Passed test-string-comparisonl-147
+
+Passed test-string-comparisonl-148
+
+Passed test-string-comparisonl-149
+
+Passed test-string-comparisonl-150
+
+Passed test-string-comparisonl-151
+
+Passed test-string-comparisonl-152
+
+Passed test-string-comparisonl-153
+
+Passed test-string-comparisonl-154
+
+Passed test-string-comparisonl-155
+
+Passed test-string-comparisonl-156
+
+Passed test-string-comparisonl-157
+
+Passed test-string-comparisonl-158
+
+Passed test-string-comparisonl-159
+
+Passed test-string-comparisonl-160
+
+Passed test-string-comparisonl-161
+
+Passed test-string-comparisonl-162
+
+Passed test-string-comparisonl-163
+
+Passed test-string-comparisonl-164
+
+Passed test-string-comparisonl-165
+
+Passed test-string-comparisonl-166
+
+Passed test-string-comparisonl-167
+
+Passed test-string-comparisonl-168
+
+Passed test-string-comparisonl-169
+
+Passed test-string-comparisonl-170
+
+Passed test-string-comparisonl-171
+
+Passed test-string-comparisonl-172
+
+Passed test-string-comparisonl-173
+
+Passed test-string-comparisonl-174
+
+Passed test-string-comparisonl-175
+
+Passed test-string-comparisonl-176
+
+Passed test-string-comparisonl-177
+
+Passed test-string-comparisonl-178
+
+Passed test-string-comparisonl-179
+
+Passed test-string-comparisonl-180
+
+Passed test-string-comparisonl-181
+
+Passed test-string-comparisonl-182
+
+Passed test-string-comparisonl-183
+
+Passed test-string-comparisonl-184
+
+Passed test-string-comparisonl-185
+
+Passed test-string-comparisonl-186
+
+Passed test-string-comparisonl-187
+
+Passed test-string-comparisonl-188
+
+Passed test-string-comparisonl-189
+
+Passed test-string-comparisonl-190
+
+Passed test-string-comparisonl-191
+
+Passed test-string-comparisonl-192
+
+Passed test-string-comparisonl-193
+
+Passed test-string-comparisonl-194
+
+Passed test-string-comparisonl-195
+
+Passed test-string-comparisonl-196
+
+Passed test-string-comparisonl-197
+
+Passed test-string-comparisonl-198
+
+Passed test-string-comparisonl-199
+
+Passed test-string-comparisonl-200
+
+Passed test-string-comparisonl-201
+
+Passed test-string-comparisonl-202
+
+Passed test-string-comparisonl-203
+
+Passed test-string-comparisonl-204
+
+Passed test-string-comparisonl-205
+
+Passed test-string-comparisonl-206
+
+Passed test-string-comparisonl-207
+
+Passed test-string-comparisonl-208
+
+Passed test-string-comparisonl-209
+
+Passed test-string-comparisonl-210
+
+Passed test-string-comparisonl-211
+
+Passed test-string-comparisonl-212
+
+Passed test-string-comparisonl-213
+
+Passed test-string-comparisonl-214
+
+Passed test-string-comparisonl-215
+
+Passed test-string-comparisonl-216
+
+Passed test-string-comparisonl-217
+
+Passed test-string-comparisonl-218
+
+Passed test-string-comparisonl-219
+
+Passed test-string-comparisonl-220
+
+Passed test-string-comparisonl-221
+
+Passed test-string-comparisonl-222
+
+Passed test-string-comparisonl-223
+
+Passed test-string-comparisonl-224
+
+Passed test-string-comparisonl-225
+
+Passed test-string-comparisonl-226
+
+Passed test-string-comparisonl-227
+
+Passed test-string-comparisonl-228
+
+Passed test-string-comparisonl-229
+
+Passed test-string-comparisonl-230
+
+Passed test-string-comparisonl-231
+
+Passed test-string-comparisonl-232
+
+Passed test-string-comparisonl-233
+
+Passed test-string-comparisonl-234
+
+Passed test-string-comparisonl-235
+
+Passed test-string-comparisonl-236
+
+Passed test-string-comparisonl-237
+
+Passed test-string-comparisonl-238
+
+Passed test-string-comparisonl-239
+
+Passed test-string-comparisonl-240
+
+Passed test-string-comparisonl-241
+
+Passed test-string-comparisonl-242
+
+Passed test-string-comparisonl-243
+
+Passed test-string-comparisonl-244
+
+Passed test-string-comparisonl-245
+
+Passed test-string-comparisonl-246
+
+Passed test-string-comparisonl-247
+
+Passed test-string-comparisonl-248
+
+Passed test-string-comparisonl-249
+
+Passed test-string-comparisonl-250
+
+Passed test-string-comparisonl-251
+
+Passed test-string-comparisonl-252
+
+Passed test-string-comparisonl-253
+
+Passed test-string-comparisonl-254
+
+Passed test-string-comparisonl-255
+
+Passed test-string-comparisonl-256
+
+Passed test-string-comparisonl-257
+
+Passed test-string-comparisonl-258
+
+Passed test-string-comparisonl-259
+
+Passed test-string-comparisonl-260
+
+Passed test-string-comparisonl-261
+
+Passed test-string-comparisonl-262
+
+Passed test-string-comparisonl-263
+
+Passed test-string-comparisonl-264
+
+Passed test-string-comparisonl-265
+
+Passed test-string-comparisonl-266
+
+Passed test-string-comparisonl-267
+
+Passed test-string-comparisonl-268
+
+Passed test-string-comparisonl-269
+
+Passed test-string-comparisonl-270
+
+Passed test-string-comparisonl-271
+
+Passed test-string-comparisonl-272
+
+Passed test-string-comparisonl-273
+
+Passed test-string-comparisonl-274
+
+Passed test-string-comparisonl-275
+
+Passed test-string-comparisonl-276
+
+Passed test-string-comparisonl-277
+
+Passed test-string-comparisonl-278
+
+Passed test-string-comparisonl-279
+
+Passed test-string-comparisonl-280
+
+Passed test-string-comparisonl-281
+
+Passed test-string-comparisonl-282
+
+Passed test-string-comparisonl-283
+
+Passed test-string-comparisonl-284
+
+Passed test-string-comparisonl-285
+
+Passed test-string-comparisonl-286
+
+Passed test-string-comparisonl-287
+
+Passed test-string-comparisonl-288
+
+Passed test-string-comparisonl-289
+
+Passed test-string-comparisonl-290
+
+Passed test-string-comparisonl-291
+
+Passed test-string-comparisonl-292
+
+Passed test-string-comparisonl-293
+
+Passed test-string-comparisonl-294
+
+Passed test-string-comparisonl-295
+
+Passed test-string-comparisonl-296
+
+Passed test-string-comparisonl-297
+
+Passed test-string-comparisonl-298
+
+Passed test-string-comparisonl-299
+
+Passed test-string-comparisonl-300
+
+Passed test-string-comparisonl-301
+
+Passed test-string-comparisonl-302
+
+Passed test-string-comparisonl-303
+
+Passed test-string-comparisonl-304
+
+Passed test-string-comparisonl-305
+
+Passed test-string-comparisonl-306
+
+Passed test-string-comparisonl-307
+
+Passed test-string-comparisonl-308
+
+Passed test-string-comparisonl-309
+
+Passed test-string-comparisonl-310
+
+Passed test-string-comparisonl-311
+
+Passed test-string-comparisonl-312
+
+Passed test-string-comparisonl-313
+
+Passed test-string-comparisonl-314
+
+Passed test-string-comparisonl-315
+
+Passed test-string-comparisonl-316
+
+Passed test-string-comparisonl-317
+
+Passed test-string-comparisonl-318
+
+Passed test-string-comparisonl-319
+
+Passed test-string-comparisonl-320
+
+Passed test-string-comparisonl-321
+
+Passed test-string-comparisonl-322
+
+Passed test-string-comparisonl-323
+
+Passed test-string-comparisonl-324
+
+Passed test-string-comparisonl-325
+
+Passed test-string-comparisonl-326
+
+Passed test-string-comparisonl-327
+
+Passed test-string-comparisonl-328
+
+Passed test-string-comparisonl-329
+
+Passed test-string-comparisonl-330
+
+Passed test-string-comparisonl-331
+
+Passed test-string-comparisonl-332
+
+Passed test-string-comparisonl-333
+
+Passed test-string-comparisonl-334
+
+Passed test-string-comparisonl-335
+
+Passed test-string-comparisonl-336
+
+Passed test-string-comparisonl-337
+
+Passed test-string-comparisonl-338
+
+Passed test-string-comparisonl-339
+
+Passed test-string-comparisonl-340
+
+Passed test-string-comparisonl-341
+
+Passed test-string-comparisonl-342
+
+Passed test-string-comparisonl-343
+
+Passed test-string-comparisonl-344
+
+Passed test-string-comparisonl-345
+
+Passed test-string-comparisonl-346
+
+Passed test-string-comparisonl-347
+
+Passed test-string-comparisonl-348
+
+Passed test-string-comparisonl-349
+
+Passed test-string-comparisonl-350
+
+Passed test-string-comparisonl-351
+
+Passed test-string-comparisonl-352
+
+Passed test-string-comparisonl-353
+
+Passed test-string-comparisonl-354
+
+Passed test-string-comparisonl-355
+
+Passed test-string-comparisonl-356
+
+Passed test-string-comparisonl-357
+
+Passed test-string-comparisonl-358
+
+Passed test-string-comparisonl-359
+
+Passed test-string-comparisonl-360
+
+Passed test-string-comparisonl-361
+
+Passed test-string-comparisonl-362
+
+Passed test-string-comparisonl-363
+
+Passed test-string-comparisonl-364
+
+Passed test-string-comparisonl-365
+
+Passed test-string-comparisonl-366
+
+Passed test-string-comparisonl-367
+
+Passed test-string-comparisonl-368
+
+Passed test-string-comparisonl-369
+
+Passed test-string-comparisonl-370
+
+Passed test-string-comparisonl-371
+
+Passed test-string-comparisonl-372
+
+Passed test-string-comparisonl-373
+
+Passed test-string-comparisonl-374
+
+Passed test-string-comparisonl-375
+
+Passed test-string-comparisonl-376
+
+Passed test-string-comparisonl-377
+
+Passed test-string-comparisonl-378
+
+Passed test-string-comparisonl-379
+
+Passed test-string-comparisonl-380
+
+Passed test-string-comparisonl-381
+
+Passed test-string-comparisonl-382
+
+Passed test-string-comparisonl-383
+
+Passed test-string-comparisonl-384
+
+Passed test-string-comparisonl-385
+
+Passed test-string-comparisonl-386
+
+Passed test-string-comparisonl-387
+
+Passed test-string-comparisonl-388
+
+Passed test-string-comparisonl-389
+
+Passed test-string-comparisonl-390
+
+Passed test-string-comparisonl-391
+
+Passed test-string-comparisonl-392
+
+Passed test-string-comparisonl-393
+
+Passed test-string-comparisonl-394
+
+Passed test-string-comparisonl-395
+
+Passed test-string-comparisonl-396
+
+Passed test-string-comparisonl-397
+
+Passed test-string-comparisonl-398
+
+Passed test-string-comparisonl-399
+
+Passed test-string-comparisonl-400
+
+Passed test-string-comparisonl-401
+
+Passed test-string-comparisonl-402
+
+Passed test-string-comparisonl-403
+
+Passed test-string-comparisonl-404
+
+Passed test-string-comparisonl-405
+
+Passed test-string-comparisonl-406
+
+Passed test-string-comparisonl-407
+
+Passed test-string-comparisonl-408
+
+Passed test-string-comparisonl-409
+
+Passed test-string-comparisonl-410
+
+Passed test-string-comparisonl-411
+
+Passed test-string-comparisonl-412
+
+Passed test-string-comparisonl-413
+
+Passed test-string-comparisonl-414
+
+Passed test-string-comparisonl-415
+
+Passed test-string-comparisonl-416
+
+Passed test-string-comparisonl-417
+
+Passed test-string-comparisonl-418
+
+Passed test-string-comparisonl-419
+
+Passed test-string-comparisonl-420
+
+Passed test-string-comparisonl-421
+
+Passed test-string-comparisonl-422
+
+Passed test-string-comparisonl-423
+
+Passed test-string-comparisonl-424
+
+Passed test-string-comparisonl-425
+
+Passed test-string-comparisonl-426
+
+Passed test-string-comparisonl-427
+
+Passed test-string-comparisonl-428
+
+Passed test-string-comparisonl-429
+
+Passed test-string-comparisonl-430
+
+Passed test-string-comparisonl-431
+
+Passed test-string-comparisonl-432
+
+Passed test-string-comparisonl-433
+
+Passed test-string-comparisonl-434
+
+Passed test-string-comparisonl-435
+
+Passed test-string-comparisonl-436
+
+Passed test-string-comparisonl-437
+
+Passed test-string-comparisonl-438
+
+Passed test-string-comparisonl-439
+
+Passed test-string-comparisonl-440
+
+Passed test-string-comparisonl-441
+
+Passed test-string-comparisonl-442
+
+Passed test-string-comparisonl-443
+
+Passed test-string-comparisonl-444
+
+Passed test-string-comparisonl-445
+
+Passed test-string-comparisonl-446
+
+Passed test-string-comparisonl-447
+
+
+Running bit-array0 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array0.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array0.fasl
+
+Passed test-bitarray-0
+
+Passed test-bitarray-1
+
+Passed test-bitarray-2
+
+Passed test-bitarray-3
+
+Passed test-bitarray-4
+
+Passed test-bitarray-5
+
+Passed test-bitarray-6
+
+Passed test-bitarray-7
+
+Passed test-bitarray-8
+
+Passed test-bitarray-9
+
+Passed test-bitarray-10
+
+Passed test-bitarray-11
+
+Passed test-bitarray-12
+
+Passed test-bitarray-13
+
+Passed test-bitarray-14
+
+Passed test-bitarray-15
+
+Passed test-bitarray-16
+
+Passed test-bitarray-17
+
+Passed test-bitarray-18
+
+Passed test-bitarray-19
+
+Passed test-bitarray-20
+
+Passed test-bitarray-21
+
+Passed test-bitarray-22
+
+Passed test-bitarray-23
+
+Passed test-bitarray-24
+
+Passed test-bitarray-25
+
+Passed test-bitarray-26
+
+Passed test-bitarray-27
+
+Passed test-bitarray-28
+
+Passed test-bitarray-29
+
+Passed test-bitarray-30
+
+Passed test-bitarray-31
+
+Passed test-bitarray-32
+
+Passed test-bitarray-33
+
+Passed test-bitarray-34
+
+Passed test-bitarray-35
+
+Passed test-bitarray-36
+
+Passed test-bitarray-37
+
+Passed test-bitarray-38
+
+Passed test-bitarray-39
+
+Passed test-bitarray-40
+
+Passed test-bitarray-41
+
+Passed test-bitarray-42
+
+Passed test-bitarray-43
+
+Passed test-bitarray-44
+
+Passed test-bitarray-45
+
+Passed test-bitarray-46
+
+Passed test-bitarray-47
+
+Passed test-bitarray-48
+
+Passed test-bitarray-49
+
+Passed test-bitarray-50
+
+Passed test-bitarray-51
+
+Passed test-bitarray-52
+
+Passed test-bitarray-53
+
+Passed test-bitarray-54
+
+Passed test-bitarray-55
+
+Passed test-bitarray-56
+
+Passed test-bitarray-57
+
+Passed test-bitarray-58
+
+Passed test-bitarray-59
+
+Passed test-bitarray-60
+
+Passed test-bitarray-61
+
+Passed test-bitarray-62
+
+Passed test-bitarray-63
+
+Passed test-bitarray-64
+
+Passed test-bitarray-65
+
+Passed test-bitarray-bitand-displaced-1
+
+Passed test-bitarray-bitand-displaced-2
+
+Passed test-bitarray-bitand-displaced-3
+
+Passed test-bitarray-bitand-displaced-4
+
+Passed test-bitarray-bitandc1-displaced-1
+
+Passed test-bitarray-bitandc1-displaced-2
+
+Passed test-bitarray-bitandc1-displaced-3
+
+Passed test-bitarray-bitandc1-displaced-4
+
+Passed test-bitarray-bitandc2-displaced-1
+
+Passed test-bitarray-bitandc2-displaced-2
+
+Passed test-bitarray-bitandc2-displaced-3
+
+Passed test-bitarray-bitandc2-displaced-4
+
+Passed test-bitarray-biteqv-displaced-1
+
+Passed test-bitarray-biteqv-displaced-2
+
+Passed test-bitarray-biteqv-displaced-3
+
+Passed test-bitarray-biteqv-displaced-4
+
+Passed test-bitarray-bitior-displaced-1
+
+Passed test-bitarray-bitior-displaced-2
+
+Passed test-bitarray-bitior-displaced-3
+
+Passed test-bitarray-bitior-displaced-4
+
+Passed test-bitarray-bitnand-displaced-1
+
+Passed test-bitarray-bitnand-displaced-2
+
+Passed test-bitarray-bitnand-displaced-3
+
+Passed test-bitarray-bitnand-displaced-4
+
+Passed test-bitarray-bit-nor-displaced-1
+
+Passed test-bitarray-bit-nor-displaced-2
+
+Passed test-bitarray-bit-nor-displaced-3
+
+Passed test-bitarray-bit-nor-displaced-4
+
+Passed test-bitarray-bit-orc1-displaced-1
+
+Passed test-bitarray-bit-orc1-displaced-2
+
+Passed test-bitarray-bit-orc1-displaced-3
+
+Passed test-bitarray-bit-orc1-displaced-4
+
+Passed test-bitarray-bit-orc2-displaced-1
+
+Passed test-bitarray-bit-orc2-displaced-2
+
+Passed test-bitarray-bit-orc2-displaced-3
+
+Passed test-bitarray-bit-orc2-displaced-4
+
+Passed test-bitarray-bit-xor-displaced-1
+
+Passed test-bitarray-bit-xor-displaced-2
+
+Passed test-bitarray-bit-xor-displaced-3
+
+Passed test-bitarray-bit-xor-displaced-4
+
+Passed test-bitarray-bit-not-displaced-1
+
+Passed test-bitarray-bit-not-displaced-4
+
+
+Running bit-array1 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.fasl
+
+Passed standard-bitvector-1
+
+Passed standard-bitvector-2
+
+Passed standard-bitvector-3
+
+Passed standard-bitvector-4
+
+Passed standard-mdbit-1
+
+Passed standard-mdbit-2
+
+Passed standard-mdbit-3
+
+Passed standard-mdbit-4
+
+Passed standard-mdbit-1a
+
+Passed standard-mdbit-2a
+
+Passed standard-mdbit-3a
+
+Passed standard-mdbit-4a
+
+Failed hell-mdbit-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 8 :element-type (quote bit) :initial-element 0)) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4))) (bit-and (vector 1) a2))
+
+Failed hell-mdbit-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 8 :element-type (quote bit) :initial-contents (list 0 1 0 1 0 1 0 1))) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4))) (bit-and (vector 1) a2))
+
+Failed hell-mdbit-3
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 8 :element-type (quote bit) :initial-contents (list 0 1 0 1 0 1 0 1))) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4))) (values (bit-and (vector 1) a2 T) (vector 1)))
+
+Failed hell-mdbit-4
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 12 :element-type (quote bit) :initial-contents (list 0 1 0 1 0 1 0 1 0 1 0 1))) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4)) (a3 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 8))) (values (bit-and (vector 1) a2 a3) a3))
+
+Passed hell-mdbit-5
+
+Passed hell-mdbit-5a
+
+
+Running character0 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/character0.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/character0.fasl
+
+Passed test-standard-char-p-$
+
+Passed test-char-0
+
+Passed test-char-1
+
+Passed test-char-2
+
+Passed test-char-3
+
+Passed test-char-4
+
+Passed test-char-5
+
+Passed test-char-6
+
+Passed test-char-7
+
+Passed test-char-8
+
+Passed test-char-9
+
+Passed test-char-10
+
+Passed test-char-11
+
+Passed test-char-0a
+
+Passed test-char-1a
+
+Passed test-char-2a
+
+Passed test-char-3a
+
+Passed test-char-4a
+
+Passed test-char-5a
+
+Passed test-char-6a
+
+Passed test-char-7a
+
+Passed test-char-8a
+
+Passed test-char-9a
+
+Passed test-char-10a
+
+Passed test-char-11a
+
+Passed test-char-12
+
+Passed test-char-12a
+
+Passed test-char-13
+
+Passed test-char-14
+
+Passed test-char-15
+
+Passed test-char-16
+
+Passed test-char-17
+
+Passed test-char-18
+
+Passed test-char-19
+
+Passed test-char-c0
+
+Passed test-char-standard-names
+
+Passed test-char-semistandard-names
+
+
+Running unicode suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unicode.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unicode.fasl
+
+Passed unicode-downcase-1
+
+Passed unicode-upcase-1
+
+Passed char-upcase.2
+
+Passed char-upcase.2a
+
+Passed char-downcase.2
+
+Passed char-downcase.2a
+
+
+Running hash-tables0 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/hash-tables0.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/hash-tables0.fasl
+
+Passed hash-table-1
+
+Passed hash-table-2
+
+Passed hash-table-3
+
+Passed hash-table-4
+
+Passed sxhash-1
+
+Passed sxhash-2
+
+Passed sxhash-3
+
+Passed hash-table-count
+
+Passed hash-table-count-2
+
+Passed hash-table-size
+
+Passed hash-table-rehash-size
+
+Passed hash-table-rehash-threshold
+
+Passed hash-table-test
+
+Passed setf-gethash
+
+Passed clrhash
+
+Passed maphash
+
+Passed remhash
+
+Passed hash-table-count-nil
+
+Passed hash-table-size-nil
+
+Passed hash-table-rehash-size-nil
+
+Passed hash-table-rehash-threshold-nil
+
+Passed hash-table-test-nil
+
+Passed hash-table-weak-key.basic
+
+Passed hash-table-weak-value.basic
+
+Passed hash-table-weak-key-and-value.basic
+
+Passed hash-table-weak-key-or-value.basic
+
+Passed hash-table-count-2-weak-key
+
+Passed setf-gethash-weak-key
+
+Passed clrhash-weak-key
+
+Passed maphash-weak-key
+
+Passed remhash-weak-key
+
+Passed weak-key-weakness
+
+Passed weak-value-weakness
+
+Passed weak-key-and-value-weakness
+
+Passed weak-key-or-value-weakness
+
+Passed equalp-hash-table-1
+
+Passed equalp-hash-table-2
+
+Passed equalp-hash-table-3
+
+Passed custom-hash-table-1
+
+Passed test-issue-946
+
+Passed test-issue-950
+
+Passed test-issue-1042
+
+
+Running misc suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/misc.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/misc.fasl
+
+Passed misc-1
+
+Passed misc-2
+
+Passed cell-1
+
+Passed cell-2
+
+Passed cell-3
+
+Passed disassemble-2
+
+Passed disassemble-3
+
+Passed disassemble-4
+
+Passed disassemble-5
+
+Passed disassemble-6
+
+Passed disassemble-7
+
+Passed disassemble-8
+
+Passed disassemble-9
+
+Passed load-stream.1
+; loading <stream>
+#<LAMBDA>
+; finished loading <stream>
+
+Passed load-stream.2
+
+Passed wots-fmt
+
+Passed load-stream.3
+
+Passed load-stream.3a
+
+Passed load-stream.3b
+
+Passed load-stream.3c
+
+Passed compile-1
+
+Failed compile-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;test-compile-file.lisp" :verbose NIL :print NIL))
+
+Failed compile-4
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (not (string= "" (with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;test-compile-file.lisp" :verbose T :print NIL))))))
+
+Failed compile-4a
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (not (string= "" (with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;test-compile-file.lisp" :verbose NIL :print T))))))
+
+Failed compile-5
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (not (string= "" (with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;test-compile-file.lisp" :print T :verbose T))))))
+
+Passed key-1
+
+Passed key-2
+
+Passed key-3
+
+Passed cl-symbols-1
+
+Passed cl-symbols-2
+
+Passed special-operator-p-1
+
+Passed special-operator-p-2
+
+Failed ast-interpreter-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (equal (list most-positive-fixnum most-negative-fixnum) (funcall (compile NIL (function (lambda NIL (load-time-value (list most-positive-fixnum most-negative-fixnum)))))))))
+
+Failed ast-interpreter-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (equal (list (1+ most-positive-fixnum) (1- most-negative-fixnum)) (funcall (compile NIL (function (lambda NIL (load-time-value (list (1+ most-positive-fixnum) (1- most-negative-fixnum))))))))))
+
+Passed issue-797
+
+Failed test-issue-948-a
+
+Unexpected error
+~tNIL
+while evaluating
+~t(reproduce)
+
+Passed test-issue-948-b
+
+Passed flet-lambda-error
+
+Passed type-inference-error
+
+Passed test-issue-1158
+
+Failed test-issue-1226-a
+
+Unexpected error
+~tNIL
+while evaluating
+~t(funcall (compile NIL (quote (lambda (c d) (values (values d c c))))) 18 19)
+
+Failed test-issue-1226-b
+
+Unexpected error
+~tNIL
+while evaluating
+~t(funcall (compile NIL (quote (lambda (x c d) (if x (setf c 19) (setf c 23)) (values (values d c c))))) T 18 19)
+
+Failed issue-1240
+
+Unexpected error
+~tNIL
+while evaluating
+~t(funcall (compile NIL (quote (lambda (iter) (loop (multiple-value-bind (node morep) (funcall iter) (unless morep (return (values))) node))))) (lambda NIL (values NIL NIL)))
+
+Passed issue-1251
+
+Passed issue-1262
+
+Failed issue-1265
+
+Unexpected error
+~tNIL
+while evaluating
+~t(funcall (compile NIL (quote (lambda (x y) (if x (sqrt (the single-float y)) (sqrt (the double-float y)))))) NIL 4)
+
+Failed bottom-primop
+
+Unexpected error
+~tNIL
+while evaluating
+~t(funcall (compile NIL (quote (lambda (x) (declare (fixnum x)) (values (ignore-errors (>= x (the real NIL))))))) 0)
+
+Passed issue-1382
+
+Passed positive-bytes-allocated
+
+Failed format-no-nil-form
+
+Unexpected error
+~tNIL
+while evaluating
+~t(third (second (macroexpand-1 (quote (formatter "~
+")))))
+
+Failed vaslist-opt-1
+
+Wanted values equalp to
+~t1
+~t2
+~t3
+but got
+~t2
+
+
+while evaluating
+~t(restart-case (invoke-restart (quote bar) 1 2 3) (bar (&rest args) (values-list args)))
+
+
+Passed vaslist-opt-2
+
+Passed macro-function-shadowing
+
+Failed single-value-catch
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((c (catch (quote foo) 4))) c)
+
+
+Running read01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/read01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/read01.fasl
+
+Passed read-from-string0
+
+Passed read-1
+
+12340282346638529000000000000000000000000 
+Passed read-2
+
+inf 
+Passed read-3
+
+Passed read-4
+
+Passed read-5
+
+Passed read-6
+
+Passed read-7
+
+Passed read-8
+
+Passed read-9
+
+Passed read-10
+
+Passed read-11
+
+Passed read-12
+
+Passed read-13
+
+Passed error-mcclim-1
+
+Passed read-14
+
+Passed read-15
+
+Passed read-16
+
+Passed read-17-a
+
+Passed read-17-b
+
+Passed read-backquote-vector-1
+
+Passed read-backquote-vector-2
+
+Passed read-from-string-1a
+
+Passed read-from-string-1b
+
+Passed read-from-string-1c
+
+Passed read-from-string-1d
+
+Passed issue-678
+
+Passed read-byte.error.3.simplyfied
+
+Passed read-byte.error.4.simplyfied
+
+Failed file-length.3.simplyfied
+
+Unexpected error
+~tNIL
+while evaluating
+~t(first (let* ((i 9) (etype (backquote (unsigned-byte (unquote i)))) (e (max 0 (- (ash 1 i) 5))) (os (open "tmp.dat" :direction :output :if-exists :supersede :element-type etype))) (loop repeat 17 do (write-byte e os)) (close os) (let ((is (open "tmp.dat" :direction :input :element-type etype))) (prog1 (list (file-length is) (stream-element-type is) e etype) (close is)))))
+
+Passed read-symbol.11
+
+Passed glsl-toolkit-grammar.lisp-1
+
+Passed syntax.dot-error.2
+
+Passed syntax.dot-error.3
+
+Passed syntax.dot-error.5
+
+Passed syntax.dot-error.6
+
+Passed read-symbol.12
+
+Passed read-symbol.19
+
+Passed read-symbol.23
+
+Passed read-symbol.23a
+
+Passed read-symbol.23b
+
+Passed read-from-string-2a
+
+Passed read-from-string-2b
+
+Passed read-from-string-2c
+
+Passed read-from-string-2d
+
+Passed read-symbol.letters.letters
+
+Passed print.array.0.11.simplified
+
+Passed read-suppress.sharp-asterisk.1
+
+Passed clhs-23.2.16
+
+Passed read-suppress.sharp-asterisk.2
+
+Passed read-suppress.sharp-asterisk.10
+
+Passed read-suppress.sharp-asterisk.11
+
+Passed read-suppress.sharp-asterisk.12
+
+Passed read-suppress.sharp-asterisk.14
+
+Passed read-suppress.sharp-b.5
+
+Passed read-suppress.sharp-r.6
+
+Passed issue-382-a
+
+Passed issue-382-b
+
+Passed issue-382-c
+
+Passed issue-382-d
+
+Passed sharp-s-new-readtable
+
+Passed set-syntax-from-char-trait-x-1a
+
+Passed set-syntax-from-char-trait-x-1b
+
+Passed syntax.sharp-colon.error.1
+
+Passed syntax.sharp-b.5
+
+Passed syntax.sharp-o.7
+
+Passed syntax.sharp-x.15
+
+Passed syntax.sharp-x.15a
+
+Passed read-ratio-print-base-1
+
+Passed syntax.dot-error.4
+
+Passed syntax.dot-error.7
+
+Passed asdf-screw-up
+
+Passed syntax.dot-token.1
+
+Passed syntax.dot-token.2
+
+Passed syntax.dot-token.3
+
+Passed syntax.dot-token.4
+
+Passed syntax.dot-token.5
+
+Passed syntax.dot-token.6
+
+Passed syntax.dot-token.7
+
+Passed print.ratios.random.simplified
+
+Passed print.ratios.random.simplified.floats
+
+Passed print.short-float.random.simplyfied
+
+Passed print.single-float.random.simplyfied.1
+
+Passed print.single-float.random.simplyfied.2
+
+Passed print.single-float.random.simplyfied.3
+
+Passed print.single-float.random.simplyfied.4
+
+Passed print.ratios.random.simplyfied.2
+
+Passed syntax.escaped.3.simplyfied.1
+
+Passed syntax.escaped.3.simplyfied.2
+
+Passed readtable-1
+
+Passed readtable-2
+
+Passed readtable-3
+
+Passed can-read-nil-bitarray-0
+
+Passed can-read-nil-bitarray-1
+
+Passed all-char-names-can-be-read-again
+
+Passed all-chars-can-be-read-again
+
+Passed name-char.2
+
+Passed syntax.sharp-s.3
+
+Passed eclector-issue-67
+
+Passed very-long-floats-maxima
+
+Passed issue-case-sensitivity-mode
+
+Passed set-syntax-from-char-from-irc-clasp
+
+Passed set-macro-character-from-irc-clasp
+
+
+Running printer01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/printer01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/printer01.fasl
+-1
+Passed print-1
+-9223372036854775808
+Passed print-1a
+23
+
+Failed print-2
+
+Wanted values equalp to
+but got
+~tNIL
+
+
+while evaluating
+~t(pprint 23)
+
+
+Passed print-3
+
+Passed print-4
+
+Passed print-5
+
+Passed print-5a
+
+Failed print-read-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(values (read-from-string (write-to-string (make-random-state *random-state*) :readably T)))
+
+Passed print-6
+
+Passed print-7
+
+Passed print-8
+
+Passed print-9
+
+Passed print-10
+
+Passed print-11
+
+Passed print-12
+
+Passed print-13
+
+Passed print-14
+
+Passed print-15
+
+Passed print.ratios.random.root-cause
+
+Passed print.bit-vector.random.root-cause
+
+Passed print.ratios.random.root-cause.2
+
+Passed print.vector.random.1.take.1
+
+Passed print.vector.random.1.take.2
+
+Passed print.array.random.1.take.1
+
+Passed print.array.random.1.take.2
+
+Passed print.cons.random.1.take.2
+
+Passed type-errors-safety>speed
+
+Passed read-print-consistency-arrays
+
+Passed write-to-string.1.simplified
+
+Passed drmeister-fep-problem
+
+Passed pprint-dispatch.6-simplified
+
+Passed pprint-dispatch.6
+
+Passed lisp-format-works
+
+Passed issue-911
+
+Passed format.justify.37
+
+Passed format.justify.38
+
+Passed format.justify.39
+
+Passed format.justify.40
+
+Passed format.justify.41
+
+Passed format.justify.42
+
+Passed format.justify.43
+
+Passed format.justify.44
+
+Passed format-c.01
+0
+Passed print-0-strange-radix
+
+Failed pprint-failure-2a
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((output (let ((*package* (find-package :cl-user))) (with-output-to-string (stream) (with-standard-io-syntax (let ((the-list (let ((*package* (find-package :cl-user))) (read-from-string "(this prints wrongly)")))) (write the-list :pretty T :circle T :lines 1 :right-margin 15 :readably NIL :stream stream))))))) (count #\. output))
+
+Failed pprint-failure-2b
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((output (let ((*package* (find-package :cl-user))) (with-output-to-string (stream) (with-standard-io-syntax (let ((the-list (read-from-string "(this prints wrongly)"))) (write the-list :pretty T :circle T :lines 1 :right-margin 15 :readably NIL :stream stream))))))) (count #\. output))
+
+Failed pprint-failure-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(count #\. (with-output-to-string (stream) (with-standard-io-syntax (write (backquote (1234 12345 1234567)) :pretty T :circle T :lines 1 :right-margin 15 :readably NIL :stream stream))))
+
+Failed pprint-failure-3a
+
+Unexpected error
+~tNIL
+while evaluating
+~t(count #\. (let ((*package* (find-package :cl-user))) (with-output-to-string (stream) (with-standard-io-syntax (write (vector progv progv progv progv progv progv progv progv progv progv progv) :escape T :pretty T :circle T :lines 0 :right-margin 28 :readably NIL :stream stream)))))
+
+Failed pprint-failure-3b
+
+Unexpected error
+~tNIL
+while evaluating
+~t(count #\. (with-output-to-string (stream) (with-standard-io-syntax (write (vector 12345 12345 12345 12345 12345 12345 12345 12345 12345 12345 12345) :escape T :pretty T :circle T :lines 1 :right-margin 28 :readably NIL :stream stream))))
+
+Failed pprint-failure-3c
+
+Unexpected error
+~tNIL
+while evaluating
+~t(count #\. (with-output-to-string (stream) (with-standard-io-syntax (write (vector 1 1) :escape T :pretty T :circle T :lines 1 :right-margin 1 :readably NIL :stream stream))))
+
+Passed write-string-happy-path
+
+Passed write-string-error-1
+
+Passed write-string-error-2
+
+Passed write-string-error-2a
+
+Passed write-string-error-3
+
+Passed write-string-error-4
+
+Passed write-string-error-4a
+
+Passed write-string-error-5
+
+Passed write-string-error-6
+
+Passed write-string-subseq-simplebasestring_o
+
+Passed write-string-subseq-simplecharacterstring_o
+
+Passed write-string-subseq-str8ns_o
+
+Passed write-string-subseq-strwns_o
+
+Passed print-nested-displacement
+
+Passed write-displacement-base
+
+Passed write-displacement-char
+
+Passed ansi-test-format-e
+
+Passed format-parameters-colon-at-01
+
+Passed format-parameters-colon-at-02
+
+Passed format-parameters-colon-at-03
+
+Passed format-parameters-colon-at-04
+
+Passed format-parameters-colon-at-05
+
+Passed format-parameters-colon-at-06
+
+Passed format-parameters-colon-at-07
+
+Passed format-parameters-colon-at-08
+
+Passed write-quasiquote-01
+
+Passed write-quasiquote-02
+
+Passed cdr-7.comma.1.interpreted
+
+Passed cdr-7.comma.1.compiled
+
+Passed cdr-7.comma.2.interpreted
+
+Passed cdr-7.comma.2.compiled
+
+Passed cdr-7.comma.3.interpreted
+
+Passed cdr-7.comma.3.compiled
+
+Passed cdr-7.comma.4.interpreted
+
+Passed cdr-7.comma.4.compiled
+
+Passed cdr-7.parameter.1.interpreted
+
+Passed cdr-7.parameter.1.compiled
+
+Passed cdr-7.parameter.2.interpreted
+
+Passed cdr-7.parameter.2.compiled
+
+Passed cdr-7.parameter.3.interpreted
+
+Passed cdr-7.parameter.3.compiled
+
+Passed cdr-7.parameter.4.interpreted
+
+Passed cdr-7.parameter.4.compiled
+
+Passed cdr-7.parameter.5.interpreted
+
+Passed cdr-7.parameter.5.compiled
+
+Passed cdr-7.parameter.6.interpreted
+
+Passed cdr-7.parameter.6.compiled
+
+Passed cdr-7.parameter.7.interpreted
+
+Passed cdr-7.parameter.7.compiled
+
+Passed cdr-7.parameter.8.interpreted
+
+Passed cdr-7.parameter.8.compiled
+
+
+Running streams01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/streams01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/streams01.fasl
+
+Passed listen-1
+
+Passed listen-2
+
+Passed listen-3
+
+Passed listen-4
+
+Passed broadcast-stream
+
+Passed broadcast-stream-1
+
+Passed concatenated-stream-1
+
+Passed concatenated-stream-2
+
+Passed with-input-from-string-1
+
+Passed with-input-from-string-2
+
+Passed with-input-from-string-3
+
+Passed with-input-from-string-4
+
+Passed with-input-from-string-5
+
+Passed with-input-from-string-6
+
+Passed with-input-from-string-7
+
+Passed with-input-from-string-8
+
+Passed with-input-from-string-9
+
+Passed with-input-from-string-10
+
+Passed with-input-from-string-10a
+
+Passed with-input-from-string-10b
+
+Passed with-input-from-string-11
+
+Passed write-byte.error.3
+
+Passed write-byte.error.4
+
+Passed file-string-length-1
+
+Passed file-string-length-2
+
+Passed file-string-length-3
+
+Passed broadcast-stream-streams.3
+
+Passed broadcast-stream-streams.4
+
+Passed stream-element-type.error.3.simplified
+
+Passed read-line.eof.01
+
+Passed read-line.eof.02
+
+Passed read-line.eof.03
+
+Passed read-line.eof.04
+
+Passed close.abort.01
+
+Passed close.abort.02
+
+Passed close.abort.03
+
+Passed close.abort.04
+
+Passed read-byte.01
+
+Passed read-byte.02
+
+Passed read-byte.03
+
+Passed gray-cursor.01
+
+Passed input-cursor.01
+
+Passed output-cursor.01
+
+Passed stream-element-type.01
+
+Passed stream-element-type.02
+
+Passed stream-element-type.03
+
+Passed stream-element-type.04
+
+Passed stream-element-type.05
+
+Passed stream-element-type.06
+
+Passed stream-external-format.01
+
+Passed stream-external-format.02
+
+Passed stream-external-format.03
+
+Passed stream-external-format.04
+
+Passed stream-external-format.05
+
+
+Running environment01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment01.fasl
+
+Passed sleep-1
+
+Passed sleep-2
+
+Passed sleep-3
+
+Passed documentation.list.compiler-macro.2
+
+Failed funcall-compiler-macro
+
+Unexpected error
+~tNIL
+while evaluating
+~t(funcall (compiler-macro-function (quote %%test%%)) (quote (funcall (function %%test%%) 2)) NIL)
+
+
+Running types01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/types01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/types01.fasl
+
+Passed types-classes-1
+
+Passed types-classes-2
+
+Passed types-classes-3
+
+Passed types-classes-4
+
+Passed types-classes-5
+
+Passed types-classes-6
+
+Passed types-classes-7
+
+Passed types-classes-8
+
+Passed types-classes-9
+
+Passed types-classes-10
+
+Failed array.9.8
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let NIL (typep ((a b) (c d) (e f)) (quote (simple-array * (* 2)))))))
+
+Passed types-classes-11-a
+
+Passed types-classes-11-b
+
+Passed types-classes-12-a
+
+Passed types-classes-12-b
+
+Passed types-classes-13-a
+
+Passed types-classes-13-b
+
+Passed types-classes-14-a
+
+Passed types-classes-14-b
+
+Passed types-classes-15-a
+
+Passed types-classes-15-b
+
+Passed subtypep-bug-979
+
+Passed issue-1252
+
+Passed issue-1252a
+
+Passed issue-1308
+
+
+Running control01 suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/control01.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/control01.fasl
+
+Passed multiple-value-setq.9
+
+Passed multiple-value-setq.10
+
+Passed multiple-value-setq.13
+
+Passed multiple-value-setq.14
+
+Passed multiple-value-setq.15
+
+Passed progv-1
+
+Passed multiple-value-call.1
+
+Passed progv-2
+
+Passed progv-3
+
+Passed fboundp.error.3
+
+Passed fboundp.error.4
+
+Passed fboundp.error.5
+
+Passed fboundp.error.9
+
+Passed fboundp.error.10
+
+Passed fboundp.11
+
+Passed fboundp.12
+
+Passed fboundp.13
+
+Passed fmakunbound.1
+
+Passed fmakunbound.2
+
+Passed fmakunbound.3
+
+Passed fmakunbound.4
+
+Passed fdefinition.1
+
+Passed fdefinition.2
+
+Passed fdefinition.3
+
+Passed fdefinition.4
+
+Passed fdefinition.5
+
+Passed fdefinition.6
+
+Passed fdefinition.7
+
+Passed setf-fdefinition.1
+
+Passed setf-fdefinition.2
+
+Passed setf-fdefinition.3
+
+Passed setf-fdefinition.4
+
+Passed setf-fdefinition.5
+
+Passed equalp-babel
+
+Passed notnot
+
+Passed flet-too-few
+
+Passed flet-too-many
+
+Passed issue-930
+
+Failed issue-780
+
+Unexpected error
+~tNIL
+while evaluating
+~t(macrolet ((%m (&key ((:a (b c)))) (backquote (quote ((unquote c) (unquote b)))))) (%m :a (1 2)))
+
+Passed issue-982-flet
+
+Passed issue-982-labels
+
+Passed issue-982-macrolet
+
+Passed macro-place-1
+
+Passed equalp-10
+
+Passed equalp-11
+
+Passed volatile-nlx
+
+
+Running iteration suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/iteration.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/iteration.fasl
+
+Passed dolist-declare-elements
+
+Passed dolist-var-nil-at-return
+
+
+Running loop suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/loop.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/loop.fasl
+
+Passed loop-complex-1
+
+Passed loop-float-1
+
+Passed loop-float-2
+
+Passed loop-fixnum-1
+
+Passed loop-finally-1
+
+Passed loop-finally-2
+
+Passed loop-finally-3
+
+Passed loop-finally-4
+
+Passed loop-collect-1
+
+Passed loop-collect-2
+
+Passed loop-collect-3
+
+Passed loop-collect-4
+
+Passed loop-collect-5
+
+Passed loop-collect-6
+
+Passed loop-stassats-ccl-1085
+
+Failed loop-issue-1044
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop with (a b) = (quote (1 NIL)) for (c d) = (quote (2 NIL)) do (return-from NIL (list a b c d)))
+
+Passed loop.13.29
+
+Passed loop.13.69
+
+Passed issue-1212
+
+Passed issue-1239
+
+Passed issue-1239a
+
+
+Running numbers-core suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers-core.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers-core.fasl
+
+Failed single-float-bit-positive-cases
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for arg in (list most-negative-single-float -3 0 3 most-positive-single-float) for bits = (ext:single-float-to-bits arg) unless (= arg (ext:bits-to-single-float bits)) collect arg)
+
+Passed single-float-bit-negative-1
+
+Passed single-float-bit-negative-2
+
+Passed single-float-bit-negative-3
+
+Passed single-float-bit-negative-4
+
+Passed single-float-bit-negative-5
+
+Failed double-float-bit-positive-cases
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for arg in (list most-negative-double-float -3 0 3 most-positive-double-float) for bits = (ext:double-float-to-bits arg) unless (= arg (ext:bits-to-double-float bits)) collect arg)
+
+Passed double-float-bit-negative-1
+
+Passed double-float-bit-negative-2
+
+Passed double-float-bit-negative-3
+
+Passed double-float-bit-negative-4
+
+Passed double-float-bit-negative-5
+
+
+Running unwind suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unwind.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unwind.fasl
+
+Failed compile-file-no-unwind
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((unwinds (gctools:thread-local-unwinds))) (ext:with-unlocked-packages ("CL" "CORE") (compile-file "sys:src;lisp;kernel;lsp;predlib.lisp" :execution :serial :output-file (make-pathname :type (pathname-type (compile-file-pathname "foo.lisp")) :defaults (core:mkstemp "/tmp/predlib"))) (- (gctools:thread-local-unwinds) unwinds)))
+
+
+Running encodings suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/encodings.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/encodings.fasl
+
+Failed encoding-default
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let NIL (load (pathname "sys:src;lisp;modules;asdf;test;lambda.lisp")) (%string-char-codes asdf-test::*lambda-string*))
+
+Failed encoding-utf-8
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let NIL (load (pathname "sys:src;lisp;modules;asdf;test;lambda.lisp") :external-format :utf-8) (%string-char-codes asdf-test::*lambda-string*))
+
+Failed encoding-latin-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let NIL (load (pathname "sys:src;lisp;modules;asdf;test;lambda.lisp") :external-format :latin-1) (%string-char-codes asdf-test::*lambda-string*))
+
+Failed encoding-iso-8859-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let NIL (load (pathname "sys:src;lisp;modules;asdf;test;lambda.lisp") :external-format :iso-8859-1) (%string-char-codes asdf-test::*lambda-string*))
+
+Passed encoding-ascii-error
+
+Passed encoding-all-encodings-plain
+
+Failed encoding-latin-2-plain
+
+Unexpected error
+~tNIL
+while evaluating
+~t(with-open-file (stream "sys:src;lisp;regression-tests;latin-2-file.txt" :direction :output :if-exists :overwrite :if-does-not-exist :create :external-format :latin-2) (write-char (code-char 65) stream))
+
+Failed encoding-latin-2-lambda
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let NIL (load (pathname "sys:src;lisp;modules;asdf;test;lambda.lisp") :external-format :latin-2) (%string-char-codes asdf-test::*lambda-string*))
+
+Failed encoding-iso-8859-2-lambda
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let NIL (load (pathname "sys:src;lisp;modules;asdf;test;lambda.lisp") :external-format :iso-8859-2) (%string-char-codes asdf-test::*lambda-string*))
+
+Failed compile-file-with-lambda
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let NIL (compile-file (pathname "sys:src;lisp;regression-tests;latin2-check.lisp") :external-format :iso-8859-1 :execution :serial) (compile-file (pathname "sys:src;lisp;regression-tests;latin2-check.lisp") :external-format :iso-8859-1 :execution :parallel))))
+
+Passed compile-file-with-lambda-default-encoding
+
+
+Running environment suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment.fasl
+
+Passed describe-function-documentation
+
+Passed describe-function-documentation-a
+
+Passed describe-function-documentation-macro
+
+Passed describe-function-documentation-function-docstring
+
+Passed describe-function-documentation-setf-function-docstring
+
+Passed describe-function-documentation-car
+
+Passed describe-function-documentation-setf-car
+
+Passed describe-compiler-macro
+
+Passed describe-special-form
+
+Passed describe-constant
+
+Passed describe-special
+
+Passed describe-type
+
+Passed describe-struct-a
+
+Passed describe-struct-b
+
+Passed describe-struct-c
+
+Passed simple-setf
+
+Passed describe-setf-short
+
+Passed describe-setf-long
+
+Passed describe-class
+
+Passed describe-instance
+
+Passed describe-package
+
+Passed describe-generic-function
+
+Passed describe-method-via-generic-function
+
+Passed describe-alltogether
+
+Passed issue-1099
+
+Passed room-1
+
+Passed room-2
+
+Passed room-3
+
+
+Running conditions suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/conditions.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/conditions.fasl
+
+Failed cerror.6
+
+Unexpected error
+~tNIL
+while evaluating
+~t(locally (declare (optimize (safety 3))) (handler-bind ((simple-error (function continue))) (progn (cerror "Wooo" (quote simple-error)) 10)))
+
+Passed condition-slot-unbound
+
+
+Running float-features suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/float-features.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/float-features.fasl
+
+Passed float-features-1a
+
+Passed float-features-1b
+
+Passed float-features-3
+
+Passed float-features-4
+
+Passed float-features-5
+
+Passed float-features-6
+
+Passed float-features-7
+
+Passed float-features-8
+
+
+Running debug suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/debug.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/debug.fasl
+
+Passed backtrace-1
+
+Passed backtrace-2
+
+Passed backtrace-3
+
+Passed backtrace-4
+
+Passed frame-locals
+
+Passed frame-function
+
+Passed frame-function-lambda-list
+
+Passed frame-function-documentation
+
+Passed bytecode-frame-function-name
+
+Passed bytecode-frame-locals
+
+Passed print-backtrace-handles-errors
+
+Passed truncate-stack
+
+Passed cap-stack
+
+Passed undelimited-stack-1
+
+Passed undelimited-stack-2
+
+Passed breakstep-compile
+
+4 
+Passed step
+
+Passed breakstepping-p
+
+4 
+Passed breakstep
+
+
+Running mp suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mp.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mp.fasl
+
+Passed process-1
+
+Passed process-2
+
+Passed process-3
+
+Passed process-name
+
+Passed process-join
+
+Passed process-specials
+
+Passed mutex-1
+
+Passed mutex-2
+
+Passed mutex-3
+
+Passed mutex-4
+
+Passed recursive-mutex-anonymous
+
+Passed recursive-mutex-symbol
+
+Passed recursive-mutex-string
+
+Passed process-active-p-1
+
+Passed process-active-p-2
+
+Passed process-active-p-3
+
+Passed process-active-p-4
+
+Passed all-processes-1
+
+Passed all-processes-2
+
+Passed all-processes-3
+
+Passed all-processes-4
+
+Passed current-thread-1
+
+Passed current-thread-2
+
+Passed process-exit
+
+Passed process-abort-1
+
+Passed process-abort-2
+
+Passed process-abort-3
+
+Passed process-abort-5
+
+Passed not-atomic-1
+
+Passed not-atomic-2
+
+Passed atomic-car
+
+Passed atomic-cdr
+
+Passed atomic-first
+
+Passed atomic-rest
+
+Passed atomic-symbol-value-1
+
+Passed atomic-svref
+
+Passed atomic-symbol-value-2
+
+Passed atomic-acquire-release-1
+
+Passed atomic-acquire-release-2
+
+Passed atomic-incf
+
+Passed atomic-sequential-consistency-1
+
+Passed atomic-counter-effect
+
+Passed atomic-counter-value
+
+Passed atomic-push
+
+
+Running interrupt suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/interrupt.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/interrupt.fasl
+
+Passed cancellation-interrupt
+
+Passed handle-interrupt
+
+Passed call-interrupt
+
+Passed sleep-interruptible
+
+Passed lock-interruptible
+
+Passed input-interruptible
+
+
+Running posix suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/posix.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/posix.fasl
+
+Passed stat-all
+
+Passed stat-size
+
+Passed stat-mtime
+
+Passed stat-size-mtime-no-logical-pathname
+
+Passed stat-size-mode
+
+Failed fstat-all
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((file "sys:src;lisp;regression-tests;run-all.lisp")) (with-open-file (stream file :direction :input) (let ((fd (ext:file-stream-file-descriptor stream))) (ext:fstat fd))))))
+
+Failed fstat-size
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((file "sys:src;lisp;regression-tests;run-all.lisp")) (with-open-file (stream file :direction :input) (let ((fd (ext:file-stream-file-descriptor stream))) (= (nth-value 0 (ext:stat file)) (nth-value 0 (ext:fstat fd))))))))
+
+Failed fstat-mtime
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((file "sys:src;lisp;regression-tests;run-all.lisp")) (with-open-file (stream file :direction :input) (let ((fd (ext:file-stream-file-descriptor stream))) (= (nth-value 1 (ext:stat file)) (nth-value 1 (ext:fstat fd))))))))
+
+Failed fstat-mode
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((file "sys:src;lisp;regression-tests;run-all.lisp")) (with-open-file (stream file :direction :input) (let ((fd (ext:file-stream-file-descriptor stream))) (= (nth-value 2 (ext:stat file)) (nth-value 2 (ext:fstat fd))))))))
+
+Passed file-stream-file-descriptor-wrong-type
+
+Passed filestream_o__repr__
+
+
+Running btb suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/btb.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/btb.fasl
+
+Passed btb.closure-1
+
+Passed btb.closure-2
+
+Passed btb.closure-3
+
+Passed btb.closure-4
+
+Passed btb.ltv-1
+
+Passed btb.ltv-1-readonly
+
+Passed btb.ltv-2
+
+Passed btb.ltv-2-readonly
+
+Passed btb.ltv-3
+
+Passed btb.ltv-4
+
+Passed btb.ltv-5
+
+Passed btb.misc-1
+
+
+Running system-construction suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/system-construction.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/system-construction.fasl
+
+Passed compile-file-pathname-1
+
+Failed compile-file-parallel
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((cmp::*compile-file-parallel* T) (file "sys:src;lisp;regression-tests;framework.lisp")) (let ((fasl (compile-file file :output-file (make-pathname :type "newfasl" :defaults file) :verbose NIL :print NIL))) (and (probe-file fasl) (string-equal (pathname-type fasl) "newfasl"))))))
+
+Failed compile-file-serial
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((cmp::*compile-file-parallel* NIL) (file "sys:src;lisp;regression-tests;framework.lisp")) (let ((fasl (compile-file file :output-file (make-pathname :type "newfasl" :defaults file) :verbose NIL :print NIL))) (and (probe-file fasl) (string-equal (pathname-type fasl) "newfasl"))))))
+
+Failed compile-file-serial-no-faso
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((cmp::*compile-file-parallel* NIL) (cmp:*default-output-type* :faso) (file "sys:src;lisp;regression-tests;framework.lisp")) (let ((fasl (compile-file file :output-file (make-pathname :type "newfasl" :defaults file) :verbose NIL :print NIL))) (and (probe-file fasl) (string-equal (pathname-type fasl) "newfasl"))))))
+
+Failed compile-file.1.simplified
+
+Unexpected error
+~tNIL
+while evaluating
+~t(with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;framework.lisp" :verbose NIL :print NIL))
+
+
+Running extensions suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/extensions.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/extensions.fasl
+
+Passed clip-failure
+
+Passed source-location-function
+
+Passed source-location-class-symbol
+
+Passed source-location-class-object
+
+Passed source-location-macro
+
+Passed source-location-special-from
+
+Passed source-location-generic-function
+
+Passed source-location-type
+
+Passed source-location-variable
+
+Passed run-program-hello-world
+
+
+Running run-program suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-program.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-program.fasl
+
+Passed run-program-argcount
+
+Passed output-streams.1
+
+Passed output-streams.2
+
+Passed interactive-input.1
+
+Passed interactive-input.2
+
+Passed non-fd-streams
+
+Passed empty-string-input-stream
+
+
+Running snapshot suite...
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/snapshot.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/snapshot.fasl
+
+
+Failures:
+  ~/pprint-fill/
+~
+
+Unexpected Successes:
+  ~/pprint-fill/
+~
+
+Expected Failures:
+  ~/pprint-fill/
+
+Successes: (compile-2-low-level jit-function-name-1 issue-698 make-load-form-saving-slots-defstruct make-load-form-saving-slots-class slot-exists-p-other-arguments issue-1244 dispatch-miss-perf uifrc.abort.3 uifdc.abort.5 floor-remainder-contagion ffloor-quotient-contagion sqrt-big-ratio-1 big-ratio-coerce all-div-mult-plus-minus-combinations unintern-1 unintern-2 find-all-symbols.1 struct-test-07-5.simplified struct-test-45 sbcl-cross-compile-2 sbcl-cross-compile-3 include-level-2 include-level-5a struct-test-56 struct-slot-value.2 hell-mdbit-1 hell-mdbit-2 hell-mdbit-3 hell-mdbit-4 compile-2 compile-4 compile-4a compile-5 ast-interpreter-1 ast-interpreter-2 test-issue-948-a test-issue-1226-a test-issue-1226-b issue-1240 issue-1265 bottom-primop format-no-nil-form vaslist-opt-1 single-value-catch file-length.3.simplyfied print-2 print-read-1 pprint-failure-2a pprint-failure-2b pprint-failure-2 pprint-failure-3a pprint-failure-3b pprint-failure-3c funcall-compiler-macro array.9.8 issue-780 loop-issue-1044 single-float-bit-positive-cases double-float-bit-positive-cases compile-file-no-unwind encoding-default encoding-utf-8 encoding-latin-1 encoding-iso-8859-1 encoding-latin-2-plain encoding-latin-2-lambda encoding-iso-8859-2-lambda compile-file-with-lambda cerror.6 fstat-all fstat-size fstat-mtime fstat-mode compile-file-parallel compile-file-serial compile-file-serial-no-faso compile-file.1.simplified)

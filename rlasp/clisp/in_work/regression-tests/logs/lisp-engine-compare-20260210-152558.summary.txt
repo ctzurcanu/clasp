@@ -1,0 +1,427 @@
+Input: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/
+Files: 59
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/array0.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.200000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array0.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.190000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.020000 compile_s=0.020000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.100000 compile_s=0.100000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/btb.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.250000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/cffi-defcallback.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/character0.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.250000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.100000 compile_s=0.100000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/clos.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/conditions.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/cons01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/control01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.100000 compile_s=0.100000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/debug.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.100000 compile_s=0.100000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/defcallback-native.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.180000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/eh.lisp
+  baseline=sbcl
+  sbcl: status=0 time_s=0.010000 match=MATCH
+  clasp: status=132 time_s=0.200000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ehkiller.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/encodings.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.180000 compile_s=0.180000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.280000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/extensions.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/external-process-programs.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/fastgf.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/finalizers.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.260000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/float-features.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/framework.lisp
+  baseline=sbcl
+  sbcl: status=0 time_s=0.030000 match=MATCH
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/hash-tables0.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.110000 compile_s=0.110000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/interrupt.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/iteration.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/latin2-check.lisp
+  baseline=sbcl
+  sbcl: status=0 time_s=0.010000 match=MATCH
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=1 time_s=0.010000 match=NA
+  irlasp-mlir: status=1 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/loop.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel-source.lisp
+  baseline=sbcl
+  sbcl: status=0 time_s=0.020000 match=MATCH
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/misc.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.020000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mop.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mp.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.110000 compile_s=0.110000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers-core.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=1 total_s=0.100000 compile_s=0.100000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/package.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.140000 compile_s=0.140000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/posix.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/printer01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.160000 compile_s=0.160000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/read01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all-irlasp.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.030000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=424.100000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.030000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.330000 compile_s=0.330000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-program.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.100000 compile_s=0.100000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/sequences01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/set-unexpected-failures.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.110000 compile_s=0.110000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/snapshot.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/stamps.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/streams01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/string-comparison0.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/strings01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.140000 compile_s=0.140000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/symbol0.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.220000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.110000 compile_s=0.110000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/system-construction.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/test-compile-file.lisp
+  baseline=sbcl
+  sbcl: status=0 time_s=0.010000 match=MATCH
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/tests01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.210000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.070000 compile_s=0.070000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/time-ctak.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.230000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/types01.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.020000 match=NA
+  clasp: status=132 time_s=0.190000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unicode.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.200000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.080000 compile_s=0.080000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unwind.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.190000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.010000 compile_s=0.010000 exec_s=0.000000 match=NA
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/update-instance-abort.lisp
+  baseline=irlasp_interpreter
+  sbcl: status=1 time_s=0.010000 match=NA
+  clasp: status=132 time_s=0.240000 match=NA
+  irlasp-interpreter: status=0 time_s=0.010000 match=MATCH
+  irlasp-mlir: status=101 total_s=0.090000 compile_s=0.090000 exec_s=0.000000 match=NA
+
+TOTAL_FILES 59
+ENGINE sbcl OK 5 FAIL 54 OUTPUT_DIFF 0 AVG_TIME_S 0.016000
+ENGINE clasp OK 0 FAIL 59 OUTPUT_DIFF 0 AVG_TIME_S 0.000000
+ENGINE irlasp_interpreter OK 58 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 7.322069
+ENGINE irlasp_mlir OK 0 FAIL 59 OUTPUT_DIFF 0 AVG_TIME_S 0.000000
+MLIR_PHASE_AVG COMPILE_S 0.000000 EXEC_S 0.000000
+
+CSV /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/lisp-engine-compare-20260210-152558.csv

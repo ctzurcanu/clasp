@@ -9307,6 +9307,124 @@ impl StackMLIRCodegen {
         Ok(())
     }
 
+    fn parse_tail_let_bindings(ast: &ASTNode) -> Vec<(String, ASTNode)> {
+        fn parse_recursive(ast: &ASTNode, bindings: &mut Vec<(String, ASTNode)>) {
+            match ast {
+                ASTNode::Call { function, args } => {
+                    if let ASTNode::Variable(var) = &**function {
+                        if let Some(val) = args.first() {
+                            bindings.push((var.clone(), val.clone()));
+                        } else {
+                            bindings.push((var.clone(), ASTNode::nil()));
+                        }
+                        for arg in args.iter().skip(1) {
+                            parse_recursive(arg, bindings);
+                        }
+                    } else if let ASTNode::Call { function: inner_fn, args: inner_args } = &**function {
+                        if let ASTNode::Variable(var) = &**inner_fn {
+                            if let Some(val) = inner_args.first() {
+                                bindings.push((var.clone(), val.clone()));
+                            } else {
+                                bindings.push((var.clone(), ASTNode::nil()));
+                            }
+                        }
+                        for arg in args {
+                            parse_recursive(arg, bindings);
+                        }
+                    }
+                }
+                ASTNode::Constant(ConstantValue::Nil) => {}
+                _ => {}
+            }
+        }
+
+        let mut bindings = Vec::new();
+        parse_recursive(ast, &mut bindings);
+        bindings
+    }
+
+    fn parse_tail_cond_clause(clause: &ASTNode) -> (ASTNode, ASTNode) {
+        match clause {
+            ASTNode::Call { function, args } => {
+                let result = if args.is_empty() {
+                    function.as_ref().clone()
+                } else if args.len() == 1 {
+                    args[0].clone()
+                } else {
+                    ASTNode::Progn { exprs: args.clone() }
+                };
+                (function.as_ref().clone(), result)
+            }
+            _ => (clause.clone(), clause.clone()),
+        }
+    }
+
+    fn compile_tail_and_exprs(&mut self, args: &[ASTNode]) -> Result<()> {
+        if args.is_empty() {
+            let t_val = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", t_val));
+            return Ok(());
+        }
+        if args.len() == 1 {
+            return self.compile_tail_expr(&args[0]);
+        }
+
+        self.compile_expr(&args[0])?;
+        let first_val = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", first_val));
+        let nil_val = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+        let cond_true = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_true, first_val, nil_val));
+
+        let saved_symbols = self.symbol_table.clone();
+        self.writeln(&format!("scf.if {} {{", cond_true));
+        self.indent();
+        self.compile_tail_and_exprs(&args[1..])?;
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        self.symbol_table = saved_symbols.clone();
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", first_val));
+        self.dedent();
+        self.writeln("}");
+        self.symbol_table = saved_symbols;
+        Ok(())
+    }
+
+    fn compile_tail_or_exprs(&mut self, args: &[ASTNode]) -> Result<()> {
+        if args.is_empty() {
+            self.writeln("func.call @stack_push_nil() : () -> ()");
+            return Ok(());
+        }
+        if args.len() == 1 {
+            return self.compile_tail_expr(&args[0]);
+        }
+
+        self.compile_expr(&args[0])?;
+        let first_val = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", first_val));
+        let nil_val = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+        let cond_true = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_true, first_val, nil_val));
+
+        let saved_symbols = self.symbol_table.clone();
+        self.writeln(&format!("scf.if {} {{", cond_true));
+        self.indent();
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", first_val));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        self.symbol_table = saved_symbols.clone();
+        self.compile_tail_or_exprs(&args[1..])?;
+        self.dedent();
+        self.writeln("}");
+        self.symbol_table = saved_symbols;
+        Ok(())
+    }
+
     fn compile_tail_expr(&mut self, ast: &ASTNode) -> Result<()> {
         match ast {
             ASTNode::If { test, then_branch, else_branch } => {
@@ -9332,6 +9450,48 @@ impl StackMLIRCodegen {
                 self.symbol_table = saved_symbols;
                 Ok(())
             }
+            ASTNode::Cond { clauses } => {
+                if clauses.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    return Ok(());
+                }
+
+                let saved_symbols = self.symbol_table.clone();
+                let mut open_elses = 0usize;
+
+                for (i, (test, result)) in clauses.iter().enumerate() {
+                    let is_last = i == clauses.len() - 1;
+                    self.symbol_table = saved_symbols.clone();
+
+                    self.compile_expr(test)?;
+                    let cond_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cond_val));
+                    let nil_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                    let cond_bool = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, nil_val));
+
+                    self.writeln(&format!("scf.if {} {{", cond_bool));
+                    self.indent();
+                    self.compile_tail_expr(result)?;
+                    self.dedent();
+                    self.writeln("} else {");
+                    self.indent();
+                    open_elses += 1;
+
+                    if is_last {
+                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                    }
+                }
+
+                for _ in 0..open_elses {
+                    self.dedent();
+                    self.writeln("}");
+                }
+
+                self.symbol_table = saved_symbols;
+                Ok(())
+            }
             ASTNode::Progn { exprs } => {
                 if exprs.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
@@ -9346,6 +9506,139 @@ impl StackMLIRCodegen {
 
                 self.compile_tail_expr(&exprs[exprs.len() - 1])
             }
+            ASTNode::Let { bindings, body } => {
+                let saved_symbols = self.symbol_table.clone();
+
+                let mut binding_ssas = Vec::new();
+                for (_var, value) in bindings {
+                    self.compile_expr(value)?;
+                    let val_ssa = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
+                    binding_ssas.push(val_ssa);
+                }
+
+                for ((var, _), val_ssa) in bindings.iter().zip(binding_ssas.iter()) {
+                    self.symbol_table.insert(var.clone(), val_ssa.clone());
+
+                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                        let sym_const = self.create_string_constant(var);
+                        let sym_ptr = self.fresh_ssa();
+                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", sym_ptr, sym_const));
+                        let len_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, var.len()));
+                        let sym_ssa = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64",
+                            sym_ssa, sym_ptr, len_ssa
+                        ));
+                        let _result = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _result, sym_ssa, val_ssa
+                        ));
+                    }
+                }
+
+                if body.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                } else {
+                    for expr in body.iter().take(body.len().saturating_sub(1)) {
+                        self.compile_expr(expr)?;
+                        let discard = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+                    }
+                    self.compile_tail_expr(&body[body.len() - 1])?;
+                }
+
+                if let Some(ref loop_vars) = self.loop_carried_vars {
+                    let loop_carried_values: Vec<(String, String)> = loop_vars
+                        .iter()
+                        .filter_map(|v| self.symbol_table.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+                    self.symbol_table = saved_symbols;
+                    for (var, val) in loop_carried_values {
+                        self.symbol_table.insert(var, val);
+                    }
+                } else {
+                    self.symbol_table = saved_symbols;
+                }
+                Ok(())
+            }
+            ASTNode::LetStar { bindings, body } => {
+                let saved_symbols = self.symbol_table.clone();
+
+                for (var, value) in bindings {
+                    self.compile_expr(value)?;
+                    let val_ssa = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
+                    self.symbol_table.insert(var.clone(), val_ssa.clone());
+
+                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                        let sym_const = self.create_string_constant(var);
+                        let sym_ptr = self.fresh_ssa();
+                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", sym_ptr, sym_const));
+                        let len_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, var.len()));
+                        let sym_ssa = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64",
+                            sym_ssa, sym_ptr, len_ssa
+                        ));
+                        let _result = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _result, sym_ssa, val_ssa
+                        ));
+                    }
+                }
+
+                if body.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                } else {
+                    for expr in body.iter().take(body.len().saturating_sub(1)) {
+                        self.compile_expr(expr)?;
+                        let discard = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+                    }
+                    self.compile_tail_expr(&body[body.len() - 1])?;
+                }
+
+                if let Some(ref loop_vars) = self.loop_carried_vars {
+                    let loop_carried_values: Vec<(String, String)> = loop_vars
+                        .iter()
+                        .filter_map(|v| self.symbol_table.get(v).map(|val| (v.clone(), val.clone())))
+                        .collect();
+                    self.symbol_table = saved_symbols;
+                    for (var, val) in loop_carried_values {
+                        self.symbol_table.insert(var, val);
+                    }
+                } else {
+                    self.symbol_table = saved_symbols;
+                }
+                Ok(())
+            }
+            ASTNode::Block { body, .. } => {
+                if body.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    return Ok(());
+                }
+
+                for expr in body.iter().take(body.len().saturating_sub(1)) {
+                    self.compile_expr(expr)?;
+                    let discard = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+                }
+
+                self.compile_tail_expr(&body[body.len() - 1])
+            }
+            ASTNode::ReturnFrom { value, .. } => {
+                if let Some(v) = value {
+                    self.compile_tail_expr(v)
+                } else {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    Ok(())
+                }
+            }
             ASTNode::Call { function, args } => {
                 if let ASTNode::Variable(func_name) = function.as_ref() {
                     let base_name = if let Some(colon_pos) = func_name.rfind(':') {
@@ -9353,6 +9646,11 @@ impl StackMLIRCodegen {
                     } else {
                         func_name.as_str()
                     };
+                    let is_non_cl_macro_stub = matches!(
+                        base_name,
+                        "define-convenience-action-methods" | "defparameter*" | "defvar*" | "define-package"
+                            | "load-mlir" | "with-upgradability"
+                    );
 
                     if base_name.eq_ignore_ascii_case("if") {
                         let test_expr = args.get(0).cloned().unwrap_or(ASTNode::Constant(ConstantValue::Nil));
@@ -9371,11 +9669,198 @@ impl StackMLIRCodegen {
                         return self.compile_tail_expr(&progn_node);
                     }
 
-                    if !rlasp::is_cl_builtin(base_name) {
+                    if base_name.eq_ignore_ascii_case("and") {
+                        return self.compile_tail_and_exprs(args);
+                    }
+
+                    if base_name.eq_ignore_ascii_case("or") {
+                        return self.compile_tail_or_exprs(args);
+                    }
+
+                    if base_name.eq_ignore_ascii_case("when") || base_name.eq_ignore_ascii_case("unless") {
+                        if args.is_empty() {
+                            self.writeln("func.call @stack_push_nil() : () -> ()");
+                            return Ok(());
+                        }
+                        let test_expr = args[0].clone();
+                        let body_expr = if args.len() <= 2 {
+                            args.get(1).cloned().unwrap_or(ASTNode::Constant(ConstantValue::Nil))
+                        } else {
+                            ASTNode::Progn { exprs: args[1..].to_vec() }
+                        };
+                        let if_node = if base_name.eq_ignore_ascii_case("when") {
+                            ASTNode::If {
+                                test: Box::new(test_expr),
+                                then_branch: Box::new(body_expr),
+                                else_branch: Box::new(ASTNode::Constant(ConstantValue::Nil)),
+                            }
+                        } else {
+                            ASTNode::If {
+                                test: Box::new(test_expr),
+                                then_branch: Box::new(ASTNode::Constant(ConstantValue::Nil)),
+                                else_branch: Box::new(body_expr),
+                            }
+                        };
+                        return self.compile_tail_expr(&if_node);
+                    }
+
+                    if base_name.eq_ignore_ascii_case("cond") {
+                        if args.is_empty() {
+                            self.writeln("func.call @stack_push_nil() : () -> ()");
+                            return Ok(());
+                        }
+
+                        let saved_symbols = self.symbol_table.clone();
+                        let mut open_elses = 0usize;
+
+                        for (i, clause) in args.iter().enumerate() {
+                            let is_last = i == args.len() - 1;
+                            match clause {
+                                ASTNode::Call { function: test_expr, args: clause_body } => {
+                                    self.symbol_table = saved_symbols.clone();
+
+                                    self.compile_expr(test_expr)?;
+                                    let test_val = self.fresh_ssa();
+                                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", test_val));
+                                    let nil_val = self.fresh_ssa();
+                                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                                    let cond_bool = self.fresh_ssa();
+                                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, test_val, nil_val));
+
+                                    self.writeln(&format!("scf.if {} {{", cond_bool));
+                                    self.indent();
+
+                                    if clause_body.is_empty() {
+                                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", test_val));
+                                    } else {
+                                        for expr in clause_body.iter().take(clause_body.len().saturating_sub(1)) {
+                                            self.compile_expr(expr)?;
+                                            let discard = self.fresh_ssa();
+                                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+                                        }
+                                        self.compile_tail_expr(&clause_body[clause_body.len() - 1])?;
+                                    }
+
+                                    self.dedent();
+                                    self.writeln("} else {");
+                                    self.indent();
+                                    open_elses += 1;
+
+                                    if is_last {
+                                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                                    }
+                                }
+                                _ => {
+                                    self.symbol_table = saved_symbols.clone();
+
+                                    self.compile_expr(clause)?;
+                                    let test_val = self.fresh_ssa();
+                                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", test_val));
+                                    let nil_val = self.fresh_ssa();
+                                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                                    let cond_bool = self.fresh_ssa();
+                                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, test_val, nil_val));
+
+                                    self.writeln(&format!("scf.if {} {{", cond_bool));
+                                    self.indent();
+                                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", test_val));
+                                    self.dedent();
+                                    self.writeln("} else {");
+                                    self.indent();
+                                    open_elses += 1;
+
+                                    if is_last {
+                                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                                    }
+                                }
+                            }
+                        }
+
+                        for _ in 0..open_elses {
+                            self.dedent();
+                            self.writeln("}");
+                        }
+                        self.symbol_table = saved_symbols;
+                        return Ok(());
+                    }
+
+                    if base_name.eq_ignore_ascii_case("let") || base_name.eq_ignore_ascii_case("let*") {
+                        if args.is_empty() {
+                            self.writeln("func.call @stack_push_nil() : () -> ()");
+                            return Ok(());
+                        }
+                        let bindings = Self::parse_tail_let_bindings(&args[0]);
+                        let body = args[1..].to_vec();
+                        if base_name.eq_ignore_ascii_case("let*") {
+                            return self.compile_tail_expr(&ASTNode::LetStar { bindings, body });
+                        }
+                        return self.compile_tail_expr(&ASTNode::Let { bindings, body });
+                    }
+
+                    if base_name.eq_ignore_ascii_case("block") {
+                        if args.is_empty() {
+                            self.writeln("func.call @stack_push_nil() : () -> ()");
+                            return Ok(());
+                        }
+                        let block_name = match &args[0] {
+                            ASTNode::Variable(n) => Some(n.clone()),
+                            ASTNode::Constant(ConstantValue::Nil) => Some("nil".to_string()),
+                            _ => None,
+                        };
+                        let body = args[1..].to_vec();
+                        return self.compile_tail_expr(&ASTNode::Block { name: block_name, body });
+                    }
+
+                    if base_name.eq_ignore_ascii_case("locally") {
+                        return self.compile_tail_expr(&ASTNode::Progn { exprs: args.to_vec() });
+                    }
+
+                    if base_name.eq_ignore_ascii_case("return-from") || base_name.eq_ignore_ascii_case("return") {
+                        let (block_name, value_idx) = if base_name.eq_ignore_ascii_case("return") {
+                            (Some("nil".to_string()), 0usize)
+                        } else {
+                            let name = args.get(0).and_then(|n| match n {
+                                ASTNode::Variable(v) => Some(v.clone()),
+                                ASTNode::Constant(ConstantValue::Nil) => Some("nil".to_string()),
+                                _ => None,
+                            }).or(Some("nil".to_string()));
+                            (name, 1usize)
+                        };
+                        let value = args.get(value_idx).cloned().map(Box::new);
+                        return self.compile_tail_expr(&ASTNode::ReturnFrom { block_name, value });
+                    }
+
+                    if base_name.eq_ignore_ascii_case("flet") || base_name.eq_ignore_ascii_case("labels") {
+                        return self.compile_flet_labels_tail(base_name.eq_ignore_ascii_case("labels"), args);
+                    }
+
+                    if !rlasp::is_cl_builtin(base_name) && !is_non_cl_macro_stub {
                         return self.compile_tail_user_function_call(base_name, args);
                     }
 
                     return self.compile_call(func_name, args);
+                }
+
+                if let ASTNode::Lambda { params, body, .. } = function.as_ref() {
+                    if params.len() != args.len() {
+                        anyhow::bail!(
+                            "Lambda call: wrong number of arguments, expected {}, got {}",
+                            params.len(),
+                            args.len()
+                        );
+                    }
+                    let bindings: Vec<(String, ASTNode)> = params
+                        .iter()
+                        .cloned()
+                        .zip(args.iter().cloned())
+                        .collect();
+                    let let_body = if body.len() == 1 {
+                        body[0].clone()
+                    } else {
+                        ASTNode::progn(body.clone())
+                    };
+                    let let_node = ASTNode::Let { bindings, body: vec![let_body] };
+                    return self.compile_tail_expr(&let_node);
                 }
 
                 self.compile_expr(ast)
@@ -9626,9 +10111,22 @@ impl StackMLIRCodegen {
     /// Compile flet or labels local function definitions
     /// Generates local functions as module-level functions with unique names
     fn compile_flet_labels(&mut self, is_labels: bool, args: &[ASTNode]) -> Result<()> {
+        self.compile_flet_labels_mode(is_labels, args, false)
+    }
+
+    fn compile_flet_labels_tail(&mut self, is_labels: bool, args: &[ASTNode]) -> Result<()> {
+        self.compile_flet_labels_mode(is_labels, args, true)
+    }
+
+    fn compile_flet_labels_mode(&mut self, is_labels: bool, args: &[ASTNode], tail_position: bool) -> Result<()> {
         // Extract function definitions from args[0]
         // For multiple definitions: ((f1 (params) body) (f2 (params) body) ...)
         // The AST structure is: Call { function: first_def, args: [second_def, third_def, ...] }
+        if args.is_empty() {
+            self.writeln("func.call @stack_push_nil() : () -> ()");
+            return Ok(());
+        }
+
         let mut func_defs_nodes = Vec::new();
 
         if let ASTNode::Call { function: first_def, args: rest_defs } = &args[0] {
@@ -9671,7 +10169,7 @@ impl StackMLIRCodegen {
             }
         }
 
-        self.compile_flet_labels_internal(is_labels, &parsed_defs, body_exprs)
+        self.compile_flet_labels_internal(is_labels, &parsed_defs, body_exprs, tail_position)
     }
 
     fn compile_flet_labels_internal(
@@ -9679,6 +10177,7 @@ impl StackMLIRCodegen {
         is_labels: bool,
         func_defs: &[(String, Vec<String>, HashMap<String, ASTNode>, HashMap<String, String>, HashMap<String, String>, ASTNode)],
         body_exprs: &[ASTNode],
+        tail_position: bool,
     ) -> Result<()> {
         // Save current symbol table
         let saved_symbols = self.symbol_table.clone();
@@ -9752,8 +10251,23 @@ impl StackMLIRCodegen {
         }
 
         // Step 3: Compile the body with local functions in scope
-        for expr in body_exprs {
-            self.compile_expr(expr)?;
+        if body_exprs.is_empty() {
+            self.writeln("func.call @stack_push_nil() : () -> ()");
+        } else if tail_position {
+            for expr in body_exprs.iter().take(body_exprs.len().saturating_sub(1)) {
+                self.compile_expr(expr)?;
+                let discard = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+            }
+            self.compile_tail_expr(&body_exprs[body_exprs.len() - 1])?;
+        } else {
+            for (i, expr) in body_exprs.iter().enumerate() {
+                self.compile_expr(expr)?;
+                if i < body_exprs.len() - 1 {
+                    let discard = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+                }
+            }
         }
 
         // Restore symbol table

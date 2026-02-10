@@ -1,0 +1,11 @@
+Input: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/
+Files discovered: 59
+Files selected: 55
+REQUIRE_BASELINE_PASS: 1
+HARNESS_MODE: auto
+HARNESS_KIND: regression
+REGRESSION_ROOT: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+

@@ -1,0 +1,491 @@
+Input: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/
+Files: 59
+REQUIRE_BASELINE_PASS: 1
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/array0.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.030000 match=SKIP
+  clasp: status=132 time_s=0.350000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array0.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.250000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.030000 match=SKIP
+  clasp: status=132 time_s=0.270000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/btb.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/cffi-defcallback.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/character0.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.260000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/clos.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/conditions.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.260000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/cons01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/control01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.030000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/debug.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/defcallback-native.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.250000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/eh.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=0 clasp=132)
+  baseline=none
+  sbcl: status=0 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.260000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ehkiller.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.260000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/encodings.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.240000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.240000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/environment01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/extensions.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.320000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/external-process-programs.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/fastgf.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/finalizers.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/float-features.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.240000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/framework.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=0 clasp=132)
+  baseline=none
+  sbcl: status=0 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/hash-tables0.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/interrupt.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.190000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/iteration.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/latin2-check.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=0 clasp=132)
+  baseline=none
+  sbcl: status=0 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.190000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/loop.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.190000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel-source.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=0 clasp=132)
+  baseline=none
+  sbcl: status=0 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.190000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/misc.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mop.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.240000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/mp.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers-core.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/package.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.250000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/posix.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/printer01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.250000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/read01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all-irlasp.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.040000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-program.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/sequences01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/set-unexpected-failures.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/snapshot.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.200000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/stamps.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.240000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/streams01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.250000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/string-comparison0.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/strings01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/symbol0.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/system-construction.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/test-compile-file.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=0 clasp=132)
+  baseline=none
+  sbcl: status=0 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/tests01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.020000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/time-ctak.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.210000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/types01.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.230000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unicode.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/unwind.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.220000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/update-instance-abort.lisp
+  eligible=no skip_reason=baseline_failed(sbcl=1 clasp=132)
+  baseline=none
+  sbcl: status=1 time_s=0.010000 match=SKIP
+  clasp: status=132 time_s=0.250000 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+TOTAL_FILES_DISCOVERED 59
+BASELINE_REQUIREMENT SBCL_AND_CLASP_MUST_PASS 1
+ELIGIBLE_FILES 0
+SKIPPED_BASELINE_FAIL 59
+BASELINE_PRECHECK SBCL_FAIL 54 CLASP_FAIL 59
+ENGINE sbcl OK 0 FAIL 0 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+ENGINE clasp OK 0 FAIL 0 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+ENGINE irlasp_interpreter OK 0 FAIL 0 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+ENGINE irlasp_mlir OK 0 FAIL 0 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+MLIR_PHASE_AVG COMPILE_S 0.000000 EXEC_S 0.000000
+
+CSV /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/lisp-engine-compare-20260210-154155.csv

@@ -2433,6 +2433,21 @@ fn decode_return_value_inline(encoded: &str) -> Result<EvalResult, String> {
     }
 }
 
+fn encode_return_value_inline(val: &EvalResult) -> String {
+    match val {
+        EvalResult::Fixnum(n) => format!("FIXNUM:{}", n),
+        EvalResult::Float(f) => format!("FLOAT:{}", f),
+        EvalResult::Bool(b) => format!("BOOL:{}", b),
+        EvalResult::Nil => "NIL".to_string(),
+        EvalResult::String(s) => format!("STRING:{}", s),
+        EvalResult::Symbol(s) => format!("SYMBOL:{}", s),
+        _ => {
+            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(val.clone()));
+            "COMPLEX".to_string()
+        }
+    }
+}
+
 /// Main evaluation entry point
 pub fn eval(ast: &ASTNode) -> Result<EvalResult, String> {
     eval_trampoline(ast, &mut HashMap::new())
@@ -3465,6 +3480,101 @@ fn eval_labels(
     *env = old_env;
 
     Ok(result)
+}
+
+fn eval_flet_tail(
+    function_bindings: &[(String, Vec<String>, Vec<ASTNode>)],
+    body: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<TailEvalResult, String> {
+    let old_env = env.clone();
+
+    let mut functions = Vec::new();
+    for (name, params, func_body) in function_bindings {
+        let lambda = EvalResult::Lambda {
+            params: params.clone(),
+            defaults: HashMap::new(),
+            supplied_p_vars: HashMap::new(),
+            key_params: HashMap::new(),
+            body: func_body.clone(),
+            env: Rc::new(RefCell::new(env.clone())),
+            dynamic_env: true,
+        };
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        functions.push((fn_name, lambda));
+    }
+
+    for (fn_name, lambda) in functions {
+        env.insert(fn_name, lambda);
+    }
+
+    let mut tail_result = if body.is_empty() {
+        TailEvalResult::Value(EvalResult::Nil)
+    } else {
+        for expr in body.iter().take(body.len().saturating_sub(1)) {
+            let _ = eval_with_env(expr, env)?;
+        }
+        eval_tail_position(&body[body.len() - 1], env)?
+    };
+
+    match &mut tail_result {
+        TailEvalResult::TailCall(req) => {
+            req.call_env_override = Some(env.clone());
+        }
+        TailEvalResult::ReturnFromTailCall { request, .. } => {
+            request.call_env_override = Some(env.clone());
+        }
+        _ => {}
+    }
+
+    *env = old_env;
+    Ok(tail_result)
+}
+
+fn eval_labels_tail(
+    function_bindings: &[(String, Vec<String>, Vec<ASTNode>)],
+    body: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<TailEvalResult, String> {
+    let old_env = env.clone();
+
+    let mut new_env = env.clone();
+    for (name, params, func_body) in function_bindings {
+        let lambda = EvalResult::Lambda {
+            params: params.clone(),
+            defaults: HashMap::new(),
+            supplied_p_vars: HashMap::new(),
+            key_params: HashMap::new(),
+            body: func_body.clone(),
+            env: Rc::new(RefCell::new(new_env.clone())),
+            dynamic_env: true,
+        };
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        new_env.insert(fn_name, lambda);
+    }
+    *env = new_env;
+
+    let mut tail_result = if body.is_empty() {
+        TailEvalResult::Value(EvalResult::Nil)
+    } else {
+        for expr in body.iter().take(body.len().saturating_sub(1)) {
+            let _ = eval_with_env(expr, env)?;
+        }
+        eval_tail_position(&body[body.len() - 1], env)?
+    };
+
+    match &mut tail_result {
+        TailEvalResult::TailCall(req) => {
+            req.call_env_override = Some(env.clone());
+        }
+        TailEvalResult::ReturnFromTailCall { request, .. } => {
+            request.call_env_override = Some(env.clone());
+        }
+        _ => {}
+    }
+
+    *env = old_env;
+    Ok(tail_result)
 }
 
 fn eval_macrolet(
@@ -12242,11 +12352,14 @@ struct TailCallRequest {
     closure_env_rc: Rc<RefCell<HashMap<String, EvalResult>>>,
     args: Vec<ASTNode>,
     frame_name: String,
+    call_env_override: Option<HashMap<String, EvalResult>>,
 }
 
 enum TailEvalResult {
     Value(EvalResult),
     TailCall(TailCallRequest),
+    ReturnFromValue { block_name: String, value: EvalResult },
+    ReturnFromTailCall { block_name: String, request: TailCallRequest },
 }
 
 fn maybe_prepare_tail_lambda_call(
@@ -12307,6 +12420,7 @@ fn maybe_prepare_tail_lambda_call(
                 closure_env_rc,
                 args: args.to_vec(),
                 frame_name,
+                call_env_override: None,
             }));
         }
     }
@@ -12424,12 +12538,47 @@ fn eval_tail_position(
                 }
             }
             match eval_tail_position(&body[body.len() - 1], env) {
+                Ok(TailEvalResult::ReturnFromValue { block_name: target, value }) => {
+                    if target == block_name {
+                        Ok(TailEvalResult::Value(value))
+                    } else {
+                        Ok(TailEvalResult::ReturnFromValue { block_name: target, value })
+                    }
+                }
+                Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request }) => {
+                    if target == block_name {
+                        Ok(TailEvalResult::TailCall(request))
+                    } else {
+                        Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request })
+                    }
+                }
                 Ok(v) => Ok(v),
                 Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
                     let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
                     Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?))
                 }
                 Err(e) => Err(e),
+            }
+        }
+        ASTNode::ReturnFrom { block_name, value } => {
+            let target_block = block_name.unwrap_or_else(|| "nil".to_string());
+            if let Some(v) = value {
+                match eval_tail_position(&v, env)? {
+                    TailEvalResult::Value(return_val) => Ok(TailEvalResult::ReturnFromValue {
+                        block_name: target_block,
+                        value: return_val,
+                    }),
+                    TailEvalResult::TailCall(request) => Ok(TailEvalResult::ReturnFromTailCall {
+                        block_name: target_block,
+                        request,
+                    }),
+                    other => Ok(other),
+                }
+            } else {
+                Ok(TailEvalResult::ReturnFromValue {
+                    block_name: target_block,
+                    value: EvalResult::Nil,
+                })
             }
         }
         ASTNode::Call { function, args } => {
@@ -12463,6 +12612,80 @@ fn eval_tail_position(
                         let _ = eval_with_env(expr, env)?;
                     }
                     return eval_tail_position(&args[args.len() - 1], env);
+                }
+                if base_name.eq_ignore_ascii_case("and") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Bool(true)));
+                    }
+                    for expr in args.iter().take(args.len().saturating_sub(1)) {
+                        let val = eval_with_env(expr, env)?;
+                        if !eval_truthy(&val) {
+                            return Ok(TailEvalResult::Value(EvalResult::Nil));
+                        }
+                    }
+                    return eval_tail_position(&args[args.len() - 1], env);
+                }
+                if base_name.eq_ignore_ascii_case("or") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    for expr in args.iter().take(args.len().saturating_sub(1)) {
+                        let val = eval_with_env(expr, env)?;
+                        let primary = super::eval_types::primary_value(val.clone());
+                        if eval_truthy(&primary) {
+                            return Ok(TailEvalResult::Value(primary));
+                        }
+                    }
+                    return eval_tail_position(&args[args.len() - 1], env);
+                }
+                if base_name.eq_ignore_ascii_case("when") || base_name.eq_ignore_ascii_case("unless") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    let test_val = eval_with_env(&args[0], env)?;
+                    let cond_true = if base_name.eq_ignore_ascii_case("when") {
+                        eval_truthy(&test_val)
+                    } else {
+                        !eval_truthy(&test_val)
+                    };
+                    if !cond_true {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    if args.len() == 1 {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    for expr in args[1..].iter().take(args.len().saturating_sub(2)) {
+                        let _ = eval_with_env(expr, env)?;
+                    }
+                    return eval_tail_position(&args[args.len() - 1], env);
+                }
+                if base_name.eq_ignore_ascii_case("cond") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    for clause in args {
+                        match clause {
+                            ASTNode::Call { function: test_expr, args: clause_body } => {
+                                let test_val = eval_with_env(&test_expr, env)?;
+                                if eval_truthy(&test_val) {
+                                    if clause_body.is_empty() {
+                                        return Ok(TailEvalResult::Value(test_val));
+                                    }
+                                    for expr in clause_body.iter().take(clause_body.len().saturating_sub(1)) {
+                                        let _ = eval_with_env(expr, env)?;
+                                    }
+                                    return eval_tail_position(&clause_body[clause_body.len() - 1], env);
+                                }
+                            }
+                            _ => {
+                                let test_val = eval_with_env(&clause, env)?;
+                                if eval_truthy(&test_val) {
+                                    return Ok(TailEvalResult::Value(test_val));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(TailEvalResult::Value(EvalResult::Nil));
                 }
                 if base_name.eq_ignore_ascii_case("let") || base_name.eq_ignore_ascii_case("let*") {
                     if args.is_empty() {
@@ -12533,6 +12756,20 @@ fn eval_tail_position(
                         }
                     }
                     return match eval_tail_position(&body[body.len() - 1], env) {
+                        Ok(TailEvalResult::ReturnFromValue { block_name: target, value }) => {
+                            if target == block_name {
+                                Ok(TailEvalResult::Value(value))
+                            } else {
+                                Ok(TailEvalResult::ReturnFromValue { block_name: target, value })
+                            }
+                        }
+                        Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request }) => {
+                            if target == block_name {
+                                Ok(TailEvalResult::TailCall(request))
+                            } else {
+                                Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request })
+                            }
+                        }
                         Ok(v) => Ok(v),
                         Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
                             let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
@@ -12549,6 +12786,51 @@ fn eval_tail_position(
                         let _ = eval_with_env(expr, env)?;
                     }
                     return eval_tail_position(&args[args.len() - 1], env);
+                }
+                if base_name.eq_ignore_ascii_case("flet") || base_name.eq_ignore_ascii_case("labels") {
+                    if args.len() < 2 {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    let function_bindings = parse_function_bindings(&args[0])?;
+                    let body = &args[1..];
+                    if base_name.eq_ignore_ascii_case("labels") {
+                        return eval_labels_tail(&function_bindings, body, env);
+                    }
+                    return eval_flet_tail(&function_bindings, body, env);
+                }
+                if base_name.eq_ignore_ascii_case("return-from") || base_name.eq_ignore_ascii_case("return") {
+                    let (target_block, value_idx) = if base_name.eq_ignore_ascii_case("return") {
+                        ("nil".to_string(), 0usize)
+                    } else {
+                        if args.is_empty() {
+                            return Err("return-from requires at least a name argument".to_string());
+                        }
+                        let block_name = match &args[0] {
+                            ASTNode::Variable(n) => n.clone(),
+                            ASTNode::Constant(ConstantValue::Nil) => "nil".to_string(),
+                            _ => return Err("return-from name must be a symbol".to_string()),
+                        };
+                        (block_name, 1usize)
+                    };
+
+                    if args.len() > value_idx {
+                        return match eval_tail_position(&args[value_idx], env)? {
+                            TailEvalResult::Value(return_val) => Ok(TailEvalResult::ReturnFromValue {
+                                block_name: target_block,
+                                value: return_val,
+                            }),
+                            TailEvalResult::TailCall(request) => Ok(TailEvalResult::ReturnFromTailCall {
+                                block_name: target_block,
+                                request,
+                            }),
+                            other => Ok(other),
+                        };
+                    } else {
+                        return Ok(TailEvalResult::ReturnFromValue {
+                            block_name: target_block,
+                            value: EvalResult::Nil,
+                        });
+                    }
                 }
             }
             if let Some(req) = maybe_prepare_tail_lambda_call(&function, &args, env)? {
@@ -12880,7 +13162,7 @@ pub(super) fn eval_lambda_call(
                 return Ok(result);
             }
             TailEvalResult::TailCall(next) => {
-                current_call_env = closure_env;
+                current_call_env = next.call_env_override.clone().unwrap_or_else(|| closure_env.clone());
                 current_params = next.params;
                 current_defaults = next.defaults;
                 current_supplied_p_vars = next.supplied_p_vars;
@@ -12890,6 +13172,13 @@ pub(super) fn eval_lambda_call(
                 current_closure_env_rc = next.closure_env_rc;
                 current_args = next.args;
                 current_frame_name = next.frame_name;
+            }
+            TailEvalResult::ReturnFromValue { block_name, value } => {
+                let encoded = encode_return_value_inline(&value);
+                return Err(format!("RETURN-FROM:{}:{}", block_name, encoded));
+            }
+            TailEvalResult::ReturnFromTailCall { block_name, .. } => {
+                return Err(format!("RETURN-FROM:{}:NIL", block_name));
             }
         }
     }

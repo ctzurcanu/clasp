@@ -1,0 +1,12 @@
+[Warning: Could not compile batch 1: complex requires exactly 2 arguments]
+[Warning: Could not compile batch 2: max requires at least 2 arguments]
+[Warning: Could not emit MLIR bytecode: mlir-opt --emit=bytecode failed: /var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/mlirbc_input.mlir:4357:9: error: 'func.call' op 'cc_abs' does not reference a valid function
+%2812 = func.call @cc_abs(%2811) : (i64) -> i64
+        ^
+/var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/mlirbc_input.mlir:4357:9: note: see current operation: %1213 = "func.call"(%1212) <{callee = @cc_abs}> : (i64) -> i64
+]
+Error: Failed to lower MLIR: mlir-opt failed: /var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/scf_input.mlir:4357:9: error: 'func.call' op 'cc_abs' does not reference a valid function
+%2812 = func.call @cc_abs(%2811) : (i64) -> i64
+        ^
+/var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/scf_input.mlir:4357:9: note: see current operation: %1213 = "func.call"(%1212) <{callee = @cc_abs}> : (i64) -> i64
+
