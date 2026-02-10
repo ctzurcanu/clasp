@@ -1,0 +1,101 @@
+Condition of type: FILE-DOES-NOT-EXIST
+The file "sys:src;lisp;regression-tests;framework.lisp" does not exist.
+   0: core::call_with_frame(std::__1::function<gctools::multiple_values<core::T_O> (gctools::smart_ptr<core::DebuggerFrame_O>)>)
+   1: core::core__call_with_frame(gctools::smart_ptr<core::Function_O>)
+   2: (CLASP-DEBUG:CALL-WITH-STACK #<CORE::CLOSURE CLASP-DEBUG::WITH-STACK-LAMBDA> :DELIMITED NIL)
+    |---> SYS:SRC;LISP;KERNEL;LSP;DEBUG.LISP:281
+   3: (CLASP-DEBUG:CALL-WITH-STACK #<CORE::CLOSURE CLASP-DEBUG::WITH-STACK-LAMBDA> :DELIMITED NIL)
+    |---> SYS:SRC;LISP;KERNEL;LSP;DEBUG.LISP:279
+   4: general_entry_point_redirect_3
+   5: (CLASP-DEBUG:PRINT-BACKTRACE :STREAM #<COMMON-LISP::SYNONYM-STREAM EXT::+PROCESS-ERROR-OUTPUT+> :SOURCE-POSITIONS T :DELIMITED NIL)
+    |---> SYS:SRC;LISP;KERNEL;CLOS;CONDITIONS.LISP:1645
+   6: (CLASP-DEBUG:PRINT-BACKTRACE :STREAM #<COMMON-LISP::SYNONYM-STREAM EXT::+PROCESS-ERROR-OUTPUT+> :SOURCE-POSITIONS T :DELIMITED NIL)
+    |---> SYS:SRC;LISP;KERNEL;CLOS;CONDITIONS.LISP:1639
+   7: (CORE::NON-DEBUGGER #<CORE:FILE-DOES-NOT-EXIST @0x128587009>)
+    |---> SYS:SRC;LISP;KERNEL;LSP;TOP.LISP:1009
+   8: (CORE::NON-DEBUGGER #<CORE:FILE-DOES-NOT-EXIST @0x128587009>)
+    |---> SYS:SRC;LISP;KERNEL;LSP;TOP.LISP:1005
+   9: (INVOKE-DEBUGGER #<CORE:FILE-DOES-NOT-EXIST @0x128587009>)
+    |---> SYS:SRC;LISP;KERNEL;LSP;TOP.LISP:1029
+  10: (INVOKE-DEBUGGER #<CORE:FILE-DOES-NOT-EXIST @0x128587009>)
+    |---> SYS:SRC;LISP;KERNEL;LSP;TOP.LISP:1015
+  11: ((LAMBDA ()))
+    |---> SYS:SRC;LISP;KERNEL;CLOS;CONDITIONS.LISP:1560
+  12: ((LAMBDA ()))
+    |---> SYS:SRC;LISP;KERNEL;CLOS;CONDITIONS.LISP:1535
+  13: (CLASP-DEBUG::CALL-WITH-TRUNCATED-STACK #<CORE::CLOSURE (LAMBDA NIL)>)
+    |---> SYS:SRC;LISP;KERNEL;LSP;DEBUG.LISP:234
+  14: (CLASP-DEBUG::CALL-WITH-TRUNCATED-STACK #<CORE::CLOSURE (LAMBDA NIL)>)
+    |---> SYS:SRC;LISP;KERNEL;LSP;DEBUG.LISP:234
+  15: (CORE:UNIVERSAL-ERROR-HANDLER NIL CORE:FILE-DOES-NOT-EXIST (:PATHNAME "sys:src;lisp;regression-tests;framework.lisp"))
+    |---> SYS:SRC;LISP;KERNEL;CLOS;CONDITIONS.LISP:1535
+  16: (CORE:UNIVERSAL-ERROR-HANDLER NIL CORE:FILE-DOES-NOT-EXIST (:PATHNAME "sys:src;lisp;regression-tests;framework.lisp"))
+    |---> SYS:SRC;LISP;KERNEL;CLOS;CONDITIONS.LISP:1522
+  17: auto core::call_with_variable_bound<core::cl__error(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::List_V>)::$_0>(gctools::smart_ptr<core::Symbol_O>, gctools::smart_ptr<core::T_O>, core::cl__error(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::List_V>)::$_0&&)
+  18: bool gctools::IsA<gctools::smart_ptr<core::Fixnum_I>, gctools::smart_ptr<core::T_O>>(gctools::smart_ptr<core::T_O> const&)
+  19: core::stream_open(gctools::smart_ptr<core::T_O>, core::StreamDirection, core::StreamIfExists, core::StreamIfDoesNotExist, long long, int, gctools::smart_ptr<core::T_O>)
+  20: clbind::WRAPPER_VariadicFunction<gctools::smart_ptr<core::T_O> (*)(gctools::smart_ptr<core::T_O>, core::StreamDirection, gctools::smart_ptr<core::T_O>, core::StreamIfExists, bool, core::StreamIfDoesNotExist, bool, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>), core::policy::clasp_policy>::entry_point_n(core::T_O*, unsigned long, core::T_O**)
+  21: core::bytecode_vm(core::VirtualMachine&, core::T_O**, core::T_O**, core::Closure_O*, core::T_O**, core::T_O**, unsigned long, core::T_O**)
+  22: (OPEN "sys:src;lisp;regression-tests;framework.lisp" :EXTERNAL-FORMAT :DEFAULT)
+    |---> SYS:SRC;CORE;LISPSTREAM.CC:906
+  23: gctools::return_type core::BytecodeClosureEntryPoint::entry_point_fixed<core::T_O*, core::T_O*, core::T_O*>(core::T_O*, core::T_O*, core::T_O*, core::T_O*)
+  24: ((LAMBDA ()))
+    |---> SYS:SRC;LISP;KERNEL;CMP;COMPILE-FILE.LISP:269
+  25: ((LAMBDA ()))
+    |---> SYS:SRC;LISP;KERNEL;CMP;COMPILE-FILE.LISP:250
+  26: (COMPILER::DO-COMPILATION-UNIT #<CORE::CLOSURE (LAMBDA NIL)>)
+    |---> SYS:SRC;LISP;KERNEL;CMP;COMPILER-CONDITIONS.LISP:384
+  27: (COMPILER::DO-COMPILATION-UNIT #<CORE::CLOSURE (LAMBDA NIL)>)
+    |---> SYS:SRC;LISP;KERNEL;CMP;COMPILER-CONDITIONS.LISP:372
+  28: general_entry_point_redirect_1
+  29: (COMPILE-FILE "sys:src;lisp;regression-tests;framework.lisp")
+    |---> SYS:SRC;LISP;KERNEL;CMP;COMPILE-FILE.LISP:250
+  30: (COMPILE-FILE "sys:src;lisp;regression-tests;framework.lisp")
+    |---> SYS:SRC;LISP;KERNEL;CMP;COMPILE-FILE.LISP:207
+  31: core::bytecode_vm(core::VirtualMachine&, core::T_O**, core::T_O**, core::Closure_O*, core::T_O**, core::T_O**, unsigned long, core::T_O**)
+  32: ((LAMBDA ()))
+    |---> /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp:5
+  33: gctools::return_type core::BytecodeClosureEntryPoint::entry_point_fixed<>(core::T_O*)
+  34: comp::cmp__bytecode_implicit_compile_form(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>)
+  35: core::load_stream(gctools::smart_ptr<core::T_O>, bool)
+  36: core::core__load_source(gctools::smart_ptr<core::T_O>, bool, bool, gctools::smart_ptr<core::T_O>, bool)
+  37: clbind::WRAPPER_VariadicFunction<gctools::smart_ptr<core::T_O> (*)(gctools::smart_ptr<core::T_O>, bool, bool, gctools::smart_ptr<core::T_O>, bool), core::policy::clasp_policy>::entry_point_n(core::T_O*, unsigned long, core::T_O**)
+  38: core::bytecode_vm(core::VirtualMachine&, core::T_O**, core::T_O**, core::Closure_O*, core::T_O**, core::T_O**, unsigned long, core::T_O**)
+  39: (CORE:LOAD-SOURCE #P"/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp" NIL NIL :DEFAULT)
+    |---> SYS:SRC;CORE;LOAD.CC:78
+  40: gctools::return_type core::BytecodeClosureEntryPoint::entry_point_fixed<core::T_O*, core::T_O*, core::T_O*, core::T_O*>(core::T_O*, core::T_O*, core::T_O*, core::T_O*, core::T_O*)
+  41: core::core__load_no_package_set(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>)
+  42: core::cl__load(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>)
+  43: clbind::WRAPPER_VariadicFunction<gctools::smart_ptr<core::T_O> (*)(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::T_O>), core::policy::clasp_policy>::entry_point_n(core::T_O*, unsigned long, core::T_O**)
+  44: core::bytecode_vm(core::VirtualMachine&, core::T_O**, core::T_O**, core::Closure_O*, core::T_O**, core::T_O**, unsigned long, core::T_O**)
+  45: (LOAD "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp")
+    |---> SYS:SRC;CORE;LOAD.CC:255
+  46: gctools::return_type core::BytecodeClosureEntryPoint::entry_point_fixed<core::T_O*>(core::T_O*, core::T_O*)
+  47: ((LAMBDA (CORE::ENTRY)) (:LOAD
+ . "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp"))
+    |---> SYS:SRC;LISP;KERNEL;INIT.LISP:0
+  48: ((LAMBDA (CORE::ENTRY)) (:LOAD
+ . "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp"))
+    |---> SYS:SRC;LISP;KERNEL;INIT.LISP:847
+  49: core::cl__mapcar(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::List_V>)
+  50: clbind::WRAPPER_VariadicFunction<gctools::smart_ptr<core::T_O> (*)(gctools::smart_ptr<core::T_O>, gctools::smart_ptr<core::List_V>), core::policy::clasp_policy>::entry_point_n(core::T_O*, unsigned long, core::T_O**)
+  51: core::bytecode_vm(core::VirtualMachine&, core::T_O**, core::T_O**, core::Closure_O*, core::T_O**, core::T_O**, unsigned long, core::T_O**)
+  52: (MAPCAR #<CORE::SIMPLE-CORE-FUN (LAMBDA (CORE::ENTRY))> ((:LOAD
+  . "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all.lisp")))
+    |---> SYS:SRC;CORE;PRIMITIVES.CC:1291
+  53: gctools::return_type core::BytecodeClosureEntryPoint::entry_point_fixed<core::T_O*, core::T_O*>(core::T_O*, core::T_O*, core::T_O*)
+  54: (CORE:PROCESS-COMMAND-LINE-LOAD-EVAL-SEQUENCE)
+    |---> SYS:SRC;LISP;KERNEL;INIT.LISP:847
+  55: (CORE:PROCESS-COMMAND-LINE-LOAD-EVAL-SEQUENCE)
+    |---> SYS:SRC;LISP;KERNEL;INIT.LISP:846
+  56: (CORE::STANDARD-TOPLEVEL)
+    |---> SYS:SRC;LISP;KERNEL;LSP;TOP-HOOK.LISP:43
+  57: (CORE::STANDARD-TOPLEVEL)
+    |---> SYS:SRC;LISP;KERNEL;LSP;TOP-HOOK.LISP:29
+  58: core::Lisp::run()
+  59: run_clasp
+  60: main
+  61: start
+Unhandled condition with debugger disabled, quitting
+Starting clasp-boehmprecise-2.7.0-304-g3c89efd2d from base image
+Resource file /Users/christiantzurcanu/.clasprc not found, skipping loading of it.

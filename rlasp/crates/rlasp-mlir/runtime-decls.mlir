@@ -295,6 +295,7 @@ func.func private @cc_make_lambda_ref_id(i64) -> i64
 func.func private @cc_make_closure(i64, i64) -> i64
 func.func private @cc_funcall(i64, i64) -> i64
 func.func private @cc_funcall_stack(i64, i64)
+func.func private @cc_tailcall_stack(i64, i64)
 func.func private @cc_apply(i64, i64) -> i64
 
 // Control flow

@@ -9251,27 +9251,9 @@ impl StackMLIRCodegen {
             effective_num_args = args.len();
         }
 
-        // Prefer direct calls when we have a compiled definition.
-        // Also check for %FN% prefix used by defun-compiled functions.
-        let compiled_target_name = if self.compiled_functions.contains(&actual_func_name) {
-            Some(actual_func_name.clone())
-        } else {
-            let prefixed = format!("%FN%{}", actual_func_name);
-            if self.compiled_functions.contains(&prefixed) {
-                Some(prefixed)
-            } else {
-                None
-            }
-        };
-
-        if is_local_function || compiled_target_name.is_some() {
-            // Local functions (from flet/labels) or defun-compiled functions
-            // are defined in this module - call them directly with func.call
-            let target = if is_local_function {
-                actual_func_name
-            } else {
-                compiled_target_name.unwrap()
-            };
+        if is_local_function {
+            // Local functions from flet/labels are not in the global registry.
+            let target = actual_func_name;
             self.writeln(&format!("func.call @\"{}\"() : () -> ()", target));
         } else {
             // Use cc_funcall_stack for dynamic dispatch to user-defined functions
@@ -9285,6 +9267,121 @@ impl StackMLIRCodegen {
             self.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", func_sym, num_args_ssa));
         }
         Ok(())
+    }
+
+    fn compile_tail_user_function_call(&mut self, base_name: &str, args: &[ASTNode]) -> Result<()> {
+        let actual_func_name = self.local_function_map
+            .get(base_name)
+            .cloned()
+            .unwrap_or_else(|| base_name.to_string());
+
+        let effective_num_args;
+        if self.special_param_functions.contains(&actual_func_name) {
+            for arg in args {
+                self.compile_expr(arg)?;
+            }
+
+            let argc = args.len();
+            let argc_ssa = self.fresh_ssa();
+            let tagged_argc = (argc as i64) << 2;
+            self.writeln(&format!("{} = arith.constant {} : i64", argc_ssa, tagged_argc));
+
+            let args_list = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @cc_collect_args({}) : (i64) -> i64", args_list, argc_ssa));
+            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", args_list));
+            effective_num_args = 1;
+        } else {
+            for arg in args {
+                self.compile_expr(arg)?;
+            }
+            effective_num_args = args.len();
+        }
+
+        let func_sym = self.create_symbol_constant(&actual_func_name);
+        let num_args_ssa = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
+        self.writeln(&format!("func.call @cc_tailcall_stack({}, {}) : (i64, i64) -> ()", func_sym, num_args_ssa));
+
+        // Placeholder result consumed by the funcall trampoline when a tailcall is requested.
+        self.writeln("func.call @stack_push_nil() : () -> ()");
+        Ok(())
+    }
+
+    fn compile_tail_expr(&mut self, ast: &ASTNode) -> Result<()> {
+        match ast {
+            ASTNode::If { test, then_branch, else_branch } => {
+                self.compile_expr(test)?;
+                let cond_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cond_val));
+                let nil_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                let cond_bool = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_bool, cond_val, nil_val));
+
+                let saved_symbols = self.symbol_table.clone();
+                self.writeln(&format!("scf.if {} {{", cond_bool));
+                self.indent();
+                self.compile_tail_expr(then_branch)?;
+                self.dedent();
+                self.writeln("} else {");
+                self.indent();
+                self.symbol_table = saved_symbols.clone();
+                self.compile_tail_expr(else_branch)?;
+                self.dedent();
+                self.writeln("}");
+                self.symbol_table = saved_symbols;
+                Ok(())
+            }
+            ASTNode::Progn { exprs } => {
+                if exprs.is_empty() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    return Ok(());
+                }
+
+                for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
+                    self.compile_expr(expr)?;
+                    let discard = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", discard));
+                }
+
+                self.compile_tail_expr(&exprs[exprs.len() - 1])
+            }
+            ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(func_name) = function.as_ref() {
+                    let base_name = if let Some(colon_pos) = func_name.rfind(':') {
+                        &func_name[colon_pos + 1..]
+                    } else {
+                        func_name.as_str()
+                    };
+
+                    if base_name.eq_ignore_ascii_case("if") {
+                        let test_expr = args.get(0).cloned().unwrap_or(ASTNode::Constant(ConstantValue::Nil));
+                        let then_expr = args.get(1).cloned().unwrap_or(ASTNode::Constant(ConstantValue::Nil));
+                        let else_expr = args.get(2).cloned().unwrap_or(ASTNode::Constant(ConstantValue::Nil));
+                        let if_node = ASTNode::If {
+                            test: Box::new(test_expr),
+                            then_branch: Box::new(then_expr),
+                            else_branch: Box::new(else_expr),
+                        };
+                        return self.compile_tail_expr(&if_node);
+                    }
+
+                    if base_name.eq_ignore_ascii_case("progn") {
+                        let progn_node = ASTNode::Progn { exprs: args.to_vec() };
+                        return self.compile_tail_expr(&progn_node);
+                    }
+
+                    if !rlasp::is_cl_builtin(base_name) {
+                        return self.compile_tail_user_function_call(base_name, args);
+                    }
+
+                    return self.compile_call(func_name, args);
+                }
+
+                self.compile_expr(ast)
+            }
+            _ => self.compile_expr(ast),
+        }
     }
 
     /// Emit a direct call to an internal function (no stack args, void return)
@@ -9502,7 +9599,7 @@ impl StackMLIRCodegen {
 
         // Compile function body - catch errors to ensure proper cleanup
         debug_println!("COMPILE_FUNCTION_DEBUG: name={}", name);
-        let compile_result = self.compile_expr(body);
+        let compile_result = self.compile_tail_expr(body);
 
         // Always restore symbol table and close function properly
         self.symbol_table = saved_symbols;

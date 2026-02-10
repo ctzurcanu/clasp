@@ -6497,6 +6497,38 @@ pub extern "C" fn cc_apply(func_ref: usize, args_list: usize) -> usize {
     stack_pop_pointer()
 }
 
+thread_local! {
+    static TAILCALL_PENDING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static TAILCALL_FUNC_REF: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TAILCALL_NUM_ARGS: std::cell::Cell<i64> = std::cell::Cell::new(0);
+}
+
+#[inline]
+fn clear_tailcall_request() {
+    TAILCALL_PENDING.with(|pending| pending.set(false));
+}
+
+#[inline]
+fn take_tailcall_request() -> Option<(usize, i64)> {
+    let pending = TAILCALL_PENDING.with(|slot| slot.get());
+    if !pending {
+        return None;
+    }
+    TAILCALL_PENDING.with(|slot| slot.set(false));
+    let func_ref = TAILCALL_FUNC_REF.with(|slot| slot.get());
+    let num_args = TAILCALL_NUM_ARGS.with(|slot| slot.get());
+    Some((func_ref, num_args))
+}
+
+/// Request a tail call from MLIR-compiled code.
+/// The caller should return immediately after invoking this function.
+#[no_mangle]
+pub extern "C" fn cc_tailcall_stack(func_ref: usize, num_args: i64) {
+    TAILCALL_FUNC_REF.with(|slot| slot.set(func_ref));
+    TAILCALL_NUM_ARGS.with(|slot| slot.set(num_args));
+    TAILCALL_PENDING.with(|slot| slot.set(true));
+}
+
 /// Funcall for stack-based calling convention
 /// Takes a function reference (symbol) and the number of arguments on stack
 /// Arguments are already on the stack, function will pop them
@@ -6534,10 +6566,6 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         }
     }
 
-    // Debug: track call count
-    static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-    let count = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-
     // Optional tracing for debugging stack overflows
     let debug_enabled = std::env::var("RLASP_TRACE_FUNCALL").is_ok();
     let trace_limit = std::env::var("RLASP_TRACE_FUNCALL_LIMIT")
@@ -6546,44 +6574,53 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         .unwrap_or(9000);
 
     let (_depth_guard, call_depth) = FuncallDepthGuard::enter();
+    // Debug: track call count
+    static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-    // Check stack depth before any operations
-    let depth_before = stack_depth();
-    if depth_before < num_args {
-        eprintln!("[STACK ERROR #{}] cc_funcall_stack: need {} args but stack has only {} items",
-                  count, num_args, depth_before);
-        // Push NIL result to maintain stack balance
-        stack_push_nil();
-        return;
-    }
+    let mut current_func_ref = func_ref;
+    let mut current_num_args = num_args;
 
-    let obj = unsafe { LispObject::from_raw(func_ref) };
+    loop {
+        clear_tailcall_request();
+        let count = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
 
-    if debug_enabled && count < trace_limit {
-        // Try to get function name for debug output - be careful about dereferencing
-        let name_str = if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-            // Check pointer is non-null before dereferencing
-            if !symbol_ptr.is_null() {
-                let symbol = unsafe { &*symbol_ptr };
-                symbol.name().to_string()
+        // Check stack depth before any operations
+        let depth_before = stack_depth();
+        if depth_before < current_num_args {
+            eprintln!("[STACK ERROR #{}] cc_funcall_stack: need {} args but stack has only {} items",
+                      count, current_num_args, depth_before);
+            // Push NIL result to maintain stack balance
+            stack_push_nil();
+            return;
+        }
+
+        let obj = unsafe { LispObject::from_raw(current_func_ref) };
+
+        if debug_enabled && count < trace_limit {
+            // Try to get function name for debug output - be careful about dereferencing
+            let name_str = if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
+                // Check pointer is non-null before dereferencing
+                if !symbol_ptr.is_null() {
+                    let symbol = unsafe { &*symbol_ptr };
+                    symbol.name().to_string()
+                } else {
+                    "<null-symbol>".to_string()
+                }
+            } else if let Some(func_id) = obj.as_fixnum() {
+                if let Some(name) = extract_function_name(current_func_ref) {
+                    name
+                } else {
+                    format!("<id:{}>", func_id)
+                }
             } else {
-                "<null-symbol>".to_string()
-            }
-        } else if let Some(func_id) = obj.as_fixnum() {
-            if let Some(name) = extract_function_name(func_ref) {
-                name
-            } else {
-                format!("<id:{}>", func_id)
-            }
-        } else {
-            "<unknown>".to_string()
-        };
-        eprintln!("[funcall_stack #{}] {} (args={}, depth={}, call_depth={})", count, name_str, num_args, depth_before, call_depth);
-        let _ = std::io::stderr().flush();
-    } else if debug_enabled && count == trace_limit {
-        eprintln!("[funcall_stack] trace limit reached ({} calls)", trace_limit);
-        let _ = std::io::stderr().flush();
-    }
+                "<unknown>".to_string()
+            };
+            eprintln!("[funcall_stack #{}] {} (args={}, depth={}, call_depth={})", count, name_str, current_num_args, depth_before, call_depth);
+            let _ = std::io::stderr().flush();
+        } else if debug_enabled && count == trace_limit {
+            eprintln!("[funcall_stack] trace limit reached ({} calls)", trace_limit);
+            let _ = std::io::stderr().flush();
+        }
 
     // Check if it's a closure
     if let Some(closure_ptr) = obj.as_general_ptr::<Closure>() {
@@ -6618,6 +6655,14 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                         // Call lambda function
                         let f: extern "C" fn() = std::mem::transmute(address);
                         f();
+                    }
+                    if let Some((next_func_ref, next_num_args)) = take_tailcall_request() {
+                        if stack_depth() > 0 {
+                            let _ = stack_pop_pointer();
+                        }
+                        current_func_ref = next_func_ref;
+                        current_num_args = next_num_args;
+                        continue;
                     }
                     return;
                 }
@@ -6698,15 +6743,15 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
             let tc = TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
             if tc < 10 {
-                eprintln!("[TRACE] Calling function that expects_args_list, num_args={}", num_args);
+                eprintln!("[TRACE] Calling function that expects_args_list, num_args={}", current_num_args);
             }
         }
 
         // Check if function expects an args_list
-        if entry.expects_args_list && num_args > 0 {
+        if entry.expects_args_list && current_num_args > 0 {
             // Package stack args into a list (pop in reverse order, cons together)
             let mut args = Vec::new();
-            for _ in 0..num_args {
+            for _ in 0..current_num_args {
                 args.push(stack_pop_pointer());
             }
             // Build list from end (args are now in reverse order)
@@ -6716,7 +6761,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             }
             // Push the args list
             stack_push_pointer(list);
-        } else if entry.expects_args_list && num_args == 0 {
+        } else if entry.expects_args_list && current_num_args == 0 {
             // No args but function expects args_list - push NIL
             stack_push_nil();
         }
@@ -6724,7 +6769,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         if entry.address == 0 {
             eprintln!("[FATAL ERROR] Function has null address! Skipping call.");
             // Pop args and push nil
-            for _ in 0..num_args {
+            for _ in 0..current_num_args {
                 let _ = stack_pop_pointer();
             }
             stack_push_nil();
@@ -6830,7 +6875,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 // (vector &rest args) - create a vector from arguments
                 // Pop all args and create vector
                 let mut items = Vec::new();
-                for _ in 0..num_args {
+                for _ in 0..current_num_args {
                     let item = stack_pop_pointer();
                     items.push(unsafe { LispObject::from_raw(item) });
                 }
@@ -6841,9 +6886,9 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             "define-condition" | "DEFINE-CONDITION" => {
                 // Macro that should have been expanded - just return the condition name
                 // Pop all args (condition-name supers slots options...)
-                if num_args > 0 {
+                if current_num_args > 0 {
                     let first_arg = stack_pop_pointer();  // Get condition name
-                    for _ in 1..num_args {
+                    for _ in 1..current_num_args {
                         let _ = stack_pop_pointer();  // Discard rest
                     }
                     stack_push_pointer(first_arg);  // Return the name
@@ -6853,9 +6898,9 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             }
             "define-package" | "DEFINE-PACKAGE" | "UIOP/PACKAGE:DEFINE-PACKAGE" => {
                 // Macro that should have been expanded - just return the package name
-                if num_args > 0 {
+                if current_num_args > 0 {
                     let first_arg = stack_pop_pointer();  // Get package name
-                    for _ in 1..num_args {
+                    for _ in 1..current_num_args {
                         let _ = stack_pop_pointer();  // Discard rest
                     }
                     stack_push_pointer(first_arg);  // Return the name
@@ -6865,21 +6910,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             }
             "report" | "REPORT" => {
                 // (report ...) - condition report macro, just pop args and push nil
-                for _ in 0..num_args {
+                for _ in 0..current_num_args {
                     let _ = stack_pop_pointer();
                 }
                 stack_push_nil();
             }
             "default-initargs" | "DEFAULT-INITARGS" => {
                 // Pop args and push nil
-                for _ in 0..num_args {
+                for _ in 0..current_num_args {
                     let _ = stack_pop_pointer();
                 }
                 stack_push_nil();
             }
             "lambda" | "LAMBDA" => {
                 // Lambda that wasn't compiled - just pop args and push nil
-                for _ in 0..num_args {
+                for _ in 0..current_num_args {
                     let _ = stack_pop_pointer();
                 }
                 stack_push_nil();
@@ -6891,11 +6936,11 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 if registry.contains_key(&name) {
                     // It's a generic function - dispatch using CLOS
                     drop(registry); // Release lock before calling
-                    execute_stack_based_dispatch(&name, num_args as usize);
+                    execute_stack_based_dispatch(&name, current_num_args as usize);
                 } else {
                     // Function not found - clean up arguments and push nil
                     // Pop all arguments to prevent stack corruption
-                    for _ in 0..num_args {
+                    for _ in 0..current_num_args {
                         let _ = stack_pop_pointer();
                     }
                     stack_push_nil();
@@ -6905,10 +6950,20 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
     } else {
         // Function not found or invalid reference
         // Clean up arguments and push nil
-        for _ in 0..num_args {
+        for _ in 0..current_num_args {
             let _ = stack_pop_pointer();
         }
         stack_push_nil();
+    }
+        if let Some((next_func_ref, next_num_args)) = take_tailcall_request() {
+            if stack_depth() > 0 {
+                let _ = stack_pop_pointer();
+            }
+            current_func_ref = next_func_ref;
+            current_num_args = next_num_args;
+            continue;
+        }
+        return;
     }
 }
 

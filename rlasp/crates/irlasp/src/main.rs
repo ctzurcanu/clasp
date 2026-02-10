@@ -1337,6 +1337,7 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             stack_clear as *const (),
             // Core intrinsics
             cc_funcall_stack as *const (),
+            cc_tailcall_stack as *const (),
             cc_funcall as *const (),
             cc_nil as *const (),
             cc_t as *const (),
@@ -1511,10 +1512,14 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     // (After transfer, we can't iterate module.get_functions() anymore)
     let mut lambda_names: Vec<String> = Vec::new();
     let mut method_names: Vec<String> = Vec::new();
+    let mut local_function_names: Vec<String> = Vec::new();
     for func_val in module.get_functions() {
         let func_name = func_val.get_name().to_str().unwrap_or("");
         if func_name.starts_with("__lambda_") {
             lambda_names.push(func_name.to_string());
+        }
+        if func_name.starts_with("local_") {
+            local_function_names.push(func_name.to_string());
         }
         let is_method = func_name.ends_with("_primary")
             || func_name.ends_with("_before")
@@ -1524,7 +1529,12 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             method_names.push(func_name.to_string());
         }
     }
-    println!("[Collected {} lambdas and {} methods from module]", lambda_names.len(), method_names.len());
+    println!(
+        "[Collected {} lambdas, {} methods, {} local functions from module]",
+        lambda_names.len(),
+        method_names.len(),
+        local_function_names.len()
+    );
 
     // Create a ThreadSafeContext and ThreadSafeModule
     let ts_ctx = unsafe { LLVMOrcCreateNewThreadSafeContext() };
@@ -1589,6 +1599,7 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         let mut registered_functions = 0;
         let mut registered_lambdas = 0;
         let mut registered_methods = 0;
+        let mut registered_local_functions = 0;
 
         // Register user-defined functions with uniform calling convention
         // All functions now take a single argument (args_and_env), so we use arity usize::MAX
@@ -1654,8 +1665,24 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 registered_methods += 1;
             }
         }
-        println!("[Registered {} functions, {} lambdas, {} methods]",
-                 registered_functions, registered_lambdas, registered_methods);
+
+        // Register local flet/labels helper functions so MLIR tailcalls can dispatch them.
+        for func_name in &local_function_names {
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                unsafe {
+                    cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                }
+                registered_local_functions += 1;
+            }
+        }
+        println!(
+            "[Registered {} functions, {} lambdas, {} methods, {} local functions]",
+            registered_functions,
+            registered_lambdas,
+            registered_methods,
+            registered_local_functions
+        );
     }
 
     // Execute top-level forms if they exist, otherwise execute all functions

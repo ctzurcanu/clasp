@@ -37,6 +37,7 @@ thread_local! {
     static DEBUG_BREAKSTEP_ENABLED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static DEBUG_STACK_DELIMITED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static DEBUG_IN_HOOK: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static STRUCT_DEFINITIONS: RefCell<HashMap<String, StructDefinition>> = RefCell::new(HashMap::new());
 }
 
 /// Maximum recursion depth before we fail with an error
@@ -79,6 +80,13 @@ struct DebugFrame {
     locals: Vec<(String, EvalResult)>,
     documentation: Option<String>,
     language: String,
+}
+
+#[derive(Clone)]
+struct StructDefinition {
+    slot_names: Vec<String>,
+    slot_defaults: Vec<ASTNode>,
+    conc_name: String,
 }
 
 /// RAII guard for tracking recursion depth
@@ -176,6 +184,329 @@ fn maybe_data_list_function_head(ast: &ASTNode) -> bool {
         ASTNode::Quote(_) => true,
         _ => false,
     }
+}
+
+fn ast_symbol_name(node: &ASTNode) -> Option<String> {
+    match node {
+        ASTNode::Variable(name) => Some(name.clone()),
+        ASTNode::Constant(ConstantValue::Symbol(name)) => {
+            Some(name.strip_prefix(':').unwrap_or(name).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn infer_struct_definition_from_env(name: &str, env: &HashMap<String, EvalResult>) -> Option<StructDefinition> {
+    let prefix = format!("{}-", name);
+    let mut slots: Vec<String> = Vec::new();
+    for key in env.keys() {
+        let Some(rest) = key.strip_prefix(FUNCTION_NS_PREFIX) else {
+            continue;
+        };
+        if rest.starts_with("(setf ") {
+            continue;
+        }
+        if rest.eq_ignore_ascii_case(&format!("{}-p", name))
+            || rest.eq_ignore_ascii_case(&format!("make-{}", name))
+            || rest.eq_ignore_ascii_case(&format!("copy-{}", name))
+        {
+            continue;
+        }
+        if rest.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
+            let slot = rest[prefix.len()..].to_string();
+            if !slot.is_empty() && !slots.iter().any(|s| s.eq_ignore_ascii_case(&slot)) {
+                slots.push(slot);
+            }
+        }
+    }
+    if slots.is_empty() {
+        None
+    } else {
+        let defaults = slots.iter().map(|_| ASTNode::nil()).collect();
+        Some(StructDefinition {
+            slot_names: slots,
+            slot_defaults: defaults,
+            conc_name: prefix,
+        })
+    }
+}
+
+fn eval_defstruct_runtime(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("defstruct requires at least a name".to_string());
+    }
+
+    let mut struct_name = ast_symbol_name(&args[0])
+        .ok_or_else(|| "defstruct name must be a symbol or (name options)".to_string())?;
+    let mut include_parent: Option<String> = None;
+    let mut include_overrides: Vec<(String, ASTNode)> = Vec::new();
+    let mut conc_name: Option<String> = None;
+
+    if let ASTNode::Call { function, args: options } = &args[0] {
+        struct_name = ast_symbol_name(function)
+            .ok_or_else(|| "defstruct name must be a symbol".to_string())?;
+        for option in options {
+            let ASTNode::Call { function: opt_head, args: opt_args } = option else {
+                continue;
+            };
+            let Some(raw_opt_name) = ast_symbol_name(opt_head) else {
+                continue;
+            };
+            let opt_name = raw_opt_name
+                .rsplit(':')
+                .next()
+                .unwrap_or(raw_opt_name.as_str())
+                .trim_start_matches(':')
+                .to_ascii_lowercase();
+            match opt_name.as_str() {
+                "include" => {
+                    if let Some(parent_ast) = opt_args.get(0) {
+                        include_parent = ast_symbol_name(parent_ast);
+                    }
+                    for override_node in opt_args.iter().skip(1) {
+                        if let ASTNode::Call { function: slot_node, args: slot_args } = override_node {
+                            if let Some(slot_name) = ast_symbol_name(slot_node) {
+                                let default = slot_args.get(0).cloned().unwrap_or_else(ASTNode::nil);
+                                include_overrides.push((slot_name, default));
+                            }
+                        }
+                    }
+                }
+                "conc-name" => {
+                    if let Some(value) = opt_args.get(0) {
+                        conc_name = match value {
+                            ASTNode::Variable(v) => Some(v.clone()),
+                            ASTNode::Constant(ConstantValue::Symbol(v)) => Some(v.clone()),
+                            ASTNode::Constant(ConstantValue::String(v)) => Some(v.clone()),
+                            ASTNode::Constant(ConstantValue::Nil) => Some(String::new()),
+                            _ => conc_name,
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut slot_names: Vec<String> = Vec::new();
+    let mut slot_defaults: Vec<ASTNode> = Vec::new();
+
+    if let Some(parent_name) = include_parent.as_ref() {
+        let parent_def = STRUCT_DEFINITIONS.with(|defs| {
+            let defs = defs.borrow();
+            defs.get(&parent_name.to_ascii_lowercase()).cloned()
+        }).or_else(|| infer_struct_definition_from_env(parent_name, env));
+        if let Some(parent_def) = parent_def {
+            slot_names = parent_def.slot_names.clone();
+            slot_defaults = parent_def.slot_defaults.clone();
+            if conc_name.is_none() {
+                conc_name = Some(parent_def.conc_name.clone());
+            }
+        }
+    }
+
+    if !include_overrides.is_empty() {
+        for (slot, default) in include_overrides {
+            if let Some(idx) = slot_names.iter().position(|s| s.eq_ignore_ascii_case(&slot)) {
+                slot_defaults[idx] = default;
+            } else {
+                slot_names.push(slot);
+                slot_defaults.push(default);
+            }
+        }
+    }
+
+    // Parse explicit slot definitions (skip docstring if present)
+    let mut slots_start = 1usize;
+    if args.len() > 1 {
+        if matches!(&args[1], ASTNode::Constant(ConstantValue::String(_))) {
+            slots_start = 2;
+        }
+    }
+    for slot_def in args.iter().skip(slots_start) {
+        match slot_def {
+            ASTNode::Variable(slot_name) => {
+                if !slot_names.iter().any(|s| s.eq_ignore_ascii_case(slot_name)) {
+                    slot_names.push(slot_name.clone());
+                    slot_defaults.push(ASTNode::nil());
+                }
+            }
+            ASTNode::Call { function, args: slot_args } => {
+                let Some(slot_name) = ast_symbol_name(function) else {
+                    return Err("defstruct slot name must be a symbol".to_string());
+                };
+                let default = slot_args.get(0).cloned().unwrap_or_else(ASTNode::nil);
+                if let Some(idx) = slot_names.iter().position(|s| s.eq_ignore_ascii_case(&slot_name)) {
+                    slot_defaults[idx] = default;
+                } else {
+                    slot_names.push(slot_name);
+                    slot_defaults.push(default);
+                }
+            }
+            _ => return Err("defstruct slot must be a symbol or (name default)".to_string()),
+        }
+    }
+
+    let conc_name = conc_name.unwrap_or_else(|| format!("{}-", struct_name));
+
+    let constructor_lambda = EvalResult::Lambda {
+        params: vec!["&key".to_string()]
+            .into_iter()
+            .chain(slot_names.iter().cloned())
+            .collect(),
+        defaults: slot_names
+            .iter()
+            .zip(slot_defaults.iter())
+            .map(|(slot, default)| (slot.clone(), default.clone()))
+            .collect(),
+        supplied_p_vars: HashMap::new(),
+        key_params: HashMap::new(),
+        body: {
+            let mut forms = vec![
+                ASTNode::setq(
+                    "obj",
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("make-hash-table".to_string())),
+                        args: vec![],
+                    },
+                ),
+            ];
+            for (slot_name, default) in slot_names.iter().zip(slot_defaults.iter()) {
+                let value_expr = if matches!(default, ASTNode::Constant(ConstantValue::Nil)) {
+                    ASTNode::Variable(slot_name.clone())
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("or".to_string())),
+                        args: vec![ASTNode::Variable(slot_name.clone()), default.clone()],
+                    }
+                };
+                forms.push(ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("setf".to_string())),
+                    args: vec![
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("gethash".to_string())),
+                            args: vec![
+                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                                ASTNode::Variable("obj".to_string()),
+                            ],
+                        },
+                        value_expr,
+                    ],
+                });
+            }
+            forms.push(ASTNode::Variable("obj".to_string()));
+            forms
+        },
+        env: Rc::new(RefCell::new(env.clone())),
+        dynamic_env: false,
+    };
+    env.insert(
+        format!("{}make-{}", FUNCTION_NS_PREFIX, struct_name),
+        constructor_lambda,
+    );
+
+    let predicate_lambda = EvalResult::Lambda {
+        params: vec!["obj".to_string()],
+        defaults: HashMap::new(),
+        supplied_p_vars: HashMap::new(),
+        key_params: HashMap::new(),
+        body: vec![ASTNode::Call {
+            function: Box::new(ASTNode::Variable("hash-table-p".to_string())),
+            args: vec![ASTNode::Variable("obj".to_string())],
+        }],
+        env: Rc::new(RefCell::new(env.clone())),
+        dynamic_env: false,
+    };
+    env.insert(
+        format!("{}{}-p", FUNCTION_NS_PREFIX, struct_name),
+        predicate_lambda,
+    );
+
+    for slot_name in slot_names.iter() {
+        let accessor_name = format!("{}{}", conc_name, slot_name);
+        let accessor_key = format!("{}{}", FUNCTION_NS_PREFIX, accessor_name);
+        if !env.contains_key(&accessor_key) {
+            let getter = EvalResult::Lambda {
+                params: vec!["obj".to_string()],
+                defaults: HashMap::new(),
+                supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
+                body: vec![ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("values".to_string())),
+                    args: vec![ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("gethash".to_string())),
+                        args: vec![
+                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                            ASTNode::Variable("obj".to_string()),
+                        ],
+                    }],
+                }],
+                env: Rc::new(RefCell::new(env.clone())),
+                dynamic_env: false,
+            };
+            env.insert(accessor_key, getter);
+        }
+        let setter_key = format!("{}(setf {})", FUNCTION_NS_PREFIX, accessor_name);
+        if !env.contains_key(&setter_key) {
+            let setter = EvalResult::Lambda {
+                params: vec!["new-value".to_string(), "obj".to_string()],
+                defaults: HashMap::new(),
+                supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
+                body: vec![ASTNode::Progn {
+                    exprs: vec![
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("setf".to_string())),
+                            args: vec![
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("gethash".to_string())),
+                                    args: vec![
+                                        ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
+                                        ASTNode::Variable("obj".to_string()),
+                                    ],
+                                },
+                                ASTNode::Variable("new-value".to_string()),
+                            ],
+                        },
+                        ASTNode::Variable("new-value".to_string()),
+                    ],
+                }],
+                env: Rc::new(RefCell::new(env.clone())),
+                dynamic_env: false,
+            };
+            env.insert(setter_key, setter);
+        }
+    }
+
+    let copy_lambda = EvalResult::Lambda {
+        params: vec!["obj".to_string()],
+        defaults: HashMap::new(),
+        supplied_p_vars: HashMap::new(),
+        key_params: HashMap::new(),
+        body: vec![ASTNode::Call {
+            function: Box::new(ASTNode::Variable("copy-hash-table".to_string())),
+            args: vec![ASTNode::Variable("obj".to_string())],
+        }],
+        env: Rc::new(RefCell::new(env.clone())),
+        dynamic_env: false,
+    };
+    env.insert(
+        format!("{}copy-{}", FUNCTION_NS_PREFIX, struct_name),
+        copy_lambda,
+    );
+
+    STRUCT_DEFINITIONS.with(|defs| {
+        defs.borrow_mut().insert(
+            struct_name.to_ascii_lowercase(),
+            StructDefinition {
+                slot_names,
+                slot_defaults,
+                conc_name,
+            },
+        );
+    });
+
+    Ok(EvalResult::Symbol(struct_name))
 }
 
 fn mp_list_to_vec(mut list: EvalResult) -> Vec<EvalResult> {
@@ -11900,6 +12231,336 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
     }
 }
 
+#[derive(Clone)]
+struct TailCallRequest {
+    params: Vec<String>,
+    defaults: HashMap<String, ASTNode>,
+    supplied_p_vars: HashMap<String, String>,
+    key_params: HashMap<String, String>,
+    body: Vec<ASTNode>,
+    dynamic_env: bool,
+    closure_env_rc: Rc<RefCell<HashMap<String, EvalResult>>>,
+    args: Vec<ASTNode>,
+    frame_name: String,
+}
+
+enum TailEvalResult {
+    Value(EvalResult),
+    TailCall(TailCallRequest),
+}
+
+fn maybe_prepare_tail_lambda_call(
+    function: &ASTNode,
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<Option<TailCallRequest>, String> {
+    let mut resolved: Option<(EvalResult, String)> = None;
+
+    if let ASTNode::Variable(name) = function {
+        let base_name = if name.contains(':') {
+            name.rsplit(':').next().unwrap_or(name)
+        } else {
+            name.as_str()
+        };
+        let is_system_prefix = name.starts_with("ext:") || name.starts_with("cl:") ||
+            name.starts_with("system:") || name.starts_with("si:") ||
+            name.starts_with("sb-ext:") || name.starts_with("sb-unix:") || name.starts_with("sb-posix:") ||
+            name.starts_with("EXT:") || name.starts_with("CL:") ||
+            name.starts_with("SYSTEM:") || name.starts_with("SI:") ||
+            name.starts_with("SB-EXT:") || name.starts_with("SB-UNIX:") || name.starts_with("SB-POSIX:");
+        let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, name);
+        let base_fn_name = if name.contains(':') && !is_system_prefix {
+            let base = name.rsplit(':').next().unwrap_or(name);
+            format!("{}{}", FUNCTION_NS_PREFIX, base)
+        } else {
+            fn_name.clone()
+        };
+        let func_val = lookup_env_binding(&fn_name, env)
+            .or_else(|| if !is_system_prefix { lookup_env_binding(&base_fn_name, env) } else { None })
+            .or_else(|| lookup_env_binding(name, env));
+        if let Some(f) = func_val {
+            resolved = Some((f, base_name.to_string()));
+        }
+    } else {
+        let f = super::eval_types::primary_value(eval_with_env(function, env)?);
+        resolved = Some((f, "<lambda>".to_string()));
+    }
+
+    if let Some((func_val, frame_name)) = resolved {
+        if let EvalResult::Lambda {
+            params,
+            defaults,
+            supplied_p_vars,
+            key_params,
+            body,
+            env: closure_env_rc,
+            dynamic_env,
+        } = func_val
+        {
+            return Ok(Some(TailCallRequest {
+                params,
+                defaults,
+                supplied_p_vars,
+                key_params,
+                body,
+                dynamic_env,
+                closure_env_rc,
+                args: args.to_vec(),
+                frame_name,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn eval_tail_position(
+    ast: &ASTNode,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<TailEvalResult, String> {
+    let expanded = expand_macros(ast);
+
+    match expanded {
+        ASTNode::If { test, then_branch, else_branch } => {
+            let test_result = eval_with_env(&test, env)?;
+            if eval_truthy(&test_result) {
+                eval_tail_position(&then_branch, env)
+            } else {
+                eval_tail_position(&else_branch, env)
+            }
+        }
+        ASTNode::Cond { clauses } => {
+            for (test, result) in clauses {
+                let test_result = eval_with_env(&test, env)?;
+                if eval_truthy(&test_result) {
+                    return eval_tail_position(&result, env);
+                }
+            }
+            Ok(TailEvalResult::Value(EvalResult::Nil))
+        }
+        ASTNode::Progn { exprs } => {
+            if exprs.is_empty() {
+                return Ok(TailEvalResult::Value(EvalResult::Nil));
+            }
+            for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
+                let _ = eval_with_env(expr, env)?;
+            }
+            eval_tail_position(&exprs[exprs.len() - 1], env)
+        }
+        ASTNode::Let { bindings, body } => {
+            let old_env = env.clone();
+            let mut values = Vec::with_capacity(bindings.len());
+            for (_var, value_expr) in &bindings {
+                let value = super::eval_types::primary_value(eval_with_env(value_expr, env)?);
+                values.push(value);
+            }
+            for ((var, _), value) in bindings.iter().zip(values.into_iter()) {
+                env.insert(var.clone(), value);
+            }
+            let tail_result = if body.is_empty() {
+                TailEvalResult::Value(EvalResult::Nil)
+            } else {
+                for expr in body.iter().take(body.len().saturating_sub(1)) {
+                    let _ = eval_with_env(expr, env)?;
+                }
+                eval_tail_position(&body[body.len() - 1], env)?
+            };
+            let bound_vars: std::collections::HashSet<String> =
+                bindings.iter().map(|(v, _)| v.clone()).collect();
+            let mut preserved_vars = HashMap::new();
+            for (var, value) in env.iter() {
+                if old_env.contains_key(var) && !bound_vars.contains(var) {
+                    preserved_vars.insert(var.clone(), value.clone());
+                }
+            }
+            *env = old_env;
+            for (var, value) in preserved_vars {
+                env.insert(var, value);
+            }
+            Ok(tail_result)
+        }
+        ASTNode::LetStar { bindings, body } => {
+            let old_env = env.clone();
+            for (var, value_expr) in &bindings {
+                let raw_value = eval_with_env(value_expr, env)?;
+                let value = super::eval_types::primary_value(raw_value);
+                env.insert(var.clone(), value);
+            }
+            let tail_result = if body.is_empty() {
+                TailEvalResult::Value(EvalResult::Nil)
+            } else {
+                for expr in body.iter().take(body.len().saturating_sub(1)) {
+                    let _ = eval_with_env(expr, env)?;
+                }
+                eval_tail_position(&body[body.len() - 1], env)?
+            };
+            let bound_vars: std::collections::HashSet<String> =
+                bindings.iter().map(|(v, _)| v.clone()).collect();
+            let mut preserved_vars = HashMap::new();
+            for (var, value) in env.iter() {
+                if old_env.contains_key(var) && !bound_vars.contains(var) {
+                    preserved_vars.insert(var.clone(), value.clone());
+                }
+            }
+            *env = old_env;
+            for (var, value) in preserved_vars {
+                env.insert(var, value);
+            }
+            Ok(tail_result)
+        }
+        ASTNode::Block { name, body } => {
+            let block_name = name.unwrap_or_else(|| "nil".to_string());
+            if body.is_empty() {
+                return Ok(TailEvalResult::Value(EvalResult::Nil));
+            }
+            for form in body.iter().take(body.len().saturating_sub(1)) {
+                match eval_with_env(form, env) {
+                    Ok(_) => {}
+                    Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
+                        let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                        return Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            match eval_tail_position(&body[body.len() - 1], env) {
+                Ok(v) => Ok(v),
+                Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
+                    let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                    Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        ASTNode::Call { function, args } => {
+            if let ASTNode::Variable(name) = function.as_ref() {
+                let base_name = if name.contains(':') {
+                    name.rsplit(':').next().unwrap_or(name)
+                } else {
+                    name.as_str()
+                };
+                if base_name.eq_ignore_ascii_case("if") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    let test_val = eval_with_env(&args[0], env)?;
+                    if eval_truthy(&test_val) {
+                        if args.len() >= 2 {
+                            return eval_tail_position(&args[1], env);
+                        }
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    if args.len() >= 3 {
+                        return eval_tail_position(&args[2], env);
+                    }
+                    return Ok(TailEvalResult::Value(EvalResult::Nil));
+                }
+                if base_name.eq_ignore_ascii_case("progn") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    for expr in args.iter().take(args.len().saturating_sub(1)) {
+                        let _ = eval_with_env(expr, env)?;
+                    }
+                    return eval_tail_position(&args[args.len() - 1], env);
+                }
+                if base_name.eq_ignore_ascii_case("let") || base_name.eq_ignore_ascii_case("let*") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    let bindings = parse_let_bindings_from_call(&args[0], env)?;
+                    let body = &args[1..];
+                    let old_env = env.clone();
+                    if base_name.eq_ignore_ascii_case("let") {
+                        let mut values = Vec::with_capacity(bindings.len());
+                        for (_var, value_expr) in &bindings {
+                            let value = super::eval_types::primary_value(eval_with_env(value_expr, env)?);
+                            values.push(value);
+                        }
+                        for ((var, _), value) in bindings.iter().zip(values.into_iter()) {
+                            env.insert(var.clone(), value);
+                        }
+                    } else {
+                        for (var, value_expr) in &bindings {
+                            let raw_value = eval_with_env(value_expr, env)?;
+                            let value = super::eval_types::primary_value(raw_value);
+                            env.insert(var.clone(), value);
+                        }
+                    }
+                    let tail_result = if body.is_empty() {
+                        TailEvalResult::Value(EvalResult::Nil)
+                    } else {
+                        for expr in body.iter().take(body.len().saturating_sub(1)) {
+                            let _ = eval_with_env(expr, env)?;
+                        }
+                        eval_tail_position(&body[body.len() - 1], env)?
+                    };
+                    let bound_vars: std::collections::HashSet<String> =
+                        bindings.iter().map(|(v, _)| v.clone()).collect();
+                    let mut preserved_vars = HashMap::new();
+                    for (var, value) in env.iter() {
+                        if old_env.contains_key(var) && !bound_vars.contains(var) {
+                            preserved_vars.insert(var.clone(), value.clone());
+                        }
+                    }
+                    *env = old_env;
+                    for (var, value) in preserved_vars {
+                        env.insert(var, value);
+                    }
+                    return Ok(tail_result);
+                }
+                if base_name.eq_ignore_ascii_case("block") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    let block_name = match &args[0] {
+                        ASTNode::Variable(n) => n.clone(),
+                        ASTNode::Constant(ConstantValue::Nil) => "nil".to_string(),
+                        _ => "nil".to_string(),
+                    };
+                    let body = &args[1..];
+                    if body.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    for form in body.iter().take(body.len().saturating_sub(1)) {
+                        match eval_with_env(form, env) {
+                            Ok(_) => {}
+                            Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
+                                let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                                return Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    return match eval_tail_position(&body[body.len() - 1], env) {
+                        Ok(v) => Ok(v),
+                        Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
+                            let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                            Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?))
+                        }
+                        Err(e) => Err(e),
+                    };
+                }
+                if base_name.eq_ignore_ascii_case("locally") {
+                    if args.is_empty() {
+                        return Ok(TailEvalResult::Value(EvalResult::Nil));
+                    }
+                    for expr in args.iter().take(args.len().saturating_sub(1)) {
+                        let _ = eval_with_env(expr, env)?;
+                    }
+                    return eval_tail_position(&args[args.len() - 1], env);
+                }
+            }
+            if let Some(req) = maybe_prepare_tail_lambda_call(&function, &args, env)? {
+                Ok(TailEvalResult::TailCall(req))
+            } else {
+                Ok(TailEvalResult::Value(eval_call_with_env(&function, &args, env)?))
+            }
+        }
+        _ => Ok(TailEvalResult::Value(eval_with_env(&expanded, env)?)),
+    }
+}
+
 pub(super) fn eval_lambda_call(
     params: Vec<String>,
     defaults: HashMap<String, ASTNode>,
@@ -11925,57 +12586,6 @@ pub(super) fn eval_lambda_call(
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v.clone())
     }
-    let persisted_keys: HashSet<String> = closure_env_rc.borrow().keys().cloned().collect();
-    let caller_keys: HashSet<String> = call_env.keys().cloned().collect();
-    let mut closure_env = closure_env_rc.borrow().clone();
-    // Check for &optional, &rest, &key, and &aux parameters
-    let mut optional_pos = None;
-    let mut rest_pos = None;
-    let mut key_pos = None;
-    let mut aux_pos = None;
-    for (i, param) in params.iter().enumerate() {
-        if param == "&optional" {
-            optional_pos = Some(i);
-        } else if param == "&rest" {
-            rest_pos = Some(i);
-            // Don't break - we need to continue to find &key and &aux
-        } else if param == "&key" {
-            key_pos = Some(i);
-        } else if param == "&aux" {
-            aux_pos = Some(i);
-            break; // &aux is always last
-        }
-    }
-
-    // Split parameters into required, optional, key, rest, and aux
-    let end_of_required = optional_pos.or(rest_pos).or(key_pos).or(aux_pos).unwrap_or(params.len());
-    let required_params = &params[..end_of_required];
-
-    let (optional_params, key_params_slice) = if let Some(opt_idx) = optional_pos {
-        let opt_end = rest_pos.or(key_pos).or(aux_pos).unwrap_or(params.len());
-        let optional = &params[opt_idx + 1..opt_end];
-        let keys = if let Some(key_idx) = key_pos {
-            // &key comes after &rest in CL, so key_end should be &aux or end
-            let key_end = aux_pos.unwrap_or(params.len());
-            &params[key_idx + 1..key_end]
-        } else {
-            &params[0..0]
-        };
-        (optional, keys)
-    } else if let Some(key_idx) = key_pos {
-        // &key comes after &rest in CL, so key_end should be &aux or end
-        let key_end = aux_pos.unwrap_or(params.len());
-        (&params[0..0], &params[key_idx + 1..key_end])
-    } else {
-        (&params[0..0], &params[0..0])
-    };
-    let key_param_vars: Vec<&String> = key_params_slice.iter()
-        .filter(|p| !p.starts_with('&'))
-        .collect();
-    let declared_key_names: Vec<String> = key_param_vars.iter()
-        .map(|p| key_params.get(*p).cloned().unwrap_or_else(|| trim_keyword(p)))
-        .collect();
-
     fn keyword_from_ast(arg: &ASTNode) -> Option<String> {
         match arg {
             ASTNode::Variable(name) if name.starts_with(':') => Some(name[1..].to_string()),
@@ -11986,248 +12596,303 @@ pub(super) fn eval_lambda_call(
         }
     }
 
-    let rest_param = rest_pos.and_then(|r| {
-        let next = r + 1;
-        if next < params.len() && params.get(next).map_or(false, |p| p != "&aux" && p != "&key") {
-            Some(&params[next])
-        } else {
-            None
-        }
-    });
+    let outer_caller_keys: HashSet<String> = call_env.keys().cloned().collect();
+    let mut current_params = params;
+    let mut current_defaults = defaults;
+    let mut current_supplied_p_vars = supplied_p_vars;
+    let mut current_key_params = key_params;
+    let mut current_body = body;
+    let mut current_dynamic_env = dynamic_env;
+    let mut current_closure_env_rc = closure_env_rc;
+    let mut current_args: Vec<ASTNode> = args.to_vec();
+    let mut current_frame_name = DEBUG_PENDING_FRAME_NAME
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| "<lambda>".to_string());
+    let mut current_call_env = call_env.clone();
 
-    // Count positional arguments (before keyword arguments)
-    // A keyword argument is a pair :key value, but ONLY if the key matches a declared &key parameter
-    let mut positional_count = 0;
-    for (i, arg) in args.iter().enumerate() {
-        if let Some(key_name) = keyword_from_ast(arg) {
-            if i + 1 < args.len() {
-                // Check if this keyword matches a declared &key parameter
-                let is_declared_key = declared_key_names.iter().any(|p| p.eq_ignore_ascii_case(&key_name));
-                if is_declared_key {
-                    // This is a keyword argument (matches a declared &key param)
-                    positional_count = i;
-                    break;
+    loop {
+        let persisted_keys: HashSet<String> = current_closure_env_rc.borrow().keys().cloned().collect();
+        let mut closure_env = current_closure_env_rc.borrow().clone();
+
+        // Check for &optional, &rest, &key, and &aux parameters
+        let mut optional_pos = None;
+        let mut rest_pos = None;
+        let mut key_pos = None;
+        let mut aux_pos = None;
+        for (i, param) in current_params.iter().enumerate() {
+            if param == "&optional" {
+                optional_pos = Some(i);
+            } else if param == "&rest" {
+                rest_pos = Some(i);
+            } else if param == "&key" {
+                key_pos = Some(i);
+            } else if param == "&aux" {
+                aux_pos = Some(i);
+                break;
+            }
+        }
+
+        // Split parameters into required, optional, key, rest, and aux
+        let end_of_required = optional_pos.or(rest_pos).or(key_pos).or(aux_pos).unwrap_or(current_params.len());
+        let required_params = &current_params[..end_of_required];
+
+        let (optional_params, key_params_slice) = if let Some(opt_idx) = optional_pos {
+            let opt_end = rest_pos.or(key_pos).or(aux_pos).unwrap_or(current_params.len());
+            let optional = &current_params[opt_idx + 1..opt_end];
+            let keys = if let Some(key_idx) = key_pos {
+                let key_end = aux_pos.unwrap_or(current_params.len());
+                &current_params[key_idx + 1..key_end]
+            } else {
+                &current_params[0..0]
+            };
+            (optional, keys)
+        } else if let Some(key_idx) = key_pos {
+            let key_end = aux_pos.unwrap_or(current_params.len());
+            (&current_params[0..0], &current_params[key_idx + 1..key_end])
+        } else {
+            (&current_params[0..0], &current_params[0..0])
+        };
+        let key_param_vars: Vec<&String> = key_params_slice.iter()
+            .filter(|p| !p.starts_with('&'))
+            .collect();
+        let declared_key_names: Vec<String> = key_param_vars.iter()
+            .map(|p| current_key_params.get(*p).cloned().unwrap_or_else(|| trim_keyword(p)))
+            .collect();
+
+        let rest_param = rest_pos.and_then(|r| {
+            let next = r + 1;
+            if next < current_params.len()
+                && current_params.get(next).map_or(false, |p| p != "&aux" && p != "&key")
+            {
+                Some(&current_params[next])
+            } else {
+                None
+            }
+        });
+
+        // Count positional arguments (before keyword arguments)
+        let mut positional_count = 0;
+        for (i, arg) in current_args.iter().enumerate() {
+            if let Some(key_name) = keyword_from_ast(arg) {
+                if i + 1 < current_args.len() {
+                    let is_declared_key = declared_key_names.iter().any(|p| p.eq_ignore_ascii_case(&key_name));
+                    if is_declared_key {
+                        positional_count = i;
+                        break;
+                    }
+                }
+            }
+            positional_count = i + 1;
+        }
+
+        let min_args = required_params.len();
+        if positional_count < min_args {
+            return Err(format!("Expected at least {} arguments, got {}", min_args, positional_count));
+        }
+
+        // Merge call environment (dynamic_env prefers caller bindings)
+        if current_dynamic_env {
+            for (key, value) in current_call_env.iter() {
+                closure_env.insert(key.clone(), value.clone());
+            }
+        } else {
+            for (key, value) in current_call_env.iter() {
+                if !is_global_binding_name(key) || !closure_env.contains_key(key) {
+                    closure_env.insert(key.clone(), value.clone());
                 }
             }
         }
-        positional_count = i + 1;
-    }
 
-    // Check minimum argument count (only positional)
-    let min_args = required_params.len();
-    if positional_count < min_args {
-        return Err(format!("Expected at least {} arguments, got {}", min_args, positional_count));
-    }
+        let positional_args = &current_args[..positional_count];
+        let keyword_args = &current_args[positional_count..];
 
-    // Merge call environment (dynamic_env prefers caller bindings)
-    if dynamic_env {
-        for (key, value) in call_env.iter() {
-            closure_env.insert(key.clone(), value.clone());
-        }
-    } else {
-        for (key, value) in call_env.iter() {
-            // Keep globals/package bindings lexical by default, but let
-            // ordinary caller bindings flow in so callback closures can
-            // observe and update surrounding locals.
-            if !is_global_binding_name(key) || !closure_env.contains_key(key) {
-                closure_env.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    // Extract positional vs keyword arguments
-    let positional_args = &args[..positional_count];
-    let keyword_args = &args[positional_count..];
-
-    // Bind required parameters
-    // Apply primary_value: in CL, multiple values in single-value context use only first value
-    for (param, arg) in required_params.iter().zip(positional_args.iter()) {
-        let arg_val = super::eval_types::primary_value(eval_with_env(arg, call_env)?);
-        closure_env.insert(param.clone(), arg_val);
-    }
-
-    // Bind optional parameters
-    let optional_positional = &positional_args[required_params.len()..];
-    let mut consumed_optional = 0;
-    for (i, param) in optional_params.iter().enumerate() {
-        if i < optional_positional.len() {
-            // Argument was provided
-            let arg_val = super::eval_types::primary_value(eval_with_env(&optional_positional[i], call_env)?);
+        // Bind required parameters
+        for (param, arg) in required_params.iter().zip(positional_args.iter()) {
+            let arg_val = super::eval_types::primary_value(eval_with_env(arg, &mut current_call_env)?);
             closure_env.insert(param.clone(), arg_val);
-            consumed_optional += 1;
-            // Bind supplied-p variable to T if present
-            if let Some(supplied_p_var) = supplied_p_vars.get(param) {
-                closure_env.insert(supplied_p_var.clone(), EvalResult::Boolean(true));
-            }
-        } else if let Some(default_expr) = defaults.get(param) {
-            // Using default value
-            let default_value = super::eval_types::primary_value(eval_with_env(default_expr, &mut closure_env)?);
-            closure_env.insert(param.clone(), default_value);
-            // Bind supplied-p variable to NIL if present
-            if let Some(supplied_p_var) = supplied_p_vars.get(param) {
-                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
-            }
-        } else {
-            // No argument provided and no default, bind to nil
-            closure_env.insert(param.clone(), EvalResult::Nil);
-            // Bind supplied-p variable to NIL if present
-            if let Some(supplied_p_var) = supplied_p_vars.get(param) {
-                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
-            }
         }
-    }
 
-    // Bind keyword parameters
-    // Parse keyword arguments into a map
-    let mut keyword_map = HashMap::new();
-    let mut i = 0;
-    while i < keyword_args.len() {
-        if let Some(key_name) = keyword_from_ast(&keyword_args[i]) {
-            if i + 1 < keyword_args.len() {
-                let value = super::eval_types::primary_value(eval_with_env(&keyword_args[i + 1], call_env)?);
-                keyword_map.insert(key_name.to_string(), value);
-                i += 2;
+        // Bind optional parameters
+        let optional_positional = &positional_args[required_params.len()..];
+        let mut consumed_optional = 0;
+        for (i, param) in optional_params.iter().enumerate() {
+            if i < optional_positional.len() {
+                let arg_val = super::eval_types::primary_value(eval_with_env(&optional_positional[i], &mut current_call_env)?);
+                closure_env.insert(param.clone(), arg_val);
+                consumed_optional += 1;
+                if let Some(supplied_p_var) = current_supplied_p_vars.get(param) {
+                    closure_env.insert(supplied_p_var.clone(), EvalResult::Boolean(true));
+                }
+            } else if let Some(default_expr) = current_defaults.get(param) {
+                let default_value = super::eval_types::primary_value(eval_with_env(default_expr, &mut closure_env)?);
+                closure_env.insert(param.clone(), default_value);
+                if let Some(supplied_p_var) = current_supplied_p_vars.get(param) {
+                    closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+                }
             } else {
-                return Err(format!("Keyword :{} requires a value", key_name));
+                closure_env.insert(param.clone(), EvalResult::Nil);
+                if let Some(supplied_p_var) = current_supplied_p_vars.get(param) {
+                    closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+                }
             }
-        } else {
-            i += 1;
         }
-    }
 
-    // Bind keyword parameters with defaults
-    for key_param in key_param_vars.iter() {
-        let key_name = key_params.get(*key_param)
+        // Bind keyword parameters
+        let mut keyword_map = HashMap::new();
+        let mut i = 0;
+        while i < keyword_args.len() {
+            if let Some(key_name) = keyword_from_ast(&keyword_args[i]) {
+                if i + 1 < keyword_args.len() {
+                    let value =
+                        super::eval_types::primary_value(eval_with_env(&keyword_args[i + 1], &mut current_call_env)?);
+                    keyword_map.insert(key_name.to_string(), value);
+                    i += 2;
+                } else {
+                    return Err(format!("Keyword :{} requires a value", key_name));
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        for key_param in key_param_vars.iter() {
+            let key_name = current_key_params.get(*key_param)
+                .cloned()
+                .unwrap_or_else(|| trim_keyword(key_param));
+            if let Some(value) = keyword_map.get(&key_name) {
+                closure_env.insert((*key_param).clone(), value.clone());
+                if let Some(supplied_p_var) = current_supplied_p_vars.get(*key_param) {
+                    closure_env.insert(supplied_p_var.clone(), EvalResult::Boolean(true));
+                }
+            } else if let Some(default_expr) = current_defaults.get(*key_param) {
+                let default_value = eval_with_env(default_expr, &mut closure_env)?;
+                closure_env.insert((*key_param).clone(), default_value);
+                if let Some(supplied_p_var) = current_supplied_p_vars.get(*key_param) {
+                    closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+                }
+            } else {
+                closure_env.insert((*key_param).clone(), EvalResult::Nil);
+                if let Some(supplied_p_var) = current_supplied_p_vars.get(*key_param) {
+                    closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
+                }
+            }
+        }
+
+        // Bind rest parameter if present
+        if let Some(rest_p) = rest_param {
+            let rest_start = required_params.len() + consumed_optional;
+            let rest_args = &current_args[rest_start..];
+            let mut rest_list = EvalResult::Nil;
+            for arg in rest_args.iter().rev() {
+                let arg_val = eval_with_env(arg, &mut current_call_env)?;
+                rest_list = EvalResult::Cons(Rc::new(RefCell::new(arg_val)), Rc::new(RefCell::new(rest_list)));
+            }
+            closure_env.insert(rest_p.clone(), rest_list);
+        }
+
+        // Bind &aux parameters
+        if let Some(aux_idx) = aux_pos {
+            let aux_params = &current_params[aux_idx + 1..];
+            for aux_param in aux_params {
+                if let Some(default_expr) = current_defaults.get(aux_param) {
+                    let aux_value = eval_with_env(default_expr, &mut closure_env)?;
+                    closure_env.insert(aux_param.clone(), aux_value);
+                } else {
+                    closure_env.insert(aux_param.clone(), EvalResult::Nil);
+                }
+            }
+        }
+
+        let lambda_list: Vec<String> = current_params
+            .iter()
+            .filter(|p| !p.starts_with('&'))
             .cloned()
-            .unwrap_or_else(|| trim_keyword(key_param));
-        if let Some(value) = keyword_map.get(&key_name) {
-            // Keyword argument was provided
-            closure_env.insert((*key_param).clone(), value.clone());
-            // Bind supplied-p variable to T if present
-            if let Some(supplied_p_var) = supplied_p_vars.get(*key_param) {
-                closure_env.insert(supplied_p_var.clone(), EvalResult::Boolean(true));
-            }
-        } else if let Some(default_expr) = defaults.get(*key_param) {
-            // Evaluate default expression in closure environment
-            let default_value = eval_with_env(default_expr, &mut closure_env)?;
-            closure_env.insert((*key_param).clone(), default_value);
-            // Bind supplied-p variable to NIL if present
-            if let Some(supplied_p_var) = supplied_p_vars.get(*key_param) {
-                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
-            }
+            .collect();
+        let mut locals = Vec::new();
+        for name in &lambda_list {
+            locals.push((
+                name.clone(),
+                closure_env.get(name).cloned().unwrap_or(EvalResult::Nil),
+            ));
+        }
+        let function_obj = EvalResult::Lambda {
+            params: current_params.clone(),
+            defaults: current_defaults.clone(),
+            supplied_p_vars: current_supplied_p_vars.clone(),
+            key_params: current_key_params.clone(),
+            body: current_body.clone(),
+            env: Rc::new(RefCell::new(closure_env.clone())),
+            dynamic_env: current_dynamic_env,
+        };
+        let documentation = if current_frame_name.eq_ignore_ascii_case("function-to-show-up-in-backtrace") {
+            Some("Dummy function for use in tests.".to_string())
         } else {
-            // No default, bind to nil
-            closure_env.insert((*key_param).clone(), EvalResult::Nil);
-            // Bind supplied-p variable to NIL if present
-            if let Some(supplied_p_var) = supplied_p_vars.get(*key_param) {
-                closure_env.insert(supplied_p_var.clone(), EvalResult::Nil);
-            }
-        }
-    }
-
-    // Bind rest parameter if present (excluding keyword args)
-    if let Some(rest_p) = rest_param {
-        let rest_start = required_params.len() + consumed_optional;
-        let rest_args = &args[rest_start..];
-        let mut rest_list = EvalResult::Nil;
-        for arg in rest_args.iter().rev() {
-            let arg_val = eval_with_env(arg, call_env)?;
-            rest_list = EvalResult::Cons(Rc::new(RefCell::new(arg_val)), Rc::new(RefCell::new(rest_list)));
-        }
-        closure_env.insert(rest_p.clone(), rest_list);
-    }
-
-    // Bind &aux parameters (local variables with optional initializers)
-    if let Some(aux_idx) = aux_pos {
-        let aux_params = &params[aux_idx + 1..];
-        for aux_param in aux_params {
-            if let Some(default_expr) = defaults.get(aux_param) {
-                // Evaluate initializer in closure environment
-                let aux_value = eval_with_env(default_expr, &mut closure_env)?;
-                closure_env.insert(aux_param.clone(), aux_value);
-            } else {
-                // No initializer, bind to nil
-                closure_env.insert(aux_param.clone(), EvalResult::Nil);
-            }
-        }
-    }
-
-    let frame_name = DEBUG_PENDING_FRAME_NAME
-        .with(|slot| slot.borrow().clone())
-        .unwrap_or_else(|| "<lambda>".to_string());
-    let lambda_list: Vec<String> = params
-        .iter()
-        .filter(|p| !p.starts_with('&'))
-        .cloned()
-        .collect();
-    let mut locals = Vec::new();
-    for name in &lambda_list {
-        locals.push((
-            name.clone(),
-            closure_env.get(name).cloned().unwrap_or(EvalResult::Nil),
-        ));
-    }
-    let function_obj = EvalResult::Lambda {
-        params: params.clone(),
-        defaults: defaults.clone(),
-        supplied_p_vars: supplied_p_vars.clone(),
-        key_params: key_params.clone(),
-        body: body.clone(),
-        env: Rc::new(RefCell::new(closure_env.clone())),
-        dynamic_env,
-    };
-    let documentation = if frame_name.eq_ignore_ascii_case("function-to-show-up-in-backtrace") {
-        Some("Dummy function for use in tests.".to_string())
-    } else {
-        None
-    };
-    DEBUG_CALL_STACK.with(|stack| {
-        stack.borrow_mut().push(DebugFrame {
-            function_name: frame_name,
-            function_obj,
-            lambda_list: lambda_list.clone(),
-            locals,
-            documentation,
-            language: "BYTECODE".to_string(),
+            None
+        };
+        DEBUG_CALL_STACK.with(|stack| {
+            stack.borrow_mut().push(DebugFrame {
+                function_name: current_frame_name.clone(),
+                function_obj,
+                lambda_list: lambda_list.clone(),
+                locals,
+                documentation,
+                language: "BYTECODE".to_string(),
+            });
         });
-    });
 
-    // Evaluate body in extended closure environment
-    let body_result = (|| -> Result<EvalResult, String> {
-        let mut result = EvalResult::Nil;
-        for expr in &body {
-            result = eval_with_env(expr, &mut closure_env)?;
+        let body_result = (|| -> Result<TailEvalResult, String> {
+            if current_body.is_empty() {
+                return Ok(TailEvalResult::Value(EvalResult::Nil));
+            }
+            for expr in current_body.iter().take(current_body.len().saturating_sub(1)) {
+                let _ = eval_with_env(expr, &mut closure_env)?;
+            }
+            eval_tail_position(&current_body[current_body.len() - 1], &mut closure_env)
+        })();
+        DEBUG_CALL_STACK.with(|stack| {
+            let _ = stack.borrow_mut().pop();
+        });
+        let body_result = body_result?;
+
+        // Persist captured lexical bindings back into closure objects.
+        {
+            let mut persisted = current_closure_env_rc.borrow_mut();
+            for key in persisted_keys.iter() {
+                if let Some(val) = lookup_case_insensitive(&closure_env, key) {
+                    persisted.insert(key.clone(), val);
+                }
+            }
         }
-        Ok(result)
-    })();
-    DEBUG_CALL_STACK.with(|stack| {
-        let _ = stack.borrow_mut().pop();
-    });
-    let result = body_result?;
-    // Persist captured lexical bindings back into the closure object so
-    // stateful closures (e.g. incrementing counters) behave like CL cells.
-    {
-        let mut persisted = closure_env_rc.borrow_mut();
-        for key in persisted_keys.iter() {
-            if let Some(val) = lookup_case_insensitive(&closure_env, key) {
-                persisted.insert(key.clone(), val);
+
+        match body_result {
+            TailEvalResult::Value(result) => {
+                // Propagate caller-visible and global-like bindings to the original caller env.
+                for key in outer_caller_keys.iter() {
+                    if let Some(val) = lookup_case_insensitive(&closure_env, key) {
+                        call_env.insert(key.clone(), val);
+                    }
+                }
+                for (k, v) in closure_env.iter() {
+                    if is_global_binding_name(k) {
+                        call_env.insert(k.clone(), v.clone());
+                    }
+                }
+                return Ok(result);
+            }
+            TailEvalResult::TailCall(next) => {
+                current_call_env = closure_env;
+                current_params = next.params;
+                current_defaults = next.defaults;
+                current_supplied_p_vars = next.supplied_p_vars;
+                current_key_params = next.key_params;
+                current_body = next.body;
+                current_dynamic_env = next.dynamic_env;
+                current_closure_env_rc = next.closure_env_rc;
+                current_args = next.args;
+                current_frame_name = next.frame_name;
             }
         }
     }
-    // Propagate updates for caller-visible bindings. This approximates
-    // shared lexical cells for callback-heavy code paths.
-    for key in caller_keys.iter() {
-        if let Some(val) = lookup_case_insensitive(&closure_env, key) {
-            call_env.insert(key.clone(), val);
-        }
-    }
-    // Propagate global-like bindings back to the caller env
-    for (k, v) in closure_env.iter() {
-        if is_global_binding_name(k) {
-            call_env.insert(k.clone(), v.clone());
-        }
-    }
-    Ok(result)
 }
 
 

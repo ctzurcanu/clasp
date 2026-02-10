@@ -1,0 +1,21 @@
+Input: /tmp/hello-compare.lisp
+Files: 1
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
+FILE /tmp/hello-compare.lisp
+  baseline=sbcl
+  sbcl: status=0 time_s=0.029511 match=MATCH
+  clasp: status=132 time_s=0.240324 match=NA
+  irlasp-interpreter: status=0 time_s=0.025517 match=MATCH
+  irlasp-mlir: status=101 total_s=0.033391 compile_s=0.033391 exec_s=0.000000 match=NA
+
+TOTAL_FILES 1
+ENGINE sbcl OK 1 FAIL 0 OUTPUT_DIFF 0 AVG_TIME_S 0.029511
+ENGINE clasp OK 0 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 0.000000
+ENGINE irlasp_interpreter OK 1 FAIL 0 OUTPUT_DIFF 0 AVG_TIME_S 0.025517
+ENGINE irlasp_mlir OK 0 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 0.000000
+MLIR_PHASE_AVG COMPILE_S 0.000000 EXEC_S 0.000000
+
+CSV /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/lisp-engine-compare-20260210-133332.csv

@@ -1,0 +1,6 @@
+Input: /tmp/hello-compare.lisp
+Files: 1
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
