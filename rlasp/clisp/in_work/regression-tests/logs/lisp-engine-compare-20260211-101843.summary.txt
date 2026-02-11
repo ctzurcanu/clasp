@@ -1,0 +1,44 @@
+Input: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests
+Files discovered: 60
+Files selected: 47
+REQUIRE_BASELINE_PASS: 1
+BASELINE_POLICY: auto
+BASELINE_POLICY_EFFECTIVE: clasp
+HARNESS_MODE: regression
+HARNESS_KIND: regression
+REGRESSION_ROOT: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests
+SUITE_LIST_SOURCE: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all-irlasp.lisp
+TIMEOUT_BIN: /opt/local/bin/gtimeout
+RLASP_MLIR_SELECTIVE_EVAL: 1
+TIMEOUTS_S: SBCL=120 CLASP=120 IRLASP_INTERP=120 IRLASP_MLIR=120
+IRLASP_BIN: /nonexistent
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
+FILE defcallback-native.lisp
+  eligible=yes skip_reason=
+  baseline_gate_failed_engines=none
+  baseline=sbcl
+  sbcl: status=0 time_s=0.048116 match=MATCH
+  clasp: status=0 time_s=5.242295 match=DIFF
+  irlasp-interpreter: status=127 time_s=0.000000 match=NA
+  irlasp-mlir: status=127 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=NA
+
+FILE lowlevel.lisp
+  eligible=yes skip_reason=
+  baseline_gate_failed_engines=none
+  baseline=sbcl
+  sbcl: status=0 time_s=0.056902 match=MATCH
+  clasp: status=0 time_s=4.378065 match=DIFF
+  irlasp-interpreter: status=127 time_s=0.000000 match=NA
+  irlasp-mlir: status=127 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=NA
+
+FILE fastgf.lisp
+  eligible=yes skip_reason=
+  baseline_gate_failed_engines=none
+  baseline=sbcl
+  sbcl: status=0 time_s=0.054037 match=MATCH
+  clasp: status=0 time_s=4.338126 match=DIFF
+  irlasp-interpreter: status=127 time_s=0.000000 match=NA
+  irlasp-mlir: status=127 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=NA
+

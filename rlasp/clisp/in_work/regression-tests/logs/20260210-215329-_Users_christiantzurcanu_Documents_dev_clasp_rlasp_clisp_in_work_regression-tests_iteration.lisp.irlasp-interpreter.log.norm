@@ -1,0 +1,11 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/iteration.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/iteration.fasl
+
+Passed dolist-declare-elements
+
+Passed dolist-var-nil-at-return
+
+~
+~
+
+Successes: 2

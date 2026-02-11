@@ -24,7 +24,7 @@ pub enum TokenKind {
     Integer(i64),
     Bignum(String),  // String representation of large integer
     Float(f64),
-    Ratio(i64, i64),
+    Ratio(String, String),
     String(String),
     Character(char),
     Symbol(String),

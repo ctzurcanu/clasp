@@ -1,0 +1,73 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.fasl
+
+Passed standard-bitvector-1
+
+Passed standard-bitvector-2
+
+Passed standard-bitvector-3
+
+Passed standard-bitvector-4
+
+Passed standard-mdbit-1
+
+Passed standard-mdbit-2
+
+Passed standard-mdbit-3
+
+Passed standard-mdbit-4
+
+Passed standard-mdbit-1a
+
+Passed standard-mdbit-2a
+
+Passed standard-mdbit-3a
+
+Passed standard-mdbit-4a
+
+Failed hell-mdbit-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 8 :element-type (quote bit) :initial-element 0)) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4))) (bit-and (vector 1) a2))
+
+Failed hell-mdbit-2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 8 :element-type (quote bit) :initial-contents (list 0 1 0 1 0 1 0 1))) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4))) (bit-and (vector 1) a2))
+
+Failed hell-mdbit-3
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 8 :element-type (quote bit) :initial-contents (list 0 1 0 1 0 1 0 1))) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4))) (values (bit-and (vector 1) a2 T) (vector 1)))
+
+Failed hell-mdbit-4
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let* ((basis (make-array 12 :element-type (quote bit) :initial-contents (list 0 1 0 1 0 1 0 1 0 1 0 1))) (a1 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 0)) (a2 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 4)) (a3 (make-array 4 :element-type (quote bit) :displaced-to basis :displaced-index-offset 8))) (values (bit-and (vector 1) a2 a3) a3))
+
+Passed hell-mdbit-5
+
+Passed hell-mdbit-5a
+
+
+Failures:
+  ~/pprint-fill/
+~
+
+Unexpected Successes:
+  ~/pprint-fill/
+~
+
+Expected Failures:
+  ~/pprint-fill/
+
+Successes: (hell-mdbit-1 hell-mdbit-2 hell-mdbit-3 hell-mdbit-4)
+Error: REGRESSION-FAIL

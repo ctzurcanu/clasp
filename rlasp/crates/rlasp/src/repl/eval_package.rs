@@ -985,6 +985,9 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     }
                 }
                 EvalResult::String(s) => s.to_uppercase(),
+                // CL booleans T/NIL are symbols and should be accepted as designators.
+                EvalResult::Bool(true) | EvalResult::Boolean(true) => "T".to_string(),
+                EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => "NIL".to_string(),
                 _ => return Err("unintern requires a symbol".to_string()),
             };
 
@@ -1004,6 +1007,11 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             } else {
                 get_current_package()
             };
+
+            // These are never internal symbols in standard packages; unintern should return NIL.
+            if sym_name == "T" || sym_name == "NIL" {
+                return Ok(EvalResult::Nil);
+            }
 
             // Remove symbol from package
             let result = PACKAGES.with(|p| {
@@ -1093,6 +1101,45 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         EvalResult::Nil
                     ]))
                 }
+            }
+        }
+
+        "find-all-symbols" => {
+            // (find-all-symbols string-designator)
+            if args.is_empty() {
+                return Err("find-all-symbols requires a symbol or string".to_string());
+            }
+            let target = match &args[0] {
+                EvalResult::String(s) => s.to_uppercase(),
+                EvalResult::Symbol(s) => {
+                    let base = s.rsplit(':').next().unwrap_or(s);
+                    if base.starts_with(':') {
+                        base[1..].to_uppercase()
+                    } else {
+                        base.to_uppercase()
+                    }
+                }
+                EvalResult::Nil => "NIL".to_string(),
+                _ => return Err("find-all-symbols requires a symbol or string".to_string()),
+            };
+
+            let mut found = false;
+            PACKAGES.with(|p| {
+                for pkg in p.borrow().values() {
+                    if pkg.has_symbol(&target) {
+                        found = true;
+                        break;
+                    }
+                }
+            });
+
+            if found {
+                Ok(EvalResult::Cons(
+                    std::rc::Rc::new(std::cell::RefCell::new(EvalResult::Symbol(target))),
+                    std::rc::Rc::new(std::cell::RefCell::new(EvalResult::Nil)),
+                ))
+            } else {
+                Ok(EvalResult::Nil)
             }
         }
 

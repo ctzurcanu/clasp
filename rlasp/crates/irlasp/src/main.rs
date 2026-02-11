@@ -889,6 +889,8 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         .unwrap_or("module");
 
     let mut codegen = StackMLIRCodegen::new(module_name);
+    let mlir_verbose = std::env::var("RLASP_MLIR_VERBOSE").is_ok();
+    let save_artifacts = std::env::var("RLASP_SAVE_ARTIFACTS").is_ok();
 
     // Read all forms from the file
     let lisp_objs = rlasp_reader::read_all_from_string(source)
@@ -914,7 +916,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     // ===== INCREMENTAL PROCESSING: Expand macros and evaluate each form before moving to next =====
     // This matches how the interpreter works - each form is fully processed (expanded + evaluated)
     // before the next, so definitions are available for subsequent macro expansions
-    println!("[MLIR] Incremental processing: expanding and evaluating forms...");
+    if mlir_verbose {
+        println!("[MLIR] Incremental processing: expanding and evaluating forms...");
+    }
     let trace_toplevel = std::env::var("RLASP_TRACE_TOPLEVEL").is_ok();
 
     // Helper function to check if an AST is a macro definition
@@ -1056,9 +1060,76 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         }
     }
 
-    // ===== INCREMENTAL: For each form, evaluate first (for definitions), then expand for MLIR =====
-    // Key insight: The interpreter evaluates forms directly (with implicit macro expansion).
-    // We need to do the same - evaluate first to get definitions, then expand for MLIR codegen.
+    fn symbol_name_from_ast(ast: &rlasp::ir::ASTNode) -> Option<&str> {
+        match ast {
+            rlasp::ir::ASTNode::Variable(name) => Some(name.as_str()),
+            rlasp::ir::ASTNode::Constant(rlasp::ir::ConstantValue::Symbol(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn is_compile_situation_atom(name: &str) -> bool {
+        let trimmed = name
+            .trim_start_matches(':')
+            .rsplit(':')
+            .next()
+            .unwrap_or(name)
+            .to_ascii_lowercase();
+        trimmed == "compile-toplevel" || trimmed == "compile"
+    }
+
+    fn eval_when_has_compile_situation(situations: &rlasp::ir::ASTNode) -> bool {
+        match situations {
+            rlasp::ir::ASTNode::Call { function, args } => {
+                if symbol_name_from_ast(function)
+                    .map(|n| is_compile_situation_atom(n))
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                args.iter().any(eval_when_has_compile_situation)
+            }
+            _ => symbol_name_from_ast(situations)
+                .map(|n| is_compile_situation_atom(n))
+                .unwrap_or(false),
+        }
+    }
+
+    fn should_eval_for_compile_env(ast: &rlasp::ir::ASTNode) -> bool {
+        match ast {
+            rlasp::ir::ASTNode::Setq { .. } => true,
+            rlasp::ir::ASTNode::Progn { exprs } => exprs.iter().any(should_eval_for_compile_env),
+            rlasp::ir::ASTNode::Call { function, args } => {
+                let head = symbol_name_from_ast(function).unwrap_or("");
+                let head_lc = head.to_ascii_lowercase();
+                match head_lc.as_str() {
+                    "defmacro" | "defun" | "deftype" | "define-compiler-macro"
+                    | "macrolet" | "symbol-macrolet"
+                    | "defvar" | "defparameter" | "defconstant"
+                    | "setq" | "setf"
+                    | "in-package" | "defpackage" | "use-package" | "import" | "export"
+                    | "shadow" | "shadowing-import" | "unintern" | "rename-package"
+                    | "defclass" | "defgeneric" | "defmethod"
+                    | "load" | "require" | "provide"
+                    | "with-upgradability" => true,
+                    "eval-when" => {
+                        if let Some(situations) = args.first() {
+                            eval_when_has_compile_situation(situations)
+                        } else {
+                            false
+                        }
+                    }
+                    "progn" | "locally" | "when" | "unless" | "if" => {
+                        args.iter().any(should_eval_for_compile_env)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    // ===== INCREMENTAL: Expand forms with compile-time environment tracking =====
     for lisp_obj in &lisp_objs {
         form_count += 1;
         match lisp_to_ast::with_read_time_env(&mut interp_env, || {
@@ -1070,10 +1141,17 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 } else {
                     None
                 };
-                // Step 1: Evaluate the original form in interpreter mode
-                // This handles macro expansion internally and adds definitions to the environment
-                // This is how the interpreter works - it expands macros as part of evaluation
-                let _ = eval_with_persistent_env(&ast, &mut interp_env);
+                // Step 1: Evaluate forms in interpreter mode to preserve load-time behavior.
+                // Selective mode is opt-in and intended for performance experiments.
+                let selective_eval = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
+                    .map(|v| {
+                        let t = v.trim().to_ascii_lowercase();
+                        !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+                    })
+                    .unwrap_or(false);
+                if !selective_eval || should_eval_for_compile_env(&ast) {
+                    let _ = eval_with_persistent_env(&ast, &mut interp_env);
+                }
 
                 // Step 2: Now try to expand macros for MLIR compilation
                 // The environment should now have all definitions from this and previous forms
@@ -1123,10 +1201,12 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                         let head_str = head.unwrap_or_else(|| "<unknown>".to_string());
                         for idx in 0..added {
                             let toplevel_idx = toplevel_before + idx + 1;
-                            println!(
-                                "[MLIR] toplevel {} from form {} head={}",
-                                toplevel_idx, form_count, head_str
-                            );
+                            if mlir_verbose {
+                                println!(
+                                    "[MLIR] toplevel {} from form {} head={}",
+                                    toplevel_idx, form_count, head_str
+                                );
+                            }
                         }
                     }
                 }
@@ -1142,8 +1222,10 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         || matches!(f, rlasp::ir::ASTNode::Call { function, .. }
             if matches!(function.as_ref(), rlasp::ir::ASTNode::Variable(n) if n == "defgeneric"))
     }).count();
-    println!("[MLIR] Processing complete: {} bindings, {} defuns, {} toplevel forms ({} defgeneric)",
-             interp_env.len(), defuns.len(), toplevel_forms.len(), dg_count);
+    if mlir_verbose {
+        println!("[MLIR] Processing complete: {} bindings, {} defuns, {} toplevel forms ({} defgeneric)",
+                 interp_env.len(), defuns.len(), toplevel_forms.len(), dg_count);
+    }
 
     // Macros have already been expanded by macroexpand_all_to_ast
     // Use defuns and toplevel_forms directly (with alias for compatibility)
@@ -1206,7 +1288,7 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(50);
+            .unwrap_or(200);
         let num_batches = (expanded_toplevel.len() + batch_size - 1) / batch_size;
         let mut batch_names = Vec::new();
 
@@ -1223,7 +1305,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             let empty_key_params: HashMap<String, String> = HashMap::new();
             match codegen.compile_function("__main", &vec![], &empty_defaults, &empty_supplied, &empty_key_params, &main_body) {
                 Ok(_) => {
-                    println!("[MLIR] Compiled top-level forms as __main");
+                    if mlir_verbose {
+                        println!("[MLIR] Compiled top-level forms as __main");
+                    }
                     compiled_any = true;
                 }
                 Err(e) => {
@@ -1232,7 +1316,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             }
         } else {
             // Split into multiple batch functions
-            println!("[MLIR] Splitting {} toplevel forms into {} batches", expanded_toplevel.len(), num_batches);
+            if mlir_verbose {
+                println!("[MLIR] Splitting {} toplevel forms into {} batches", expanded_toplevel.len(), num_batches);
+            }
 
             for (i, chunk) in expanded_toplevel.chunks(batch_size).enumerate() {
                 let batch_name = format!("__main_batch_{}", i);
@@ -1244,7 +1330,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 match codegen.compile_function(&batch_name, &vec![], &empty_defaults, &empty_supplied, &empty_key_params, &batch_body) {
                     Ok(_) => {
                         batch_names.push(batch_name.clone());
-                        println!("[MLIR] Compiled batch {} ({} forms)", i, chunk.len());
+                        if mlir_verbose {
+                            println!("[MLIR] Compiled batch {} ({} forms)", i, chunk.len());
+                        }
                     }
                     Err(e) => {
                         println!("[Warning: Could not compile batch {}: {}]", i, e);
@@ -1255,7 +1343,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             // Create __main that calls all batches in sequence using direct func.call
             match codegen.compile_main_with_batches(&batch_names) {
                 Ok(_) => {
-                    println!("[MLIR] Compiled __main with {} batch calls", batch_names.len());
+                    if mlir_verbose {
+                        println!("[MLIR] Compiled __main with {} batch calls", batch_names.len());
+                    }
                     compiled_any = true;
                 }
                 Err(e) => {
@@ -1269,16 +1359,24 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     let mlir_text = codegen.finalize();
 
     // Save MLIR to file
-    let mlir_path = format!("/tmp/{}.mlir", module_name);
-    std::fs::write(&mlir_path, &mlir_text)
-        .map_err(|e| format!("Failed to write MLIR file: {}", e))?;
-    println!("[Saved MLIR to: {}]", mlir_path);
+    if save_artifacts {
+        let mlir_path = format!("/tmp/{}.mlir", module_name);
+        std::fs::write(&mlir_path, &mlir_text)
+            .map_err(|e| format!("Failed to write MLIR file: {}", e))?;
+        if mlir_verbose {
+            println!("[Saved MLIR to: {}]", mlir_path);
+        }
 
-    // Save MLIR bytecode
-    let mlirbc_path = format!("/tmp/{}.mlirbc", module_name);
-    match rlasp_mlir::lowering::emit_mlir_bytecode(&mlir_text, &mlirbc_path) {
-        Ok(()) => println!("[Saved MLIR bytecode to: {}]", mlirbc_path),
-        Err(e) => eprintln!("[Warning: Could not emit MLIR bytecode: {}]", e),
+        // Save MLIR bytecode
+        let mlirbc_path = format!("/tmp/{}.mlirbc", module_name);
+        match rlasp_mlir::lowering::emit_mlir_bytecode(&mlir_text, &mlirbc_path) {
+            Ok(()) => {
+                if mlir_verbose {
+                    println!("[Saved MLIR bytecode to: {}]", mlirbc_path);
+                }
+            }
+            Err(e) => eprintln!("[Warning: Could not emit MLIR bytecode: {}]", e),
+        }
     }
 
     // Lower MLIR to LLVM IR in memory
@@ -1286,12 +1384,17 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         .map_err(|e| format!("Failed to lower MLIR: {}", e))?;
 
     // Save LLVM IR for debugging
-    let ll_path = format!("/tmp/{}.ll", module_name);
-    std::fs::write(&ll_path, &llvm_ir_text)
-        .map_err(|e| format!("Failed to write LLVM IR: {}", e))?;
-
-    println!("[Lowered MLIR → LLVM IR in memory]");
-    println!("[Saved LLVM IR to: {}]", ll_path);
+    if save_artifacts {
+        let ll_path = format!("/tmp/{}.ll", module_name);
+        std::fs::write(&ll_path, &llvm_ir_text)
+            .map_err(|e| format!("Failed to write LLVM IR: {}", e))?;
+        if mlir_verbose {
+            println!("[Saved LLVM IR to: {}]", ll_path);
+        }
+    }
+    if mlir_verbose {
+        println!("[Lowered MLIR → LLVM IR in memory]");
+    }
 
     // Parse LLVM IR and execute with ORC JIT
     use inkwell::context::Context;
@@ -1303,7 +1406,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     let module = context.create_module_from_ir(memory_buffer)
         .map_err(|e| format!("Failed to parse LLVM IR: {:?}", e))?;
 
-    println!("[Parsed LLVM IR into module]");
+    if mlir_verbose {
+        println!("[Parsed LLVM IR into module]");
+    }
 
     // Create ORC LLJIT execution engine using llvm-sys directly
     use llvm_sys::orc2::*;
@@ -1315,7 +1420,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     use inkwell::targets::{Target, InitializationConfig};
     Target::initialize_native(&InitializationConfig::default())
         .map_err(|e| format!("Failed to initialize native target: {}", e))?;
-    println!("[Initialized LLVM native target]");
+    if mlir_verbose {
+        println!("[Initialized LLVM native target]");
+    }
 
     // Force linker to keep critical runtime symbols by referencing them
     // This prevents the linker from stripping symbols needed at JIT runtime
@@ -1388,6 +1495,7 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             cc_sub as *const (),
             cc_mul as *const (),
             cc_div as *const (),
+            cc_abs as *const (),
             cc_equal as *const (),
             cc_null as *const (),
             cc_apply as *const (),
@@ -1463,12 +1571,16 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         ];
         // Use volatile read to prevent optimizer from removing the references
         std::hint::black_box(_keep_symbols);
-        println!("[Forced linker to keep {} runtime symbols]", _keep_symbols.len());
+        if mlir_verbose {
+            println!("[Forced linker to keep {} runtime symbols]", _keep_symbols.len());
+        }
     }
 
     // Make the process's symbols available to LLVM for dynamic lookup
     inkwell::support::load_visible_symbols();
-    println!("[Loaded process symbols for ORC JIT]");
+    if mlir_verbose {
+        println!("[Loaded process symbols for ORC JIT]");
+    }
 
     // Create LLJIT instance
     let lljit: LLVMOrcLLJITRef = unsafe {
@@ -1483,7 +1595,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         }
         lljit
     };
-    println!("[Created ORC LLJIT]");
+    if mlir_verbose {
+        println!("[Created ORC LLJIT]");
+    }
 
     // Get the main JITDylib
     let main_jd = unsafe { LLVMOrcLLJITGetMainJITDylib(lljit) };
@@ -1506,7 +1620,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         }
         LLVMOrcJITDylibAddGenerator(main_jd, gen);
     }
-    println!("[Added DynamicLibrarySearchGenerator for process symbols]");
+    if mlir_verbose {
+        println!("[Added DynamicLibrarySearchGenerator for process symbols]");
+    }
 
     // Collect function names BEFORE transferring module to LLJIT
     // (After transfer, we can't iterate module.get_functions() anymore)
@@ -1529,12 +1645,14 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             method_names.push(func_name.to_string());
         }
     }
-    println!(
-        "[Collected {} lambdas, {} methods, {} local functions from module]",
-        lambda_names.len(),
-        method_names.len(),
-        local_function_names.len()
-    );
+    if mlir_verbose {
+        println!(
+            "[Collected {} lambdas, {} methods, {} local functions from module]",
+            lambda_names.len(),
+            method_names.len(),
+            local_function_names.len()
+        );
+    }
 
     // Create a ThreadSafeContext and ThreadSafeModule
     let ts_ctx = unsafe { LLVMOrcCreateNewThreadSafeContext() };
@@ -1557,7 +1675,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             return Err(format!("Failed to add module to LLJIT: {}", msg));
         }
     }
-    println!("[Added LLVM IR module to ORC LLJIT]");
+    if mlir_verbose {
+        println!("[Added LLVM IR module to ORC LLJIT]");
+    }
 
     // Helper function to look up symbols
     let lookup_symbol = |name: &str| -> std::result::Result<u64, String> {
@@ -1575,7 +1695,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         Ok(addr)
     };
 
-    println!("[Created ORC LLJIT execution engine]");
+    if mlir_verbose {
+        println!("[Created ORC LLJIT execution engine]");
+    }
 
     // Note: With ORC JIT's DynamicLibrarySearchGenerator, runtime intrinsics are resolved
     // automatically from the process symbols. No manual add_global_mapping needed.
@@ -1586,7 +1708,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     if init_runtime {
         // Initialize standard Common Lisp variables
         rlasp_jit::intrinsics::init_standard_cl_variables();
-        println!("[Initialized standard CL variables]");
+        if mlir_verbose {
+            println!("[Initialized standard CL variables]");
+        }
     }
 
     // Auto-register all JIT-compiled user functions and lambdas in the function registry
@@ -1676,13 +1800,15 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 registered_local_functions += 1;
             }
         }
-        println!(
-            "[Registered {} functions, {} lambdas, {} methods, {} local functions]",
-            registered_functions,
-            registered_lambdas,
-            registered_methods,
-            registered_local_functions
-        );
+        if mlir_verbose {
+            println!(
+                "[Registered {} functions, {} lambdas, {} methods, {} local functions]",
+                registered_functions,
+                registered_lambdas,
+                registered_methods,
+                registered_local_functions
+            );
+        }
     }
 
     // Execute top-level forms if they exist, otherwise execute all functions
@@ -1708,7 +1834,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 }
             }
             if batch_count > 0 {
-                println!("[Pre-compiled {} batch functions]", batch_count);
+                if mlir_verbose {
+                    println!("[Pre-compiled {} batch functions]", batch_count);
+                }
             }
 
             if trace_batches && batch_count > 0 {
@@ -1732,7 +1860,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 // Cast address to function pointer and call directly
                 let jit_fn: extern "C" fn() = std::mem::transmute(__main_addr);
 
-                println!("[Executing __main]");
+                if mlir_verbose {
+                    println!("[Executing __main]");
+                }
                 jit_fn();
 
                 let depth = stack_depth();
@@ -1743,7 +1873,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 } else {
                     0
                 };
-                println!("=> {}", format_jit_result(result as i64));
+                if mlir_verbose {
+                    println!("=> {}", format_jit_result(result as i64));
+                }
                 exec_count += 1;
             }
         }
@@ -1767,19 +1899,22 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                     let jit_fn: extern "C" fn(i64) -> i64 = std::mem::transmute(func_addr);
                     let result = jit_fn(args_and_env as i64);
 
-                    println!("=> {}", format_jit_result(result as i64));
+                    if mlir_verbose {
+                        println!("=> {}", format_jit_result(result as i64));
+                    }
                     exec_count += 1;
                 }
             }
         }
     }
 
-    println!("[JIT execution: {} functions compiled, {} forms executed]", defuns.len(), exec_count);
-
-    // Clean up ORC LLJIT
-    unsafe {
-        LLVMOrcDisposeLLJIT(lljit);
+    if mlir_verbose {
+        println!("[JIT execution: {} functions compiled, {} forms executed]", defuns.len(), exec_count);
     }
+
+    // Keep LLJIT alive for process lifetime because function pointers from this
+    // module are registered globally and may be called later.
+    // unsafe { LLVMOrcDisposeLLJIT(lljit); }
 
     Ok(())
 }

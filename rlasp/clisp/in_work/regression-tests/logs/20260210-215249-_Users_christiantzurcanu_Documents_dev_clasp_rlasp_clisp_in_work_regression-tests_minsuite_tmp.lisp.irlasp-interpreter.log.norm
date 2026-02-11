@@ -1,0 +1,11 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/minsuite_tmp.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/minsuite_tmp.fasl
+
+Passed floor-remainder-contagion
+
+Passed ffloor-quotient-contagion
+
+~
+~
+
+Successes: 2

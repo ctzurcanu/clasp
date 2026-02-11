@@ -1,0 +1,6 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.fasl
+
+
+thread 'main' panicked at crates/irlasp/src/main.rs:78:10:
+Main thread panicked: Any { .. }

@@ -1,0 +1,457 @@
+Input: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests
+Files discovered: 60
+Files selected: 47
+REQUIRE_BASELINE_PASS: 1
+BASELINE_POLICY: auto
+BASELINE_POLICY_EFFECTIVE: clasp
+HARNESS_MODE: regression
+HARNESS_KIND: regression
+REGRESSION_ROOT: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests
+SUITE_LIST_SOURCE: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all-irlasp.lisp
+TIMEOUT_BIN: /opt/local/bin/gtimeout
+RLASP_MLIR_SELECTIVE_EVAL: 1
+TIMEOUTS_S: SBCL=120 CLASP=120 IRLASP_INTERP=120 IRLASP_MLIR=120
+IRLASP_BIN: /nonexistent
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
+FILE defcallback-native.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.054555 match=SKIP
+  clasp: status=132 time_s=0.236252 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE lowlevel.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.045800 match=SKIP
+  clasp: status=132 time_s=0.198066 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE fastgf.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.048390 match=SKIP
+  clasp: status=132 time_s=0.202399 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE array0.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.073000 match=SKIP
+  clasp: status=132 time_s=0.230681 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE tests01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.048781 match=SKIP
+  clasp: status=132 time_s=0.247655 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE finalizers.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.045118 match=SKIP
+  clasp: status=132 time_s=0.230476 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE strings01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.052088 match=SKIP
+  clasp: status=132 time_s=0.233900 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE cons01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.057771 match=SKIP
+  clasp: status=132 time_s=0.235122 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE sequences01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.052265 match=SKIP
+  clasp: status=132 time_s=0.232626 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE clos.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.065768 match=SKIP
+  clasp: status=132 time_s=0.226394 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE mop.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.041728 match=SKIP
+  clasp: status=132 time_s=0.219592 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE update-instance-abort.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.046895 match=SKIP
+  clasp: status=132 time_s=0.227001 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE numbers.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.074974 match=SKIP
+  clasp: status=132 time_s=0.220948 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE ehkiller.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.041338 match=SKIP
+  clasp: status=132 time_s=0.241458 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE package.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.047200 match=SKIP
+  clasp: status=132 time_s=0.230740 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE structures.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.185378 match=SKIP
+  clasp: status=132 time_s=0.230167 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE symbol0.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.052834 match=SKIP
+  clasp: status=132 time_s=0.222908 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE string-comparison0.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.291843 match=SKIP
+  clasp: status=132 time_s=0.233926 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE bit-array0.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.091378 match=SKIP
+  clasp: status=132 time_s=0.227526 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE bit-array1.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.053849 match=SKIP
+  clasp: status=132 time_s=0.226456 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE character0.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.058356 match=SKIP
+  clasp: status=132 time_s=0.236323 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE unicode.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.075619 match=SKIP
+  clasp: status=132 time_s=0.221876 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE hash-tables0.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.048225 match=SKIP
+  clasp: status=132 time_s=0.233915 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE misc.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.049885 match=SKIP
+  clasp: status=132 time_s=0.219404 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE read01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.043092 match=SKIP
+  clasp: status=132 time_s=0.242341 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE printer01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.096216 match=SKIP
+  clasp: status=132 time_s=0.226914 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE streams01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.054371 match=SKIP
+  clasp: status=132 time_s=0.223600 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE environment01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.052402 match=SKIP
+  clasp: status=132 time_s=0.223568 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE types01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.061535 match=SKIP
+  clasp: status=132 time_s=0.222328 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE control01.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.046777 match=SKIP
+  clasp: status=132 time_s=0.251057 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE iteration.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.044751 match=SKIP
+  clasp: status=132 time_s=0.227023 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE loop.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=1 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=1 time_s=0.058714 match=SKIP
+  clasp: status=132 time_s=0.233121 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE numbers-core.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.044443 match=SKIP
+  clasp: status=132 time_s=0.238408 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE unwind.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.044704 match=SKIP
+  clasp: status=132 time_s=0.246960 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE encodings.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.054299 match=SKIP
+  clasp: status=132 time_s=0.241020 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE environment.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.042960 match=SKIP
+  clasp: status=132 time_s=0.233175 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE conditions.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.044988 match=SKIP
+  clasp: status=132 time_s=0.231466 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE float-features.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.046147 match=SKIP
+  clasp: status=132 time_s=0.261247 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE debug.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.042981 match=SKIP
+  clasp: status=132 time_s=0.275995 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE mp.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.041450 match=SKIP
+  clasp: status=132 time_s=0.246750 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE interrupt.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.044355 match=SKIP
+  clasp: status=132 time_s=0.260475 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE posix.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.041507 match=SKIP
+  clasp: status=132 time_s=0.224949 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE btb.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.045008 match=SKIP
+  clasp: status=132 time_s=0.225229 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE system-construction.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.044325 match=SKIP
+  clasp: status=132 time_s=0.233985 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE extensions.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.043696 match=SKIP
+  clasp: status=132 time_s=0.220488 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE run-program.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.043695 match=SKIP
+  clasp: status=132 time_s=0.227591 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+FILE snapshot.lisp
+  eligible=no skip_reason=baseline_failed(policy=clasp failed=clasp sbcl=0 clasp=132)
+  baseline_gate_failed_engines=clasp
+  baseline=none
+  sbcl: status=0 time_s=0.046237 match=SKIP
+  clasp: status=132 time_s=0.282788 match=SKIP
+  irlasp-interpreter: status=125 time_s=0.000000 match=SKIP
+  irlasp-mlir: status=125 total_s=0.000000 compile_s=0.000000 exec_s=0.000000 match=SKIP
+
+TOTAL_FILES_DISCOVERED 60
+TOTAL_FILES_SELECTED 47
+BASELINE_REQUIREMENT ENABLED 1
+BASELINE_POLICY_EFFECTIVE clasp
+ELIGIBLE_FILES 0
+SKIPPED_BASELINE_FAIL 47
+BASELINE_PRECHECK SBCL_FAIL 7 CLASP_FAIL 47
+RUN_WALL_CLOCK_S 16.343302
+ENGINE sbcl ATTEMPTED 47 EXIT_OK 40 EXIT_FAIL 7 OUTPUT_MATCH 0 OUTPUT_DIFF 0 TOTAL_TIME_S 2.831691 AVG_TIME_S_ATTEMPTED 0.060249 AVG_TIME_S_EXIT_OK 0.055693
+ENGINE clasp ATTEMPTED 47 EXIT_OK 0 EXIT_FAIL 47 OUTPUT_MATCH 0 OUTPUT_DIFF 0 TOTAL_TIME_S 10.966289 AVG_TIME_S_ATTEMPTED 0.233325 AVG_TIME_S_EXIT_OK 0.000000
+ENGINE irlasp_interpreter ATTEMPTED 0 EXIT_OK 0 EXIT_FAIL 0 OUTPUT_MATCH 0 OUTPUT_DIFF 0 TOTAL_TIME_S 0.000000 AVG_TIME_S_ATTEMPTED 0.000000 AVG_TIME_S_EXIT_OK 0.000000
+ENGINE irlasp_mlir ATTEMPTED 0 EXIT_OK 0 EXIT_FAIL 0 OUTPUT_MATCH 0 OUTPUT_DIFF 0 TOTAL_TIME_S 0.000000 AVG_TIME_S_ATTEMPTED 0.000000 AVG_TIME_S_EXIT_OK 0.000000
+MLIR_PHASE_AVG COMPILE_S 0.000000 EXEC_S 0.000000
+
+CSV /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/lisp-engine-compare-20260211-100856.csv
+
+ERROR No eligible files: baseline policy clasp rejected all files.

@@ -1,0 +1,26 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/conditions.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/conditions.fasl
+
+Failed cerror.6
+
+Unexpected error
+~tNIL
+while evaluating
+~t(locally (declare (optimize (safety 3))) (handler-bind ((simple-error (function continue))) (progn (cerror "Wooo" (quote simple-error)) 10)))
+
+Passed condition-slot-unbound
+
+
+Failures:
+  ~/pprint-fill/
+~
+
+Unexpected Successes:
+  ~/pprint-fill/
+~
+
+Expected Failures:
+  ~/pprint-fill/
+
+Successes: (cerror.6)
+Error: REGRESSION-FAIL

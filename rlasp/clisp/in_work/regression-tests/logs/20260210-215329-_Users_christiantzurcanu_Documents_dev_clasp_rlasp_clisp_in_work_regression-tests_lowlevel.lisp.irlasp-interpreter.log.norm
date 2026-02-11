@@ -1,0 +1,24 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel.fasl
+
+Failed compile-2-low-level
+
+Unexpected error
+~tNIL
+while evaluating
+~t(with-output-to-string (*standard-output*) (compile-file "sys:src;lisp;regression-tests;lowlevel-source.lisp" :verbose NIL :print NIL))
+
+
+Failures:
+  ~/pprint-fill/
+~
+
+Unexpected Successes:
+  ~/pprint-fill/
+~
+
+Expected Failures:
+  ~/pprint-fill/
+
+Successes: (compile-2-low-level)
+Error: REGRESSION-FAIL

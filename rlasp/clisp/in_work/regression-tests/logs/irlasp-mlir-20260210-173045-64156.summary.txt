@@ -1,0 +1,7 @@
+Running mode=mlir log=/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/irlasp-mlir-20260210-173045-64156.log
+SUITE_TIMEOUT_S 240
+TIMEOUT_BIN gtimeout
+[1/1] suite=unicode
+SUITE unicode                  TOTAL 6 FAILED 0 PASSED 6
+TOTAL 6 FAILED 0 COMPILE_ERRORS 0 RUN_ERRORS 0 NON_PASSING 0 PASSED 6
+SUITES_TOTAL 1 SUITES_TIMED_OUT 0

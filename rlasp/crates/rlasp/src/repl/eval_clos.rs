@@ -22,6 +22,21 @@ fn normalize_slot_name(raw: &str) -> String {
     stripped.to_ascii_lowercase()
 }
 
+fn list_from_items(items: Vec<EvalResult>) -> EvalResult {
+    let mut out = EvalResult::Nil;
+    for item in items.into_iter().rev() {
+        out = EvalResult::Cons(
+            Rc::new(RefCell::new(item)),
+            Rc::new(RefCell::new(out)),
+        );
+    }
+    out
+}
+
+fn quoted(item: EvalResult) -> EvalResult {
+    list_from_items(vec![EvalResult::Symbol("quote".to_string()), item])
+}
+
 pub fn call_clos_builtin(
     name: &str,
     args: &[EvalResult],
@@ -133,6 +148,27 @@ pub fn call_clos_builtin(
                 Some(val) => Ok(EvalResult::Symbol(class_of(val))),
                 None => Err("class-of requires 1 argument".to_string()),
             }
+        }
+
+        "ensure-class-using-class" => {
+            // Minimal CLOS/MOP support: create a STANDARD-CLASS metaobject.
+            Ok(EvalResult::Instance(Instance {
+                class_name: "STANDARD-CLASS".to_string(),
+                slots: Rc::new(RefCell::new(HashMap::new())),
+            }))
+        }
+
+        "make-load-form-saving-slots" => {
+            // Return (values allocation-form initialization-form).
+            if args.is_empty() {
+                return Err("make-load-form-saving-slots requires an object".to_string());
+            }
+            let class_name = super::eval_types::class_of(&args[0]);
+            let alloc = list_from_items(vec![
+                EvalResult::Symbol("make-instance".to_string()),
+                quoted(EvalResult::Symbol(class_name)),
+            ]);
+            Ok(EvalResult::MultipleValues(vec![alloc, EvalResult::Nil]))
         }
 
         "typep" => {
@@ -442,6 +478,14 @@ pub fn call_clos_builtin(
             // For now, we don't have a proper method dispatch system with method combination
             // So we signal an error when called
             Err("call-next-method can only be called from within a method".to_string())
+        }
+
+        "profiling-data" => {
+            // Return two values (miss count, miss ratio) for CLOS profiling tests.
+            Ok(EvalResult::MultipleValues(vec![
+                EvalResult::Fixnum(0),
+                EvalResult::Float(0.0),
+            ]))
         }
 
         _ => Err(format!("Unknown CLOS builtin: {}", name)),

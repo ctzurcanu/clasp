@@ -1,0 +1,15 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/fastgf.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/fastgf.fasl
+
+Passed dispatch-integer
+
+Passed dispatch-string
+
+Passed dispatch-symbol
+
+Passed dispatch-no-applicable-method
+
+~
+~
+
+Successes: 4

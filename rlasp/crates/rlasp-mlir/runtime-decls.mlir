@@ -47,6 +47,7 @@ func.func private @ratio(i64) -> i64
 func.func private @complex(i64) -> i64
 func.func private @cc_mod(i64, i64) -> i64
 func.func private @cc_expt(i64, i64) -> i64
+func.func private @cc_abs(i64) -> i64
 func.func private @cc_sqrt(i64) -> i64
 func.func private @cc_floor(i64) -> i64
 func.func private @cc_floor_2(i64, i64) -> i64

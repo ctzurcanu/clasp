@@ -1,0 +1,34 @@
+Input: /tmp/sleep30.lisp
+Files discovered: 1
+Files selected: 1
+REQUIRE_BASELINE_PASS: 0
+HARNESS_MODE: direct
+HARNESS_KIND: direct
+REGRESSION_ROOT: <none>
+TIMEOUT_BIN: /opt/local/bin/gtimeout
+TIMEOUTS_S: SBCL=3 CLASP=3 IRLASP_INTERP=3 IRLASP_MLIR=3
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+
+FILE /tmp/sleep30.lisp
+  eligible=yes skip_reason=
+  baseline=sbcl
+  sbcl: status=124 time_s=3.010000 match=NA
+  clasp: status=132 time_s=0.270000 match=NA
+  irlasp-interpreter: status=124 time_s=3.010000 match=NA
+  irlasp-mlir: status=124 total_s=3.010000 compile_s=3.010000 exec_s=0.000000 match=NA
+
+TOTAL_FILES_DISCOVERED 1
+TOTAL_FILES_SELECTED 1
+BASELINE_REQUIREMENT SBCL_AND_CLASP_MUST_PASS 0
+ELIGIBLE_FILES 1
+SKIPPED_BASELINE_FAIL 0
+BASELINE_PRECHECK SBCL_FAIL 1 CLASP_FAIL 1
+ENGINE sbcl OK 0 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+ENGINE clasp OK 0 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+ENGINE irlasp_interpreter OK 0 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+ENGINE irlasp_mlir OK 0 FAIL 1 OUTPUT_DIFF 0 AVG_TIME_S 0.000000 (eligible-only)
+MLIR_PHASE_AVG COMPILE_S 0.000000 EXEC_S 0.000000
+
+CSV /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/lisp-engine-compare-20260210-164330.csv

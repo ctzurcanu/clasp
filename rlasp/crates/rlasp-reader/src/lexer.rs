@@ -372,7 +372,7 @@ impl Lexer {
                         let den_str = &num_text[slash_pos + 1..];
                         if let (Ok(num), Ok(den)) = (i64::from_str_radix(num_str, radix), i64::from_str_radix(den_str, radix)) {
                             if den != 0 {
-                                return Ok(Token::new(TokenKind::Ratio(num, den), start_pos));
+                                return Ok(Token::new(TokenKind::Ratio(num.to_string(), den.to_string()), start_pos));
                             }
                         }
                         return Err(ReaderError::InvalidSyntax {
@@ -442,7 +442,7 @@ impl Lexer {
                     let den_str = &num_text[slash_pos + 1..];
                     if let (Ok(num), Ok(den)) = (i64::from_str_radix(num_str, 2), i64::from_str_radix(den_str, 2)) {
                         if den != 0 {
-                            return Ok(Token::new(TokenKind::Ratio(num, den), start_pos));
+                            return Ok(Token::new(TokenKind::Ratio(num.to_string(), den.to_string()), start_pos));
                         }
                     }
                     return Err(ReaderError::InvalidSyntax {
@@ -629,9 +629,15 @@ impl Lexer {
         if let Some(slash_pos) = text.find('/') {
             let num_str = &text[..slash_pos];
             let den_str = &text[slash_pos + 1..];
-            if let (Ok(num), Ok(den)) = (num_str.parse::<i64>(), den_str.parse::<i64>()) {
-                if den != 0 {
-                    return Ok(Token::new(TokenKind::Ratio(num, den), start_pos));
+            if let (Ok(_num), Ok(den)) = (
+                num_str.parse::<malachite::Integer>(),
+                den_str.parse::<malachite::Integer>(),
+            ) {
+                if den != malachite::Integer::from(0) {
+                    return Ok(Token::new(
+                        TokenKind::Ratio(num_str.to_string(), den_str.to_string()),
+                        start_pos,
+                    ));
                 }
             }
         }
@@ -781,7 +787,10 @@ mod tests {
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Integer(-17));
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Float(3.14));
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Float(-2.5));
-        assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Ratio(3, 4));
+        assert_eq!(
+            lexer.next_token().unwrap().kind,
+            TokenKind::Ratio("3".to_string(), "4".to_string())
+        );
     }
 
     #[test]

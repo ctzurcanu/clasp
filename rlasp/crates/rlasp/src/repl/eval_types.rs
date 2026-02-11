@@ -362,7 +362,8 @@ pub fn class_of(val: &EvalResult) -> String {
         EvalResult::Macro { .. } => "MACRO".to_string(),
         EvalResult::ModifyMacro { .. } => "MACRO".to_string(),
         EvalResult::HashTable(_) => "HASH-TABLE".to_string(),
-        EvalResult::Array(_) => "ARRAY".to_string(),
+        // Runtime arrays are currently 1-D vector-backed, so dispatch as VECTOR.
+        EvalResult::Array(_) => "VECTOR".to_string(),
         EvalResult::GenericFunction(_) => "GENERIC-FUNCTION".to_string(),
         _ => "T".to_string(),
     }

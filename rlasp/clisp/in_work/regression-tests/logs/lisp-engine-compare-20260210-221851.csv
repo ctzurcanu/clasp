@@ -1,0 +1,48 @@
+file,eligible,skip_reason,baseline_engine,sbcl_status,clasp_status,irlasp_interpreter_status,irlasp_mlir_status,sbcl_match,clasp_match,irlasp_interpreter_match,irlasp_mlir_match,sbcl_time_s,clasp_time_s,irlasp_interpreter_time_s,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s
+"defcallback-native.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.047004,5.175274,0.000000,0.000000,0.000000,0.000000
+"lowlevel.lisp",yes,"",sbcl,0,0,127,127,MATCH,DIFF,NA,NA,0.056125,4.203434,0.000000,0.000000,0.000000,0.000000
+"fastgf.lisp",yes,"",sbcl,0,0,127,127,MATCH,DIFF,NA,NA,0.056066,4.419209,0.000000,0.000000,0.000000,0.000000
+"array0.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.068259,4.740933,0.000000,0.000000,0.000000,0.000000
+"tests01.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.048380,4.306204,0.000000,0.000000,0.000000,0.000000
+"finalizers.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.049328,6.318629,0.000000,0.000000,0.000000,0.000000
+"strings01.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.059262,4.302525,0.000000,0.000000,0.000000,0.000000
+"cons01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.060565,5.118840,0.000000,0.000000,0.000000,0.000000
+"sequences01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.055894,6.176604,0.000000,0.000000,0.000000,0.000000
+"clos.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.072358,5.195833,0.000000,0.000000,0.000000,0.000000
+"mop.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.044173,4.817680,0.000000,0.000000,0.000000,0.000000
+"update-instance-abort.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.051722,4.831403,0.000000,0.000000,0.000000,0.000000
+"numbers.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.088383,8.140303,0.000000,0.000000,0.000000,0.000000
+"ehkiller.lisp",yes,"",sbcl,0,0,127,127,MATCH,DIFF,NA,NA,0.048708,4.499770,0.000000,0.000000,0.000000,0.000000
+"package.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.052709,8.120838,0.000000,0.000000,0.000000,0.000000
+"structures.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.199411,7.570039,0.000000,0.000000,0.000000,0.000000
+"symbol0.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.076551,5.047906,0.000000,0.000000,0.000000,0.000000
+"string-comparison0.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.309289,11.505274,0.000000,0.000000,0.000000,0.000000
+"bit-array0.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.091189,4.860901,0.000000,0.000000,0.000000,0.000000
+"bit-array1.lisp",yes,"",sbcl,0,0,127,127,MATCH,DIFF,NA,NA,0.057445,4.215918,0.000000,0.000000,0.000000,0.000000
+"character0.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.061366,5.192759,0.000000,0.000000,0.000000,0.000000
+"unicode.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.080087,4.859560,0.000000,0.000000,0.000000,0.000000
+"hash-tables0.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.054254,4.597501,0.000000,0.000000,0.000000,0.000000
+"misc.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.048986,5.126775,0.000000,0.000000,0.000000,0.000000
+"read01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.046285,6.862030,0.000000,0.000000,0.000000,0.000000
+"printer01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.091256,6.325379,0.000000,0.000000,0.000000,0.000000
+"streams01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.064708,5.763433,0.000000,0.000000,0.000000,0.000000
+"environment01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.046287,4.501464,0.000000,0.000000,0.000000,0.000000
+"types01.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.059001,4.838019,0.000000,0.000000,0.000000,0.000000
+"control01.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.050134,5.758198,0.000000,0.000000,0.000000,0.000000
+"iteration.lisp",yes,"",sbcl,0,0,127,127,MATCH,DIFF,NA,NA,0.046031,5.070015,0.000000,0.000000,0.000000,0.000000
+"loop.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.071046,6.583227,0.000000,0.000000,0.000000,0.000000
+"numbers-core.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.040049,4.321327,0.000000,0.000000,0.000000,0.000000
+"unwind.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.052312,4.328104,0.000000,0.000000,0.000000,0.000000
+"encodings.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.054840,4.875346,0.000000,0.000000,0.000000,0.000000
+"environment.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.045920,5.751607,0.000000,0.000000,0.000000,0.000000
+"conditions.lisp",yes,"",sbcl,0,0,127,127,MATCH,DIFF,NA,NA,0.043006,4.302518,0.000000,0.000000,0.000000,0.000000
+"float-features.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.042134,4.604054,0.000000,0.000000,0.000000,0.000000
+"debug.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.042038,4.814463,0.000000,0.000000,0.000000,0.000000
+"mp.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.049515,5.013568,0.000000,0.000000,0.000000,0.000000
+"interrupt.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.042292,4.953713,0.000000,0.000000,0.000000,0.000000
+"posix.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.043478,4.472083,0.000000,0.000000,0.000000,0.000000
+"btb.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.050029,4.429792,0.000000,0.000000,0.000000,0.000000
+"system-construction.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.044344,6.107423,0.000000,0.000000,0.000000,0.000000
+"extensions.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.045475,3.817132,0.000000,0.000000,0.000000,0.000000
+"run-program.lisp",no,"baseline_failed(failed=sbcl,clasp sbcl=1 clasp=1)",none,1,1,125,125,SKIP,SKIP,SKIP,SKIP,0.042138,4.694528,0.000000,0.000000,0.000000,0.000000
+"snapshot.lisp",no,"baseline_failed(failed=clasp sbcl=0 clasp=1)",none,0,1,125,125,SKIP,SKIP,SKIP,SKIP,0.046163,10.505880,0.000000,0.000000,0.000000,0.000000

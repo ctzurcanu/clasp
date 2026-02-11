@@ -1,0 +1,13 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ehkiller.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ehkiller.fasl
+
+Passed eh-foo
+
+Passed eh-bar
+
+Passed eh-baz
+
+~
+~
+
+Successes: 3

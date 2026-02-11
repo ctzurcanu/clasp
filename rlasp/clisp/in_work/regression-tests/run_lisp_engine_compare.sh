@@ -14,6 +14,7 @@ fi
 
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 REQUIRE_BASELINE_PASS="${REQUIRE_BASELINE_PASS:-1}"
+BASELINE_POLICY="${BASELINE_POLICY:-auto}"
 HARNESS_MODE="${HARNESS_MODE:-auto}"
 RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-180}"
 SBCL_TIMEOUT_S="${SBCL_TIMEOUT_S:-$RUN_TIMEOUT_S}"
@@ -25,8 +26,9 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <file.lisp|directory>"
-  echo "Optional env: SBCL_BIN, CLASP_BIN, IRLASP_BIN, LOG_DIR, REQUIRE_BASELINE_PASS, HARNESS_MODE"
+  echo "Optional env: SBCL_BIN, CLASP_BIN, IRLASP_BIN, LOG_DIR, REQUIRE_BASELINE_PASS, BASELINE_POLICY, HARNESS_MODE"
   echo "Optional env timeouts (seconds): RUN_TIMEOUT_S, SBCL_TIMEOUT_S, CLASP_TIMEOUT_S, IRLASP_INTERP_TIMEOUT_S, IRLASP_MLIR_TIMEOUT_S"
+  echo "BASELINE_POLICY: auto|clasp|sbcl|sbcl_and_clasp (default: auto)"
   echo "HARNESS_MODE: auto|direct|regression (default: auto)"
   exit 2
 fi
@@ -47,6 +49,17 @@ if [[ "$HARNESS_MODE" != "auto" && "$HARNESS_MODE" != "direct" && "$HARNESS_MODE
   echo "Error: HARNESS_MODE must be one of auto|direct|regression"
   exit 2
 fi
+if [[ "$BASELINE_POLICY" != "auto" && "$BASELINE_POLICY" != "clasp" && "$BASELINE_POLICY" != "sbcl" && "$BASELINE_POLICY" != "sbcl_and_clasp" ]]; then
+  echo "Error: BASELINE_POLICY must be one of auto|clasp|sbcl|sbcl_and_clasp"
+  exit 2
+fi
+
+TIMEOUT_BIN=""
+if command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="$(command -v gtimeout)"
+elif command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="$(command -v timeout)"
+fi
 
 float_add() {
   awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", (a + b) }'
@@ -54,6 +67,10 @@ float_add() {
 
 float_sub() {
   awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", (a - b) }'
+}
+
+float_gt_zero() {
+  awk -v a="$1" 'BEGIN { exit !(a > 0.0) }'
 }
 
 now_mono_ts() {
@@ -91,6 +108,41 @@ is_regression_helper_file() {
   esac
 }
 
+pick_regression_suite_manifest() {
+  local root="$1"
+  if [[ -f "$root/run-all-irlasp.lisp" ]]; then
+    echo "$root/run-all-irlasp.lisp"
+    return 0
+  fi
+  if [[ -f "$root/run-all.lisp" ]]; then
+    echo "$root/run-all.lisp"
+    return 0
+  fi
+  return 1
+}
+
+extract_regression_suite_names() {
+  local manifest_file="$1"
+  awk '
+    BEGIN { in_list=0 }
+    {
+      if (!in_list && $0 ~ /\(def(parameter|var)[[:space:]]+\*(irlasp-suites|suites)\*/) {
+        in_list=1
+      }
+      if (in_list) {
+        line=$0
+        while (match(line, /"[^"]+"/)) {
+          print substr(line, RSTART + 1, RLENGTH - 2)
+          line=substr(line, RSTART + RLENGTH)
+        }
+        if ($0 ~ /\)\)/) {
+          exit
+        }
+      }
+    }
+  ' "$manifest_file"
+}
+
 lisp_escape_string() {
   local s="$1"
   print -r -- "$s" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
@@ -124,14 +176,9 @@ write_regression_runner() {
 (in-package #:clasp-tests)
 (reset-clasp-tests)
 (load-if-compiled-correctly #P"$escaped_suite")
-(let* ((ok (show-test-summary))
-       (code (if ok 0 1))
-       (quit-sym (and (find-package "SYS") (find-symbol "QUIT" "SYS")))
-       (exit-sym (and (find-package "SB-EXT") (find-symbol "EXIT" "SB-EXT"))))
-  (cond
-    ((and quit-sym (fboundp quit-sym)) (funcall quit-sym code))
-    ((and exit-sym (fboundp exit-sym)) (funcall exit-sym :code code))
-    (t (error "No exit function available"))))
+(let ((ok (show-test-summary)))
+  (unless ok
+    (error "REGRESSION-FAIL")))
 EOF
 }
 
@@ -140,6 +187,7 @@ normalize_output() {
   local out_file="$2"
   sed -E \
     -e 's/\r$//' \
+    -e '/^\[HARNESS-TIMING\]/d' \
     -e '/^\[MLIR\]/d' \
     -e '/^\[Saved /d' \
     -e '/^\[Lowered /d' \
@@ -168,51 +216,52 @@ run_engine_generic() {
   shift
   shift
 
-  local time_file
-  time_file="$(mktemp "${TMPDIR:-/tmp}/lisp-engine-time.XXXXXX")"
+  local start_ts end_ts wall_elapsed
+  start_ts="$(now_mono_ts)"
   set +e
   if [[ "$timeout_s" =~ '^[0-9]+$' && "$timeout_s" -gt 0 ]]; then
-    /usr/bin/time -p -o "$time_file" perl -e 'my $t=shift @ARGV; alarm $t; exec @ARGV;' "$timeout_s" "$@" >"$log_file" 2>&1
+    perl -e 'my $t=shift @ARGV; alarm $t; exec @ARGV;' "$timeout_s" "$@" >"$log_file" 2>&1
   else
-    /usr/bin/time -p -o "$time_file" "$@" >"$log_file" 2>&1
+    "$@" >"$log_file" 2>&1
   fi
   local exit_code=$?
   set -e
+  end_ts="$(now_mono_ts)"
+  wall_elapsed="$(float_sub "$end_ts" "$start_ts")"
 
   RUN_STATUS="$exit_code"
-  RUN_ELAPSED="$(extract_real_time "$time_file")"
-  rm -f "$time_file"
+  RUN_ELAPSED="$wall_elapsed"
+  printf '[HARNESS-TIMING] status=%s elapsed_s=%s\n' "$RUN_STATUS" "$RUN_ELAPSED" >> "$log_file"
 }
 
 run_mlir_with_phase_timing() {
   local file_path="$1"
   local log_file="$2"
   local timeout_s="$3"
+  local selective_eval="${RLASP_MLIR_SELECTIVE_EVAL:-1}"
 
   local start="$(now_mono_ts)"
   local exec_mark=""
   local exit_code=127
   local fifo_path
-  local time_file
   fifo_path="$(mktemp "${TMPDIR:-/tmp}/irlasp-mlir-stream.XXXXXX")"
-  time_file="$(mktemp "${TMPDIR:-/tmp}/lisp-engine-time.XXXXXX")"
   rm -f "$fifo_path"
   mkfifo "$fifo_path"
   : > "$log_file"
 
   set +e
   if [[ "$timeout_s" =~ '^[0-9]+$' && "$timeout_s" -gt 0 ]]; then
-    (/usr/bin/time -p -o "$time_file" perl -e 'my $t=shift @ARGV; alarm $t; exec @ARGV;' "$timeout_s" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
+    (perl -e 'my $t=shift @ARGV; alarm $t; exec @ARGV;' "$timeout_s" env RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
   else
-    (/usr/bin/time -p -o "$time_file" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
+    (env RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
-  while IFS= read -r line <"$fifo_path"; do
-    print -r -- "$line" >> "$log_file"
+  while IFS= read -r line; do
+    print -r -- "$line"
     if [[ -z "$exec_mark" && "$line" == "[Executing __main]"* ]]; then
       exec_mark="$(now_mono_ts)"
     fi
-  done
+  done <"$fifo_path" >>"$log_file"
   wait "$cmd_pid"
   exit_code=$?
   set -e
@@ -220,8 +269,7 @@ run_mlir_with_phase_timing() {
 
   local end="$(now_mono_ts)"
   RUN_STATUS="$exit_code"
-  RUN_ELAPSED="$(extract_real_time "$time_file")"
-  rm -f "$time_file"
+  RUN_ELAPSED="$(float_sub "$end" "$start")"
   if [[ -n "$exec_mark" ]]; then
     MLIR_COMPILE="$(float_sub "$exec_mark" "$start")"
     MLIR_EXEC="$(float_sub "$end" "$exec_mark")"
@@ -229,12 +277,17 @@ run_mlir_with_phase_timing() {
     MLIR_COMPILE="$RUN_ELAPSED"
     MLIR_EXEC="0.000000"
   fi
+  printf '[HARNESS-TIMING] status=%s elapsed_s=%s compile_s=%s exec_s=%s\n' \
+    "$RUN_STATUS" "$RUN_ELAPSED" "$MLIR_COMPILE" "$MLIR_EXEC" >> "$log_file"
 }
 
 typeset -a FILES=()
+typeset -a DISCOVERED_FILES=()
 DISCOVERED_COUNT=0
 REGRESSION_ROOT=""
 HARNESS_KIND="direct"
+SUITE_LIST_SOURCE="<none>"
+EFFECTIVE_BASELINE_POLICY="$BASELINE_POLICY"
 
 if [[ -d "$TARGET_PATH" ]]; then
   candidate_root="$TARGET_PATH"
@@ -258,18 +311,52 @@ elif [[ "$HARNESS_MODE" == "auto" ]]; then
     HARNESS_KIND="regression"
   fi
 fi
+if [[ "$BASELINE_POLICY" == "auto" ]]; then
+  if [[ "$HARNESS_KIND" == "regression" ]]; then
+    EFFECTIVE_BASELINE_POLICY="clasp"
+  else
+    EFFECTIVE_BASELINE_POLICY="sbcl_and_clasp"
+  fi
+fi
 
 if [[ -d "$TARGET_PATH" ]]; then
   while IFS= read -r f; do
     DISCOVERED_COUNT=$(( DISCOVERED_COUNT + 1 ))
-    if [[ "$HARNESS_KIND" == "regression" ]]; then
-      base="$(basename "$f")"
-      if is_regression_helper_file "$base"; then
-        continue
-      fi
-    fi
-    FILES+=("$f")
+    DISCOVERED_FILES+=("$f")
   done < <(find "$TARGET_PATH" -type f -name '*.lisp' | LC_ALL=C sort)
+  if [[ "$HARNESS_KIND" == "regression" ]]; then
+    suite_manifest="$(pick_regression_suite_manifest "$REGRESSION_ROOT" || true)"
+    if [[ -n "$suite_manifest" ]]; then
+      SUITE_LIST_SOURCE="$suite_manifest"
+      typeset -A seen_suite_files
+      while IFS= read -r suite_name; do
+        [[ -z "$suite_name" ]] && continue
+        suite_file="$REGRESSION_ROOT/$suite_name.lisp"
+        if [[ ! -f "$suite_file" ]]; then
+          continue
+        fi
+        if [[ "$suite_file" != "$TARGET_PATH/"* && "$suite_file" != "$TARGET_PATH" ]]; then
+          continue
+        fi
+        if [[ -n "${seen_suite_files[$suite_file]:-}" ]]; then
+          continue
+        fi
+        seen_suite_files[$suite_file]=1
+        FILES+=("$suite_file")
+      done < <(extract_regression_suite_names "$suite_manifest")
+    fi
+    if (( ${#FILES[@]} == 0 )); then
+      for f in "${DISCOVERED_FILES[@]}"; do
+        base="$(basename "$f")"
+        if is_regression_helper_file "$base"; then
+          continue
+        fi
+        FILES+=("$f")
+      done
+    fi
+  else
+    FILES=("${DISCOVERED_FILES[@]}")
+  fi
 else
   if [[ "${TARGET_PATH##*.}" != "lisp" ]]; then
     echo "Error: file must end with .lisp: $TARGET_PATH"
@@ -292,9 +379,14 @@ CSV_FILE="$LOG_DIR/lisp-engine-compare-$STAMP.csv"
   echo "Files discovered: $DISCOVERED_COUNT"
   echo "Files selected: ${#FILES[@]}"
   echo "REQUIRE_BASELINE_PASS: $REQUIRE_BASELINE_PASS"
+  echo "BASELINE_POLICY: $BASELINE_POLICY"
+  echo "BASELINE_POLICY_EFFECTIVE: $EFFECTIVE_BASELINE_POLICY"
   echo "HARNESS_MODE: $HARNESS_MODE"
   echo "HARNESS_KIND: $HARNESS_KIND"
   echo "REGRESSION_ROOT: ${REGRESSION_ROOT:-<none>}"
+  echo "SUITE_LIST_SOURCE: $SUITE_LIST_SOURCE"
+  echo "TIMEOUT_BIN: ${TIMEOUT_BIN:-<none>}"
+  echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-1}"
   echo "TIMEOUTS_S: SBCL=$SBCL_TIMEOUT_S CLASP=$CLASP_TIMEOUT_S IRLASP_INTERP=$IRLASP_INTERP_TIMEOUT_S IRLASP_MLIR=$IRLASP_MLIR_TIMEOUT_S"
   echo "IRLASP_BIN: $IRLASP_BIN"
   echo "SBCL_BIN: ${SBCL_BIN:-<missing>}"
@@ -302,17 +394,23 @@ CSV_FILE="$LOG_DIR/lisp-engine-compare-$STAMP.csv"
   echo
 } > "$SUMMARY_FILE"
 
-echo "file,eligible,skip_reason,baseline_engine,sbcl_status,sbcl_time_s,sbcl_match,clasp_status,clasp_time_s,clasp_match,irlasp_interpreter_status,irlasp_interpreter_time_s,irlasp_interpreter_match,irlasp_mlir_status,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s,irlasp_mlir_match" > "$CSV_FILE"
+echo "file,eligible,skip_reason,baseline_engine,sbcl_status,sbcl_match,sbcl_time_s,clasp_status,clasp_match,clasp_time_s,irlasp_interpreter_status,irlasp_interpreter_match,irlasp_interpreter_time_s,irlasp_mlir_status,irlasp_mlir_match,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s" > "$CSV_FILE"
 
 typeset -A FAIL_COUNT
 typeset -A DIFF_COUNT
 typeset -A OK_TIME_SUM
 typeset -A OK_COUNT
+typeset -A ATTEMPT_COUNT
+typeset -A TOTAL_TIME_SUM
+typeset -A MATCH_COUNT
 for e in sbcl clasp irlasp_interpreter irlasp_mlir; do
   FAIL_COUNT[$e]=0
   DIFF_COUNT[$e]=0
   OK_TIME_SUM[$e]="0.000000"
   OK_COUNT[$e]=0
+  ATTEMPT_COUNT[$e]=0
+  TOTAL_TIME_SUM[$e]="0.000000"
+  MATCH_COUNT[$e]=0
 done
 MLIR_COMPILE_SUM="0.000000"
 MLIR_EXEC_SUM="0.000000"
@@ -321,8 +419,23 @@ SKIPPED_BASELINE_COUNT=0
 SBCL_BASELINE_FAIL_COUNT=0
 CLASP_BASELINE_FAIL_COUNT=0
 
+record_engine_result() {
+  local engine="$1"
+  local exit_status="$2"
+  local elapsed="$3"
+  ATTEMPT_COUNT[$engine]=$(( ATTEMPT_COUNT[$engine] + 1 ))
+  TOTAL_TIME_SUM[$engine]="$(float_add "${TOTAL_TIME_SUM[$engine]}" "$elapsed")"
+  if [[ "$exit_status" -ne 0 ]]; then
+    FAIL_COUNT[$engine]=$(( FAIL_COUNT[$engine] + 1 ))
+  else
+    OK_COUNT[$engine]=$(( OK_COUNT[$engine] + 1 ))
+    OK_TIME_SUM[$engine]="$(float_add "${OK_TIME_SUM[$engine]}" "$elapsed")"
+  fi
+}
+
 total_selected="${#FILES[@]}"
 file_index=0
+RUN_START_TS="$(now_mono_ts)"
 for file_path in "${FILES[@]}"; do
   file_index=$(( file_index + 1 ))
   rel_path="$file_path"
@@ -353,7 +466,9 @@ for file_path in "${FILES[@]}"; do
     sbcl_status=127
     sbcl_time="0.000000"
     echo "SBCL binary not found/executable" > "$sbcl_raw"
+    printf '[HARNESS-TIMING] engine=sbcl status=%s elapsed_s=%s\n' "$sbcl_status" "$sbcl_time" >> "$sbcl_raw"
   fi
+  record_engine_result "sbcl" "$sbcl_status" "$sbcl_time"
 
   if [[ -n "${CLASP_BIN:-}" && -x "$CLASP_BIN" ]]; then
     run_engine_generic "$clasp_raw" "$CLASP_TIMEOUT_S" "$CLASP_BIN" --non-interactive --load "$engine_input"
@@ -363,7 +478,9 @@ for file_path in "${FILES[@]}"; do
     clasp_status=127
     clasp_time="0.000000"
     echo "CLASP binary not found/executable" > "$clasp_raw"
+    printf '[HARNESS-TIMING] engine=clasp status=%s elapsed_s=%s\n' "$clasp_status" "$clasp_time" >> "$clasp_raw"
   fi
+  record_engine_result "clasp" "$clasp_status" "$clasp_time"
 
   if [[ "$sbcl_status" -ne 0 ]]; then
     SBCL_BASELINE_FAIL_COUNT=$(( SBCL_BASELINE_FAIL_COUNT + 1 ))
@@ -374,10 +491,42 @@ for file_path in "${FILES[@]}"; do
 
   eligible="yes"
   skip_reason=""
-  if [[ "$REQUIRE_BASELINE_PASS" -eq 1 && ( "$sbcl_status" -ne 0 || "$clasp_status" -ne 0 ) ]]; then
-    eligible="no"
-    skip_reason="baseline_failed(sbcl=$sbcl_status clasp=$clasp_status)"
-    SKIPPED_BASELINE_COUNT=$(( SKIPPED_BASELINE_COUNT + 1 ))
+  failed_baseline_engines="none"
+  if [[ "$REQUIRE_BASELINE_PASS" -eq 1 ]]; then
+    case "$EFFECTIVE_BASELINE_POLICY" in
+      clasp)
+        if [[ "$clasp_status" -ne 0 ]]; then
+          failed_baseline_engines="clasp"
+        fi
+        ;;
+      sbcl)
+        if [[ "$sbcl_status" -ne 0 ]]; then
+          failed_baseline_engines="sbcl"
+        fi
+        ;;
+      sbcl_and_clasp)
+        failed_baseline_engines=""
+        if [[ "$sbcl_status" -ne 0 ]]; then
+          failed_baseline_engines="sbcl"
+        fi
+        if [[ "$clasp_status" -ne 0 ]]; then
+          if [[ -n "$failed_baseline_engines" ]]; then
+            failed_baseline_engines="$failed_baseline_engines,clasp"
+          else
+            failed_baseline_engines="clasp"
+          fi
+        fi
+        ;;
+      *)
+        echo "Error: unsupported baseline policy: $EFFECTIVE_BASELINE_POLICY" >&2
+        exit 2
+        ;;
+    esac
+    if [[ "$failed_baseline_engines" != "none" && -n "$failed_baseline_engines" ]]; then
+      eligible="no"
+      skip_reason="baseline_failed(policy=$EFFECTIVE_BASELINE_POLICY failed=$failed_baseline_engines sbcl=$sbcl_status clasp=$clasp_status)"
+      SKIPPED_BASELINE_COUNT=$(( SKIPPED_BASELINE_COUNT + 1 ))
+    fi
   fi
 
   if [[ "$eligible" == "yes" ]]; then
@@ -390,6 +539,7 @@ for file_path in "${FILES[@]}"; do
       interp_status=127
       interp_time="0.000000"
       echo "IRLASP binary not found/executable: $IRLASP_BIN" > "$interp_raw"
+      printf '[HARNESS-TIMING] engine=irlasp-interpreter status=%s elapsed_s=%s\n' "$interp_status" "$interp_time" >> "$interp_raw"
     fi
 
     if [[ -x "$IRLASP_BIN" ]]; then
@@ -404,23 +554,18 @@ for file_path in "${FILES[@]}"; do
       mlir_compile_time="0.000000"
       mlir_exec_time="0.000000"
       echo "IRLASP binary not found/executable: $IRLASP_BIN" > "$mlir_raw"
+      printf '[HARNESS-TIMING] engine=irlasp-mlir status=%s elapsed_s=%s compile_s=%s exec_s=%s\n' \
+        "$mlir_status" "$mlir_total_time" "$mlir_compile_time" "$mlir_exec_time" >> "$mlir_raw"
     fi
 
     for pair in \
-      "sbcl:$sbcl_status:$sbcl_time" \
-      "clasp:$clasp_status:$clasp_time" \
       "irlasp_interpreter:$interp_status:$interp_time" \
       "irlasp_mlir:$mlir_status:$mlir_total_time"; do
       engine="${pair%%:*}"
       rest="${pair#*:}"
       pair_status="${rest%%:*}"
       elapsed="${rest#*:}"
-      if [[ "$pair_status" -ne 0 ]]; then
-        FAIL_COUNT[$engine]=$(( FAIL_COUNT[$engine] + 1 ))
-      else
-        OK_COUNT[$engine]=$(( OK_COUNT[$engine] + 1 ))
-        OK_TIME_SUM[$engine]="$(float_add "${OK_TIME_SUM[$engine]}" "$elapsed")"
-      fi
+      record_engine_result "$engine" "$pair_status" "$elapsed"
     done
 
     if [[ "$mlir_status" -eq 0 ]]; then
@@ -438,6 +583,9 @@ for file_path in "${FILES[@]}"; do
     mlir_match="SKIP"
     echo "Skipped due to baseline requirement: $skip_reason" > "$interp_raw"
     echo "Skipped due to baseline requirement: $skip_reason" > "$mlir_raw"
+    printf '[HARNESS-TIMING] engine=irlasp-interpreter status=%s elapsed_s=%s\n' "$interp_status" "$interp_time" >> "$interp_raw"
+    printf '[HARNESS-TIMING] engine=irlasp-mlir status=%s elapsed_s=%s compile_s=%s exec_s=%s\n' \
+      "$mlir_status" "$mlir_total_time" "$mlir_compile_time" "$mlir_exec_time" >> "$mlir_raw"
   fi
 
   sbcl_match="NA"
@@ -468,6 +616,10 @@ for file_path in "${FILES[@]}"; do
     if [[ "$mlir_status" -eq 0 ]]; then
       if cmp -s "$mlir_norm" "$baseline_norm"; then mlir_match="MATCH"; else mlir_match="DIFF"; DIFF_COUNT[irlasp_mlir]=$(( DIFF_COUNT[irlasp_mlir] + 1 )); fi
     fi
+    [[ "$sbcl_match" == "MATCH" ]] && MATCH_COUNT[sbcl]=$(( MATCH_COUNT[sbcl] + 1 ))
+    [[ "$clasp_match" == "MATCH" ]] && MATCH_COUNT[clasp]=$(( MATCH_COUNT[clasp] + 1 ))
+    [[ "$interp_match" == "MATCH" ]] && MATCH_COUNT[irlasp_interpreter]=$(( MATCH_COUNT[irlasp_interpreter] + 1 ))
+    [[ "$mlir_match" == "MATCH" ]] && MATCH_COUNT[irlasp_mlir]=$(( MATCH_COUNT[irlasp_mlir] + 1 ))
   else
     baseline_engine="none"
     sbcl_match="SKIP"
@@ -479,6 +631,7 @@ for file_path in "${FILES[@]}"; do
   {
     echo "FILE $rel_path"
     echo "  eligible=$eligible skip_reason=$skip_reason"
+    echo "  baseline_gate_failed_engines=$failed_baseline_engines"
     echo "  baseline=$baseline_engine"
     echo "  sbcl: status=$sbcl_status time_s=$sbcl_time match=$sbcl_match"
     echo "  clasp: status=$clasp_status time_s=$clasp_time match=$clasp_match"
@@ -487,7 +640,7 @@ for file_path in "${FILES[@]}"; do
     echo
   } >> "$SUMMARY_FILE"
 
-  echo "\"$rel_path\",$eligible,\"$skip_reason\",$baseline_engine,$sbcl_status,$sbcl_time,$sbcl_match,$clasp_status,$clasp_time,$clasp_match,$interp_status,$interp_time,$interp_match,$mlir_status,$mlir_total_time,$mlir_compile_time,$mlir_exec_time,$mlir_match" >> "$CSV_FILE"
+  echo "\"$rel_path\",$eligible,\"$skip_reason\",$baseline_engine,$sbcl_status,$sbcl_match,$sbcl_time,$clasp_status,$clasp_match,$clasp_time,$interp_status,$interp_match,$interp_time,$mlir_status,$mlir_match,$mlir_total_time,$mlir_compile_time,$mlir_exec_time" >> "$CSV_FILE"
 
   if [[ -n "$runner_file" ]]; then
     rm -f "$runner_file"
@@ -503,17 +656,22 @@ avg_or_zero() {
     awk -v s="$sum" -v c="$count" 'BEGIN { printf "%.6f", (s / c) }'
   fi
 }
+RUN_END_TS="$(now_mono_ts)"
+RUN_WALL_S="$(float_sub "$RUN_END_TS" "$RUN_START_TS")"
 
 {
   echo "TOTAL_FILES_DISCOVERED $DISCOVERED_COUNT"
   echo "TOTAL_FILES_SELECTED ${#FILES[@]}"
-  echo "BASELINE_REQUIREMENT SBCL_AND_CLASP_MUST_PASS $REQUIRE_BASELINE_PASS"
+  echo "BASELINE_REQUIREMENT ENABLED $REQUIRE_BASELINE_PASS"
+  echo "BASELINE_POLICY_EFFECTIVE $EFFECTIVE_BASELINE_POLICY"
   echo "ELIGIBLE_FILES $ELIGIBLE_COUNT"
   echo "SKIPPED_BASELINE_FAIL $SKIPPED_BASELINE_COUNT"
   echo "BASELINE_PRECHECK SBCL_FAIL $SBCL_BASELINE_FAIL_COUNT CLASP_FAIL $CLASP_BASELINE_FAIL_COUNT"
+  echo "RUN_WALL_CLOCK_S $RUN_WALL_S"
   for e in sbcl clasp irlasp_interpreter irlasp_mlir; do
-    avg="$(avg_or_zero "${OK_TIME_SUM[$e]}" "${OK_COUNT[$e]}")"
-    echo "ENGINE $e OK ${OK_COUNT[$e]} FAIL ${FAIL_COUNT[$e]} OUTPUT_DIFF ${DIFF_COUNT[$e]} AVG_TIME_S $avg (eligible-only)"
+    avg_ok="$(avg_or_zero "${OK_TIME_SUM[$e]}" "${OK_COUNT[$e]}")"
+    avg_attempted="$(avg_or_zero "${TOTAL_TIME_SUM[$e]}" "${ATTEMPT_COUNT[$e]}")"
+    echo "ENGINE $e ATTEMPTED ${ATTEMPT_COUNT[$e]} EXIT_OK ${OK_COUNT[$e]} EXIT_FAIL ${FAIL_COUNT[$e]} OUTPUT_MATCH ${MATCH_COUNT[$e]} OUTPUT_DIFF ${DIFF_COUNT[$e]} TOTAL_TIME_S ${TOTAL_TIME_SUM[$e]} AVG_TIME_S_ATTEMPTED $avg_attempted AVG_TIME_S_EXIT_OK $avg_ok"
   done
   mlir_avg_compile="$(avg_or_zero "$MLIR_COMPILE_SUM" "${OK_COUNT[irlasp_mlir]}")"
   mlir_avg_exec="$(avg_or_zero "$MLIR_EXEC_SUM" "${OK_COUNT[irlasp_mlir]}")"
@@ -526,9 +684,9 @@ exit_code=0
 if [[ "$REQUIRE_BASELINE_PASS" -eq 1 && "$ELIGIBLE_COUNT" -eq 0 ]]; then
   {
     echo
-    echo "ERROR No eligible files: baseline requires sbcl=0 and clasp=0."
+    echo "ERROR No eligible files: baseline policy $EFFECTIVE_BASELINE_POLICY rejected all files."
   } >> "$SUMMARY_FILE"
-  echo "Error: no eligible files satisfy baseline requirement (sbcl+clasp pass)." >&2
+  echo "Error: no eligible files satisfy baseline requirement (policy=$EFFECTIVE_BASELINE_POLICY)." >&2
   exit_code=3
 fi
 

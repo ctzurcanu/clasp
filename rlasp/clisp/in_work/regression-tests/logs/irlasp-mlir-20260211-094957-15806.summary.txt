@@ -1,0 +1,99 @@
+Running mode=mlir log=/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/irlasp-mlir-20260211-094957-15806.log
+SUITE_TIMEOUT_S 120
+TIMEOUT_BIN gtimeout
+[1/47] suite=defcallback-native
+SUITE defcallback-native       TOTAL 1 FAILED 0 PASSED 1 TIME_S 0.049174
+[2/47] suite=lowlevel
+SUITE lowlevel                 TOTAL 1 FAILED 0 PASSED 1 TIME_S 0.077331
+[3/47] suite=fastgf
+SUITE fastgf                   TOTAL 4 FAILED 0 PASSED 4 TIME_S 0.053417
+[4/47] suite=array0
+SUITE array0                   TOTAL 35 FAILED 0 PASSED 35 TIME_S 0.122614
+[5/47] suite=tests01
+SUITE tests01                  TOTAL 9 FAILED 0 PASSED 9 TIME_S 0.060682
+[6/47] suite=finalizers
+SUITE finalizers               TOTAL 4 FAILED 0 PASSED 4 TIME_S 0.217385
+[7/47] suite=strings01
+SUITE strings01                TOTAL 34 FAILED 0 PASSED 34 TIME_S 0.118774
+[8/47] suite=cons01
+SUITE cons01                   TOTAL 45 FAILED 0 PASSED 45 TIME_S 0.141211
+[9/47] suite=sequences01
+SUITE sequences01              TOTAL 122 FAILED 0 PASSED 122 TIME_S 0.315604
+[10/47] suite=clos
+SUITE clos                     TOTAL 22 FAILED 7 PASSED 15 TIME_S 0.109164
+[11/47] suite=mop
+SUITE mop                      TOTAL 3 FAILED 0 PASSED 3 TIME_S 0.054017
+[12/47] suite=update-instance-abort
+SUITE update-instance-abort    TOTAL 9 FAILED 2 PASSED 7 TIME_S 0.064288
+[13/47] suite=numbers
+SUITE numbers                  TOTAL 259 FAILED 0 PASSED 259 TIME_S 49.989530
+[14/47] suite=ehkiller
+SUITE ehkiller                 TOTAL 3 FAILED 0 PASSED 3 TIME_S 0.054059
+[15/47] suite=package
+SUITE package                  TOTAL 106 FAILED 3 PASSED 103 TIME_S 0.363500
+[16/47] suite=structures
+SUITE structures               TOTAL 30 FAILED 10 PASSED 20 TIME_S 0.255693
+[17/47] suite=symbol0
+SUITE symbol0                  TOTAL 20 FAILED 0 PASSED 20 TIME_S 0.096528
+[18/47] suite=string-comparison0
+SUITE string-comparison0       TOTAL 448 FAILED 0 PASSED 448 TIME_S 1.219055
+[19/47] suite=bit-array0
+SUITE bit-array0               TOTAL 108 FAILED 0 PASSED 108 TIME_S 0.287534
+[20/47] suite=bit-array1
+SUITE bit-array1               TOTAL 18 FAILED 4 PASSED 14 TIME_S 0.081226
+[21/47] suite=character0
+SUITE character0               TOTAL 37 FAILED 0 PASSED 37 TIME_S 12.885177
+[22/47] suite=unicode
+SUITE unicode                  TOTAL 6 FAILED 0 PASSED 6 TIME_S 13.327742
+[23/47] suite=hash-tables0
+SUITE hash-tables0             TOTAL 42 FAILED 0 PASSED 42 TIME_S 0.145815
+[24/47] suite=misc
+SUITE misc                     TOTAL 54 FAILED 11 PASSED 43 TIME_S 0.236808
+[25/47] suite=read01
+SUITE read01                   TOTAL 103 FAILED 1 PASSED 102 TIME_S 9.928437
+[26/47] suite=printer01
+SUITE printer01                TOTAL 101 FAILED 8 PASSED 93 TIME_S 0.288109
+[27/47] suite=streams01
+SUITE streams01                TOTAL 54 FAILED 0 PASSED 54 TIME_S 0.188808
+[28/47] suite=environment01
+SUITE environment01            TOTAL 5 FAILED 1 PASSED 4 TIME_S 0.053155
+[29/47] suite=types01
+SUITE types01                  TOTAL 25 FAILED 1 PASSED 24 TIME_S 0.114605
+[30/47] suite=control01
+SUITE control01                TOTAL 46 FAILED 1 PASSED 45 TIME_S 0.152029
+[31/47] suite=iteration
+SUITE iteration                TOTAL 2 FAILED 0 PASSED 2 TIME_S 0.048141
+[32/47] suite=loop
+SUITE loop                     TOTAL 21 FAILED 1 PASSED 20 TIME_S 0.094610
+[33/47] suite=numbers-core
+SUITE numbers-core             TOTAL 12 FAILED 2 PASSED 10 TIME_S 0.069267
+[34/47] suite=unwind
+SUITE unwind                   TOTAL 1 FAILED 1 PASSED 0 TIME_S 0.049091
+[35/47] suite=encodings
+SUITE encodings                TOTAL 11 FAILED 7 PASSED 4 TIME_S 0.074655
+[36/47] suite=environment
+SUITE environment              TOTAL 28 FAILED 0 PASSED 28 TIME_S 0.208653
+[37/47] suite=conditions
+SUITE conditions               TOTAL 2 FAILED 1 PASSED 1 TIME_S 0.045831
+[38/47] suite=float-features
+SUITE float-features           TOTAL 8 FAILED 0 PASSED 8 TIME_S 0.072446
+[39/47] suite=debug
+SUITE debug                    TOTAL 19 FAILED 0 PASSED 19 TIME_S 0.179907
+[40/47] suite=mp
+SUITE mp                       TOTAL 44 FAILED 1 PASSED 43 TIME_S 0.179446
+[41/47] suite=interrupt
+SUITE interrupt                TOTAL 6 FAILED 0 PASSED 6 TIME_S 3.068568
+[42/47] suite=posix
+SUITE posix                    TOTAL 11 FAILED 0 PASSED 11 TIME_S 0.069129
+[43/47] suite=btb
+SUITE btb                      TOTAL 12 FAILED 0 PASSED 12 TIME_S 0.082024
+[44/47] suite=system-construction
+SUITE system-construction      TOTAL 5 FAILED 0 PASSED 5 TIME_S 0.055609
+[45/47] suite=extensions
+SUITE extensions               TOTAL 10 FAILED 0 PASSED 10 TIME_S 0.069430
+[46/47] suite=run-program
+SUITE run-program              TOTAL 7 FAILED 0 PASSED 7 TIME_S 0.065566
+[47/47] suite=snapshot
+SUITE snapshot                 TOTAL 0 FAILED 0 PASSED 0 TIME_S 0.041426
+TOTAL 1953 FAILED 62 COMPILE_ERRORS 0 RUN_ERRORS 0 NON_PASSING 62 PASSED 1891 SUITE_TIME_SUM_S 95.525270 WALL_CLOCK_S 96.833027
+SUITES_TOTAL 47 SUITES_TIMED_OUT 0

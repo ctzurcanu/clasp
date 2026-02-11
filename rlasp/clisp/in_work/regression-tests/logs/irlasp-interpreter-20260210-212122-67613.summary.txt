@@ -1,0 +1,7 @@
+Running mode=interpreter log=/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/irlasp-interpreter-20260210-212122-67613.log
+SUITE_TIMEOUT_S 120
+TIMEOUT_BIN gtimeout
+[1/1] suite=numbers
+SUITE numbers                  TOTAL 259 FAILED 5 PASSED 254 TIME_S 50.039238
+TOTAL 259 FAILED 5 COMPILE_ERRORS 0 RUN_ERRORS 0 NON_PASSING 5 PASSED 254 SUITE_TIME_SUM_S 50.039238 WALL_CLOCK_S 50.074634
+SUITES_TOTAL 1 SUITES_TIMED_OUT 0

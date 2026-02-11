@@ -1,0 +1,43 @@
+Starting clasp-boehmprecise-2.7.0-304-g3c89efd2d from base image
+Resource file /Users/christiantzurcanu/.clasprc not found, skipping loading of it.
+; Compiling file: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.lisp
+;   (IN-PACKAGE #:CLASP-TESTS)
+;   (TEST STANDARD-BITVECTOR-1 ...)
+;   (TEST STANDARD-BITVECTOR-2 ...)
+;   (TEST STANDARD-BITVECTOR-3 ...)
+;   (TEST STANDARD-BITVECTOR-4 ...)
+;   (TEST STANDARD-MDBIT-1 ...)
+;   (TEST STANDARD-MDBIT-2 ...)
+;   (TEST STANDARD-MDBIT-3 ...)
+;   (TEST STANDARD-MDBIT-4 ...)
+;   (TEST STANDARD-MDBIT-1A ...)
+;   (TEST STANDARD-MDBIT-2A ...)
+;   (TEST STANDARD-MDBIT-3A ...)
+;   (TEST STANDARD-MDBIT-4A ...)
+;   (TEST HELL-MDBIT-1 ...)
+;   (TEST HELL-MDBIT-2 ...)
+;   (TEST HELL-MDBIT-3 ...)
+;   (TEST HELL-MDBIT-4 ...)
+;   (TEST HELL-MDBIT-5 ...)
+;   (TEST HELL-MDBIT-5A ...)
+; Writing FASO file to: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array1.faso
+Passed STANDARD-BITVECTOR-1
+Passed STANDARD-BITVECTOR-2
+Passed STANDARD-BITVECTOR-3
+Passed STANDARD-BITVECTOR-4
+Passed STANDARD-MDBIT-1
+Passed STANDARD-MDBIT-2
+Passed STANDARD-MDBIT-3
+Passed STANDARD-MDBIT-4
+Passed STANDARD-MDBIT-1A
+Passed STANDARD-MDBIT-2A
+Passed STANDARD-MDBIT-3A
+Passed STANDARD-MDBIT-4A
+Passed HELL-MDBIT-1
+Passed HELL-MDBIT-2
+Passed HELL-MDBIT-3
+Passed HELL-MDBIT-4
+Passed HELL-MDBIT-5
+Passed HELL-MDBIT-5A
+
+Successes: 18

@@ -1100,7 +1100,9 @@ impl<'a> LoopParser<'a> {
         let mut all_list_vars: HashSet<String> = HashSet::new();  // All :into vars for list ops
         let mut all_sum_vars: HashSet<String> = HashSet::new();   // All :into vars for sum ops
         let mut all_count_vars: HashSet<String> = HashSet::new(); // All :into vars for count ops
-        let mut iter_var: Option<String> = None;
+        // Multiple parallel :in iterators are allowed (e.g. FOR x IN ... FOR y IN ...).
+        // Tuple: (loop var, hidden list var, optional :by step function)
+        let mut in_iters: Vec<(String, String, Option<ASTNode>)> = Vec::new();
         let mut iter_list: Option<ASTNode> = None;
         let mut iter_step: Option<ASTNode> = None;
         let mut across_iter: Option<(String, ASTNode)> = None;
@@ -1147,12 +1149,10 @@ impl<'a> LoopParser<'a> {
                     }
                 }
                 LoopClause::ForIn { var, list, by } => {
-                    iter_var = Some(var.clone());
-                    iter_list = Some(list.clone());
-                    iter_step = by.clone();
                     ensure_binding(&mut bindings, var, ASTNode::nil());
-                    // Add temp var for list iteration
-                    bindings.push(("__loop_list__".to_string(), list.clone()));
+                    let list_var = format!("__loop_list_{}__", in_iters.len());
+                    bindings.push((list_var.clone(), list.clone()));
+                    in_iters.push((var.clone(), list_var, by.clone()));
                 }
                 LoopClause::ForAcross { var, seq } => {
                     across_iter = Some((var.clone(), seq.clone()));
@@ -1374,7 +1374,7 @@ impl<'a> LoopParser<'a> {
             // Support mixed iteration like:
             //   (loop for i from 0 and n in list ...)
             // by binding list vars before body and advancing the list each iteration.
-            if iter_list.is_some() {
+            if iter_list.is_some() || !in_iters.is_empty() {
                 if let Some((car_var, cdr_var)) = &destructure {
                     while_body.push(ASTNode::setq(
                         car_var.clone(),
@@ -1390,14 +1390,16 @@ impl<'a> LoopParser<'a> {
                             args: vec![ASTNode::Variable("__loop_list__".to_string())],
                         },
                     ));
-                } else if let Some(var) = &iter_var {
-                    while_body.push(ASTNode::setq(
-                        var.clone(),
-                        ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("car".to_string())),
-                            args: vec![ASTNode::Variable("__loop_list__".to_string())],
-                        },
-                    ));
+                } else {
+                    for (var, list_var, _) in &in_iters {
+                        while_body.push(ASTNode::setq(
+                            var.clone(),
+                            ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("car".to_string())),
+                                args: vec![ASTNode::Variable(list_var.clone())],
+                            },
+                        ));
+                    }
                 }
             }
 
@@ -1432,6 +1434,20 @@ impl<'a> LoopParser<'a> {
                     next_list,
                 ));
             }
+            for (_var, list_var, by) in in_iters.iter().rev() {
+                let next_list = if let Some(step) = by {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![step.clone(), ASTNode::Variable(list_var.clone())],
+                    }
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                        args: vec![ASTNode::Variable(list_var.clone())],
+                    }
+                };
+                while_body.push(ASTNode::setq(list_var.clone(), next_list));
+            }
 
             // Build termination condition: AND of all iterators that have an end value
             let mut conditions = Vec::new();
@@ -1453,6 +1469,9 @@ impl<'a> LoopParser<'a> {
 
             if iter_list.is_some() {
                 conditions.push(ASTNode::Variable("__loop_list__".to_string()));
+            }
+            for (_var, list_var, _) in &in_iters {
+                conditions.push(ASTNode::Variable(list_var.clone()));
             }
 
             let condition = if conditions.is_empty() {
@@ -1586,9 +1605,8 @@ impl<'a> LoopParser<'a> {
                     ),
                 ],
             }
-        } else if iter_list.is_some() {
+        } else if iter_list.is_some() || !in_iters.is_empty() {
             // List iteration with :in
-            // (while __loop_list__ (let ((var (car __loop_list__))) body) (setq __loop_list__ (cdr __loop_list__)))
             let mut iter_body = Vec::new();
             if let Some((car_var, cdr_var)) = &destructure {
                 // Destructuring: (setq car_var (caar __loop_list__)) (setq cdr_var (cdar __loop_list__))
@@ -1606,39 +1624,70 @@ impl<'a> LoopParser<'a> {
                         args: vec![ASTNode::Variable("__loop_list__".to_string())],
                     },
                 ));
-            } else if let Some(var) = &iter_var {
-                iter_body.push(ASTNode::setq(
-                    var.clone(),
-                    ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("car".to_string())),
-                        args: vec![ASTNode::Variable("__loop_list__".to_string())],
-                    },
-                ));
+            } else {
+                for (var, list_var, _) in &in_iters {
+                    iter_body.push(ASTNode::setq(
+                        var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("car".to_string())),
+                            args: vec![ASTNode::Variable(list_var.clone())],
+                        },
+                    ));
+                }
             }
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
-            let next_list = if let Some(step) = &iter_step {
-                ASTNode::Call {
-                    function: Box::new(ASTNode::Variable("funcall".to_string())),
-                    args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
-                }
+            let mut step_forms: Vec<ASTNode> = Vec::new();
+            if iter_list.is_some() {
+                let next_list = if let Some(step) = &iter_step {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                    }
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                        args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                    }
+                };
+                step_forms.push(ASTNode::setq("__loop_list__".to_string(), next_list));
+            }
+            for (_var, list_var, by) in in_iters.iter().rev() {
+                let next_list = if let Some(step) = by {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![step.clone(), ASTNode::Variable(list_var.clone())],
+                    }
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                        args: vec![ASTNode::Variable(list_var.clone())],
+                    }
+                };
+                step_forms.push(ASTNode::setq(list_var.clone(), next_list));
+            }
+
+            let mut conditions = Vec::new();
+            if iter_list.is_some() {
+                conditions.push(ASTNode::Variable("__loop_list__".to_string()));
+            }
+            for (_var, list_var, _) in &in_iters {
+                conditions.push(ASTNode::Variable(list_var.clone()));
+            }
+            let while_condition = if conditions.len() == 1 {
+                conditions.remove(0)
             } else {
                 ASTNode::Call {
-                    function: Box::new(ASTNode::Variable("cdr".to_string())),
-                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                    function: Box::new(ASTNode::Variable("and".to_string())),
+                    args: conditions,
                 }
             };
 
+            let mut while_args = vec![while_condition, inner_body];
+            while_args.extend(step_forms);
             ASTNode::Call {
                 function: Box::new(ASTNode::Variable("sys::while".to_string())),
-                args: vec![
-                    ASTNode::Variable("__loop_list__".to_string()),
-                    inner_body,
-                    ASTNode::setq(
-                        "__loop_list__".to_string(),
-                        next_list
-                    ),
-                ],
+                args: while_args,
             }
         } else if let Some((var, hash_table, is_keys)) = &hash_iter {
             // Hash table iteration

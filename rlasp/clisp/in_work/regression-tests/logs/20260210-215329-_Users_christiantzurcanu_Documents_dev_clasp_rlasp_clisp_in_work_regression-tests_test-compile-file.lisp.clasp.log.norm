@@ -1,0 +1,8 @@
+Starting clasp-boehmprecise-2.7.0-304-g3c89efd2d from base image
+Resource file /Users/christiantzurcanu/.clasprc not found, skipping loading of it.
+; Compiling file: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/test-compile-file.lisp
+;   (IN-PACKAGE :CL-USER)
+;   (DEFUN FOO ...)
+; Writing FASO file to: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/test-compile-file.faso
+
+Successes: 0

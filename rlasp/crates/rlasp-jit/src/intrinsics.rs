@@ -1231,6 +1231,43 @@ pub extern "C" fn cc_sqrt(x: usize) -> usize {
     }
 }
 
+/// Absolute value (abs x)
+#[no_mangle]
+pub extern "C" fn cc_abs(x: usize) -> usize {
+    use malachite::Rational;
+    use rlasp_runtime::{Number, NumberValue};
+
+    let x_obj = unsafe { LispObject::from_raw(x) };
+
+    if let Some(n) = x_obj.as_fixnum() {
+        if n == i64::MIN {
+            return Number::allocate_bignum(-Integer::from(n)).raw();
+        }
+        return LispObject::fixnum(if n < 0 { -n } else { n }).raw();
+    }
+
+    if let Some(ptr) = x_obj.as_general_ptr::<Number>() {
+        if ptr.is_null() {
+            return LispObject::nil().raw();
+        }
+        let num = unsafe { &*ptr };
+        return match &num.value {
+            NumberValue::Float(f) => Number::allocate_float(f.abs()).raw(),
+            NumberValue::Bignum(b) => {
+                let v = if b < &Integer::from(0) { -b.clone() } else { b.clone() };
+                Number::allocate_bignum(v).raw()
+            }
+            NumberValue::Ratio(r) => {
+                let abs_r: Rational = if r < &Rational::from(0) { -r.clone() } else { r.clone() };
+                Number::allocate_ratio(abs_r).raw()
+            }
+            NumberValue::Complex(c) => Number::allocate_float(c.norm()).raw(),
+        };
+    }
+
+    LispObject::nil().raw()
+}
+
 /// Length of a list
 #[no_mangle]
 pub extern "C" fn cc_length(list: usize) -> usize {
@@ -6166,6 +6203,7 @@ pub fn register_builtin_intrinsics() {
         ("floor", cc_floor as usize),
         ("ceiling", cc_ceiling as usize),
         ("truncate", cc_truncate as usize),
+        ("abs", cc_abs as usize),
         ("sqrt", cc_sqrt as usize),
         ("isqrt", cc_isqrt as usize),
         ("signum", cc_signum as usize),

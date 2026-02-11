@@ -1,0 +1,17 @@
+Input: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/
+Files discovered: 60
+Files selected: 56
+REQUIRE_BASELINE_PASS: 1
+BASELINE_POLICY: auto
+BASELINE_POLICY_EFFECTIVE: clasp
+HARNESS_MODE: auto
+HARNESS_KIND: regression
+REGRESSION_ROOT: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests
+SUITE_LIST_SOURCE: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/run-all-irlasp.lisp
+TIMEOUT_BIN: /opt/local/bin/gtimeout
+RLASP_MLIR_SELECTIVE_EVAL: 1
+TIMEOUTS_S: SBCL=180 CLASP=180 IRLASP_INTERP=180 IRLASP_MLIR=180
+IRLASP_BIN: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp
+SBCL_BIN: /opt/homebrew/bin/sbcl
+CLASP_BIN: /opt/homebrew/bin/clasp
+

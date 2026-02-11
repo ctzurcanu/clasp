@@ -1,0 +1,18 @@
+; compiling file "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/defcallback-native.lisp" (written 12 DEC 2025 08:25:13 AM):
+; 
+; caught ERROR:
+;   READ error during COMPILE-FILE:
+;   
+;     Package CLASP-FFI does not exist.
+;   
+;       Line: 8, Column: 32, File-Position: 211
+;   
+;       Stream: #<SB-INT:FORM-TRACKING-STREAM for "file /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/defcallback-native.lisp" {7005873C03}>
+; 
+; compilation unit aborted
+;   caught 1 fatal ERROR condition
+;   caught 1 ERROR condition
+
+; compilation aborted after 0:00:00.001
+
+Successes: 0

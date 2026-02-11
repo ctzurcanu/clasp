@@ -1687,9 +1687,7 @@ pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<Strin
     };
 
     if std::env::var("RLASP_DEBUG_MVB").is_ok() {
-        if var_names.iter().any(|v| v == "unspecific-handler" || v.ends_with(":unspecific-handler")) {
-            eprintln!("[mv-bind] vars={:?} values={:?} form={:?}", var_names, values, values_form);
-        }
+        eprintln!("[mv-bind] vars={:?} values={:?} form={:?}", var_names, values, values_form);
     }
 
     // Save old variable values

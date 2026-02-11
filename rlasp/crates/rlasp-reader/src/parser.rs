@@ -7,6 +7,8 @@ use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
 use rlasp_runtime::{LispObject, RString, RVector, Symbol};
 use std::collections::HashMap;
+use malachite::Integer;
+use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
 /// Sentinel symbol for skipped feature conditionals
 /// read_list and read_all filter this out
@@ -111,6 +113,19 @@ pub struct Parser {
 }
 
 impl Parser {
+    const MAX_FIXNUM: i64 = (1_i64 << 61) - 1;
+    const MIN_FIXNUM: i64 = -(1_i64 << 61);
+
+    fn integer_to_lisp_object(value: Integer) -> LispObject {
+        if i64::convertible_from(&value) {
+            let n = i64::exact_from(&value);
+            if n >= Self::MIN_FIXNUM && n <= Self::MAX_FIXNUM {
+                return LispObject::fixnum(n);
+            }
+        }
+        rlasp_runtime::Number::allocate_bignum(value)
+    }
+
     /// Create a new parser from a string
     pub fn new(input: &str) -> ReaderResult<Self> {
         let mut lexer = Lexer::new(input);
@@ -138,23 +153,19 @@ impl Parser {
             TokenKind::Integer(n) => {
                 let val = *n;
                 self.advance()?;
-                Ok(LispObject::fixnum(val))
+                if val >= Self::MIN_FIXNUM && val <= Self::MAX_FIXNUM {
+                    Ok(LispObject::fixnum(val))
+                } else {
+                    Ok(rlasp_runtime::Number::allocate_bignum(Integer::from(val)))
+                }
             }
 
             TokenKind::Bignum(s) => {
                 let bignum_str = s.clone();
                 self.advance()?;
                 // Parse the bignum string
-                use malachite::Integer;
-                use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
-
                 if let Ok(bignum) = bignum_str.parse::<Integer>() {
-                    // Check if it actually fits in a fixnum
-                    if i64::convertible_from(&bignum) {
-                        Ok(LispObject::fixnum(i64::exact_from(&bignum)))
-                    } else {
-                        Ok(rlasp_runtime::Number::allocate_bignum(bignum))
-                    }
+                    Ok(Self::integer_to_lisp_object(bignum))
                 } else {
                     Err(ReaderError::InvalidSyntax {
                         msg: format!("Invalid bignum: {}", bignum_str),
@@ -171,15 +182,29 @@ impl Parser {
             }
 
             TokenKind::Ratio(numerator, denominator) => {
-                let num = *numerator;
-                let denom = *denominator;
+                let numerator_str = numerator.clone();
+                let denominator_str = denominator.clone();
                 self.advance()?;
+                let num = numerator_str.parse::<Integer>().map_err(|_| ReaderError::InvalidSyntax {
+                    msg: format!("Invalid ratio numerator: {}", numerator_str),
+                    pos: self.current_token.pos,
+                })?;
+                let denom = denominator_str.parse::<Integer>().map_err(|_| ReaderError::InvalidSyntax {
+                    msg: format!("Invalid ratio denominator: {}", denominator_str),
+                    pos: self.current_token.pos,
+                })?;
+                if denom == Integer::from(0) {
+                    return Err(ReaderError::InvalidSyntax {
+                        msg: "Ratio denominator cannot be zero".to_string(),
+                        pos: self.current_token.pos,
+                    });
+                }
                 // Create Ratio as a tagged list: (ratio numerator denominator)
                 let ratio_sym = rlasp_runtime::Symbol::allocate("ratio");
                 Ok(rlasp_runtime::Cons::list(&[
                     ratio_sym,
-                    LispObject::fixnum(num),
-                    LispObject::fixnum(denom),
+                    Self::integer_to_lisp_object(num),
+                    Self::integer_to_lisp_object(denom),
                 ]))
             }
 

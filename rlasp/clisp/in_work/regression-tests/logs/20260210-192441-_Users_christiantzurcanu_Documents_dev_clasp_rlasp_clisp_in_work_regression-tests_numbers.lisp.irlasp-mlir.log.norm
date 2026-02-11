@@ -1,0 +1,559 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.fasl
+
+Passed fixnum-double-high
+
+Passed fixnum-double-low
+
+Passed fixnum-single-high
+
+Passed fixnum-single-low
+
+Passed oddp-1
+
+Passed oddp-2
+
+Passed oddp-3
+
+Passed oddp-4
+
+Passed oddp-5
+
+Passed random-0
+
+Passed random-1
+
+Passed random-2
+
+Passed random-3
+
+Passed random-4
+
+Passed random-5
+
+Passed random-6
+
+Passed random-4a
+
+Passed random-5a
+
+Passed random-6a
+
+Passed random-7
+
+Passed random-7a
+
+Passed random-7b
+
+Passed random-7c
+
+Passed eq-1
+
+Passed eq-2
+
+Passed eq-3
+
+Passed eq-4
+
+Passed eq-5
+
+Passed eq-6
+
+Passed neq-1
+
+Passed neq-2
+
+Passed neq-3
+
+Passed neq-4
+
+Passed neq-5
+
+Passed neq-6
+
+Passed neq-7
+
+Passed neq-8
+
+Passed eq-7
+
+Passed /=.order.3
+
+Passed ratios-1
+
+Passed ratios-2
+
+Passed ratios-3
+
+Passed ratios-4
+
+Passed ratios-5
+
+Passed integer-length.1
+
+Passed integer-length.2
+
+Passed integer-length.3
+
+Passed integer-length.4
+
+Passed boole-1
+
+Passed boole-2
+
+Passed boole-3
+
+Passed boole-4
+
+Passed boole-5
+
+Passed boole-6
+
+Passed boole-7
+
+Passed boole-8
+
+Passed floor-ratio-1
+
+Passed floor-ratio-2
+
+Passed floor-ratio-3
+
+Passed floor-ratio-4
+
+Passed floor-ratio-5
+
+Passed floor-ratio-6
+
+Passed floor-ratio-float-1
+
+Passed ceiling-ratio-1
+
+Passed floor-7
+
+Passed floor-ceiling-2
+
+Passed floor-truncate-1
+
+Passed floor-truncate-2
+
+Passed floor-mpf-1
+
+Failed floor-remainder-contagion
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for fun in (quote (floor ceiling truncate round ffloor fceiling ftruncate fround)) nconc (loop for args in (quote ((3 2) (3 2) (3 (ratio 4 7)) ((ratio 31 30) 2) (3 2) (3 2) (3 2))) for rtype in (quote (single-float single-float single-float single-float double-float double-float double-float)) unless (typep (nth-value 1 (apply fun args)) rtype) collect (cons fun args)))
+
+Failed ffloor-quotient-contagion
+
+Unexpected error
+~tNIL
+while evaluating
+~t(loop for fun in (quote (ffloor fceiling ftruncate fround)) nconc (loop for args in (quote ((3 2) (3 (ratio 4 7)) ((ratio 31 30) 2) (3 2) (3 2) (3 (ratio 4 7)) ((ratio 31 30) 2) (3 2) (3 2) (3 2))) for rtype in (quote (single-float single-float single-float single-float single-float single-float single-float double-float double-float double-float)) unless (typep (apply fun args) rtype) collect (cons fun args)))
+
+Passed negate-most-negative-fixnum-1
+
+Passed reciprocal-1
+
+Passed reciprocal-0
+
+Passed reciprocal-0-1
+
+Passed reciprocal-2
+
+Passed abs-1
+
+Passed complex-1
+
+Passed make-complex-0
+
+Passed expt-complex-1
+
+Passed times-complex-2
+
+Passed complex-float-1
+
+Passed complex-rational-1
+
+Passed complex-float-3
+
+Passed complex-float-4
+
+Passed complex-float-5
+
+Passed complex-float-6
+
+Passed complex-float-7
+
+Passed complex-float-8
+
+Passed complex-float-9
+
+Passed complex-float-10
+
+Passed complex-float-11
+
+Passed complex-float-12
+
+Passed complex-float-13
+
+Passed ash-1
+
+Passed logbitp-1
+
+Passed logbitp-2
+
+Passed logbitp-3
+
+Passed logbitp-4
+
+Passed logbitp-5
+
+Passed logbitp-6
+
+Passed gcd-1
+
+Passed gcd-2
+
+Passed gcd-3
+
+Passed gcd-4
+
+Passed gcd-5
+
+Passed gcd-6
+
+Passed ltv-complex-0
+
+Passed ltv-complex-1
+
+Passed ltv-complex-2
+
+Passed ltv-complex-3
+
+Passed ltv-complex-4
+
+Passed infinity-1
+
+Passed infinity-2
+
+Passed infinity-3
+
+Passed infinity-4
+
+Passed infinity-5
+
+Passed infinity-6
+
+Passed infinity-7
+
+Passed infinity-8
+
+Passed infinity-9
+
+Passed nan-1
+
+Passed nan-2
+
+Passed nan-3
+
+Passed nan-4
+
+Passed signum-1
+
+Passed signum-1a
+
+Passed signum-2
+
+Passed signum-2a
+
+Passed signum-3
+
+Failed sqrt-big-ratio-1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (ext:with-float-traps-masked (:invalid :overflow :underflow :divide-by-zero) (let ((result (sqrt 28022395738783732117648967388274923619871355234097921/122167958641777737216225939000892255646232346624))) (and (typep result (quote float)) (not (ext:float-nan-p result)))))))
+
+Passed sqrt-bignum-should-fit-in-single-float-1
+
+Passed sqrt-bignum-does-not-fit-in-single-float-overflow-1
+
+Passed sqrt-bignum-should-fit-in-single-float-overflow-2
+
+Passed number-compare-1
+
+Passed number-compare-2
+
+Passed number-compare-3
+
+Passed number-compare-4
+
+Passed number-compare-5
+
+Passed number-compare-6
+
+Passed max-1
+
+Passed max-2
+
+Passed max-2a
+
+Passed max-3
+
+Passed min-1
+
+Passed min-2
+
+Passed min-2a
+
+Passed min-3
+
+Passed number-comparison-real-1
+
+Passed number-comparison-real-2
+
+Passed number-comparison-real-3
+
+Passed number-comparison-real-4
+
+Passed number-comparison-real-7
+
+Passed number-comparison-real-8
+
+Passed number-comparison-real-9
+
+Passed number-comparison-real-10
+
+Passed number-comparison-number-11
+
+Passed number-comparison-number-12
+
+Passed number-comparison-number-13
+
+Passed number-comparison-number-14
+
+Passed number-comparison-real-1a
+
+Passed number-comparison-real-2a
+
+Passed number-comparison-real-3a
+
+Passed number-comparison-real-4a
+
+Passed number-comparison-real-7a
+
+Passed number-comparison-real-8a
+
+Passed number-comparison-real-9a
+
+Passed number-comparison-real-10a
+
+Passed number-comparison-number-11a
+
+Passed number-comparison-number-12a
+
+Passed number-comparison-number-13a
+
+Passed number-comparison-number-14a
+
+Passed complex-reciprocal
+
+Passed number-unary-operations-1-inline
+
+Passed number-unary-operations-1-notinline
+
+Passed log-functions-1
+
+Passed log-functions-2
+
+Passed log-functions-3
+
+Passed log-functions-4
+
+Passed log-functions-5
+
+Passed log-functions-5a
+
+Passed log-functions-5b
+
+Passed logand.1
+
+Passed logand.2
+
+Passed logand.3
+
+Passed logand.order.2.simple
+
+Passed logand.3a
+
+Passed logand.3b
+
+Passed logand.3c
+
+Passed logand.3d
+
+Passed logand.5.simple
+
+Passed logandc1.1
+
+Passed logandc1.2
+
+Passed logandc1.3
+
+Passed logandc1.4.simple
+
+Passed logandc2.1
+
+Passed logandc2.2
+
+Passed logandc2.3
+
+Passed logandc2.4.simple
+
+Passed logeqv.1
+
+Passed logeqv.2
+
+Passed logeqv.3
+
+Passed logeqv.3a
+
+Passed logeqv.5.simple
+
+Passed logeqv.5.simple.inline
+
+Passed logior.1
+
+Passed logior.2
+
+Passed logior.3
+
+Passed logior.3a
+
+Passed logior.5.simple
+
+Passed lognand.1
+
+Passed lognand.2
+
+Passed lognand.3
+
+Passed lognand.3a
+
+Passed lognand.4.simple
+
+Passed lognor.1
+
+Passed lognor.2
+
+Passed lognor.3
+
+Passed lognor.3a
+
+Passed lognor.4.simple
+
+Passed logorc1.1
+
+Passed logorc1.2
+
+Passed logorc1.3
+
+Passed logorc1.4
+
+Passed logorc1.4a
+
+Passed logorc1.4.simple
+
+Passed logorc2.1
+
+Passed logorc2.2
+
+Passed logorc2.3
+
+Passed logorc2.4
+
+Passed logorc2.4a
+
+Passed logorc2.4.simple
+
+Passed logxor.1
+
+Passed logxor.2
+
+Passed logxor.3
+
+Passed logxor.3a
+
+Passed logxor.4.simple
+
+Passed logxor.5.simple
+
+Passed log-bignum
+
+Passed load-log-bignum
+
+Failed big-ratio-coerce
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((result (coerce 6795704571147613088400718678381656244393117734249898937417419069310191575883868986428455446312916068568665979830007649804543533991572608932250835738151489076845330821569858726908084574701882988127547528934585469826755385222874837210418773111903651670205662000421193529634355863606092768847694362480173879256904596515653328461457501880112334566400744016842783001773321772818609367618076742443023275354232092047563787771643659430278130974461062642384241926963624924919867161137264969829092223075246982819340445538562498073940878705520674737984170082956322173496241162764552348099573721983300906273607793253095492671040351/2500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 (quote single-float)))) (and (floatp result) (not (ext:float-nan-p result))))))
+
+Passed ratio-error-from-#clasp
+
+Failed all-div-mult-plus-minus-combinations
+
+Unexpected error
+~tNIL
+while evaluating
+~t(not (not (let ((operands (list 23 0 (/ 3 2) 1.23 1.23 (complex 2 3))) (results NIL) (print NIL) (compare NIL) (results-from-sbcl (list 0 (complex 4 6) (complex -5 12) 1 (complex 0.77 3) (complex 3.23 3) (complex 2.46 3.69) (complex 1.6260163 2.4390244) (complex 0.77 3) (complex 3.23 3) (complex 2.46 3.69) (complex 1.6260162601626016 2.4390243902439024) (complex (ratio 1 2) 3) (complex (ratio 7 2) 3) (complex 3 (ratio 9 2)) (complex (ratio 4 3) 2) (complex 2 3) (complex 2 3) (complex (parse-integer "9223372036854775808") (parse-integer "13835058055282163712")) (complex (ratio 1 -2305843009213693952) (ratio 3 0)) (complex -21 3) (complex 25 3) (complex 46 69) (complex (ratio 2 23) (ratio 3 23)) (complex -0.77 -3) (complex 3.23 3) (complex 2.46 3.69) (complex 0.18923077 -0.28384614) 0 2.46 1.5129 1 1.907348634588857 2.4600000190734863 1.5129000234603882 1.0000000155068995 -0.26999998 2.73 1.845 0.82 -4.611686 4.611686 5.672374 2.6671374 -21.77 24.23 28.29 0.053478263 (complex -0.77 -3) (complex 3.23 3) (complex 2.46 3.69) (complex 0.18923076923076923 -0.28384615384615386) -1.907348634588857 2.4600000190734863 1.5129000234603882 0.9999999844931008 0 2.46 1.5129 1 -0.27 2.73 1.845 0.82 -4.611686018427388 4.611686018427388 5.672373802665687 2.667137344314341 -21.77 24.23 28.29 0.05347826086956522 (complex (ratio -1 2) -3) (complex (ratio 7 2) 3) (complex 3 (ratio 9 2)) (complex (ratio 3 13) (ratio -9 26)) 0.26999998 2.73 1.845 1.2195122 0.27 2.73 1.845 1.2195121951219512 0 3 (ratio 9 4) 1 (ratio 3 2) 9223372036854775811/2 -2305843009213693952 3/9223372036854775808 (ratio -43 2) (ratio 49 2) (ratio 69 2) (ratio 3 46) (complex -2 -3) (complex 2 3) (complex (parse-integer "9223372036854775808") (parse-integer "13835058055282163712")) (complex 9223372036854775808/13 -13835058055282163712/13) 4.611686 4.611686 5.672374 3.7493382 4.611686018427388 4.611686018427388 5.672373802665687 3.74933822636373 (ratio -3 2) 9223372036854775811/2 -2305843009213693952 9223372036854775808/3 0 (parse-integer "9223372036854775808") (parse-integer "21267647932558653966460912964485513216") 1 -23 23 (parse-integer "106068778423829921792") (ratio 0 23) (complex 21 -3) (complex 25 3) (complex 46 69) (complex (ratio 46 13) (ratio -69 13)) 21.77 24.23 28.29 18.699186 21.77 24.23 28.29 18.69918699186992 (ratio 43 2) (ratio 49 2) (ratio 69 2) (ratio 46 3) 23 23 (parse-integer "106068778423829921792") (ratio 23 0) 0 46 529 1)) (no-error-p T)) NIL (if compare (progn (loop for x in results for y in results-from-sbcl unless (equal x y) do (format T "Diff ~a with ~a~2%" x y))) NIL) (values no-error-p))))
+
+Passed float-constants-1
+
+Passed float-constants-2
+
+Passed float-constants-3
+
+Passed float-constants-4
+
+Passed float-constants-1-negative
+
+Passed float-constants-2-negative
+
+Passed float-constants-3-negative
+
+Passed float-constants-4-negative
+
+Passed float-constants-5
+
+Passed float-constants-5-negative
+
+Passed random-short
+
+Passed random-single
+
+Passed random-double
+
+Passed random-long
+
+Passed issue-1257
+
+Passed issue-1258
+
+
+Failures:
+  ~/pprint-fill/
+~
+
+Unexpected Successes:
+  ~/pprint-fill/
+~
+
+Expected Failures:
+  ~/pprint-fill/
+
+Successes: (floor-remainder-contagion ffloor-quotient-contagion sqrt-big-ratio-1 big-ratio-coerce all-div-mult-plus-minus-combinations)

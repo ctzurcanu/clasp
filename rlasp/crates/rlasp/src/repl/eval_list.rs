@@ -375,7 +375,7 @@ pub(super) fn eval_length(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     // Handle different sequence types
     match &seq {
         EvalResult::Nil => return Ok(EvalResult::Fixnum(0)),
-        EvalResult::String(s) => return Ok(EvalResult::Fixnum(s.len() as i64)),
+        EvalResult::String(s) => return Ok(EvalResult::Fixnum(s.chars().count() as i64)),
         EvalResult::Array(arr) => return Ok(EvalResult::Fixnum(arr.borrow().len() as i64)),
         EvalResult::Cons(_, _) => {
             // Count list elements
@@ -664,44 +664,18 @@ pub(super) fn eval_mapc(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     }
 
     // Apply function to each element (for side effects)
-    match &func {
-        EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: lambda_env, dynamic_env } => {
-            for elem in elements {
-                eval_lambda_call_with_values(
-                    params.clone(),
-                    defaults.clone(),
-                    supplied_p_vars.clone(),
-                    key_params.clone(),
-                    body.clone(),
-                    *dynamic_env,
-                    lambda_env.clone(),
-                    &[elem],
-                    env
-                )?;
-            }
-        }
-        EvalResult::Symbol(name) => {
-            // Handle function name - look up or call builtin
-            for elem in elements {
-                let ast_args: Vec<ASTNode> = vec![{
-                    match &elem {
-                        EvalResult::Fixnum(n) => ASTNode::Constant(crate::ir::ConstantValue::Fixnum(*n)),
-                        EvalResult::Float(f) => ASTNode::Constant(crate::ir::ConstantValue::Float(*f)),
-                        EvalResult::Nil => ASTNode::Constant(crate::ir::ConstantValue::Nil),
-                        EvalResult::Boolean(b) => ASTNode::Constant(if *b { crate::ir::ConstantValue::T } else { crate::ir::ConstantValue::Nil }),
-                        EvalResult::String(s) => ASTNode::Constant(crate::ir::ConstantValue::String(s.clone())),
-                        EvalResult::Symbol(s) => ASTNode::Quote(Box::new(ASTNode::Variable(s.clone()))),
-                        _ => ASTNode::Quote(Box::new(ASTNode::Variable(format!("{:?}", elem)))),
-                    }
-                }];
-                let call = ASTNode::Call {
-                    function: Box::new(ASTNode::Variable(name.clone())),
-                    args: ast_args,
-                };
-                eval_with_env(&call, env)?;
-            }
-        }
-        _ => return Err("mapc: first argument must be a function".to_string()),
+    if !matches!(
+        func,
+        EvalResult::Lambda { .. }
+            | EvalResult::Symbol(_)
+            | EvalResult::BuiltinFunction(_)
+            | EvalResult::GenericFunction(_)
+            | EvalResult::ForeignFunction(_)
+    ) {
+        return Err("mapc: first argument must be a function".to_string());
+    }
+    for elem in elements {
+        apply_function(&func, &[elem], env)?;
     }
 
     // Return the original list
