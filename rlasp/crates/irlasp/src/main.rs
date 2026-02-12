@@ -1004,6 +1004,7 @@ fn eval_file_mlir(
         println!("[MLIR] Incremental processing: expanding and evaluating forms...");
     }
     let trace_toplevel = std::env::var("RLASP_TRACE_TOPLEVEL").is_ok();
+    let trace_compile_eval = std::env::var("RLASP_TRACE_MLIR_EVAL").is_ok();
 
     // Helper function to check if an AST is a macro definition
     fn is_macro_definition(ast: &rlasp::ir::ASTNode) -> bool {
@@ -1324,21 +1325,43 @@ fn eval_file_mlir(
             lisp_to_ast::lisp_to_ast(lisp_obj.clone())
         }) {
             Ok(ast) => {
-                let head = if trace_toplevel {
+                let head = if trace_toplevel || trace_compile_eval {
                     Some(head_of_lisp_form(*lisp_obj))
                 } else {
                     None
                 };
                 // Step 1: Evaluate forms in interpreter mode to preserve compile-time behavior.
-                // Strict MLIR defaults to selective evaluation (compile-time forms only).
-                let selective_eval_default = matches!(behavior, MlirBehavior::Strict);
+                // Default to full compile-time evaluation for semantic fidelity.
+                // Selective evaluation can be re-enabled explicitly via env.
+                let selective_eval_default = false;
                 let selective_eval = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
                     .map(|v| {
                         let t = v.trim().to_ascii_lowercase();
                         !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
                     })
                     .unwrap_or(selective_eval_default);
-                let evaled_for_compile = !selective_eval || should_eval_for_compile_env(&ast);
+                let should_eval_compile = should_eval_for_compile_env(&ast);
+                let evaled_for_compile = !selective_eval || should_eval_compile;
+                if trace_compile_eval {
+                    let ast_tag = match &ast {
+                        rlasp::ir::ASTNode::Setq { .. } => "Setq",
+                        rlasp::ir::ASTNode::Call { .. } => "Call",
+                        rlasp::ir::ASTNode::Progn { .. } => "Progn",
+                        rlasp::ir::ASTNode::Defgeneric { .. } => "Defgeneric",
+                        rlasp::ir::ASTNode::Defmethod { .. } => "Defmethod",
+                        rlasp::ir::ASTNode::Lambda { .. } => "Lambda",
+                        _ => "Other",
+                    };
+                    println!(
+                        "[MLIR-EVAL] form={} head={} ast={} selective_eval={} should_eval_compile={} evaled_for_compile={}",
+                        form_count,
+                        head.clone().unwrap_or_else(|| "<unknown>".to_string()),
+                        ast_tag,
+                        selective_eval,
+                        should_eval_compile,
+                        evaled_for_compile
+                    );
+                }
                 if evaled_for_compile {
                     let _ = eval_with_persistent_env(&ast, &mut interp_env);
                 }

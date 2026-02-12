@@ -11,6 +11,11 @@ LOG_DIR="$BASE_DIR/regression-tests/logs"
 RUNNER_FILE="$BASE_DIR/regression-tests/run-all-irlasp.lisp"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
+MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
+if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
+  echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
+  exit 2
+fi
 
 mkdir -p "$LOG_DIR"
 cd "$BASE_DIR"
@@ -115,6 +120,7 @@ run_jit_suite_with_phase_timing() {
   local runner_file="$4"
   local start end rc exec_mark
   local fifo_path
+  local -a extra_env
   start="$(now_mono_ts)"
   exec_mark=""
   rc=127
@@ -123,11 +129,16 @@ run_jit_suite_with_phase_timing() {
   mkfifo "$fifo_path"
   : > "$suite_log"
 
+  extra_env=()
+  if [[ "$mode" == "mlir" ]]; then
+    extra_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR")
+  fi
+
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    (TEST_SUITES="$suite" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${extra_env[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   else
-    (TEST_SUITES="$suite" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${extra_env[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
   while IFS= read -r line; do
@@ -217,6 +228,9 @@ run_mode() {
   echo "Running mode=$mode log=$log_file" | tee -a "$summary_file"
   echo "SUITE_TIMEOUT_S $SUITE_TIMEOUT_S" | tee -a "$summary_file"
   echo "TIMEOUT_BIN ${TIMEOUT_BIN:-none}" | tee -a "$summary_file"
+  if [[ "$mode" == "mlir" ]]; then
+    echo "MLIR_BEHAVIOR $MLIR_BEHAVIOR" | tee -a "$summary_file"
+  fi
 
   local tp=0
   local tf=0

@@ -7,15 +7,22 @@
 //! - Instance creation and slot access
 
 use crate::object::LispObject;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Mutex};
 
 /// Global class registry for CPL computation and class lookup
 static mut CLASS_TABLE: Option<Mutex<HashMap<String, *const Class>>> = None;
+static mut INSTANCE_TABLE: Option<Mutex<HashSet<usize>>> = None;
 
 fn get_class_table() -> &'static Mutex<HashMap<String, *const Class>> {
     unsafe {
         CLASS_TABLE.get_or_insert_with(|| Mutex::new(HashMap::new()))
+    }
+}
+
+fn get_instance_table() -> &'static Mutex<HashSet<usize>> {
+    unsafe {
+        INSTANCE_TABLE.get_or_insert_with(|| Mutex::new(HashSet::new()))
     }
 }
 
@@ -300,6 +307,7 @@ impl Instance {
     pub fn allocate(class: *const Class) -> LispObject {
         let instance = Box::new(Instance::new(class));
         let ptr = Box::into_raw(instance);
+        get_instance_table().lock().unwrap().insert(ptr as usize);
         LispObject::from_instance_ptr(ptr)
     }
 }
@@ -339,7 +347,11 @@ impl LispObject {
             if (ptr as usize) < 0x1000 {
                 return None;
             }
-            Some(ptr)
+            if get_instance_table().lock().unwrap().contains(&(ptr as usize)) {
+                Some(ptr)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -358,6 +370,6 @@ impl Drop for Class {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        // Arc will handle cleanup
+        get_instance_table().lock().unwrap().remove(&(self as *const Instance as usize));
     }
 }

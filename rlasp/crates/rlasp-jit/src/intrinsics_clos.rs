@@ -875,12 +875,24 @@ fn extract_string_from_cons_list(obj: usize) -> String {
 
 /// Extract string from LispObject
 fn extract_string_from_object(obj: LispObject) -> String {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
     use rlasp_runtime::{Symbol, RString};
 
-    // Try as symbol first
-    if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
-        let sym = unsafe { &*sym_ptr };
-        return sym.name().to_string();
+    // Safely inspect heap object type before casting to concrete structs.
+    if let Some(ptr) = obj.as_general_ptr::<()>() {
+        if !ptr.is_null() {
+            match unsafe { TypeHeader::from_ptr(ptr) } {
+                Some(ObjectType::Symbol) => {
+                    let sym = unsafe { &*(ptr as *const Symbol) };
+                    return sym.name().to_string();
+                }
+                Some(ObjectType::String) => {
+                    let rstr = unsafe { &*(ptr as *const RString) };
+                    return rstr.as_str().to_string();
+                }
+                _ => {}
+            }
+        }
     }
 
     // Try as cons (quoted symbol)
@@ -895,12 +907,6 @@ fn extract_string_from_object(obj: LispObject) -> String {
     // Try as fixnum
     if obj.is_fixnum() {
         return format!("{}", obj.as_fixnum().unwrap());
-    }
-
-    // Try as string
-    if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
-        let rstr = unsafe { &*str_ptr };
-        return rstr.as_str().to_string();
     }
 
     "UNKNOWN".to_string()
@@ -1094,7 +1100,7 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_subtypep(class1: usize, class2_name: usize) -> usize {
     let class_obj = unsafe { LispObject::from_raw(class1) };
-    let name_str = extract_string_from_cons_list(class2_name);
+    let class2_obj = unsafe { LispObject::from_raw(class2_name) };
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
         // Validate class pointer is reasonable
@@ -1102,12 +1108,143 @@ pub extern "C" fn cc_subtypep(class1: usize, class2_name: usize) -> usize {
             return LispObject::nil().raw();
         }
         let class = unsafe { &*class_ptr };
+        let name_str = extract_string_from_cons_list(class2_name);
         if class.is_subclass_of(&name_str) {
             return LispObject::t().raw();
         }
     }
 
+    let lhs = parse_type_spec(class_obj);
+    let rhs = parse_type_spec(class2_obj);
+    if let (Some(lhs_spec), Some(rhs_spec)) = (lhs, rhs) {
+        if type_spec_is_subtype(&lhs_spec, &rhs_spec) {
+            return LispObject::t().raw();
+        }
+    }
+
     LispObject::nil().raw()
+}
+
+#[derive(Clone, Debug)]
+enum TypeSpec {
+    Symbol(String),
+    SimpleArray {
+        element_type: String,
+        dim: Option<i64>, // None means wildcard (*)
+    },
+}
+
+fn normalize_type_name(name: &str) -> String {
+    let base = name.rsplit(':').next().unwrap_or(name);
+    base.trim_start_matches(':').to_ascii_uppercase()
+}
+
+fn symbol_name_if_symbol(obj: LispObject) -> Option<String> {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+    use rlasp_runtime::Symbol;
+
+    let ptr = obj.as_general_ptr::<()>()?;
+    if ptr.is_null() || unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::Symbol) {
+        return None;
+    }
+    let sym = unsafe { &*(ptr as *const Symbol) };
+    Some(sym.name().to_string())
+}
+
+fn maybe_unquote(obj: LispObject) -> LispObject {
+    let Some(cons_ptr) = obj.as_cons_ptr() else {
+        return obj;
+    };
+    let cons = unsafe { &*cons_ptr };
+    let Some(head) = symbol_name_if_symbol(cons.car()) else {
+        return obj;
+    };
+    if !normalize_type_name(&head).eq("QUOTE") {
+        return obj;
+    }
+    let Some(rest_ptr) = cons.cdr().as_cons_ptr() else {
+        return obj;
+    };
+    let rest = unsafe { &*rest_ptr };
+    rest.car()
+}
+
+fn parse_type_spec(obj: LispObject) -> Option<TypeSpec> {
+    let obj = maybe_unquote(obj);
+
+    if let Some(sym_name) = symbol_name_if_symbol(obj) {
+        return Some(TypeSpec::Symbol(normalize_type_name(&sym_name)));
+    }
+
+    let cons_ptr = obj.as_cons_ptr()?;
+    let cons = unsafe { &*cons_ptr };
+    let head_name = normalize_type_name(&symbol_name_if_symbol(cons.car())?);
+    if head_name != "SIMPLE-ARRAY" {
+        return None;
+    }
+
+    let tail_ptr = cons.cdr().as_cons_ptr()?;
+    let tail = unsafe { &*tail_ptr };
+    let element_type = normalize_type_name(&symbol_name_if_symbol(tail.car())?);
+
+    let mut dim: Option<i64> = None;
+    if let Some(dim_list_ptr) = tail.cdr().as_cons_ptr() {
+        let dim_list = unsafe { &*dim_list_ptr };
+        let dims_obj = maybe_unquote(dim_list.car());
+        if let Some(dims_cons_ptr) = dims_obj.as_cons_ptr() {
+            let dims_cons = unsafe { &*dims_cons_ptr };
+            let first_dim = dims_cons.car();
+            if let Some(n) = first_dim.as_fixnum() {
+                dim = Some(n);
+            } else if let Some(sym) = symbol_name_if_symbol(first_dim) {
+                if normalize_type_name(&sym) == "*" {
+                    dim = None;
+                }
+            }
+        } else if let Some(n) = dims_obj.as_fixnum() {
+            dim = Some(n);
+        }
+    }
+
+    Some(TypeSpec::SimpleArray { element_type, dim })
+}
+
+fn type_spec_is_subtype(lhs: &TypeSpec, rhs: &TypeSpec) -> bool {
+    let is_element_subtype = |a: &str, b: &str| -> bool {
+        if a == b {
+            true
+        } else if b == "CHARACTER" && a == "BASE-CHAR" {
+            true
+        } else {
+            false
+        }
+    };
+
+    match (lhs, rhs) {
+        (_, TypeSpec::Symbol(s)) if s == "T" => true,
+        (TypeSpec::Symbol(a), TypeSpec::Symbol(b)) => a == b,
+        (
+            TypeSpec::SimpleArray {
+                element_type: a_el,
+                dim: a_dim,
+            },
+            TypeSpec::SimpleArray {
+                element_type: b_el,
+                dim: b_dim,
+            },
+        ) => {
+            let dims_ok = match b_dim {
+                None => true,
+                Some(bn) => a_dim == &Some(*bn),
+            };
+            dims_ok && is_element_subtype(a_el, b_el)
+        }
+        (
+            TypeSpec::SimpleArray { .. },
+            TypeSpec::Symbol(s),
+        ) if s == "STRING" || s == "SIMPLE-STRING" => true,
+        _ => false,
+    }
 }
 
 /// Helper: Create a symbol from a string

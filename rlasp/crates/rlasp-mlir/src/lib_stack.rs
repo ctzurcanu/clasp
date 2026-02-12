@@ -150,7 +150,8 @@ impl StackMLIRCodegen {
         const_name
     }
 
-    /// Create a symbol constant (calls cc_make_symbol with a string constant)
+    /// Create a symbol constant.
+    /// Uses cc_intern so repeated quoted symbols share identity (CL reader semantics).
     /// Symbol names are uppercased to match CL's default readcase
     fn create_symbol_constant(&mut self, name: &str) -> String {
         // Uppercase the symbol name to match CL's default readcase
@@ -177,9 +178,19 @@ impl StackMLIRCodegen {
         let len = normalized_name.len();
         let len_ssa = self.fresh_ssa();
         self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
-        // Create symbol using cc_make_symbol
+        // Build a runtime string, then intern it.
+        let name_obj = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_make_string({}, {}) : (!llvm.ptr, i64) -> i64",
+            name_obj, str_ptr, len_ssa
+        ));
+        let pkg_nil = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", pkg_nil));
         let sym = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64", sym, str_ptr, len_ssa));
+        self.writeln(&format!(
+            "{} = func.call @cc_intern({}, {}) : (i64, i64) -> i64",
+            sym, name_obj, pkg_nil
+        ));
         sym
     }
 
@@ -2359,23 +2370,34 @@ impl StackMLIRCodegen {
         } else {
             func_name
         };
+        let base_name_lower = base_name.to_ascii_lowercase();
 
         // Allow a small set of non-CL macros that should have been expanded to reach
         // the special-form handling below. This avoids evaluating their arguments
         // as ordinary function calls when macro expansion is missing.
         let is_non_cl_macro_stub = matches!(
-            base_name,
+            base_name_lower.as_str(),
             "define-convenience-action-methods" | "defparameter*" | "defvar*" | "define-package"
             | "load-mlir" | "with-upgradability"
         );
-        if !rlasp::is_cl_builtin(base_name) && !is_non_cl_macro_stub {
+        if !rlasp::is_cl_builtin(base_name_lower.as_str()) && !is_non_cl_macro_stub {
             return self.compile_user_function_call(base_name, args);
         }
 
-        match base_name {
+        match base_name_lower.as_str() {
             // ==========================================================================
             // SPECIAL FORMS - These are NOT function calls, they modify the environment
             // ==========================================================================
+
+            "q" | "quote" => {
+                if args.len() != 1 {
+                    anyhow::bail!("quote requires exactly 1 argument");
+                }
+                // Reader-level quote often arrives as a regular function call form.
+                // Re-wrap as ASTNode::Quote so runtime gets the literal object.
+                let quoted = ASTNode::Quote(Box::new(args[0].clone()));
+                self.compile_expr(&quoted)
+            }
 
             "defvar" | "defparameter" | "defconstant" => {
                 // (defvar name [value [doc]])
@@ -3189,7 +3211,18 @@ impl StackMLIRCodegen {
                     self.dedent();
                     self.writeln("} else {");
                     self.indent();
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", protected));
+                    // Preserve all values from the protected form, not only the primary.
+                    let values_list_ok = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
+                        values_list_ok, protected
+                    ));
+                    let primary_ok = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_values_pack({}) : (i64) -> i64",
+                        primary_ok, values_list_ok
+                    ));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", primary_ok));
                     self.dedent();
                     self.writeln("}");
                 } else {
@@ -3207,12 +3240,35 @@ impl StackMLIRCodegen {
                 }
                 // Execute protected form
                 self.compile_expr(&args[0])?;
+                let protected_primary = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @stack_pop_pointer() : () -> i64",
+                    protected_primary
+                ));
+                let protected_values = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
+                    protected_values, protected_primary
+                ));
                 // Execute cleanup forms
                 for expr in &args[1..] {
-                    let _tmp = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", _tmp));
                     self.compile_expr(expr)?;
+                    let discard_cleanup = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @stack_pop_pointer() : () -> i64",
+                        discard_cleanup
+                    ));
                 }
+                // Unwind-protect returns values from the protected form.
+                let restored_primary = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_values_pack({}) : (i64) -> i64",
+                    restored_primary, protected_values
+                ));
+                self.writeln(&format!(
+                    "func.call @stack_push_pointer({}) : (i64) -> ()",
+                    restored_primary
+                ));
                 return Ok(());
             }
 
@@ -5156,7 +5212,7 @@ impl StackMLIRCodegen {
                         }
 
                         // Hash table: (setf (gethash key ht) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "gethash") => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("gethash")) => {
                             if place_args.len() < 2 {
                                 anyhow::bail!("setf gethash requires key and table");
                             }
@@ -5184,7 +5240,7 @@ impl StackMLIRCodegen {
                         }
 
                         // Symbol value: (setf (symbol-value sym) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "symbol-value") => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("symbol-value")) => {
                             if place_args.len() != 1 {
                                 anyhow::bail!("setf symbol-value requires exactly one argument");
                             }
@@ -5207,21 +5263,26 @@ impl StackMLIRCodegen {
                         }
 
                         // Array: (setf (aref array index) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "aref") => {
-                            if place_args.len() < 2 {
-                                anyhow::bail!("setf aref requires array and index");
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("aref")) => {
+                            if place_args.is_empty() {
+                                anyhow::bail!("setf aref requires an array argument");
                             }
 
-                            // Evaluate array, index, and value
+                            // Evaluate array, optional index, and value
                             self.compile_expr(&place_args[0])?; // array
-                            self.compile_expr(&place_args[1])?; // index
+                            let idx_ssa = self.fresh_ssa();
+                            if place_args.len() >= 2 {
+                                self.compile_expr(&place_args[1])?; // index
+                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx_ssa));
+                            } else {
+                                // Rank-0 arrays are represented with one storage slot.
+                                self.writeln(&format!("{} = arith.constant 0 : i64", idx_ssa));
+                            }
                             self.compile_expr(value)?;           // value
 
-                            // Pop in reverse: value, index, array
+                            // Pop in reverse: value, array (index already materialized as SSA)
                             let val_ssa = self.fresh_ssa();
                             self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
-                            let idx_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx_ssa));
                             let arr_ssa = self.fresh_ssa();
                             self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arr_ssa));
 
@@ -5235,7 +5296,7 @@ impl StackMLIRCodegen {
                         }
 
                         // CAR: (setf (car cons) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "car") => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("car")) => {
                             if place_args.len() != 1 {
                                 anyhow::bail!("setf car requires exactly one argument");
                             }
@@ -5260,7 +5321,7 @@ impl StackMLIRCodegen {
                         }
 
                         // CDR: (setf (cdr cons) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "cdr") => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("cdr")) => {
                             if place_args.len() != 1 {
                                 anyhow::bail!("setf cdr requires exactly one argument");
                             }
@@ -5285,23 +5346,46 @@ impl StackMLIRCodegen {
                         }
 
                         // CHAR: (setf (char string index) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "char") => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.rsplit(':').next().map(|b| b.eq_ignore_ascii_case("char")).unwrap_or(false)) => {
                             if place_args.len() != 2 {
                                 anyhow::bail!("setf char requires string and index");
                             }
 
-                            // Evaluate string, index, and value
+                            // Evaluate string and index first
                             self.compile_expr(&place_args[0])?; // string
                             self.compile_expr(&place_args[1])?; // index
-                            self.compile_expr(value)?;           // value
-
-                            // Pop in reverse: value, index, string
-                            let val_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
                             let idx_ssa = self.fresh_ssa();
                             self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx_ssa));
                             let str_ssa = self.fresh_ssa();
                             self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", str_ssa));
+
+                            // Evaluate value; special-case (code-char n) so setf char works
+                            // even when generic code-char lowering is unavailable.
+                            let val_ssa = self.fresh_ssa();
+                            let code_char_arg = match value {
+                                ASTNode::Call { function, args }
+                                    if args.len() == 1
+                                        && matches!(
+                                            function.as_ref(),
+                                            ASTNode::Variable(name)
+                                            if name.rsplit(':').next().map(|b| b.eq_ignore_ascii_case("code-char")).unwrap_or(false)
+                                        ) =>
+                                {
+                                    Some(&args[0])
+                                }
+                                _ => None,
+                            };
+                            if let Some(code_arg) = code_char_arg {
+                                self.compile_expr(code_arg)?;
+                                let code_raw = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", code_raw));
+                                let code_unboxed = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", code_unboxed, code_raw));
+                                self.writeln(&format!("{} = func.call @cc_box_character({}) : (i64) -> i64", val_ssa, code_unboxed));
+                            } else {
+                                self.compile_expr(value)?;           // value
+                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
+                            }
 
                             // Call cc_set_char
                             let result = self.fresh_ssa();
@@ -6057,10 +6141,16 @@ impl StackMLIRCodegen {
                 let mut contents_idx: Option<usize> = None;
                 let mut initial_element_idx: Option<usize> = None;
                 for i in (1..args.len()).step_by(2) {
-                    if let ASTNode::Variable(kw) = &args[i] {
-                        if kw == ":initial-contents" && i + 1 < args.len() {
+                    let kw_opt: Option<&str> = match &args[i] {
+                        ASTNode::Variable(kw) => Some(kw.as_str()),
+                        ASTNode::Constant(ConstantValue::Symbol(kw)) => Some(kw.as_str()),
+                        _ => None,
+                    };
+                    if let Some(kw_raw) = kw_opt {
+                        let kw_base = kw_raw.rsplit(':').next().unwrap_or(kw_raw);
+                        if kw_base.eq_ignore_ascii_case("initial-contents") && i + 1 < args.len() {
                             contents_idx = Some(i + 1);
-                        } else if kw == ":initial-element" && i + 1 < args.len() {
+                        } else if kw_base.eq_ignore_ascii_case("initial-element") && i + 1 < args.len() {
                             initial_element_idx = Some(i + 1);
                         }
                     }
@@ -6107,15 +6197,19 @@ impl StackMLIRCodegen {
 
             "aref" => {
                 // (aref array index)
-                if args.len() != 2 {
-                    anyhow::bail!("aref requires exactly 2 arguments");
+                if args.is_empty() {
+                    anyhow::bail!("aref requires at least 1 argument");
                 }
 
                 self.compile_expr(&args[0])?; // array
-                self.compile_expr(&args[1])?; // index
-
                 let idx = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx));
+                if args.len() >= 2 {
+                    self.compile_expr(&args[1])?; // index
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx));
+                } else {
+                    // Rank-0 arrays are represented with one storage slot.
+                    self.writeln(&format!("{} = arith.constant 0 : i64", idx));
+                }
                 let array = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", array));
 
@@ -6153,8 +6247,14 @@ impl StackMLIRCodegen {
                 let mut char_ssa = None;
                 let mut i = 1;
                 while i < args.len() {
-                    if let ASTNode::Variable(kw) = &args[i] {
-                        if kw == ":initial-element" && i + 1 < args.len() {
+                    let kw_opt: Option<&str> = match &args[i] {
+                        ASTNode::Variable(kw) => Some(kw.as_str()),
+                        ASTNode::Constant(ConstantValue::Symbol(kw)) => Some(kw.as_str()),
+                        _ => None,
+                    };
+                    if let Some(kw_raw) = kw_opt {
+                        let kw_base = kw_raw.rsplit(':').next().unwrap_or(kw_raw);
+                        if kw_base.eq_ignore_ascii_case("initial-element") && i + 1 < args.len() {
                             // Compile the character value
                             self.compile_expr(&args[i + 1])?;
                             let ch = self.fresh_ssa();
@@ -6204,6 +6304,38 @@ impl StackMLIRCodegen {
                 // Use cc_aref for character access
                 let result = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64", result, str_ssa, idx_ssa));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "code-char" => {
+                // (code-char code) -> character or NIL
+                if args.len() != 1 {
+                    anyhow::bail!("code-char requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let code_obj = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", code_obj));
+                let code_raw = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64", code_raw, code_obj));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_box_character({}) : (i64) -> i64", result, code_raw));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "char-code" => {
+                // (char-code character) -> fixnum codepoint
+                if args.len() != 1 {
+                    anyhow::bail!("char-code requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let ch_obj = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", ch_obj));
+                let code_raw = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_unbox_character({}) : (i64) -> i64", code_raw, ch_obj));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", result, code_raw));
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -8239,8 +8371,10 @@ impl StackMLIRCodegen {
             "tagbody" | "go" | "prog" | "prog*" | "prog1" | "prog2" |
             // Evaluation and compilation stubs (eval handled separately below)
             "compile" | "compile-file" | "require" | "provide" |
-            "constantp" | "macro-function" | "macroexpand" | "macroexpand-1" |
-            // Declarations (typically ignored at runtime)
+            "constantp" | "macro-function" | "macroexpand" | "macroexpand-1" => {
+                self.compile_user_function_call(base_name, args)
+            }
+
             // CL Standard Symbol Functions - implemented via runtime
             "gensym" => {
                 // (gensym &optional prefix)
@@ -8796,7 +8930,7 @@ impl StackMLIRCodegen {
             "string-right-trim" | "schar" |
             "string-lessp" | "string-greaterp" | "string-not-greaterp" | "string-not-lessp" |
             // Characters
-            "character" | "char-code" | "char-int" | "code-char" | "char-name" | "name-char" |
+            "character" | "char-int" | "char-name" | "name-char" |
             "char=" | "char/=" | "char<" | "char>" | "char<=" | "char>=" |
             "char-equal" | "char-not-equal" | "char-lessp" | "char-greaterp" |
             "char-not-greaterp" | "char-not-lessp" | "char-upcase" | "char-downcase" |
@@ -8836,7 +8970,7 @@ impl StackMLIRCodegen {
             "with-simple-restart" | "invoke-restart" | "find-restart" | "compute-restarts" |
             "restart-name" | "abort" | "continue" | "muffle-warning" | "store-value" | "use-value" |
             // Misc
-            "q" | "quote" | "cond" | "case" | "etypecase" | "ctypecase" |
+            "cond" | "case" | "etypecase" | "ctypecase" |
             "identity" | "complement" | "constantly" |
             "special-operator-p" | "trace" | "untrace" | "step" | "time" | "describe" |
             "inspect" | "room" | "ed" | "apropos" | "apropos-list" | "dribble" |
@@ -10135,8 +10269,17 @@ impl StackMLIRCodegen {
         }
 
         // Compile function body - catch errors to ensure proper cleanup
+        // Directly-invoked entry points are not called via cc_funcall_stack,
+        // so tailcall requests cannot be serviced there.
+        let is_direct_entry = name == "__main"
+            || name.starts_with("__main_batch_")
+            || name.starts_with("__rlasp_");
         debug_println!("COMPILE_FUNCTION_DEBUG: name={}", name);
-        let compile_result = self.compile_tail_expr(body);
+        let compile_result = if is_direct_entry {
+            self.compile_expr(body)
+        } else {
+            self.compile_tail_expr(body)
+        };
 
         // Always restore symbol table and close function properly
         self.symbol_table = saved_symbols;
@@ -10389,8 +10532,9 @@ impl StackMLIRCodegen {
             }
             data.push_str("\\00"); // double null terminator
             total_len += 1;
+            // This global has an initializer, so it must be a regular constant, not `external`.
             self.writeln(&format!(
-                "llvm.mlir.global external constant @__argslist_functions(\"{}\") : !llvm.array<{} x i8>",
+                "llvm.mlir.global private constant @__argslist_functions(\"{}\") : !llvm.array<{} x i8>",
                 data, total_len
             ));
         }

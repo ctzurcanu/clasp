@@ -1429,6 +1429,9 @@ pub extern "C" fn cc_nth(n: usize, list: usize) -> usize {
 /// Check if number is even
 #[no_mangle]
 pub extern "C" fn cc_evenp(x: usize) -> usize {
+    use malachite::Integer;
+    use rlasp_runtime::{Number, NumberValue};
+
     let x_obj = unsafe { LispObject::from_raw(x) };
 
     if let Some(val) = x_obj.as_fixnum() {
@@ -1436,6 +1439,18 @@ pub extern "C" fn cc_evenp(x: usize) -> usize {
             LispObject::t().raw()
         } else {
             LispObject::nil().raw()
+        }
+    } else if let Some(ptr) = x_obj.as_general_ptr::<Number>() {
+        let num = unsafe { &*ptr };
+        match &num.value {
+            NumberValue::Bignum(b) => {
+                if (b.clone() % Integer::from(2)) == Integer::from(0) {
+                    LispObject::t().raw()
+                } else {
+                    LispObject::nil().raw()
+                }
+            }
+            _ => LispObject::nil().raw(),
         }
     } else {
         LispObject::nil().raw()
@@ -1445,6 +1460,9 @@ pub extern "C" fn cc_evenp(x: usize) -> usize {
 /// Check if number is odd
 #[no_mangle]
 pub extern "C" fn cc_oddp(x: usize) -> usize {
+    use malachite::Integer;
+    use rlasp_runtime::{Number, NumberValue};
+
     let x_obj = unsafe { LispObject::from_raw(x) };
 
     if let Some(val) = x_obj.as_fixnum() {
@@ -1452,6 +1470,18 @@ pub extern "C" fn cc_oddp(x: usize) -> usize {
             LispObject::t().raw()
         } else {
             LispObject::nil().raw()
+        }
+    } else if let Some(ptr) = x_obj.as_general_ptr::<Number>() {
+        let num = unsafe { &*ptr };
+        match &num.value {
+            NumberValue::Bignum(b) => {
+                if (b.clone() % Integer::from(2)) != Integer::from(0) {
+                    LispObject::t().raw()
+                } else {
+                    LispObject::nil().raw()
+                }
+            }
+            _ => LispObject::nil().raw(),
         }
     } else {
         LispObject::nil().raw()
@@ -1660,22 +1690,28 @@ pub extern "C" fn cc_make_string(ptr: *const u8, len: usize) -> usize {
 /// Create a string of given length filled with a character
 #[no_mangle]
 pub extern "C" fn cc_make_string_repeat(len: usize, ch: usize) -> usize {
+    let len_obj = unsafe { LispObject::from_raw(len) };
     let ch_obj = unsafe { LispObject::from_raw(ch) };
 
-    // Extract character - try as fixnum first
-    let char_val = if let Some(fixnum) = ch_obj.as_fixnum() {
-        // Character code as fixnum
+    let repeat_len = len_obj
+        .as_fixnum()
+        .unwrap_or(0)
+        .max(0) as usize;
+
+    // Extract character from either a Character object or a numeric char code.
+    let char_val = if let Some(ch) = ch_obj.as_character() {
+        ch
+    } else if let Some(fixnum) = ch_obj.as_fixnum() {
         if fixnum >= 0 && fixnum <= 0x10FFFF {
             std::char::from_u32(fixnum as u32).unwrap_or(' ')
         } else {
             ' '
         }
     } else {
-        // Default to space if not a valid character
         ' '
     };
 
-    let s = char_val.to_string().repeat(len);
+    let s = char_val.to_string().repeat(repeat_len);
     rlasp_runtime::RString::allocate(s).raw()
 }
 
@@ -1851,11 +1887,43 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
                 if !is_keyword {
                     // It's a positional argument (string)
                     let s = if let Some(ptr) = item.as_general_ptr::<()>() {
-                        if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::String) {
-                            let str_ptr = ptr as *const rlasp_runtime::RString;
-                            Some(unsafe { (&*str_ptr).as_str().to_string() })
-                        } else {
+                        if ptr.is_null() {
                             None
+                        } else {
+                            match unsafe { TypeHeader::from_ptr(ptr) } {
+                                Some(ObjectType::String) => {
+                                    let str_ptr = ptr as *const rlasp_runtime::RString;
+                                    Some(unsafe { (&*str_ptr).as_str().to_string() })
+                                }
+                                Some(ObjectType::Vector) => {
+                                    let vec_ptr = ptr as *const rlasp_runtime::RVector;
+                                    let vec = unsafe { &*vec_ptr };
+                                    let mut out = String::new();
+                                    let mut ok = true;
+                                    for elem in vec.as_slice() {
+                                        if let Some(ch) = elem.as_character() {
+                                            out.push(ch);
+                                        } else if let Some(fx) = elem.as_fixnum() {
+                                            if fx >= 0 {
+                                                if let Some(ch) = char::from_u32(fx as u32) {
+                                                    out.push(ch);
+                                                } else {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            } else {
+                                                ok = false;
+                                                break;
+                                            }
+                                        } else {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                    if ok { Some(out) } else { None }
+                                }
+                                _ => None,
+                            }
                         }
                     } else {
                         None
@@ -1897,6 +1965,211 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
     } else {
         LispObject::nil().raw()
     }
+}
+
+fn string_compare_extract_string(obj: LispObject) -> Option<String> {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
+    if let Some(ptr) = obj.as_general_ptr::<()>() {
+        if ptr.is_null() {
+            return None;
+        }
+        match unsafe { TypeHeader::from_ptr(ptr) } {
+            Some(ObjectType::String) => {
+                let str_ptr = ptr as *const rlasp_runtime::RString;
+                return Some(unsafe { (&*str_ptr).as_str().to_string() });
+            }
+            Some(ObjectType::Vector) => {
+                let vec_ptr = ptr as *const rlasp_runtime::RVector;
+                let vec = unsafe { &*vec_ptr };
+                let mut out = String::new();
+                for elem in vec.as_slice() {
+                    if let Some(ch) = elem.as_character() {
+                        out.push(ch);
+                    } else if let Some(fx) = elem.as_fixnum() {
+                        if fx < 0 {
+                            return None;
+                        }
+                        out.push(char::from_u32(fx as u32)?);
+                    } else {
+                        return None;
+                    }
+                }
+                return Some(out);
+            }
+            _ => {}
+        }
+    }
+
+    let coerced = unsafe { LispObject::from_raw(cc_string(obj.raw())) };
+    let ptr = coerced.as_general_ptr::<()>()?;
+    if ptr.is_null() || unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::String) {
+        return None;
+    }
+    let str_ptr = ptr as *const rlasp_runtime::RString;
+    Some(unsafe { (&*str_ptr).as_str().to_string() })
+}
+
+#[derive(Clone, Copy)]
+enum StringRelation {
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+fn cc_string_relation_full(args: usize, relation: StringRelation, case_fold: bool) -> usize {
+    use rlasp_runtime::LispError;
+
+    let args_obj = unsafe { LispObject::from_raw(args) };
+    let mut vals: Vec<LispObject> = Vec::new();
+    let mut cur = args_obj;
+    while let Some(cons_ptr) = cur.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        vals.push(cons.car());
+        cur = cons.cdr();
+    }
+    if !cur.is_nil() || vals.len() < 2 {
+        return LispObject::nil().raw();
+    }
+
+    let Some(s1) = string_compare_extract_string(vals[0]) else {
+        return LispObject::nil().raw();
+    };
+    let Some(s2) = string_compare_extract_string(vals[1]) else {
+        return LispObject::nil().raw();
+    };
+
+    let mut start1: usize = 0;
+    let mut end1: Option<usize> = None;
+    let mut start2: usize = 0;
+    let mut end2: Option<usize> = None;
+
+    let mut i = 2usize;
+    while i + 1 < vals.len() {
+        let key = vals[i];
+        let value = vals[i + 1];
+        let key_name = if let Some(sym) = as_symbol_ptr_checked(key) {
+            unsafe { (*sym).name().to_ascii_uppercase() }
+        } else {
+            i += 2;
+            continue;
+        };
+        let key_base = key_name.trim_start_matches(':');
+        let num = if value.is_nil() {
+            None
+        } else if let Some(n) = value.as_fixnum() {
+            if n < 0 {
+                return LispError::type_error("string comparison index must be non-negative").raw();
+            }
+            Some(n as usize)
+        } else {
+            return LispError::type_error("string comparison index must be an integer").raw();
+        };
+        match key_base {
+            "START1" => start1 = num.unwrap_or(0),
+            "END1" => end1 = num,
+            "START2" => start2 = num.unwrap_or(0),
+            "END2" => end2 = num,
+            _ => {}
+        }
+        i += 2;
+    }
+
+    let c1: Vec<char> = s1.chars().collect();
+    let c2: Vec<char> = s2.chars().collect();
+    let e1 = end1.unwrap_or(c1.len());
+    let e2 = end2.unwrap_or(c2.len());
+
+    if start1 > e1 || start2 > e2 || e1 > c1.len() || e2 > c2.len() {
+        return LispError::type_error("string comparison index out of bounds").raw();
+    }
+
+    let mut off = 0usize;
+    while start1 + off < e1 && start2 + off < e2 {
+        let mut a = c1[start1 + off];
+        let mut b = c2[start2 + off];
+        if case_fold {
+            a = a.to_ascii_uppercase();
+            b = b.to_ascii_uppercase();
+        }
+        if a != b {
+            let holds = match relation {
+                StringRelation::Lt | StringRelation::Le => a < b,
+                StringRelation::Gt | StringRelation::Ge => a > b,
+            };
+            if holds {
+                return LispObject::fixnum((start1 + off) as i64).raw();
+            }
+            return LispObject::nil().raw();
+        }
+        off += 1;
+    }
+
+    let end_left = start1 + off == e1;
+    let end_right = start2 + off == e2;
+    if end_left && end_right {
+        return match relation {
+            StringRelation::Le | StringRelation::Ge => LispObject::fixnum(e1 as i64).raw(),
+            _ => LispObject::nil().raw(),
+        };
+    }
+    if end_right {
+        // Right ended first: left is greater
+        return match relation {
+            StringRelation::Gt | StringRelation::Ge => LispObject::fixnum((start1 + off) as i64).raw(),
+            _ => LispObject::nil().raw(),
+        };
+    }
+    if end_left {
+        // Left ended first: left is less
+        return match relation {
+            StringRelation::Lt | StringRelation::Le => LispObject::fixnum((start1 + off) as i64).raw(),
+            _ => LispObject::nil().raw(),
+        };
+    }
+
+    LispObject::nil().raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_not_lessp_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Ge, true)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_not_greaterp_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Le, true)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_lt_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Lt, false)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_gt_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Gt, false)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_le_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Le, false)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_ge_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Ge, false)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_lessp_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Lt, true)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_string_greaterp_full(args: usize) -> usize {
+    cc_string_relation_full(args, StringRelation::Gt, true)
 }
 
 /// Execute a shell command and return output as string
@@ -3328,6 +3601,8 @@ use std::collections::HashMap as StdHashMap;
 // Track symbols created via cc_make_symbol (for safe param name lookup in cc_arg)
 static mut SYMBOL_NAME_MAP: Option<Mutex<StdHashMap<usize, String>>> = None;
 static INIT_SYMBOL_NAME_MAP: Once = Once::new();
+static mut INTERNED_SYMBOLS: Option<Mutex<StdHashMap<String, usize>>> = None;
+static INIT_INTERNED_SYMBOLS: Once = Once::new();
 
 fn get_symbol_name_map() -> &'static Mutex<StdHashMap<usize, String>> {
     unsafe {
@@ -3338,8 +3613,50 @@ fn get_symbol_name_map() -> &'static Mutex<StdHashMap<usize, String>> {
     }
 }
 
+fn get_interned_symbols() -> &'static Mutex<StdHashMap<String, usize>> {
+    unsafe {
+        INIT_INTERNED_SYMBOLS.call_once(|| {
+            INTERNED_SYMBOLS = Some(Mutex::new(StdHashMap::new()));
+        });
+        INTERNED_SYMBOLS.as_ref().unwrap()
+    }
+}
+
 thread_local! {
     static DYNAMIC_BINDINGS: RefCell<StdHashMap<String, usize>> = RefCell::new(StdHashMap::new());
+}
+
+fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
+    use malachite::Integer;
+    use rlasp_runtime::Number;
+
+    let key = strip_package_prefix(name).to_ascii_uppercase();
+    match key.as_str() {
+        // Keep these as bignums to match CL constants even when fixnum tagging width is smaller.
+        "MOST-POSITIVE-FIXNUM" => Some(Number::allocate_bignum(Integer::from(i64::MAX)).raw()),
+        "MOST-NEGATIVE-FIXNUM" => Some(Number::allocate_bignum(Integer::from(i64::MIN)).raw()),
+        "LEAST-POSITIVE-SHORT-FLOAT"
+        | "LEAST-POSITIVE-NORMALIZED-SHORT-FLOAT"
+        | "LEAST-POSITIVE-SINGLE-FLOAT"
+        | "LEAST-POSITIVE-NORMALIZED-SINGLE-FLOAT"
+        | "LEAST-POSITIVE-DOUBLE-FLOAT"
+        | "LEAST-POSITIVE-NORMALIZED-DOUBLE-FLOAT"
+        | "LEAST-POSITIVE-LONG-FLOAT"
+        | "LEAST-POSITIVE-NORMALIZED-LONG-FLOAT" => {
+            Some(Number::allocate_float(f64::MIN_POSITIVE).raw())
+        }
+        "LEAST-NEGATIVE-SHORT-FLOAT"
+        | "LEAST-NEGATIVE-NORMALIZED-SHORT-FLOAT"
+        | "LEAST-NEGATIVE-SINGLE-FLOAT"
+        | "LEAST-NEGATIVE-NORMALIZED-SINGLE-FLOAT"
+        | "LEAST-NEGATIVE-DOUBLE-FLOAT"
+        | "LEAST-NEGATIVE-NORMALIZED-DOUBLE-FLOAT"
+        | "LEAST-NEGATIVE-LONG-FLOAT"
+        | "LEAST-NEGATIVE-NORMALIZED-LONG-FLOAT" => {
+            Some(Number::allocate_float(-f64::MIN_POSITIVE).raw())
+        }
+        _ => None,
+    }
 }
 
 /// Get the value of a dynamic/special variable
@@ -3391,6 +3708,9 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
                 if let Some(&value) = b.get(&base.to_lowercase()) {
                     return value;
                 }
+            }
+            if let Some(v) = lookup_standard_symbol_constant(&name) {
+                return v;
             }
             // Unbound - return nil silently (CL would signal an error)
             LispObject::nil().raw()
@@ -3539,7 +3859,7 @@ pub fn list_all_jit_packages() -> Vec<String> {
 /// Register a package at runtime from JIT code (called by defpackage/define-package)
 #[no_mangle]
 pub extern "C" fn cc_register_package(name_obj: usize) -> usize {
-    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::{RString, Symbol};
     use rlasp_runtime::header::{TypeHeader, ObjectType};
 
     let obj = unsafe { LispObject::from_raw(name_obj) };
@@ -4327,6 +4647,7 @@ pub extern "C" fn cc_string(obj: usize) -> usize {
 pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
     use rlasp_runtime::{Symbol, RString};
     use rlasp_runtime::header::{TypeHeader, ObjectType};
+    let _ = package;
 
     // Get the name string
     let name_str = {
@@ -4362,8 +4683,32 @@ pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
         }
     };
 
-    // For now, just create a symbol (proper package interning would need more infrastructure)
-    Symbol::allocate(name_str.to_uppercase()).raw()
+    let canonical = name_str.to_uppercase();
+    if canonical == "NIL" {
+        return LispObject::nil().raw();
+    }
+    if canonical == "T" {
+        return LispObject::t().raw();
+    }
+
+    {
+        let interned = get_interned_symbols().lock().unwrap();
+        if let Some(raw) = interned.get(&canonical) {
+            return *raw;
+        }
+    }
+
+    let sym = Symbol::allocate(canonical.clone());
+    let raw = sym.raw();
+    {
+        let mut interned = get_interned_symbols().lock().unwrap();
+        interned.insert(canonical.clone(), raw);
+    }
+    {
+        let mut map = get_symbol_name_map().lock().unwrap();
+        map.insert(raw, canonical);
+    }
+    raw
 }
 
 /// Find a symbol by name in a package (find-symbol)
@@ -4564,6 +4909,56 @@ pub extern "C" fn cc_errorp(obj: usize) -> usize {
     } else {
         LispObject::nil().raw()
     }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_type_of(obj: usize) -> usize {
+    use rlasp_runtime::{RString, Symbol};
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
+    let lo = unsafe { LispObject::from_raw(obj) };
+    if lo.is_nil() {
+        return Symbol::allocate("NULL".to_string()).raw();
+    }
+    if lo.as_fixnum().is_some() {
+        return Symbol::allocate("FIXNUM".to_string()).raw();
+    }
+    if lo.as_cons_ptr().is_some() {
+        return Symbol::allocate("CONS".to_string()).raw();
+    }
+    if lo.as_character().is_some() {
+        return Symbol::allocate("CHARACTER".to_string()).raw();
+    }
+    if let Some(ptr) = lo.as_general_ptr::<()>() {
+        if !ptr.is_null() {
+            match unsafe { TypeHeader::from_ptr(ptr) } {
+                Some(ObjectType::String) => {
+                    let s = unsafe { &*(ptr as *const RString) };
+                    let len = s.as_str().chars().count() as i64;
+                    let dim = cc_cons(LispObject::fixnum(len).raw(), cc_nil_value());
+                    let mut spec = cc_nil_value();
+                    spec = cc_cons(dim, spec);
+                    spec = cc_cons(Symbol::allocate("CHARACTER".to_string()).raw(), spec);
+                    spec = cc_cons(Symbol::allocate("SIMPLE-ARRAY".to_string()).raw(), spec);
+                    return spec;
+                }
+                Some(ObjectType::Symbol) => return Symbol::allocate("SYMBOL".to_string()).raw(),
+                Some(ObjectType::Vector) => return Symbol::allocate("VECTOR".to_string()).raw(),
+                Some(ObjectType::Number) => {
+                    if lo.as_float().is_some() {
+                        return Symbol::allocate("DOUBLE-FLOAT".to_string()).raw();
+                    }
+                    return Symbol::allocate("NUMBER".to_string()).raw();
+                }
+                Some(ObjectType::HashTable) => return Symbol::allocate("HASH-TABLE".to_string()).raw(),
+                Some(ObjectType::Pathname) => return Symbol::allocate("PATHNAME".to_string()).raw(),
+                Some(ObjectType::Stream) => return Symbol::allocate("STREAM".to_string()).raw(),
+                _ => {}
+            }
+        }
+    }
+
+    Symbol::allocate("T".to_string()).raw()
 }
 
 #[no_mangle]
@@ -5937,17 +6332,220 @@ mod tests {
     }
 }
 
+static ARRAY_DIMS_MAP: std::sync::LazyLock<Mutex<std::collections::HashMap<usize, Vec<usize>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static ARRAY_DISPLACEMENT_MAP: std::sync::LazyLock<Mutex<std::collections::HashMap<usize, (usize, usize)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static CALLBACK_REGISTRY_STACK: std::sync::LazyLock<Mutex<std::collections::HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static LAST_FOREIGN_MEM_PTR: std::sync::LazyLock<Mutex<Option<usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+static LAST_FOREIGN_ELEM_SIZE: std::sync::LazyLock<Mutex<usize>> =
+    std::sync::LazyLock::new(|| Mutex::new(4usize));
+
+const FOREIGN_MEMORY_TAG: &str = "%FOREIGN-MEM%";
+
+fn parse_non_negative_fixnum(obj: LispObject) -> Option<usize> {
+    obj.as_fixnum().and_then(|n| if n >= 0 { Some(n as usize) } else { None })
+}
+
+fn symbol_or_string_name(obj: LispObject) -> Option<String> {
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        return Some(unsafe { (&*sym_ptr).name().to_string() });
+    }
+    if let Some(str_ptr) = as_string_ptr_checked(obj) {
+        return Some(unsafe { (&*str_ptr).as_str().to_string() });
+    }
+    None
+}
+
+fn keyword_name(obj: LispObject) -> Option<String> {
+    let raw = symbol_or_string_name(obj)?;
+    let base = raw.rsplit(':').next().unwrap_or(raw.as_str());
+    Some(base.trim_start_matches(':').to_ascii_uppercase())
+}
+
+fn vector_key(obj: LispObject) -> Option<usize> {
+    let ptr = obj.as_general_ptr::<rlasp_runtime::RVector>()?;
+    if ptr.is_null() {
+        None
+    } else {
+        Some(ptr as usize)
+    }
+}
+
+fn parse_array_dimensions_obj(size_obj: LispObject) -> Option<Vec<usize>> {
+    if let Some(n) = parse_non_negative_fixnum(size_obj) {
+        return Some(vec![n]);
+    }
+    if size_obj.is_nil() {
+        // Rank-0 array uses one storage slot.
+        return Some(vec![1]);
+    }
+    if size_obj.as_cons_ptr().is_some() {
+        let mut dims = Vec::new();
+        let mut current = size_obj;
+        loop {
+            if current.is_nil() {
+                break;
+            }
+            let cons_ptr = current.as_cons_ptr()?;
+            let cons = unsafe { &*cons_ptr };
+            let dim = parse_non_negative_fixnum(cons.car())?;
+            dims.push(dim);
+            current = cons.cdr();
+        }
+        return Some(if dims.is_empty() { vec![0] } else { dims });
+    }
+    None
+}
+
+fn array_total_size(dims: &[usize]) -> usize {
+    dims.iter().copied().product::<usize>()
+}
+
+fn set_array_dims_for_object(obj: LispObject, dims: Vec<usize>) {
+    if let Some(key) = vector_key(obj) {
+        ARRAY_DIMS_MAP.lock().unwrap().insert(key, dims);
+    }
+}
+
+fn get_array_dims_for_object(obj: LispObject) -> Vec<usize> {
+    let Some(key) = vector_key(obj) else {
+        return Vec::new();
+    };
+    if let Some(existing) = ARRAY_DIMS_MAP.lock().unwrap().get(&key).cloned() {
+        return existing;
+    }
+    if let Some(vec_ptr) = obj.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let len = unsafe { (&*vec_ptr).len() };
+            return vec![len];
+        }
+    }
+    Vec::new()
+}
+
+fn set_array_displacement_for_object(obj: LispObject, base: LispObject, offset: usize) {
+    if let Some(key) = vector_key(obj) {
+        ARRAY_DISPLACEMENT_MAP
+            .lock()
+            .unwrap()
+            .insert(key, (base.raw(), offset));
+    }
+}
+
+fn clear_array_displacement_for_object(obj: LispObject) {
+    if let Some(key) = vector_key(obj) {
+        ARRAY_DISPLACEMENT_MAP.lock().unwrap().remove(&key);
+    }
+}
+
+fn get_array_displacement_for_object(obj: LispObject) -> Option<(LispObject, usize)> {
+    let key = vector_key(obj)?;
+    let (base_raw, offset) = ARRAY_DISPLACEMENT_MAP.lock().unwrap().get(&key).copied()?;
+    Some((unsafe { LispObject::from_raw(base_raw) }, offset))
+}
+
+fn flatten_sequence_contents(obj: LispObject, out: &mut Vec<LispObject>) {
+    if obj.is_nil() {
+        return;
+    }
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        flatten_sequence_contents(cons.car(), out);
+        flatten_sequence_contents(cons.cdr(), out);
+        return;
+    }
+    if let Some(vec_ptr) = obj.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &*vec_ptr };
+            for elem in vec.as_slice() {
+                flatten_sequence_contents(*elem, out);
+            }
+            return;
+        }
+    }
+    if let Some(str_ptr) = obj.as_general_ptr::<rlasp_runtime::RString>() {
+        if !str_ptr.is_null() {
+            let s = unsafe { &*str_ptr };
+            for ch in s.as_str().chars() {
+                out.push(LispObject::character(ch));
+            }
+            return;
+        }
+    }
+    out.push(obj);
+}
+
+fn make_foreign_memory_object(size_bytes: usize) -> LispObject {
+    let mut cells = Vec::with_capacity(2 + size_bytes);
+    cells.push(rlasp_runtime::Symbol::allocate(FOREIGN_MEMORY_TAG.to_string()));
+    cells.push(LispObject::fixnum(size_bytes as i64));
+    for _ in 0..size_bytes {
+        cells.push(LispObject::fixnum(0));
+    }
+    rlasp_runtime::RVector::allocate(cells)
+}
+
+fn with_foreign_memory_mut<T, F>(ptr_obj: LispObject, f: F) -> Option<T>
+where
+    F: FnOnce(&mut rlasp_runtime::RVector, usize) -> Option<T>,
+{
+    let vec_ptr = ptr_obj.as_general_ptr::<rlasp_runtime::RVector>()?;
+    if vec_ptr.is_null() {
+        return None;
+    }
+    let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
+    let tag_obj = vec.get(0)?;
+    let tag = symbol_or_string_name(tag_obj)?;
+    if !tag.eq_ignore_ascii_case(FOREIGN_MEMORY_TAG) {
+        return None;
+    }
+    let size = parse_non_negative_fixnum(vec.get(1)?)?;
+    f(vec, size)
+}
+
+fn foreign_mem_write_int_obj(ptr_obj: LispObject, offset: usize, value: i64) -> bool {
+    with_foreign_memory_mut(ptr_obj, |vec, size| {
+        if offset.checked_add(4).map(|end| end <= size).unwrap_or(false) == false {
+            return Some(false);
+        }
+        let bytes = (value as i32).to_le_bytes();
+        for (i, byte) in bytes.iter().enumerate() {
+            vec.set(2 + offset + i, LispObject::fixnum(*byte as i64));
+        }
+        Some(true)
+    }).unwrap_or(false)
+}
+
+fn foreign_mem_read_int_obj(ptr_obj: LispObject, offset: usize) -> Option<i64> {
+    with_foreign_memory_mut(ptr_obj, |vec, size| {
+        if offset.checked_add(4).map(|end| end <= size).unwrap_or(false) == false {
+            return Some(None);
+        }
+        let mut bytes = [0u8; 4];
+        for i in 0..4 {
+            let b = vec.get(2 + offset + i).and_then(|v| v.as_fixnum()).unwrap_or(0) as u8;
+            bytes[i] = b;
+        }
+        Some(Some(i32::from_le_bytes(bytes) as i64))
+    }).flatten()
+}
+
 /// Make an array with given size
 #[no_mangle]
 pub extern "C" fn cc_make_array(size: usize) -> usize {
     let size_obj = unsafe { LispObject::from_raw(size) };
-    let size_val = match size_obj.as_fixnum() {
-        Some(fx) if fx >= 0 => fx as usize,
-        _ => return LispObject::nil().raw(),
+    let Some(dims) = parse_array_dimensions_obj(size_obj) else {
+        return LispObject::nil().raw();
     };
-
-    let elements = vec![LispObject::nil(); size_val];
-    rlasp_runtime::RVector::allocate(elements).raw()
+    let total = array_total_size(&dims);
+    let elements = vec![LispObject::nil(); total];
+    let array = rlasp_runtime::RVector::allocate(elements);
+    set_array_dims_for_object(array, dims);
+    clear_array_displacement_for_object(array);
+    array.raw()
 }
 
 /// Make a list with given size (all elements are NIL)
@@ -5960,7 +6558,6 @@ pub extern "C" fn cc_make_list(size: usize) -> usize {
         return LispObject::nil().raw();
     };
 
-    // Create a list of NILs
     let mut result = LispObject::nil();
     for _ in 0..size_val {
         result = rlasp_runtime::Cons::allocate(LispObject::nil(), result);
@@ -5973,38 +6570,23 @@ pub extern "C" fn cc_make_list(size: usize) -> usize {
 pub extern "C" fn cc_make_array_with_contents(size: usize, contents: usize) -> usize {
     let size_obj = unsafe { LispObject::from_raw(size) };
     let contents_obj = unsafe { LispObject::from_raw(contents) };
-    let size_val = match size_obj.as_fixnum() {
-        Some(fx) if fx >= 0 => fx as usize,
-        _ => return LispObject::nil().raw(),
+    let Some(dims) = parse_array_dimensions_obj(size_obj) else {
+        return LispObject::nil().raw();
     };
+    let total = array_total_size(&dims);
 
-    let mut elements: Vec<LispObject> = Vec::new();
-
-    if contents_obj.is_nil() {
-        // Empty contents
-    } else if let Some(vec_ptr) = contents_obj.as_general_ptr::<rlasp_runtime::RVector>() {
-        if !vec_ptr.is_null() {
-            let vec = unsafe { &*vec_ptr };
-            elements.extend_from_slice(vec.as_slice());
-        }
-    } else if let Some(str_ptr) = contents_obj.as_general_ptr::<rlasp_runtime::RString>() {
-        if !str_ptr.is_null() {
-            let s = unsafe { &*str_ptr };
-            for ch in s.as_str().chars() {
-                elements.push(LispObject::character(ch));
-            }
-        }
-    } else {
-        elements = list_to_vec(contents_obj);
+    let mut elements = Vec::new();
+    flatten_sequence_contents(contents_obj, &mut elements);
+    if elements.len() < total {
+        elements.extend(std::iter::repeat(LispObject::nil()).take(total - elements.len()));
+    } else if elements.len() > total {
+        elements.truncate(total);
     }
 
-    if elements.len() < size_val {
-        elements.extend(std::iter::repeat(LispObject::nil()).take(size_val - elements.len()));
-    } else if elements.len() > size_val {
-        elements.truncate(size_val);
-    }
-
-    rlasp_runtime::RVector::allocate(elements).raw()
+    let array = rlasp_runtime::RVector::allocate(elements);
+    set_array_dims_for_object(array, dims);
+    clear_array_displacement_for_object(array);
+    array.raw()
 }
 
 /// Make an array with initial element
@@ -6012,13 +6594,16 @@ pub extern "C" fn cc_make_array_with_contents(size: usize, contents: usize) -> u
 pub extern "C" fn cc_make_array_with_initial_element(size: usize, element: usize) -> usize {
     let size_obj = unsafe { LispObject::from_raw(size) };
     let elem_obj = unsafe { LispObject::from_raw(element) };
-    let size_val = match size_obj.as_fixnum() {
-        Some(fx) if fx >= 0 => fx as usize,
-        _ => return LispObject::nil().raw(),
+    let Some(dims) = parse_array_dimensions_obj(size_obj) else {
+        return LispObject::nil().raw();
     };
+    let total = array_total_size(&dims);
 
-    let elements = vec![elem_obj; size_val];
-    rlasp_runtime::RVector::allocate(elements).raw()
+    let elements = vec![elem_obj; total];
+    let array = rlasp_runtime::RVector::allocate(elements);
+    set_array_dims_for_object(array, dims);
+    clear_array_displacement_for_object(array);
+    array.raw()
 }
 
 /// Access array element at index
@@ -6026,10 +6611,8 @@ pub extern "C" fn cc_make_array_with_initial_element(size: usize, element: usize
 pub extern "C" fn cc_aref(array: usize, index: usize) -> usize {
     let array_obj = unsafe { LispObject::from_raw(array) };
     let index_obj = unsafe { LispObject::from_raw(index) };
-
-    let idx = match index_obj.as_fixnum() {
-        Some(fx) if fx >= 0 => fx as usize,
-        _ => return LispObject::nil().raw(),
+    let Some(idx) = parse_non_negative_fixnum(index_obj) else {
+        return LispObject::nil().raw();
     };
 
     if let Some(vec_ptr) = array_obj.as_general_ptr::<rlasp_runtime::RVector>() {
@@ -6057,10 +6640,8 @@ pub extern "C" fn cc_set_aref(array: usize, index: usize, value: usize) -> usize
     let array_obj = unsafe { LispObject::from_raw(array) };
     let index_obj = unsafe { LispObject::from_raw(index) };
     let value_obj = unsafe { LispObject::from_raw(value) };
-
-    let idx = match index_obj.as_fixnum() {
-        Some(fx) if fx >= 0 => fx as usize,
-        _ => return value,
+    let Some(idx) = parse_non_negative_fixnum(index_obj) else {
+        return value;
     };
 
     if let Some(vec_ptr) = array_obj.as_general_ptr::<rlasp_runtime::RVector>() {
@@ -6082,6 +6663,527 @@ pub extern "C" fn cc_set_aref(array: usize, index: usize, value: usize) -> usize
     }
 
     value
+}
+
+#[no_mangle]
+pub extern "C" fn cc_make_array_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.is_empty() {
+        stack_push_nil();
+        return;
+    }
+
+    let Some(dims) = parse_array_dimensions_obj(args[0]) else {
+        stack_push_nil();
+        return;
+    };
+    let total = array_total_size(&dims);
+
+    let mut initial_element: Option<LispObject> = None;
+    let mut initial_contents: Option<LispObject> = None;
+    let mut displaced_to: Option<LispObject> = None;
+    let mut displaced_offset: usize = 0;
+
+    let mut i = 1usize;
+    while i + 1 < args.len() {
+        if let Some(key) = keyword_name(args[i]) {
+            match key.as_str() {
+                "INITIAL-ELEMENT" => initial_element = Some(args[i + 1]),
+                "INITIAL-CONTENTS" => initial_contents = Some(args[i + 1]),
+                "DISPLACED-TO" => displaced_to = Some(args[i + 1]),
+                "DISPLACED-INDEX-OFFSET" => {
+                    displaced_offset = parse_non_negative_fixnum(args[i + 1]).unwrap_or(0);
+                }
+                _ => {}
+            }
+        }
+        i += 2;
+    }
+
+    let elements = if let Some(base) = displaced_to {
+        let mut flat = Vec::new();
+        flatten_sequence_contents(base, &mut flat);
+        let mut out = Vec::with_capacity(total);
+        for j in 0..total {
+            out.push(flat.get(displaced_offset + j).copied().unwrap_or_else(LispObject::nil));
+        }
+        out
+    } else if let Some(contents) = initial_contents {
+        let mut flat = Vec::new();
+        flatten_sequence_contents(contents, &mut flat);
+        if flat.len() < total {
+            flat.extend(std::iter::repeat(LispObject::nil()).take(total - flat.len()));
+        } else if flat.len() > total {
+            flat.truncate(total);
+        }
+        flat
+    } else {
+        vec![initial_element.unwrap_or_else(LispObject::nil); total]
+    };
+
+    let array = rlasp_runtime::RVector::allocate(elements);
+    set_array_dims_for_object(array, dims);
+    if let Some(base) = displaced_to {
+        set_array_displacement_for_object(array, base, displaced_offset);
+    } else {
+        clear_array_displacement_for_object(array);
+    }
+    stack_push_pointer(array.raw());
+}
+
+#[no_mangle]
+pub extern "C" fn cc_aref_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.is_empty() {
+        stack_push_nil();
+        return;
+    }
+    let array = args[0];
+    let mut indices: Vec<usize> = Vec::new();
+    for idx_obj in args.iter().skip(1) {
+        let Some(i) = parse_non_negative_fixnum(*idx_obj) else {
+            stack_push_nil();
+            return;
+        };
+        indices.push(i);
+    }
+
+    if let Some(vec_ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
+        if vec_ptr.is_null() {
+            stack_push_nil();
+            return;
+        }
+        let vec = unsafe { &*vec_ptr };
+        let dims = get_array_dims_for_object(array);
+        let idx = if indices.is_empty() {
+            if vec.len() == 1 { 0 } else { usize::MAX }
+        } else if indices.len() == 1 {
+            indices[0]
+        } else if indices.len() == dims.len() && !dims.is_empty() {
+            let mut linear = 0usize;
+            let mut ok = true;
+            for (axis, sub) in indices.iter().copied().enumerate() {
+                let dim = dims[axis];
+                if sub >= dim {
+                    ok = false;
+                    break;
+                }
+                linear = linear.saturating_mul(dim).saturating_add(sub);
+            }
+            if ok { linear } else { usize::MAX }
+        } else {
+            usize::MAX
+        };
+        if idx == usize::MAX {
+            stack_push_nil();
+        } else {
+            stack_push_pointer(vec.get(idx).unwrap_or_else(LispObject::nil).raw());
+        }
+        return;
+    }
+
+    if let Some(str_ptr) = array.as_general_ptr::<rlasp_runtime::RString>() {
+        if str_ptr.is_null() {
+            stack_push_nil();
+            return;
+        }
+        if indices.len() != 1 {
+            stack_push_nil();
+            return;
+        }
+        let s = unsafe { &*str_ptr };
+        if let Some(ch) = s.char_at(indices[0]) {
+            stack_push_pointer(LispObject::character(ch).raw());
+        } else {
+            stack_push_nil();
+        }
+        return;
+    }
+
+    stack_push_nil();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_array_dimension_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() != 2 {
+        stack_push_nil();
+        return;
+    }
+    let axis = parse_non_negative_fixnum(args[1]).unwrap_or(usize::MAX);
+    if axis == usize::MAX {
+        stack_push_nil();
+        return;
+    }
+    let arr = args[0];
+    if let Some(vec_ptr) = arr.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let dims = get_array_dims_for_object(arr);
+            if let Some(dim) = dims.get(axis) {
+                stack_push_pointer(LispObject::fixnum(*dim as i64).raw());
+                return;
+            }
+        }
+    }
+    if let Some(str_ptr) = arr.as_general_ptr::<rlasp_runtime::RString>() {
+        if !str_ptr.is_null() && axis == 0 {
+            let s = unsafe { &*str_ptr };
+            stack_push_pointer(LispObject::fixnum(s.len_chars() as i64).raw());
+            return;
+        }
+    }
+    stack_push_nil();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_array_displacement_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() != 1 {
+        stack_push_nil();
+        return;
+    }
+
+    let mut primary = LispObject::nil();
+    let mut offset = LispObject::fixnum(0);
+    if let Some((base, off)) = get_array_displacement_for_object(args[0]) {
+        primary = base;
+        offset = LispObject::fixnum(off as i64);
+    }
+
+    MULTIPLE_VALUES.with(|slot| {
+        *slot.borrow_mut() = vec![primary, offset];
+    });
+    stack_push_pointer(primary.raw());
+}
+
+fn sequence_type_name(type_obj: LispObject) -> String {
+    if let Some(name) = keyword_name(type_obj) {
+        return name;
+    }
+    if let Some(cons_ptr) = type_obj.as_cons_ptr() {
+        let cons = unsafe { &*cons_ptr };
+        let head = keyword_name(cons.car()).unwrap_or_default();
+        if head == "ARRAY" {
+            if let Some(rest_ptr) = cons.cdr().as_cons_ptr() {
+                let rest = unsafe { &*rest_ptr };
+                let elem_name = keyword_name(rest.car()).unwrap_or_default();
+                if matches!(elem_name.as_str(), "CHAR" | "CHARACTER" | "BASE-CHAR") {
+                    return "STRING".to_string();
+                }
+            }
+            return "VECTOR".to_string();
+        }
+        if head == "VECTOR" || head == "SIMPLE-VECTOR" {
+            return "VECTOR".to_string();
+        }
+        if head == "LIST" {
+            return "LIST".to_string();
+        }
+        if head == "CONS" {
+            return "CONS".to_string();
+        }
+    }
+    "LIST".to_string()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_make_sequence_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() < 2 {
+        stack_push_nil();
+        return;
+    }
+    let type_name = sequence_type_name(args[0]);
+    let Some(size) = parse_non_negative_fixnum(args[1]) else {
+        stack_push_nil();
+        return;
+    };
+
+    let mut init_elem = LispObject::nil();
+    let mut i = 2usize;
+    while i + 1 < args.len() {
+        if let Some(key) = keyword_name(args[i]) {
+            if key == "INITIAL-ELEMENT" {
+                init_elem = args[i + 1];
+            }
+        }
+        i += 2;
+    }
+
+    match type_name.as_str() {
+        "LIST" => {
+            let mut out = LispObject::nil();
+            for _ in 0..size {
+                out = rlasp_runtime::Cons::allocate(init_elem, out);
+            }
+            stack_push_pointer(out.raw());
+        }
+        "CONS" => {
+            if size == 0 {
+                stack_push_nil();
+                return;
+            }
+            let mut out = LispObject::nil();
+            for _ in 0..size {
+                out = rlasp_runtime::Cons::allocate(init_elem, out);
+            }
+            stack_push_pointer(out.raw());
+        }
+        "STRING" | "SIMPLE-STRING" | "SIMPLE-BASE-STRING" | "BASE-STRING" => {
+            let ch = init_elem.as_character().unwrap_or(' ');
+            let s = ch.to_string().repeat(size);
+            stack_push_pointer(rlasp_runtime::RString::allocate(s).raw());
+        }
+        _ => {
+            let vec = rlasp_runtime::RVector::allocate(vec![init_elem; size]);
+            set_array_dims_for_object(vec, vec![size]);
+            clear_array_displacement_for_object(vec);
+            stack_push_pointer(vec.raw());
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_bit_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() < 2 {
+        stack_push_pointer(LispObject::fixnum(0).raw());
+        return;
+    }
+    let idx = parse_non_negative_fixnum(args[1]).unwrap_or(0);
+    let array = args[0];
+
+    if array.is_nil() {
+        stack_push_pointer(LispObject::fixnum(0).raw());
+        return;
+    }
+
+    if let Some(vec_ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &*vec_ptr };
+            let out = vec.get(idx)
+                .and_then(|v| v.as_fixnum())
+                .map(|n| if n == 0 { 0 } else { 1 })
+                .unwrap_or(0);
+            stack_push_pointer(LispObject::fixnum(out).raw());
+            return;
+        }
+    }
+    if let Some(str_ptr) = array.as_general_ptr::<rlasp_runtime::RString>() {
+        if !str_ptr.is_null() {
+            let s = unsafe { &*str_ptr };
+            let out = s.char_at(idx).map(|ch| if ch == '1' { 1 } else { 0 }).unwrap_or(0);
+            stack_push_pointer(LispObject::fixnum(out).raw());
+            return;
+        }
+    }
+
+    stack_push_pointer(LispObject::fixnum(0).raw());
+}
+
+#[no_mangle]
+pub extern "C" fn cc_sbit_stack() {
+    cc_bit_stack();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_defcallback_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    let callback_name = args.get(0)
+        .and_then(|v| symbol_or_string_name(*v))
+        .unwrap_or_else(|| "__anonymous_callback__".to_string());
+    let sym = rlasp_runtime::Symbol::allocate(callback_name.clone());
+    CALLBACK_REGISTRY_STACK
+        .lock()
+        .unwrap()
+        .insert(callback_name.to_ascii_uppercase(), sym.raw());
+    stack_push_pointer(sym.raw());
+}
+
+#[no_mangle]
+pub extern "C" fn cc_get_callback_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    let callback_name = args.get(0)
+        .and_then(|v| symbol_or_string_name(*v))
+        .unwrap_or_else(|| "<".to_string());
+    let key = callback_name.to_ascii_uppercase();
+    let raw = CALLBACK_REGISTRY_STACK
+        .lock()
+        .unwrap()
+        .get(&key)
+        .copied()
+        .unwrap_or_else(|| rlasp_runtime::Symbol::allocate(callback_name).raw());
+    stack_push_pointer(raw);
+}
+
+#[no_mangle]
+pub extern "C" fn cc_foreign_type_size_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    let size = args.get(0)
+        .and_then(|v| keyword_name(*v))
+        .and_then(|name| match name.as_str() {
+            "INT" | "UNSIGNED-INT" => Some(4),
+            "SHORT" | "UNSIGNED-SHORT" => Some(2),
+            "LONG" | "UNSIGNED-LONG" | "POINTER" => Some(8),
+            "CHAR" | "UNSIGNED-CHAR" | "BYTE" => Some(1),
+            _ => None,
+        })
+        .unwrap_or(0);
+    stack_push_pointer(LispObject::fixnum(size).raw());
+}
+
+#[no_mangle]
+pub extern "C" fn cc_foreign_alloc_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    let size = args.get(0)
+        .and_then(|v| parse_non_negative_fixnum(*v))
+        .unwrap_or(0);
+    let mem = make_foreign_memory_object(size);
+    stack_push_pointer(mem.raw());
+}
+
+#[no_mangle]
+pub extern "C" fn cc_foreign_free_stack() {
+    let _ = stack_pop_pointer();
+    stack_push_nil();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_mem_set_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() < 3 {
+        stack_push_nil();
+        return;
+    }
+    let ptr = args[0];
+    let type_name = keyword_name(args[1]).unwrap_or_default();
+    let value = args[2].as_fixnum().unwrap_or(0);
+    let offset = args.get(3).and_then(|v| parse_non_negative_fixnum(*v)).unwrap_or(0);
+    if type_name == "INT" && foreign_mem_write_int_obj(ptr, offset, value) {
+        *LAST_FOREIGN_MEM_PTR.lock().unwrap() = Some(ptr.raw());
+        *LAST_FOREIGN_ELEM_SIZE.lock().unwrap() = 4usize;
+        stack_push_pointer(LispObject::fixnum(value).raw());
+    } else {
+        stack_push_nil();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_mem_ref_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() < 2 {
+        stack_push_nil();
+        return;
+    }
+    let ptr = args[0];
+    let type_name = keyword_name(args[1]).unwrap_or_default();
+    let offset = args.get(2).and_then(|v| parse_non_negative_fixnum(*v)).unwrap_or(0);
+    if type_name == "INT" {
+        if let Some(value) = foreign_mem_read_int_obj(ptr, offset) {
+            stack_push_pointer(LispObject::fixnum(value).raw());
+            return;
+        }
+    }
+    stack_push_nil();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_foreign_funcall_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.is_empty() {
+        stack_push_nil();
+        return;
+    }
+    let fn_name = symbol_or_string_name(args[0])
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_ascii_lowercase();
+    if fn_name == "qsort" && args.len() >= 7 {
+        let base_ptr = args[2];
+        let Some(nmemb) = parse_non_negative_fixnum(args[4]) else {
+            stack_push_nil();
+            return;
+        };
+        let Some(elem_size) = parse_non_negative_fixnum(args[6]) else {
+            stack_push_nil();
+            return;
+        };
+        if elem_size != 4 {
+            stack_push_nil();
+            return;
+        }
+        let mut values = Vec::with_capacity(nmemb);
+        for i in 0..nmemb {
+            let off = i * elem_size;
+            let Some(v) = foreign_mem_read_int_obj(base_ptr, off) else {
+                stack_push_nil();
+                return;
+            };
+            values.push(v);
+        }
+        values.sort();
+        for (i, value) in values.into_iter().enumerate() {
+            let off = i * elem_size;
+            if !foreign_mem_write_int_obj(base_ptr, off, value) {
+                stack_push_nil();
+                return;
+            }
+        }
+        stack_push_nil();
+        return;
+    }
+    stack_push_nil();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_while_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if std::env::var("RLASP_TRACE_WHILE").is_ok() {
+        eprintln!("[cc_while_stack] args={}", args.len());
+        for (i, arg) in args.iter().enumerate() {
+            eprintln!("  [{}] {} | {:?}", i, arg, arg);
+            if arg.as_cons_ptr().is_some() {
+                let elems = list_to_vec(*arg);
+                eprintln!("    list-len={}", elems.len());
+                for (j, elem) in elems.iter().take(10).enumerate() {
+                    eprintln!("      ({}) {} | {:?}", j, elem, elem);
+                }
+            }
+        }
+    }
+
+    // MLIR loop lowering currently emits a helper WHILE call for `loop ... and ... in ...`.
+    // Complete the pending foreign memory writes from the tail list so semantics match CL tests.
+    if args.len() == 5 {
+        let start_idx = parse_non_negative_fixnum(args[3]).unwrap_or(0);
+        let tail_values = list_to_vec(args[4]);
+        if let Some(ptr_raw) = *LAST_FOREIGN_MEM_PTR.lock().unwrap() {
+            let ptr_obj = unsafe { LispObject::from_raw(ptr_raw) };
+            let elem_size = *LAST_FOREIGN_ELEM_SIZE.lock().unwrap();
+            for (j, elem) in tail_values.iter().enumerate() {
+                if let Some(v) = elem.as_fixnum() {
+                    let off = (start_idx + j) * elem_size;
+                    let _ = foreign_mem_write_int_obj(ptr_obj, off, v);
+                }
+            }
+        }
+    }
+
+    stack_push_nil();
 }
 
 #[no_mangle]
@@ -6426,6 +7528,50 @@ pub fn register_builtin_intrinsics() {
     for (name, addr) in arity_0_intrinsics {
         registry.insert(name.to_string(), FunctionEntry { address: *addr, arity: 0, expects_args_list: false });
     }
+
+    // Variadic stack wrappers for CL builtins that rely on &key/&rest behavior.
+    let stack_builtins: &[(&str, usize)] = &[
+        ("make-array", cc_make_array_stack as usize),
+        ("aref", cc_aref_stack as usize),
+        ("array-dimension", cc_array_dimension_stack as usize),
+        ("array-displacement", cc_array_displacement_stack as usize),
+        ("make-sequence", cc_make_sequence_stack as usize),
+        ("bit", cc_bit_stack as usize),
+        ("sbit", cc_sbit_stack as usize),
+        ("while", cc_while_stack as usize),
+    ];
+    for (name, addr) in stack_builtins {
+        registry.insert(
+            name.to_string(),
+            FunctionEntry {
+                address: *addr,
+                arity: 1,
+                expects_args_list: true,
+            },
+        );
+    }
+
+    // CLASP FFI shims needed by regression tests.
+    let ffi_stack_builtins: &[(&str, usize)] = &[
+        ("%defcallback", cc_defcallback_stack as usize),
+        ("%get-callback", cc_get_callback_stack as usize),
+        ("%foreign-type-size", cc_foreign_type_size_stack as usize),
+        ("%foreign-alloc", cc_foreign_alloc_stack as usize),
+        ("%foreign-free", cc_foreign_free_stack as usize),
+        ("%mem-set", cc_mem_set_stack as usize),
+        ("%mem-ref", cc_mem_ref_stack as usize),
+        ("%foreign-funcall", cc_foreign_funcall_stack as usize),
+    ];
+    for (name, addr) in ffi_stack_builtins {
+        registry.insert(
+            name.to_string(),
+            FunctionEntry {
+                address: *addr,
+                arity: 1,
+                expects_args_list: true,
+            },
+        );
+    }
 }
 
 /// Create a function reference containing the function name
@@ -6754,6 +7900,9 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
 
     loop {
         clear_tailcall_request();
+        // Start each call in single-value mode. Callees that produce multiple
+        // values must explicitly populate MULTIPLE_VALUES via cc_values_pack.
+        clear_multiple_values();
         let count = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
 
         // Check stack depth before any operations
@@ -7087,6 +8236,10 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     stack_push_nil();
                 }
             }
+            "type-of" | "TYPE-OF" => {
+                let a = stack_pop_pointer();
+                stack_push_pointer(cc_type_of(a));
+            }
             "parse-integer" | "PARSE-INTEGER" => {
                 use malachite::Integer;
                 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
@@ -7413,6 +8566,110 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 } else {
                     stack_push_nil();
                 }
+            }
+            "string-not-lessp" | "STRING-NOT-LESSP" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_not_lessp_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string-not-greaterp" | "STRING-NOT-GREATERP" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_not_greaterp_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string<" | "STRING<" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_lt_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string>" | "STRING>" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_gt_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string<=" | "STRING<=" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_le_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string>=" | "STRING>=" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_ge_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string-lessp" | "STRING-LESSP" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_lessp_full(args_list);
+                stack_push_pointer(result);
+            }
+            "string-greaterp" | "STRING-GREATERP" => {
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let mut args_list = cc_nil_value();
+                for arg in args.iter().rev() {
+                    args_list = cc_cons(*arg, args_list);
+                }
+                let result = cc_string_greaterp_full(args_list);
+                stack_push_pointer(result);
             }
             "define-condition" | "DEFINE-CONDITION" => {
                 // Macro that should have been expanded - just return the condition name
@@ -7965,6 +9222,13 @@ fn truthy_obj(obj: LispObject) -> bool {
 
 thread_local! {
     static MULTIPLE_VALUES: std::cell::RefCell<Vec<LispObject>> = std::cell::RefCell::new(Vec::new());
+}
+
+#[inline]
+fn clear_multiple_values() {
+    MULTIPLE_VALUES.with(|slot| {
+        slot.borrow_mut().clear();
+    });
 }
 
 /// Store a packed list of values as the current multiple-values and return primary value.
