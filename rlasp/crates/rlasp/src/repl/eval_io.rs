@@ -1064,7 +1064,7 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 let mut out = format_for_prin1(obj);
                 out.push('\n');
                 write_to_destination(args.get(1), &out)?;
-                Ok(EvalResult::Nil)
+                Ok(EvalResult::MultipleValues(vec![]))
             } else {
                 Ok(EvalResult::Nil)
             }
@@ -1485,20 +1485,23 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return Err("write-byte requires a byte and a stream".to_string());
             }
             let stream = &args[1];
-            match args[0] {
-                EvalResult::Fixnum(n) if n >= 0 => {
-                    if n <= 255 {
-                        let byte = n as u8;
-                        stream_write_raw_byte(stream, byte)?;
-                        Ok(EvalResult::Fixnum(byte as i64))
-                    } else if let Some(ch) = char::from_u32(n as u32) {
-                        stream_write_text(stream, &ch.to_string())?;
-                        Ok(EvalResult::Fixnum(n))
-                    } else {
-                        Err("write-byte requires a non-negative integer representable as a codepoint".to_string())
-                    }
-                }
-                _ => Err("write-byte requires an unsigned integer".to_string()),
+            let byte_value = super::eval_types::primary_value(args[0].clone());
+            let n = match byte_value {
+                EvalResult::Fixnum(v) if v >= 0 => Some(v),
+                EvalResult::Float(v) if v >= 0.0 && v.fract() == 0.0 => Some(v as i64),
+                EvalResult::Bignum(b) => b.to_string().parse::<i64>().ok().filter(|v| *v >= 0),
+                _ => None,
+            }.ok_or_else(|| "write-byte requires an unsigned integer".to_string())?;
+
+            if n <= 255 {
+                let byte = n as u8;
+                stream_write_raw_byte(stream, byte)?;
+                Ok(EvalResult::Fixnum(byte as i64))
+            } else if let Some(ch) = char::from_u32(n as u32) {
+                stream_write_text(stream, &ch.to_string())?;
+                Ok(EvalResult::Fixnum(n))
+            } else {
+                Err("write-byte requires a non-negative integer representable as a codepoint".to_string())
             }
         }
 
@@ -2114,20 +2117,141 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
 // Helper: format object for prin1 (with escapes)
 fn format_for_prin1(obj: &EvalResult) -> String {
-    match obj {
-        EvalResult::String(s) => format!("\"{}\"", s),
-        EvalResult::Character(c) => format!("#\\{}", c),
-        EvalResult::Symbol(s) => s.clone(),
-        EvalResult::Float(n) => n.to_string(),
-        EvalResult::Fixnum(n) => n.to_string(),
-        EvalResult::Bignum(n) => n.to_string(),
-        EvalResult::Ratio(r) => format!("{}/{}", r.numerator_ref(), r.denominator_ref()),
-        EvalResult::Complex(re, im) => format!("#C({} {})", re, im),
-        EvalResult::Boolean(true) | EvalResult::Bool(true) => "T".to_string(),
-        EvalResult::Boolean(false) | EvalResult::Bool(false) | EvalResult::Nil => "NIL".to_string(),
-        EvalResult::Cons(_, _) => format_list(obj),
-        _ => format!("{}", obj),
+    fn print_circle_enabled() -> bool {
+        matches!(
+            super::eval_io_syntax::get_io_syntax_var("*print-circle*"),
+            Some(EvalResult::Bool(true) | EvalResult::Boolean(true))
+        )
     }
+
+    struct ArrayPrintCtx {
+        print_circle: bool,
+        next_label: usize,
+        labels: HashMap<usize, usize>,
+        defined: HashSet<usize>,
+        in_progress: HashSet<usize>,
+    }
+
+    impl ArrayPrintCtx {
+        fn new(print_circle: bool) -> Self {
+            Self {
+                print_circle,
+                next_label: 1,
+                labels: HashMap::new(),
+                defined: HashSet::new(),
+                in_progress: HashSet::new(),
+            }
+        }
+
+        fn ensure_label(&mut self, ptr: usize) -> usize {
+            if let Some(label) = self.labels.get(&ptr).copied() {
+                label
+            } else {
+                let label = self.next_label;
+                self.next_label += 1;
+                self.labels.insert(ptr, label);
+                label
+            }
+        }
+    }
+
+    fn format_array_contents_recursive(
+        elements: &[EvalResult],
+        dims: &[usize],
+        depth: usize,
+        index: &mut usize,
+        ctx: &mut ArrayPrintCtx,
+    ) -> String {
+        if depth >= dims.len() {
+            return "NIL".to_string();
+        }
+        let mut parts = Vec::with_capacity(dims[depth]);
+        for _ in 0..dims[depth] {
+            if depth + 1 == dims.len() {
+                if let Some(elem) = elements.get(*index) {
+                    parts.push(format_for_prin1_with_ctx(elem, ctx));
+                    *index += 1;
+                } else {
+                    parts.push("NIL".to_string());
+                }
+            } else {
+                parts.push(format_array_contents_recursive(elements, dims, depth + 1, index, ctx));
+            }
+        }
+        format!("({})", parts.join(" "))
+    }
+
+    fn format_array_for_prin1(arr: &Rc<RefCell<Vec<EvalResult>>>, ctx: &mut ArrayPrintCtx) -> String {
+        let ptr = Rc::as_ptr(arr) as usize;
+        if ctx.in_progress.contains(&ptr) {
+            if ctx.print_circle {
+                let label = ctx.ensure_label(ptr);
+                return format!("#{}#", label);
+            }
+            return "#<ARRAY>".to_string();
+        }
+        if ctx.print_circle {
+            if let Some(label) = ctx.labels.get(&ptr).copied() {
+                if ctx.defined.contains(&ptr) {
+                    return format!("#{}#", label);
+                }
+            }
+        }
+
+        ctx.in_progress.insert(ptr);
+        let elements_ref = arr.borrow();
+        let elements: &[EvalResult] = &elements_ref;
+        let mut dims = super::eval_system::get_array_dims(arr);
+        if dims.is_empty() {
+            dims.push(elements.len());
+        }
+
+        let body = if dims.len() == 1 {
+            let mut rendered_parts = Vec::with_capacity(elements.len());
+            for elem in elements {
+                rendered_parts.push(format_for_prin1_with_ctx(elem, ctx));
+            }
+            format!("#({})", rendered_parts.join(" "))
+        } else {
+            let mut idx = 0usize;
+            let nested = format_array_contents_recursive(elements, &dims, 0, &mut idx, ctx);
+            format!("#{}A{}", dims.len(), nested)
+        };
+
+        ctx.in_progress.remove(&ptr);
+
+        if ctx.print_circle {
+            if let Some(label) = ctx.labels.get(&ptr).copied() {
+                if !ctx.defined.contains(&ptr) {
+                    ctx.defined.insert(ptr);
+                    return format!("#{}={}", label, body);
+                }
+            }
+        }
+
+        body
+    }
+
+    fn format_for_prin1_with_ctx(obj: &EvalResult, ctx: &mut ArrayPrintCtx) -> String {
+        match obj {
+            EvalResult::String(s) => format!("\"{}\"", s),
+            EvalResult::Character(c) => format!("#\\{}", c),
+            EvalResult::Symbol(s) => s.clone(),
+            EvalResult::Float(n) => n.to_string(),
+            EvalResult::Fixnum(n) => n.to_string(),
+            EvalResult::Bignum(n) => n.to_string(),
+            EvalResult::Ratio(r) => format!("{}/{}", r.numerator_ref(), r.denominator_ref()),
+            EvalResult::Complex(re, im) => format!("#C({} {})", re, im),
+            EvalResult::Boolean(true) | EvalResult::Bool(true) => "T".to_string(),
+            EvalResult::Boolean(false) | EvalResult::Bool(false) | EvalResult::Nil => "NIL".to_string(),
+            EvalResult::Cons(_, _) => format_list(obj),
+            EvalResult::Array(arr) => format_array_for_prin1(arr, ctx),
+            _ => format!("{}", obj),
+        }
+    }
+
+    let mut ctx = ArrayPrintCtx::new(print_circle_enabled());
+    format_for_prin1_with_ctx(obj, &mut ctx)
 }
 
 // Helper: format object for princ (without escapes)

@@ -55,10 +55,12 @@ pub fn expand_loop(args: &[ASTNode]) -> ASTNode {
     // Check if this is a simple loop (no keywords, just body)
     let first_is_keyword = is_loop_keyword_any(&args[0]);
     if !first_is_keyword {
-        // Simple loop: (loop body...) - infinite loop with body
-        // Transform to: (block nil (tagbody :loop body... (go :loop)))
-        // For now, just execute once (we don't have proper infinite loop support)
-        return ASTNode::progn(args.to_vec());
+        // Simple loop: (loop body...) has an implicit NIL block so (return ...)
+        // can exit with values. We still execute a single pass for now.
+        return ASTNode::Call {
+            function: Box::new(ASTNode::Variable("block".to_string())),
+            args: vec![ASTNode::nil(), ASTNode::progn(args.to_vec())],
+        };
     }
 
     // Parse loop clauses
@@ -1100,6 +1102,7 @@ impl<'a> LoopParser<'a> {
         let mut all_list_vars: HashSet<String> = HashSet::new();  // All :into vars for list ops
         let mut all_sum_vars: HashSet<String> = HashSet::new();   // All :into vars for sum ops
         let mut all_count_vars: HashSet<String> = HashSet::new(); // All :into vars for count ops
+        let mut needs_sequential_bindings = false;
         // Multiple parallel :in iterators are allowed (e.g. FOR x IN ... FOR y IN ...).
         // Tuple: (loop var, hidden list var, optional :by step function)
         let mut in_iters: Vec<(String, String, Option<ASTNode>)> = Vec::new();
@@ -1136,6 +1139,7 @@ impl<'a> LoopParser<'a> {
                 }
                 LoopClause::WithDestructure { vars, init } => {
                     // WITH (a b) = expr → bind __loop_with_tmp__ = expr, a = (nth 0 tmp), b = (nth 1 tmp)
+                    needs_sequential_bindings = true;
                     let tmp_var = format!("__loop_with_tmp_{}__", bindings.len());
                     bindings.push((tmp_var.clone(), init.clone()));
                     for (i, v) in vars.iter().enumerate() {
@@ -1905,6 +1909,11 @@ impl<'a> LoopParser<'a> {
         // Wrap in let with bindings
         if bindings.is_empty() {
             block_body
+        } else if needs_sequential_bindings {
+            ASTNode::LetStar {
+                bindings,
+                body: vec![block_body],
+            }
         } else {
             ASTNode::let_bindings(bindings, vec![block_body])
         }

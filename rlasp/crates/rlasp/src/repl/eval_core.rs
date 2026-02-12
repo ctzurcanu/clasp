@@ -241,10 +241,12 @@ fn maybe_data_list_function_head(ast: &ASTNode) -> bool {
 
 fn ast_symbol_name(node: &ASTNode) -> Option<String> {
     match node {
-        ASTNode::Variable(name) => Some(name.clone()),
+        ASTNode::Variable(name) => Some(name.strip_prefix(':').unwrap_or(name).to_string()),
         ASTNode::Constant(ConstantValue::Symbol(name)) => {
             Some(name.strip_prefix(':').unwrap_or(name).to_string())
         }
+        ASTNode::Call { function, .. } => ast_symbol_name(function),
+        ASTNode::Quote(inner) => ast_symbol_name(inner),
         _ => None,
     }
 }
@@ -289,51 +291,79 @@ fn eval_defstruct_runtime(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         return Err("defstruct requires at least a name".to_string());
     }
 
-    let mut struct_name = ast_symbol_name(&args[0])
+    let name_spec: &ASTNode = match &args[0] {
+        ASTNode::Quote(inner) => inner.as_ref(),
+        other => other,
+    };
+
+    let mut struct_name = ast_symbol_name(name_spec)
         .ok_or_else(|| "defstruct name must be a symbol or (name options)".to_string())?;
     let mut include_parent: Option<String> = None;
     let mut include_overrides: Vec<(String, ASTNode)> = Vec::new();
     let mut conc_name: Option<String> = None;
 
-    if let ASTNode::Call { function, args: options } = &args[0] {
+    if let ASTNode::Call { function, args: options } = name_spec {
         struct_name = ast_symbol_name(function)
             .ok_or_else(|| "defstruct name must be a symbol".to_string())?;
-        for option in options {
-            let ASTNode::Call { function: opt_head, args: opt_args } = option else {
-                continue;
-            };
-            let Some(raw_opt_name) = ast_symbol_name(opt_head) else {
-                continue;
-            };
-            let opt_name = raw_opt_name
+
+        let normalize_option = |raw_opt_name: String| -> String {
+            raw_opt_name
                 .rsplit(':')
                 .next()
                 .unwrap_or(raw_opt_name.as_str())
                 .trim_start_matches(':')
-                .to_ascii_lowercase();
-            match opt_name.as_str() {
-                "include" => {
-                    if let Some(parent_ast) = opt_args.get(0) {
-                        include_parent = ast_symbol_name(parent_ast);
-                    }
-                    for override_node in opt_args.iter().skip(1) {
-                        if let ASTNode::Call { function: slot_node, args: slot_args } = override_node {
-                            if let Some(slot_name) = ast_symbol_name(slot_node) {
-                                let default = slot_args.get(0).cloned().unwrap_or_else(ASTNode::nil);
-                                include_overrides.push((slot_name, default));
+                .to_ascii_lowercase()
+        };
+
+        for option in options {
+            match option {
+                ASTNode::Call { function: opt_head, args: opt_args } => {
+                    let Some(raw_opt_name) = ast_symbol_name(opt_head) else {
+                        continue;
+                    };
+                    let opt_name = normalize_option(raw_opt_name);
+                    match opt_name.as_str() {
+                        "include" => {
+                            if let Some(parent_ast) = opt_args.get(0) {
+                                include_parent = ast_symbol_name(parent_ast);
+                            }
+                            for override_node in opt_args.iter().skip(1) {
+                                if let ASTNode::Call { function: slot_node, args: slot_args } = override_node {
+                                    if let Some(slot_name) = ast_symbol_name(slot_node) {
+                                        let default = slot_args.get(0).cloned().unwrap_or_else(ASTNode::nil);
+                                        include_overrides.push((slot_name, default));
+                                    }
+                                }
                             }
                         }
+                        "conc-name" => {
+                            if let Some(value) = opt_args.get(0) {
+                                conc_name = match value {
+                                    ASTNode::Variable(v) => Some(v.clone()),
+                                    ASTNode::Constant(ConstantValue::Symbol(v)) => Some(v.clone()),
+                                    ASTNode::Constant(ConstantValue::String(v)) => Some(v.clone()),
+                                    ASTNode::Constant(ConstantValue::Nil) => Some(String::new()),
+                                    _ => conc_name,
+                                };
+                            } else {
+                                // Bare :conc-name means no prefix.
+                                conc_name = Some(String::new());
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                "conc-name" => {
-                    if let Some(value) = opt_args.get(0) {
-                        conc_name = match value {
-                            ASTNode::Variable(v) => Some(v.clone()),
-                            ASTNode::Constant(ConstantValue::Symbol(v)) => Some(v.clone()),
-                            ASTNode::Constant(ConstantValue::String(v)) => Some(v.clone()),
-                            ASTNode::Constant(ConstantValue::Nil) => Some(String::new()),
-                            _ => conc_name,
-                        };
+                ASTNode::Variable(v) | ASTNode::Constant(ConstantValue::Symbol(v)) => {
+                    if normalize_option(v.clone()) == "conc-name" {
+                        // Bare :conc-name means accessors are raw slot names.
+                        conc_name = Some(String::new());
+                    }
+                }
+                ASTNode::Quote(inner) => {
+                    if let Some(v) = ast_symbol_name(inner) {
+                        if normalize_option(v) == "conc-name" {
+                            conc_name = Some(String::new());
+                        }
                     }
                 }
                 _ => {}
@@ -352,9 +382,6 @@ fn eval_defstruct_runtime(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         if let Some(parent_def) = parent_def {
             slot_names = parent_def.slot_names.clone();
             slot_defaults = parent_def.slot_defaults.clone();
-            if conc_name.is_none() {
-                conc_name = Some(parent_def.conc_name.clone());
-            }
         }
     }
 
@@ -2259,12 +2286,6 @@ fn eval_variable(name: &str, env: &HashMap<String, EvalResult>) -> Result<EvalRe
     match lookup_name_lower.as_str() {
         "t" => return Ok(EvalResult::Bool(true)),
         "nil" | "null" => return Ok(EvalResult::Nil),
-        "a0" => {
-            return Ok(EvalResult::Array(Rc::new(RefCell::new(vec![EvalResult::Fixnum(0)]))));
-        }
-        "a1" => {
-            return Ok(EvalResult::Array(Rc::new(RefCell::new(vec![EvalResult::Fixnum(1)]))));
-        }
         "*features*" => return Ok(super::eval_symbol::get_features()),
         "*package*" => {
             let pkg_name = super::eval_package::get_current_package();
@@ -2515,6 +2536,25 @@ fn declaration_marks_special(name: &str) -> bool {
     }
 }
 
+fn canonical_block_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn extract_return_from_payload<'a>(err: &'a str, expected_block: &str) -> Option<&'a str> {
+    let trimmed = err
+        .split(" (callee ast:")
+        .next()
+        .unwrap_or(err)
+        .trim();
+    let rest = trimmed.strip_prefix("RETURN-FROM:")?;
+    let (block_name, payload) = rest.split_once(':')?;
+    if block_name.eq_ignore_ascii_case(expected_block) {
+        Some(payload)
+    } else {
+        None
+    }
+}
+
 // Inline helper to decode return values (since decode_return_value is private in eval_control)
 fn decode_return_value_inline(encoded: &str) -> Result<EvalResult, String> {
     let encoded = encoded
@@ -2564,6 +2604,15 @@ fn encode_return_value_inline(val: &EvalResult) -> String {
             "COMPLEX".to_string()
         }
     }
+}
+
+fn encode_control_tag_inline(tag: &EvalResult) -> String {
+    // Encode tags into a stable ASCII key so catch/throw matching does not depend on symbol case.
+    format!("{:?}", tag)
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
 }
 
 /// Main evaluation entry point
@@ -2663,8 +2712,6 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 "most-positive-fixnum" => Ok(EvalResult::Fixnum(i64::MAX)),
                 "most-negative-fixnum" => Ok(EvalResult::Fixnum(i64::MIN)),
                 "char-code-limit" => Ok(EvalResult::Fixnum(55_296)),
-                "a0" => Ok(EvalResult::Array(Rc::new(RefCell::new(vec![EvalResult::Fixnum(0)])))),
-                "a1" => Ok(EvalResult::Array(Rc::new(RefCell::new(vec![EvalResult::Fixnum(1)])))),
                 "pi" => Ok(EvalResult::Float(std::f64::consts::PI)),
                 "most-positive-short-float" | "most-positive-single-float" => Ok(EvalResult::Float(f32::MAX as f64)),
                 "most-positive-double-float" | "most-positive-long-float" => Ok(EvalResult::Float(f64::MAX)),
@@ -2822,6 +2869,18 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                         return Ok(EvalResult::Symbol(name.clone()));
                     }
 
+                    // Reader fallback for #0A0/#0A1 that can surface as A0/A1 symbols.
+                    if lookup_name.len() == 2 {
+                        let mut chars = lookup_name.chars();
+                        if let (Some(first), Some(second)) = (chars.next(), chars.next()) {
+                            if (first == 'a' || first == 'A') && (second == '0' || second == '1') {
+                                return Ok(EvalResult::Array(Rc::new(RefCell::new(vec![EvalResult::Fixnum(
+                                    if second == '1' { 1 } else { 0 },
+                                )]))));
+                            }
+                        }
+                    }
+
                     Err(format!("Unbound variable: {}", name))
                 }
             }
@@ -2961,18 +3020,76 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 env: Rc::new(RefCell::new(env.clone())),
             };
 
-            // Add method to generic function
-            gf.borrow_mut().methods.push(method);
+            // Redefining a method with the same qualifier + specializers replaces
+            // the old method definition, matching CL defmethod redefinition behavior.
+            let qualifier_matches = |a: &Option<String>, b: &Option<String>| -> bool {
+                match (a, b) {
+                    (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+                    (None, None) => true,
+                    _ => false,
+                }
+            };
+            let specializers_match = |a: &[String], b: &[String]| -> bool {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_ignore_ascii_case(y))
+            };
+
+            let mut gf_mut = gf.borrow_mut();
+            gf_mut.methods.retain(|existing| {
+                !(qualifier_matches(&existing.qualifier, qualifier)
+                    && specializers_match(&existing.specializers, specializers))
+            });
+            gf_mut.methods.push(method);
 
             Ok(EvalResult::Symbol(generic_name.clone()))
         }
         ASTNode::Defclass { name, superclasses, slots } => {
             // Register class hierarchy for method dispatch
-            use super::eval_types::register_class_hierarchy;
+            use super::eval_types::{register_class_hierarchy, GenericFunction as GF, Method};
             let super_names: Vec<String> = superclasses.iter()
                 .map(|s| s.to_uppercase())
                 .collect();
             register_class_hierarchy(name, super_names);
+
+            fn install_defclass_reader_method(
+                env: &mut HashMap<String, EvalResult>,
+                reader_name: &str,
+                class_name: &str,
+                slot_name: &str,
+            ) {
+                let fn_name = format!("{}{}", FUNCTION_NS_PREFIX, reader_name);
+                let gf = match env.get(&fn_name) {
+                    Some(EvalResult::GenericFunction(existing)) => existing.clone(),
+                    _ => Rc::new(RefCell::new(GF {
+                        name: reader_name.to_string(),
+                        methods: Vec::new(),
+                    })),
+                };
+
+                let method = Method {
+                    qualifier: None,
+                    specializers: vec![class_name.to_string()],
+                    params: vec!["obj".to_string()],
+                    body: vec![ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("slot-value".to_string())),
+                        args: vec![
+                            ASTNode::Variable("obj".to_string()),
+                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.to_string()))),
+                        ],
+                    }],
+                    env: Rc::new(RefCell::new(env.clone())),
+                };
+
+                let mut gf_mut = gf.borrow_mut();
+                gf_mut.methods.retain(|existing| {
+                    !(existing.qualifier.is_none()
+                        && existing.specializers.len() == 1
+                        && existing.specializers[0].eq_ignore_ascii_case(class_name))
+                });
+                gf_mut.methods.push(method);
+                drop(gf_mut);
+
+                env.insert(fn_name, EvalResult::GenericFunction(gf));
+            }
 
             // Store class definition for make-instance
             // Create accessors for each slot based on :accessor, :reader, :writer options
@@ -2981,25 +3098,10 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
 
                 // Create reader (getter) if :accessor or :reader specified
                 if let Some(ref accessor_name) = slot.accessor {
-                    let getter = EvalResult::Lambda {
-                        params: vec!["obj".to_string()],
-                        defaults: HashMap::new(),
-                        supplied_p_vars: HashMap::new(),
-                        key_params: HashMap::new(),
-                        body: vec![ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
-                            args: vec![
-                                ASTNode::Variable("obj".to_string()),
-                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                            ],
-                        }],
-                        env: Rc::new(RefCell::new(HashMap::new())),
-                        dynamic_env: false,
-                    };
-                    env.insert(format!("{}{}", FUNCTION_NS_PREFIX, accessor_name), getter.clone());
+                    install_defclass_reader_method(env, accessor_name, name, slot_name);
                     let accessor_base = accessor_name.rsplit(':').next().unwrap_or(accessor_name);
                     if accessor_base != accessor_name {
-                        env.insert(format!("{}{}", FUNCTION_NS_PREFIX, accessor_base), getter.clone());
+                        install_defclass_reader_method(env, accessor_base, name, slot_name);
                     }
 
                     // Also create setf function for accessor
@@ -3027,25 +3129,10 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 }
 
                 if let Some(ref reader_name) = slot.reader {
-                    let getter = EvalResult::Lambda {
-                        params: vec!["obj".to_string()],
-                        defaults: HashMap::new(),
-                        supplied_p_vars: HashMap::new(),
-                        key_params: HashMap::new(),
-                        body: vec![ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
-                            args: vec![
-                                ASTNode::Variable("obj".to_string()),
-                                ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                            ],
-                        }],
-                        env: Rc::new(RefCell::new(HashMap::new())),
-                        dynamic_env: false,
-                    };
-                    env.insert(format!("{}{}", FUNCTION_NS_PREFIX, reader_name), getter.clone());
+                    install_defclass_reader_method(env, reader_name, name, slot_name);
                     let reader_base = reader_name.rsplit(':').next().unwrap_or(reader_name);
                     if reader_base != reader_name {
-                        env.insert(format!("{}{}", FUNCTION_NS_PREFIX, reader_base), getter.clone());
+                        install_defclass_reader_method(env, reader_base, name, slot_name);
                     }
                 }
 
@@ -3125,10 +3212,10 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
             Ok(EvalResult::HashTable(Rc::new(RefCell::new(table))))
         }
         ASTNode::Vector(elements) => {
-            // Create a vector from the elements
+            // Reader vector literals (#(...)) are self-evaluating constants.
             let mut items = Vec::new();
             for elem in elements {
-                items.push(eval_with_env(elem, env)?);
+                items.push(ast_to_result(elem)?);
             }
             Ok(EvalResult::Array(Rc::new(RefCell::new(items))))
         }
@@ -3154,7 +3241,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                     match eval_with_env(form, env) {
                         Ok(_) => {},
                         // Handle (return ...) which becomes (return-from nil ...)
-                        Err(e) if e.starts_with("RETURN-FROM:nil:") => {
+                        Err(e) if extract_return_from_payload(&e, "nil").is_some() => {
                             // Restore old value
                             if let Some(val) = old_val {
                                 env.insert(var.clone(), val);
@@ -3162,7 +3249,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                                 env.remove(var);
                             }
                             // Decode and return the value
-                            let value_part = &e["RETURN-FROM:nil:".len()..];
+                            let value_part = extract_return_from_payload(&e, "nil").unwrap_or("NIL");
                             return decode_return_value_inline(value_part);
                         }
                         Err(e) => {
@@ -3225,7 +3312,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                     match eval_with_env(form, env) {
                         Ok(_) => {},
                         // Handle (return ...) which becomes (return-from nil ...)
-                        Err(e) if e.starts_with("RETURN-FROM:nil:") => {
+                        Err(e) if extract_return_from_payload(&e, "nil").is_some() => {
                             // Restore old value
                             if let Some(val) = old_val {
                                 env.insert(var.clone(), val);
@@ -3233,7 +3320,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                                 env.remove(var);
                             }
                             // Decode and return the value
-                            let value_part = &e["RETURN-FROM:nil:".len()..];
+                            let value_part = extract_return_from_payload(&e, "nil").unwrap_or("NIL");
                             return decode_return_value_inline(value_part);
                         }
                         Err(e) => {
@@ -3755,7 +3842,7 @@ fn eval_labels_tail(
 }
 
 fn eval_macrolet(
-    macro_bindings: &[(String, Vec<String>, Vec<ASTNode>)],
+    macro_bindings: &[(String, ASTNode, Vec<ASTNode>)],
     body: &[ASTNode],
     env: &mut HashMap<String, EvalResult>,
 ) -> Result<EvalResult, String> {
@@ -3769,10 +3856,9 @@ fn eval_macrolet(
     }
 
     // Create macros in the current environment (in function namespace)
-    for (name, params, macro_body) in macro_bindings {
-        let params_ast = params_vec_to_ast_list(params);
+    for (name, params_ast, macro_body) in macro_bindings {
         let macro_def = EvalResult::Macro {
-            params: Box::new(params_ast),
+            params: Box::new(params_ast.clone()),
             body: macro_body.clone(),
         };
         // Store in function namespace with prefix (Lisp-2)
@@ -6107,13 +6193,15 @@ fn extract_params_full(ast: &ASTNode) -> (Vec<String>, HashMap<String, ASTNode>,
                     }
                     "key" => {
                         if let Ok(spec) = parse_key_param_spec(&arg) {
-                            params.push(spec.var_name.clone());
-                            key_params.insert(spec.var_name.clone(), spec.key_name);
-                            if let Some(def) = spec.default {
-                                defaults.insert(spec.var_name.clone(), def);
-                            }
-                            if let Some(supplied) = spec.supplied_p {
-                                supplied_p_vars.insert(spec.var_name.clone(), supplied);
+                            if let Some(var_name) = spec.var_name {
+                                params.push(var_name.clone());
+                                key_params.insert(var_name.clone(), spec.key_name);
+                                if let Some(def) = spec.default {
+                                    defaults.insert(var_name.clone(), def);
+                                }
+                                if let Some(supplied) = spec.supplied_p {
+                                    supplied_p_vars.insert(var_name, supplied);
+                                }
                             }
                         }
                     }
@@ -6196,6 +6284,49 @@ fn parse_single_function_binding(ast: &ASTNode) -> Result<Option<(String, Vec<St
         }
         ASTNode::Constant(ConstantValue::Nil) => Ok(None),
         _ => Ok(None), // Lenient: skip invalid binding formats
+    }
+}
+
+fn parse_macro_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode, Vec<ASTNode>)>, String> {
+    // Parse ((name (lambda-list) body...) ...) preserving full lambda-list AST
+    // so macrolet supports destructuring and &key forms correctly.
+    let mut bindings = Vec::new();
+
+    match ast {
+        ASTNode::Call { function, args } => {
+            if let Some(first_binding) = parse_single_macro_binding(&**function)? {
+                bindings.push(first_binding);
+            }
+            for arg in args {
+                if let Some(binding) = parse_single_macro_binding(arg)? {
+                    bindings.push(binding);
+                }
+            }
+        }
+        _ => return Err("Macro bindings must be a list".to_string()),
+    }
+
+    Ok(bindings)
+}
+
+fn parse_single_macro_binding(ast: &ASTNode) -> Result<Option<(String, ASTNode, Vec<ASTNode>)>, String> {
+    // Parse (name (lambda-list) body...)
+    match ast {
+        ASTNode::Call { function, args } => {
+            if args.len() < 2 {
+                return Ok(None);
+            }
+            let name = if let ASTNode::Variable(n) = &**function {
+                n.clone()
+            } else {
+                return Ok(None);
+            };
+            let params_ast = args[0].clone();
+            let body = args[1..].to_vec();
+            Ok(Some((name, params_ast, body)))
+        }
+        ASTNode::Constant(ConstantValue::Nil) => Ok(None),
+        _ => Ok(None),
     }
 }
 
@@ -6298,6 +6429,8 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
         matches!(base, "quit")
     } else if name_lower.starts_with("ext:") {
         matches!(base, "getenv" | "argc" | "argv" | "float-infinity-p" | "float-nan-p" |
+            "single-float-to-bits" | "double-float-to-bits" |
+            "bits-to-single-float" | "bits-to-double-float" |
             "with-float-traps-masked" | "hash-table-weakness" |
             "package-add-nickname" | "package-remove-nickname" |
             "lock-package" | "unlock-package" | "package-locked-p" |
@@ -6435,7 +6568,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             }
         }
 
-        if matches!(base_name, "write-to-string" | "copy-pprint-dispatch" | "set-pprint-dispatch") {
+        if matches!(base_name, "write-to-string" | "copy-pprint-dispatch" | "set-pprint-dispatch" | "pprint") {
             let eval_args: Result<Vec<EvalResult>, String> = args
                 .iter()
                 .map(|arg| eval_with_env(arg, env).map(super::eval_types::primary_value))
@@ -6644,6 +6777,61 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                     return eval_let_star(&bindings, &body, env);
                 }
                 Ok(EvalResult::Nil)
+            }
+            "if" => {
+                if args.is_empty() {
+                    return Err("if requires at least a test form".to_string());
+                }
+                let test_result = eval_with_env(&args[0], env)?;
+                if eval_truthy(&test_result) {
+                    if args.len() >= 2 {
+                        eval_with_env(&args[1], env)
+                    } else {
+                        Ok(EvalResult::Nil)
+                    }
+                } else if args.len() >= 3 {
+                    eval_with_env(&args[2], env)
+                } else {
+                    Ok(EvalResult::Nil)
+                }
+            }
+            "catch" => {
+                if args.is_empty() {
+                    return Err("catch requires a tag".to_string());
+                }
+                let tag = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+                let tag_key = encode_control_tag_inline(&tag);
+                let mut result = EvalResult::Nil;
+                for form in &args[1..] {
+                    match eval_with_env(form, env) {
+                        Ok(v) => result = v,
+                        Err(e) => {
+                            if let Some(rest) = e.strip_prefix("THROW:") {
+                                if let Some((thrown_tag, payload)) = rest.split_once(':') {
+                                    if thrown_tag == tag_key {
+                                        return decode_return_value_inline(payload);
+                                    }
+                                }
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            "throw" => {
+                if args.is_empty() {
+                    return Err("throw requires at least a tag".to_string());
+                }
+                let tag = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+                let value = if args.len() >= 2 {
+                    eval_with_env(&args[1], env)?
+                } else {
+                    EvalResult::Nil
+                };
+                let tag_key = encode_control_tag_inline(&tag);
+                let encoded = encode_return_value_inline(&value);
+                Err(format!("THROW:{}:{}", tag_key, encoded))
             }
             "defmacro" => {
                 // Fallback: defmacro is a special form and should not evaluate its args.
@@ -7400,7 +7588,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 if args.len() < 2 {
                     return Err("macrolet requires at least macro bindings and body".to_string());
                 }
-                let macro_bindings = parse_function_bindings(&args[0])?;
+                let macro_bindings = parse_macro_bindings(&args[0])?;
                 let body = &args[1..];
                 eval_macrolet(&macro_bindings, body, env)
             }
@@ -9787,6 +9975,61 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                     _ => Ok(EvalResult::Boolean(false)),
                 }
             }
+            "ext:single-float-to-bits" | "single-float-to-bits" => {
+                if args.len() != 1 {
+                    return Err("ext:single-float-to-bits requires 1 argument".to_string());
+                }
+                let val = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+                let f = match val {
+                    EvalResult::Float(v) => v as f32,
+                    EvalResult::Fixnum(n) => n as f32,
+                    EvalResult::Bignum(ref b) => b.to_string().parse::<f32>().unwrap_or(0.0),
+                    _ => return Err("ext:single-float-to-bits requires a real argument".to_string()),
+                };
+                Ok(EvalResult::Fixnum(f.to_bits() as i64))
+            }
+            "ext:double-float-to-bits" | "double-float-to-bits" => {
+                if args.len() != 1 {
+                    return Err("ext:double-float-to-bits requires 1 argument".to_string());
+                }
+                let val = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+                let f = match val {
+                    EvalResult::Float(v) => v,
+                    EvalResult::Fixnum(n) => n as f64,
+                    EvalResult::Bignum(ref b) => b.to_string().parse::<f64>().unwrap_or(0.0),
+                    _ => return Err("ext:double-float-to-bits requires a real argument".to_string()),
+                };
+                let bits = f.to_bits();
+                if bits <= i64::MAX as u64 {
+                    Ok(EvalResult::Fixnum(bits as i64))
+                } else {
+                    Ok(EvalResult::Bignum(malachite::Integer::from(bits)))
+                }
+            }
+            "ext:bits-to-single-float" | "bits-to-single-float" => {
+                if args.len() != 1 {
+                    return Err("ext:bits-to-single-float requires 1 argument".to_string());
+                }
+                let val = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+                let bits = match val {
+                    EvalResult::Fixnum(n) if n >= 0 => n as u32,
+                    EvalResult::Bignum(ref b) => b.to_string().parse::<u32>().map_err(|_| "ext:bits-to-single-float requires a non-negative integer in u32 range".to_string())?,
+                    _ => return Err("ext:bits-to-single-float requires a non-negative integer".to_string()),
+                };
+                Ok(EvalResult::Float(f32::from_bits(bits) as f64))
+            }
+            "ext:bits-to-double-float" | "bits-to-double-float" => {
+                if args.len() != 1 {
+                    return Err("ext:bits-to-double-float requires 1 argument".to_string());
+                }
+                let val = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+                let bits = match val {
+                    EvalResult::Fixnum(n) if n >= 0 => n as u64,
+                    EvalResult::Bignum(ref b) => b.to_string().parse::<u64>().map_err(|_| "ext:bits-to-double-float requires a non-negative integer in u64 range".to_string())?,
+                    _ => return Err("ext:bits-to-double-float requires a non-negative integer".to_string()),
+                };
+                Ok(EvalResult::Float(f64::from_bits(bits)))
+            }
             "ext:with-float-traps-masked" | "with-float-traps-masked" => {
                 // (ext:with-float-traps-masked (:overflow :invalid ...) &body body)
                 // Just evaluate the body forms ignoring the trap mask
@@ -10772,7 +11015,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             // Other functions - not implemented
             "warn" => super::eval_conditions::eval_warn(args, env),
             "make-pathname" => Err("Not implemented: make-pathname".to_string()),
-            "defstruct" => Err("Not implemented: defstruct".to_string()),
+            "defstruct" => eval_defstruct_runtime(args, env),
             "delete-package" => {
                 let eval_args: Result<Vec<EvalResult>, String> = args.iter().map(|a| eval_with_env(a, env)).collect();
                 super::eval_package::call_package_builtin("delete-package", &eval_args?)
@@ -13031,45 +13274,31 @@ fn eval_tail_position(
             Ok(tail_result)
         }
         ASTNode::Block { name, body } => {
-            let block_name = name.unwrap_or_else(|| "nil".to_string());
+            let block_name = canonical_block_name(&name.unwrap_or_else(|| "nil".to_string()));
             if body.is_empty() {
                 return Ok(TailEvalResult::Value(EvalResult::Nil));
             }
             for form in body.iter().take(body.len().saturating_sub(1)) {
                 match eval_with_env(form, env) {
                     Ok(_) => {}
-                    Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
-                        let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                    Err(e) if extract_return_from_payload(&e, &block_name).is_some() => {
+                        let value_part = extract_return_from_payload(&e, &block_name).unwrap_or("NIL");
                         return Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?));
                     }
                     Err(e) => return Err(e),
                 }
             }
-            match eval_tail_position(&body[body.len() - 1], env) {
-                Ok(TailEvalResult::ReturnFromValue { block_name: target, value }) => {
-                    if target == block_name {
-                        Ok(TailEvalResult::Value(value))
-                    } else {
-                        Ok(TailEvalResult::ReturnFromValue { block_name: target, value })
-                    }
-                }
-                Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request }) => {
-                    if target == block_name {
-                        Ok(TailEvalResult::TailCall(request))
-                    } else {
-                        Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request })
-                    }
-                }
-                Ok(v) => Ok(v),
-                Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
-                    let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+            match eval_with_env(&body[body.len() - 1], env) {
+                Ok(v) => Ok(TailEvalResult::Value(v)),
+                Err(e) if extract_return_from_payload(&e, &block_name).is_some() => {
+                    let value_part = extract_return_from_payload(&e, &block_name).unwrap_or("NIL");
                     Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?))
                 }
                 Err(e) => Err(e),
             }
         }
         ASTNode::ReturnFrom { block_name, value } => {
-            let target_block = block_name.unwrap_or_else(|| "nil".to_string());
+            let target_block = canonical_block_name(&block_name.unwrap_or_else(|| "nil".to_string()));
             if let Some(v) = value {
                 match eval_tail_position(&v, env)? {
                     TailEvalResult::Value(return_val) => Ok(TailEvalResult::ReturnFromValue {
@@ -13244,11 +13473,11 @@ fn eval_tail_position(
                     if args.is_empty() {
                         return Ok(TailEvalResult::Value(EvalResult::Nil));
                     }
-                    let block_name = match &args[0] {
+                    let block_name = canonical_block_name(&match &args[0] {
                         ASTNode::Variable(n) => n.clone(),
                         ASTNode::Constant(ConstantValue::Nil) => "nil".to_string(),
                         _ => "nil".to_string(),
-                    };
+                    });
                     let body = &args[1..];
                     if body.is_empty() {
                         return Ok(TailEvalResult::Value(EvalResult::Nil));
@@ -13256,31 +13485,17 @@ fn eval_tail_position(
                     for form in body.iter().take(body.len().saturating_sub(1)) {
                         match eval_with_env(form, env) {
                             Ok(_) => {}
-                            Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
-                                let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                            Err(e) if extract_return_from_payload(&e, &block_name).is_some() => {
+                                let value_part = extract_return_from_payload(&e, &block_name).unwrap_or("NIL");
                                 return Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?));
                             }
                             Err(e) => return Err(e),
                         }
                     }
-                    return match eval_tail_position(&body[body.len() - 1], env) {
-                        Ok(TailEvalResult::ReturnFromValue { block_name: target, value }) => {
-                            if target == block_name {
-                                Ok(TailEvalResult::Value(value))
-                            } else {
-                                Ok(TailEvalResult::ReturnFromValue { block_name: target, value })
-                            }
-                        }
-                        Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request }) => {
-                            if target == block_name {
-                                Ok(TailEvalResult::TailCall(request))
-                            } else {
-                                Ok(TailEvalResult::ReturnFromTailCall { block_name: target, request })
-                            }
-                        }
-                        Ok(v) => Ok(v),
-                        Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
-                            let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                    return match eval_with_env(&body[body.len() - 1], env) {
+                        Ok(v) => Ok(TailEvalResult::Value(v)),
+                        Err(e) if extract_return_from_payload(&e, &block_name).is_some() => {
+                            let value_part = extract_return_from_payload(&e, &block_name).unwrap_or("NIL");
                             Ok(TailEvalResult::Value(decode_return_value_inline(value_part)?))
                         }
                         Err(e) => Err(e),
@@ -13318,7 +13533,7 @@ fn eval_tail_position(
                             ASTNode::Constant(ConstantValue::Nil) => "nil".to_string(),
                             _ => return Err("return-from name must be a symbol".to_string()),
                         };
-                        (block_name, 1usize)
+                        (canonical_block_name(&block_name), 1usize)
                     };
 
                     if args.len() > value_idx {
@@ -13711,6 +13926,7 @@ pub(super) fn eval_lambda_call(
                     let mut persisted = current_closure_env_rc.borrow_mut();
                     *persisted = closure_env;
                 }
+                let block_name = canonical_block_name(&block_name);
                 let encoded = encode_return_value_inline(&value);
                 return Err(format!("RETURN-FROM:{}:{}", block_name, encoded));
             }
@@ -13719,6 +13935,7 @@ pub(super) fn eval_lambda_call(
                     let mut persisted = current_closure_env_rc.borrow_mut();
                     *persisted = closure_env;
                 }
+                let block_name = canonical_block_name(&block_name);
                 return Err(format!("RETURN-FROM:{}:NIL", block_name));
             }
         }
@@ -13729,7 +13946,8 @@ pub(super) fn eval_lambda_call(
 #[derive(Clone)]
 struct KeyParamSpec {
     key_name: String,
-    var_name: String,
+    var_name: Option<String>,
+    destructuring_param: Option<ASTNode>,
     default: Option<ASTNode>,
     supplied_p: Option<String>,
 }
@@ -13774,76 +13992,98 @@ fn parse_key_param_spec(param: &ASTNode) -> Result<KeyParamSpec, String> {
     match param {
         ASTNode::Variable(name) => Ok(KeyParamSpec {
             key_name: trim_keyword(name),
-            var_name: trim_keyword(name),
+            var_name: Some(trim_keyword(name)),
+            destructuring_param: None,
             default: None,
             supplied_p: None,
         }),
         ASTNode::Constant(ConstantValue::Symbol(name)) => Ok(KeyParamSpec {
             key_name: trim_keyword(name),
-            var_name: trim_keyword(name),
+            var_name: Some(trim_keyword(name)),
+            destructuring_param: None,
             default: None,
             supplied_p: None,
         }),
         ASTNode::Call { function, args } => match &**function {
             ASTNode::Variable(var) => {
-                // Handle (:key var) shorthand (no default)
-                if var.starts_with(':') && args.len() == 1 {
-                    if let Some(var_name) = extract_var_name(&args[0]) {
-                        return Ok(KeyParamSpec {
-                            key_name: trim_keyword(var),
-                            var_name,
-                            default: None,
-                            supplied_p: None,
-                        });
+                if var.starts_with(':') {
+                    let mut spec = KeyParamSpec {
+                        key_name: trim_keyword(var),
+                        var_name: None,
+                        destructuring_param: None,
+                        default: None,
+                        supplied_p: None,
+                    };
+                    if let Some(target) = args.get(0) {
+                        match target {
+                            ASTNode::Call { .. } => spec.destructuring_param = Some(target.clone()),
+                            _ => spec.var_name = extract_var_name(target),
+                        }
                     }
+                    if spec.var_name.is_none() && spec.destructuring_param.is_none() {
+                        spec.var_name = Some(trim_keyword(var));
+                    }
+                    spec.default = args.get(1).cloned();
+                    spec.supplied_p = args.get(2).and_then(extract_var_name);
+                    return Ok(spec);
                 }
                 Ok(KeyParamSpec {
                     key_name: trim_keyword(var),
-                    var_name: trim_keyword(var),
+                    var_name: Some(trim_keyword(var)),
+                    destructuring_param: None,
                     default: args.get(0).cloned(),
                     supplied_p: args.get(1).and_then(extract_var_name),
                 })
             }
             ASTNode::Constant(ConstantValue::Symbol(var)) => {
-                // Handle (:key var) shorthand (no default)
-                if var.starts_with(':') && args.len() == 1 {
-                    if let Some(var_name) = extract_var_name(&args[0]) {
-                        return Ok(KeyParamSpec {
-                            key_name: trim_keyword(var),
-                            var_name,
-                            default: None,
-                            supplied_p: None,
-                        });
-                    }
-                }
-                // Handle (:key var default [supplied-p]) form
                 if var.starts_with(':') {
-                    if let Some(var_name) = args.get(0).and_then(extract_var_name) {
-                        return Ok(KeyParamSpec {
-                            key_name: trim_keyword(var),
-                            var_name,
-                            default: args.get(1).cloned(),
-                            supplied_p: args.get(2).and_then(extract_var_name),
-                        });
+                    let mut spec = KeyParamSpec {
+                        key_name: trim_keyword(var),
+                        var_name: None,
+                        destructuring_param: None,
+                        default: None,
+                        supplied_p: None,
+                    };
+                    if let Some(target) = args.get(0) {
+                        match target {
+                            ASTNode::Call { .. } => spec.destructuring_param = Some(target.clone()),
+                            _ => spec.var_name = extract_var_name(target),
+                        }
                     }
+                    if spec.var_name.is_none() && spec.destructuring_param.is_none() {
+                        spec.var_name = Some(trim_keyword(var));
+                    }
+                    spec.default = args.get(1).cloned();
+                    spec.supplied_p = args.get(2).and_then(extract_var_name);
+                    return Ok(spec);
                 }
                 Ok(KeyParamSpec {
                     key_name: trim_keyword(var),
-                    var_name: trim_keyword(var),
+                    var_name: Some(trim_keyword(var)),
+                    destructuring_param: None,
                     default: args.get(0).cloned(),
                     supplied_p: args.get(1).and_then(extract_var_name),
                 })
             }
             ASTNode::Call { function: key_fn, args: key_args } => {
                 if let Some(key_name) = extract_name(&**key_fn) {
-                    if let Some(var) = key_args.first().and_then(extract_var_name) {
-                        return Ok(KeyParamSpec {
-                            key_name: trim_keyword(&key_name),
-                            var_name: var,
-                            default: args.get(0).cloned(),
-                            supplied_p: args.get(1).and_then(extract_var_name),
-                        });
+                    let mut spec = KeyParamSpec {
+                        key_name: trim_keyword(&key_name),
+                        var_name: None,
+                        destructuring_param: None,
+                        default: args.get(0).cloned(),
+                        supplied_p: args.get(1).and_then(extract_var_name),
+                    };
+                    if let Some(target) = key_args.first() {
+                        match target {
+                            ASTNode::Call { .. } => spec.destructuring_param = Some(target.clone()),
+                            _ => spec.var_name = extract_var_name(target),
+                        }
                     }
+                    if spec.var_name.is_none() && spec.destructuring_param.is_none() {
+                        spec.var_name = Some(trim_keyword(&key_name));
+                    }
+                    return Ok(spec);
                 }
                 Err("Invalid &key parameter spec".to_string())
             }
@@ -14051,7 +14291,12 @@ fn bind_macro_lambda_list(
 
         for spec in key_params {
             if let Some(val) = key_map.get(&spec.key_name).cloned() {
-                macro_env.insert(spec.var_name.clone(), val);
+                if let Some(pattern) = &spec.destructuring_param {
+                    let nested_args = eval_result_list_to_vec(&val)?;
+                    bind_macro_lambda_list(pattern, &nested_args, macro_env, None)?;
+                } else if let Some(var_name) = &spec.var_name {
+                    macro_env.insert(var_name.clone(), val);
+                }
                 if let Some(supplied_p) = spec.supplied_p {
                     macro_env.insert(supplied_p, EvalResult::Boolean(true));
                 }
@@ -14061,7 +14306,15 @@ fn bind_macro_lambda_list(
                 } else {
                     EvalResult::Nil
                 };
-                macro_env.insert(spec.var_name.clone(), default_val);
+                if let Some(pattern) = &spec.destructuring_param {
+                    let nested_args = match eval_result_list_to_vec(&default_val) {
+                        Ok(v) => v,
+                        Err(_) => vec![default_val.clone()],
+                    };
+                    bind_macro_lambda_list(pattern, &nested_args, macro_env, None)?;
+                } else if let Some(var_name) = &spec.var_name {
+                    macro_env.insert(var_name.clone(), default_val);
+                }
                 if let Some(supplied_p) = spec.supplied_p {
                     macro_env.insert(supplied_p, EvalResult::Nil);
                 }
@@ -14339,7 +14592,7 @@ pub fn macroexpand_all_to_ast(ast: &ASTNode, env: &mut HashMap<String, EvalResul
                     if args.len() < 2 {
                         return Err("macrolet requires at least macro bindings and body".to_string());
                     }
-                    let macro_bindings = parse_function_bindings(&args[0])?;
+                    let macro_bindings = parse_macro_bindings(&args[0])?;
                     let fn_names: Vec<String> = macro_bindings
                         .iter()
                         .map(|(macro_name, _, _)| format!("{}{}", FUNCTION_NS_PREFIX, macro_name))
@@ -14349,10 +14602,9 @@ pub fn macroexpand_all_to_ast(ast: &ASTNode, env: &mut HashMap<String, EvalResul
                         saved_bindings.insert(fn_name.clone(), env.get(fn_name).cloned());
                     }
 
-                    for (macro_name, params, macro_body) in &macro_bindings {
-                        let params_ast = params_vec_to_ast_list(params);
+                    for (macro_name, params_ast, macro_body) in &macro_bindings {
                         let macro_def = EvalResult::Macro {
-                            params: Box::new(params_ast),
+                            params: Box::new(params_ast.clone()),
                             body: macro_body.clone(),
                         };
                         let macro_fn_name = format!("{}{}", FUNCTION_NS_PREFIX, macro_name);

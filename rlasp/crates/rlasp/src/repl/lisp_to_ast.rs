@@ -76,7 +76,10 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             let vector = unsafe { &*(ptr as *const RVector) };
                             let mut elements = Vec::new();
                             for elem in vector.as_slice() {
-                                elements.push(lisp_to_ast(*elem)?);
+                                // Reader vectors/arrays are self-evaluating literals.
+                                // Convert their elements as data so symbols remain symbols,
+                                // not variable references.
+                                elements.push(lisp_to_ast_as_data(*elem)?);
                             }
                             return Ok(ASTNode::Vector(elements));
                         }
@@ -103,14 +106,6 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             // Special case: the symbol 't' should be treated as T (true)
                             if name.to_lowercase() == "t" {
                                 return Ok(ASTNode::Constant(ConstantValue::T));
-                            }
-
-                            // Reader fallback for #0A0/#0A1 when they surface as symbols.
-                            if name.eq_ignore_ascii_case("a0") {
-                                return Ok(ASTNode::Vector(vec![ASTNode::fixnum(0)]));
-                            }
-                            if name.eq_ignore_ascii_case("a1") {
-                                return Ok(ASTNode::Vector(vec![ASTNode::fixnum(1)]));
                             }
 
                             return Ok(ASTNode::variable(name.to_string()));
@@ -813,179 +808,16 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     // "defun", "defmacro", "defvar", "defparameter" - handled in eval_core.rs
                     // to preserve forms for macros. Fall through to generic Call handling.
                     "defstruct" => {
+                        // Keep DEFSTRUCT as a regular form so runtime DEFSTRUCT handling
+                        // in eval_core.rs can process :conc-name/:include and related options.
                         let args = cdr_to_vec(cdr)?;
                         if args.is_empty() {
                             return Err("defstruct requires at least a name".to_string());
                         }
-
-                        let extract_symbol_name = |node: &ASTNode| -> Option<String> {
-                            match node {
-                                ASTNode::Variable(n) => Some(n.clone()),
-                                ASTNode::Constant(ConstantValue::Symbol(s)) => {
-                                    if let Some(rest) = s.strip_prefix(':') {
-                                        Some(rest.to_string())
-                                    } else {
-                                        Some(s.clone())
-                                    }
-                                }
-                                _ => None,
-                            }
-                        };
-
-                        // Parse struct name (can be symbol or (name options))
-                        let struct_name = match &args[0] {
-                            ASTNode::Variable(n) => n.clone(),
-                            ASTNode::Constant(ConstantValue::Symbol(s)) => {
-                                s.strip_prefix(':').unwrap_or(s).to_string()
-                            }
-                            ASTNode::Call { function, .. } => {
-                                // (name options...) form - extract name
-                                extract_symbol_name(function)
-                                    .ok_or_else(|| "defstruct name must be a symbol".to_string())?
-                            }
-                            _ => return Err("defstruct name must be a symbol or (name options)".to_string()),
-                        };
-
-                        // Parse slot definitions (skip docstring if present)
-                        let mut slot_names = Vec::new();
-                        let mut slot_defaults = Vec::new();
-
-                        // Start at args[1], but skip if it's a docstring (Constant String)
-                        let slots_start = if args.len() > 1 {
-                            match &args[1] {
-                                ASTNode::Constant(ConstantValue::String(_)) => 2,
-                                _ => 1,
-                            }
-                        } else {
-                            1
-                        };
-
-                        for slot_def in &args[slots_start..] {
-                            match slot_def {
-                                ASTNode::Variable(slot_name) => {
-                                    slot_names.push(slot_name.clone());
-                                    slot_defaults.push(ASTNode::nil());
-                                }
-                                ASTNode::Call { function, args: slot_args } => {
-                                    // (slot-name default-value) form
-                                    if let Some(slot_name) = extract_symbol_name(function) {
-                                        slot_names.push(slot_name);
-                                        if !slot_args.is_empty() {
-                                            slot_defaults.push(slot_args[0].clone());
-                                        } else {
-                                            slot_defaults.push(ASTNode::nil());
-                                        }
-                                    } else {
-                                        return Err("defstruct slot name must be a symbol".to_string());
-                                    }
-                                }
-                                _ => return Err("defstruct slot must be a symbol or (name default)".to_string()),
-                            }
-                        }
-
-                        // Generate functions
-                        let mut forms = Vec::new();
-
-                        // 1. Constructor: (defun make-STRUCT (&key slot1 slot2 ...) (make-hash-table ...))
-                        let constructor_name = format!("make-{}", struct_name);
-
-                        // Create constructor function
-                        // (defun make-STRUCT (&key slots...) (progn (setq obj (make-hash-table)) ...))
-                        let mut full_constructor_body = vec![
-                            ASTNode::setq(
-                                "obj",
-                                ASTNode::Call {
-                                    function: Box::new(ASTNode::Variable("make-hash-table".to_string())),
-                                    args: vec![],
-                                },
-                            ),
-                        ];
-
-                        // Add slot initialization - use (or param default) to handle defaults
-                        for (slot_name, default) in slot_names.iter().zip(slot_defaults.iter()) {
-                            // Initialize slot with (or param-value default-value)
-                            // This ensures defaults are used when keyword arg is not provided
-                            let value_expr = if matches!(default, ASTNode::Constant(ConstantValue::Nil)) {
-                                // If default is nil, just use the parameter
-                                ASTNode::Variable(slot_name.clone())
-                            } else {
-                                // Use (or param default) to handle cases where param is not provided
-                                ASTNode::Call {
-                                    function: Box::new(ASTNode::Variable("or".to_string())),
-                                    args: vec![
-                                        ASTNode::Variable(slot_name.clone()),
-                                        default.clone(),
-                                    ],
-                                }
-                            };
-
-                            full_constructor_body.push(ASTNode::Call {
-                                function: Box::new(ASTNode::Variable("setf".to_string())),
-                                args: vec![
-                                    ASTNode::Call {
-                                        function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                        args: vec![
-                                            ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                                            ASTNode::Variable("obj".to_string()),
-                                        ],
-                                    },
-                                    value_expr,
-                                ],
-                            });
-                        }
-
-                        full_constructor_body.push(ASTNode::Variable("obj".to_string()));
-
-                        // Generate: (setq make-STRUCT (lambda (&key slots...) body))
-                        let constructor_params = vec!["&key".to_string()]
-                            .into_iter()
-                            .chain(slot_names.iter().cloned())
-                            .collect();
-                        let constructor_lambda = ASTNode::lambda(constructor_params, full_constructor_body);
-                        forms.push(ASTNode::setq(constructor_name, constructor_lambda));
-
-                        // 2. Predicate: (setq STRUCT-p (lambda (obj) (hash-table-p obj)))
-                        let predicate_lambda = ASTNode::lambda(
-                            vec!["obj".to_string()],
-                            vec![ASTNode::Call {
-                                function: Box::new(ASTNode::Variable("hash-table-p".to_string())),
-                                args: vec![ASTNode::Variable("obj".to_string())],
-                            }],
-                        );
-                        forms.push(ASTNode::setq(format!("{}-p", struct_name), predicate_lambda));
-
-                        // 3. Accessors: (setq STRUCT-SLOT (lambda (obj) (values (gethash 'slot obj))))
-                        // Wrap in (values ...) to strip gethash's secondary "found-p" value
-                        for slot_name in &slot_names {
-                            let gethash_call = ASTNode::Call {
-                                function: Box::new(ASTNode::Variable("gethash".to_string())),
-                                args: vec![
-                                    ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.clone()))),
-                                    ASTNode::Variable("obj".to_string()),
-                                ],
-                            };
-                            let accessor_lambda = ASTNode::lambda(
-                                vec!["obj".to_string()],
-                                vec![ASTNode::Call {
-                                    function: Box::new(ASTNode::Variable("values".to_string())),
-                                    args: vec![gethash_call],
-                                }],
-                            );
-                            forms.push(ASTNode::setq(format!("{}-{}", struct_name, slot_name), accessor_lambda));
-                        }
-
-                        // 4. Copier: (setq copy-STRUCT (lambda (obj) (copy-hash-table obj)))
-                        let copier_lambda = ASTNode::lambda(
-                            vec!["obj".to_string()],
-                            vec![ASTNode::Call {
-                                function: Box::new(ASTNode::Variable("copy-hash-table".to_string())),
-                                args: vec![ASTNode::Variable("obj".to_string())],
-                            }],
-                        );
-                        forms.push(ASTNode::setq(format!("copy-{}", struct_name), copier_lambda));
-
-                        // Return all forms wrapped in progn
-                        return Ok(ASTNode::progn(forms));
+                        return Ok(ASTNode::Call {
+                            function: Box::new(ASTNode::variable("defstruct".to_string())),
+                            args,
+                        });
                     }
                     "defclass" => {
                         // (defclass name (superclasses...) ((slot options...) ...) class-options...)
@@ -1399,17 +1231,24 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         };
 
                         // Check for optional qualifier (:before, :after, :around)
-                        let (qualifier, lambda_list_idx) = match &args[1] {
-                            ASTNode::Variable(kw) if kw.starts_with(':') => {
-                                // It's a qualifier
-                                let q = kw.to_uppercase();
-                                if q == ":BEFORE" || q == ":AFTER" || q == ":AROUND" {
-                                    (Some(q), 2)
-                                } else {
-                                    (None, 1) // Not a recognized qualifier, treat as lambda-list
-                                }
+                        let qualifier_key = match &args[1] {
+                            ASTNode::Variable(kw) => Some(kw.clone()),
+                            ASTNode::Constant(ConstantValue::Symbol(kw)) => Some(kw.clone()),
+                            _ => None,
+                        };
+                        let (qualifier, lambda_list_idx) = if let Some(raw_kw) = qualifier_key {
+                            let normalized = if raw_kw.starts_with(':') {
+                                raw_kw.to_uppercase()
+                            } else {
+                                format!(":{}", raw_kw.to_uppercase())
+                            };
+                            if normalized == ":BEFORE" || normalized == ":AFTER" || normalized == ":AROUND" {
+                                (Some(normalized), 2)
+                            } else {
+                                (None, 1)
                             }
-                            _ => (None, 1), // No qualifier
+                        } else {
+                            (None, 1)
                         };
 
                         if args.len() <= lambda_list_idx {
@@ -1437,8 +1276,14 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                             // Specialized parameter: (param class-name)
                                             if let ASTNode::Variable(param_name) = &*function {
                                                 param_vec.push(param_name.clone());
-                                                if let Some(ASTNode::Variable(class_name)) = args.first() {
-                                                    spec_vec.push(class_name.clone());
+                                                if let Some(class_node) = args.first() {
+                                                    match class_node {
+                                                        ASTNode::Variable(class_name) => spec_vec.push(class_name.clone()),
+                                                        ASTNode::Constant(ConstantValue::Symbol(class_name)) => {
+                                                            spec_vec.push(class_name.clone())
+                                                        }
+                                                        _ => spec_vec.push("T".to_string()),
+                                                    }
                                                 } else {
                                                     spec_vec.push("T".to_string());
                                                 }

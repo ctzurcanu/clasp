@@ -1,0 +1,15 @@
+Running mode=mlir log=/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/irlasp-mlir-20260212-154616-97598.log
+SUITE_TIMEOUT_S 120
+TIMEOUT_BIN gtimeout
+[1/5] suite=structures
+SUITE_RUN_ERROR structures rc=19
+SUITE structures               TOTAL 29 FAILED 18 PASSED 11 TIME_TOTAL_S 120.056486 TIME_COMPILE_S 1.677263 TIME_EXEC_S 118.379223
+[2/5] suite=read01
+SUITE read01                   TOTAL 103 FAILED 42 PASSED 61 TIME_TOTAL_S 0.849774 TIME_COMPILE_S 0.826323 TIME_EXEC_S 0.023451
+[3/5] suite=printer01
+SUITE_RUN_ERROR printer01 rc=134
+SUITE printer01                TOTAL 62 FAILED 41 PASSED 21 TIME_TOTAL_S 1.020403 TIME_COMPILE_S 0.880631 TIME_EXEC_S 0.139772
+[4/5] suite=sequences01
+SUITE_TIMEOUT sequences01 rc=137 timeout_s=120
+SUITE sequences01              TOTAL 87 FAILED 38 PASSED 49 TIME_TOTAL_S 42.852650 TIME_COMPILE_S 0.985438 TIME_EXEC_S 41.867212
+[5/5] suite=snapshot

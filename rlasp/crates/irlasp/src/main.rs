@@ -3,12 +3,16 @@
 /// Usage:
 ///   irlasp              - Start REPL in interpreter mode
 ///   irlasp -m llvm      - Start REPL in LLVM ORC JIT mode
+///   irlasp -m fasl      - Run/REPL in FASL compatibility mode
 ///   irlasp file.lisp    - Run file in interpreter mode
 ///   irlasp -m llvm file.lisp - Run file in LLVM ORC JIT mode
+///   irlasp -m mlir file.lisp - Run file in strict MLIR/JIT mode
 
 use clap::Parser;
 use rustyline::error::ReadlineError;
 use rustyline::{DefaultEditor, Result};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::os::raw::{c_char, c_int};
@@ -16,11 +20,16 @@ use inkwell::values::AnyValue;
 
 extern crate rlasp_reader;
 
+thread_local! {
+    static MLIR_INTERP_ENV: RefCell<HashMap<String, rlasp::repl::EvalResult>> =
+        RefCell::new(HashMap::new());
+}
+
 #[derive(Parser)]
 #[command(name = "irlasp")]
 #[command(about = "Interactive rlasp REPL and Lisp interpreter", long_about = None)]
 struct Args {
-    /// Execution mode: interpreter (default), llir (LLVM IR + ORC JIT), or mlir (MLIR + ORC JIT)
+    /// Execution mode: interpreter (default), fasl, llir (LLVM IR + ORC JIT), or mlir (MLIR + ORC JIT)
     #[arg(short, long, value_name = "MODE", default_value = "interpreter")]
     mode: String,
 
@@ -35,8 +44,29 @@ struct Args {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ExecutionMode {
     Interpreter,
+    Fasl,
     LlirJit,  // LLVM IR + ORC JIT
     MlirJit,  // MLIR + ORC JIT
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MlirBehavior {
+    Compat,
+    Strict,
+}
+
+fn resolve_mlir_behavior(default_behavior: MlirBehavior) -> MlirBehavior {
+    match std::env::var("RLASP_MLIR_BEHAVIOR") {
+        Ok(raw) => {
+            let v = raw.trim().to_ascii_lowercase();
+            match v.as_str() {
+                "compat" | "legacy" | "fasl" => MlirBehavior::Compat,
+                "strict" | "mlir" => MlirBehavior::Strict,
+                _ => default_behavior,
+            }
+        }
+        Err(_) => default_behavior,
+    }
 }
 
 // Declare external C functions from librlasp for interpreter mode
@@ -85,10 +115,11 @@ fn run_main() -> Result<()> {
 
     let mode = match args.mode.as_str() {
         "interpreter" | "interp" | "i" => ExecutionMode::Interpreter,
+        "fasl" | "f" => ExecutionMode::Fasl,
         "llir" | "llvm" => ExecutionMode::LlirJit,
         "mlir" => ExecutionMode::MlirJit,
         _ => {
-            eprintln!("Error: Unknown mode '{}'. Use 'interpreter', 'llir', or 'mlir'", args.mode);
+            eprintln!("Error: Unknown mode '{}'. Use 'interpreter', 'fasl', 'llir', or 'mlir'", args.mode);
             std::process::exit(1);
         }
     };
@@ -125,6 +156,12 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
                 rlasp_shutdown(runtime);
             }
         }
+        ExecutionMode::Fasl => {
+            if let Err(e) = eval_file_fasl(&source, file_path) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         ExecutionMode::LlirJit => {
             if let Err(e) = eval_file_llvm(&source, file_path) {
                 eprintln!("Error: {}", e);
@@ -132,7 +169,7 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
             }
         }
         ExecutionMode::MlirJit => {
-            if let Err(e) = eval_file_mlir(&source, file_path, true) {
+            if let Err(e) = eval_file_mlir(&source, file_path, true, MlirBehavior::Strict) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -145,6 +182,7 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
 fn run_repl(mode: ExecutionMode) -> Result<()> {
     println!("rlasp REPL v0.1.0 (mode: {})", match mode {
         ExecutionMode::Interpreter => "interpreter",
+        ExecutionMode::Fasl => "fasl",
         ExecutionMode::LlirJit => "llir-jit",
         ExecutionMode::MlirJit => "mlir-jit",
     });
@@ -153,6 +191,7 @@ fn run_repl(mode: ExecutionMode) -> Result<()> {
 
     match mode {
         ExecutionMode::Interpreter => run_repl_interpreter(),
+        ExecutionMode::Fasl => run_repl_interpreter(),
         ExecutionMode::LlirJit => run_repl_llvm(),
         ExecutionMode::MlirJit => run_repl_mlir(),
     }
@@ -876,11 +915,45 @@ fn head_of_lisp_form(obj: rlasp_runtime::LispObject) -> String {
     format_atom(obj)
 }
 
-fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::result::Result<(), String> {
+fn eval_file_fasl(source: &str, file_path: &str) -> std::result::Result<(), String> {
+    use rlasp::repl::{lisp_to_ast, eval_with_persistent_env, EvalResult};
+    use std::collections::HashMap;
+
+    let lisp_objs = rlasp_reader::read_all_from_string(source)
+        .map_err(|e| format!("Read error: {}", e))?;
+    let mut interp_env: HashMap<String, EvalResult> = HashMap::new();
+
+    for (idx, lisp_obj) in lisp_objs.iter().enumerate() {
+        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
+            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+        }) {
+            Ok(ast) => {
+                let _ = eval_with_persistent_env(&ast, &mut interp_env);
+            }
+            Err(e) => {
+                println!(
+                    "[Warning: Could not parse form {} in {}: {}]",
+                    idx + 1,
+                    file_path,
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn eval_file_mlir(
+    source: &str,
+    file_path: &str,
+    init_runtime: bool,
+    default_behavior: MlirBehavior,
+) -> std::result::Result<(), String> {
     use rlasp_mlir::lib_stack::StackMLIRCodegen;
     use rlasp::repl::{lisp_to_ast, eval_with_persistent_env, macroexpand_all_to_ast, EvalResult};
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
-    use std::collections::HashMap;
+    let behavior = resolve_mlir_behavior(default_behavior);
 
     // Create MLIR codegen
     let module_name = Path::new(file_path)
@@ -891,6 +964,12 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     let mut codegen = StackMLIRCodegen::new(module_name);
     let mlir_verbose = std::env::var("RLASP_MLIR_VERBOSE").is_ok();
     let save_artifacts = std::env::var("RLASP_SAVE_ARTIFACTS").is_ok();
+    let skip_side_effect_forms = std::env::var("RLASP_MLIR_SKIP_SIDE_EFFECT_FORMS")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
 
     // Read all forms from the file
     let lisp_objs = rlasp_reader::read_all_from_string(source)
@@ -909,9 +988,14 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
     )> = Vec::new();
     let mut toplevel_forms: Vec<rlasp::ir::ASTNode> = Vec::new();
 
-    // Create an interpreter environment for macro expansion
-    // This allows us to evaluate complex macros (like those using `loop`) at compile time
-    let mut interp_env: HashMap<String, EvalResult> = HashMap::new();
+    // Use a persistent interpreter environment across nested MLIR loads so that
+    // macro/package definitions from previously loaded files remain visible.
+    let mut interp_env: HashMap<String, EvalResult> = MLIR_INTERP_ENV.with(|cell| {
+        if init_runtime {
+            cell.borrow_mut().clear();
+        }
+        cell.borrow().clone()
+    });
 
     // ===== INCREMENTAL PROCESSING: Expand macros and evaluate each form before moving to next =====
     // This matches how the interpreter works - each form is fully processed (expanded + evaluated)
@@ -1129,6 +1213,110 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         }
     }
 
+    fn seed_defuns_from_interp_env(
+        interp_env: &HashMap<String, EvalResult>,
+        seen_defuns: &mut HashSet<String>,
+        defuns: &mut Vec<(
+            String,
+            Vec<String>,
+            HashMap<String, rlasp::ir::ASTNode>,
+            HashMap<String, String>,
+            HashMap<String, String>,
+            Vec<rlasp::ir::ASTNode>,
+        )>,
+        user_functions: &mut HashMap<String, Vec<String>>,
+    ) {
+        for (name, value) in interp_env.iter() {
+            // Keep top-level function namespace bindings only.
+            if !name.to_ascii_uppercase().starts_with("%FN%") {
+                continue;
+            }
+            if !seen_defuns.insert(name.clone()) {
+                continue;
+            }
+            if let EvalResult::Lambda {
+                params,
+                defaults,
+                supplied_p_vars,
+                key_params,
+                body,
+                ..
+            } = value
+            {
+                defuns.push((
+                    name.clone(),
+                    params.clone(),
+                    defaults.clone(),
+                    supplied_p_vars.clone(),
+                    key_params.clone(),
+                    body.clone(),
+                ));
+                user_functions.entry(name.clone()).or_insert_with(|| params.clone());
+            }
+        }
+    }
+
+    fn should_skip_runtime_codegen_after_compile_eval(ast: &rlasp::ir::ASTNode) -> bool {
+        fn head_name(ast: &rlasp::ir::ASTNode) -> Option<String> {
+            if let rlasp::ir::ASTNode::Call { function, .. } = ast {
+                match function.as_ref() {
+                    rlasp::ir::ASTNode::Variable(n) => Some(n.to_ascii_lowercase()),
+                    rlasp::ir::ASTNode::Constant(rlasp::ir::ConstantValue::Symbol(n)) => {
+                        Some(n.to_ascii_lowercase())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        fn is_compile_side_effect_head(name: &str) -> bool {
+            matches!(
+                name,
+                "load"
+                    | "require"
+                    | "provide"
+                    | "in-package"
+                    | "defpackage"
+                    | "use-package"
+                    | "import"
+                    | "export"
+                    | "shadow"
+                    | "shadowing-import"
+                    | "unintern"
+                    | "rename-package"
+            )
+        }
+
+        match ast {
+            rlasp::ir::ASTNode::Call { function, args } => {
+                let head = symbol_name_from_ast(function).unwrap_or("").to_ascii_lowercase();
+                if head == "eval-when" {
+                    if args.len() < 2 {
+                        return false;
+                    }
+                    if !eval_when_has_compile_situation(&args[0]) {
+                        return false;
+                    }
+                    return args[1..]
+                        .iter()
+                        .all(should_skip_runtime_codegen_after_compile_eval);
+                }
+                if is_compile_side_effect_head(head.as_str()) {
+                    return true;
+                }
+                if let Some(h) = head_name(ast) {
+                    return is_compile_side_effect_head(h.as_str());
+                }
+                false
+            }
+            rlasp::ir::ASTNode::Progn { exprs } => {
+                !exprs.is_empty() && exprs.iter().all(should_skip_runtime_codegen_after_compile_eval)
+            }
+            _ => false,
+        }
+    }
+
     // ===== INCREMENTAL: Expand forms with compile-time environment tracking =====
     for lisp_obj in &lisp_objs {
         form_count += 1;
@@ -1141,16 +1329,25 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
                 } else {
                     None
                 };
-                // Step 1: Evaluate forms in interpreter mode to preserve load-time behavior.
-                // Selective mode is opt-in and intended for performance experiments.
+                // Step 1: Evaluate forms in interpreter mode to preserve compile-time behavior.
+                // Strict MLIR defaults to selective evaluation (compile-time forms only).
+                let selective_eval_default = matches!(behavior, MlirBehavior::Strict);
                 let selective_eval = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
                     .map(|v| {
                         let t = v.trim().to_ascii_lowercase();
                         !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
                     })
-                    .unwrap_or(false);
-                if !selective_eval || should_eval_for_compile_env(&ast) {
+                    .unwrap_or(selective_eval_default);
+                let evaled_for_compile = !selective_eval || should_eval_for_compile_env(&ast);
+                if evaled_for_compile {
                     let _ = eval_with_persistent_env(&ast, &mut interp_env);
+                }
+                if skip_side_effect_forms
+                    && matches!(behavior, MlirBehavior::Strict)
+                    && evaled_for_compile
+                    && should_skip_runtime_codegen_after_compile_eval(&ast)
+                {
+                    continue;
                 }
 
                 // Step 2: Now try to expand macros for MLIR compilation
@@ -1226,6 +1423,24 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
         println!("[MLIR] Processing complete: {} bindings, {} defuns, {} toplevel forms ({} defgeneric)",
                  interp_env.len(), defuns.len(), toplevel_forms.len(), dg_count);
     }
+    let mut seen_defuns: HashSet<String> = defuns.iter().map(|(name, ..)| name.clone()).collect();
+    let seeded_before = seen_defuns.len();
+    seed_defuns_from_interp_env(
+        &interp_env,
+        &mut seen_defuns,
+        &mut defuns,
+        &mut user_functions,
+    );
+    let seeded_count = seen_defuns.len().saturating_sub(seeded_before);
+    if mlir_verbose && seeded_count > 0 {
+        println!(
+            "[MLIR] Seeded {} functions from compile-time env",
+            seeded_count
+        );
+    }
+    MLIR_INTERP_ENV.with(|cell| {
+        *cell.borrow_mut() = interp_env.clone();
+    });
 
     // Macros have already been expanded by macroexpand_all_to_ast
     // Use defuns and toplevel_forms directly (with alias for compatibility)
@@ -1531,6 +1746,9 @@ fn eval_file_mlir(source: &str, file_path: &str, init_runtime: bool) -> std::res
             cc_find_if as *const (),
             cc_some as *const (),
             cc_every as *const (),
+            cc_every2 as *const (),
+            cc_values_pack as *const (),
+            cc_multiple_value_list as *const (),
             cc_sort as *const (),
             cc_map_nil as *const (),
             cc_mapcar_stack as *const (),
@@ -1942,40 +2160,114 @@ fn normalize_path_string(raw: &str) -> String {
 }
 
 fn extract_pathname_string(obj: rlasp_runtime::LispObject) -> Option<String> {
-    use rlasp_runtime::{Cons, RString, Symbol};
+    use rlasp_runtime::{Pathname, RString, Symbol};
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
 
-    if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
-        if !str_ptr.is_null() {
-            let s = unsafe { &*str_ptr };
-            return Some(s.as_str().to_string());
+    fn object_to_string(obj: rlasp_runtime::LispObject) -> Option<String> {
+        if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
+            if !str_ptr.is_null() {
+                let s = unsafe { &*str_ptr };
+                return Some(s.as_str().to_string());
+            }
         }
+        if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
+            if !sym_ptr.is_null() {
+                let s = unsafe { &*sym_ptr };
+                return Some(s.name().to_string());
+            }
+        }
+        None
     }
 
-    if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
-        if !sym_ptr.is_null() {
-            let s = unsafe { &*sym_ptr };
-            return Some(s.name().to_string());
+    fn collect_cons_list(mut list_obj: rlasp_runtime::LispObject) -> Vec<rlasp_runtime::LispObject> {
+        let mut out = Vec::new();
+        while let Some(ptr) = list_obj.as_cons_ptr() {
+            if ptr.is_null() {
+                break;
+            }
+            let cons = unsafe { &*ptr };
+            out.push(cons.car());
+            list_obj = cons.cdr();
+        }
+        out
+    }
+
+    fn normalize_symbol_piece(sym: &str) -> String {
+        sym.rsplit(':').next().unwrap_or(sym).to_string()
+    }
+
+    if let Some(s) = object_to_string(obj) {
+        return Some(s);
+    }
+
+    if let Some(path_ptr) = obj.as_general_ptr::<Pathname>() {
+        if !path_ptr.is_null() && unsafe { TypeHeader::from_ptr(path_ptr) } == Some(ObjectType::Pathname) {
+            let pathname = unsafe { &*path_ptr };
+            let name = object_to_string(pathname.name).unwrap_or_default();
+            let typ = object_to_string(pathname.type_).unwrap_or_default();
+
+            let mut absolute = false;
+            let mut dir_parts: Vec<String> = Vec::new();
+            for elem in collect_cons_list(pathname.directory) {
+                if let Some(s) = object_to_string(elem) {
+                    let piece = normalize_symbol_piece(&s);
+                    let piece_lc = piece.to_ascii_lowercase();
+                    if piece_lc == "absolute" {
+                        absolute = true;
+                        continue;
+                    }
+                    if piece_lc == "relative" || piece_lc == "wild" || piece_lc == "wild-inferiors" {
+                        continue;
+                    }
+                    dir_parts.push(piece.trim_matches('"').to_string());
+                }
+            }
+
+            let mut out = String::new();
+            if absolute {
+                out.push('/');
+            }
+            if !dir_parts.is_empty() {
+                out.push_str(&dir_parts.join("/"));
+                if !out.ends_with('/') {
+                    out.push('/');
+                }
+            }
+            if !name.is_empty() {
+                out.push_str(name.trim_matches('"'));
+            }
+            if !typ.is_empty() {
+                let typ_clean = normalize_symbol_piece(typ.trim_matches('"'));
+                if !typ_clean.is_empty() {
+                    if !out.ends_with('/') && !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(typ_clean.as_str());
+                }
+            }
+            if !out.is_empty() {
+                return Some(out);
+            }
         }
     }
 
     if let Some(cons_ptr) = obj.as_cons_ptr() {
-        if cons_ptr.is_null() {
-            return None;
-        }
-        let cons = unsafe { &*cons_ptr };
-        let car = cons.car();
-        if let Some(sym_ptr) = car.as_general_ptr::<Symbol>() {
-            if !sym_ptr.is_null() {
-                let sym = unsafe { &*sym_ptr };
-                let name = sym.name();
-                let base = name.rsplit(':').next().unwrap_or(name);
-                if base.eq_ignore_ascii_case("pathname") {
-                    let cdr = cons.cdr();
-                    if let Some(cdr_ptr) = cdr.as_cons_ptr() {
-                        if !cdr_ptr.is_null() {
-                            let cdr_cons = unsafe { &*cdr_ptr };
-                            let path_obj = cdr_cons.car();
-                            return extract_pathname_string(path_obj);
+        if !cons_ptr.is_null() {
+            let cons = unsafe { &*cons_ptr };
+            let car = cons.car();
+            if let Some(sym_ptr) = car.as_general_ptr::<Symbol>() {
+                if !sym_ptr.is_null() {
+                    let sym = unsafe { &*sym_ptr };
+                    let name = sym.name();
+                    let base = name.rsplit(':').next().unwrap_or(name);
+                    if base.eq_ignore_ascii_case("pathname") {
+                        let cdr = cons.cdr();
+                        if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                            if !cdr_ptr.is_null() {
+                                let cdr_cons = unsafe { &*cdr_ptr };
+                                let path_obj = cdr_cons.car();
+                                return extract_pathname_string(path_obj);
+                            }
                         }
                     }
                 }
@@ -2012,6 +2304,13 @@ pub extern "C" fn cc_load(path_obj: usize) -> usize {
             .map(|cwd| cwd.join(&path).to_string_lossy().to_string())
             .unwrap_or(path)
     };
+    if std::env::var("RLASP_DEBUG_LOAD_PATHS").is_ok() {
+        eprintln!(
+            "[cc_load] raw_path='{}' resolved_path='{}'",
+            raw_path,
+            resolved_path
+        );
+    }
 
     let contents = match std::fs::read_to_string(&resolved_path) {
         Ok(c) => c,
@@ -2021,7 +2320,7 @@ pub extern "C" fn cc_load(path_obj: usize) -> usize {
         }
     };
 
-    match eval_file_mlir(&contents, &resolved_path, false) {
+    match eval_file_mlir(&contents, &resolved_path, false, MlirBehavior::Strict) {
         Ok(_) => unsafe { rlasp_jit::intrinsics::cc_t_value() },
         Err(e) => {
             eprintln!("load failed: {}", e);
@@ -7604,5 +7903,7 @@ fn print_help() {
     println!();
     println!("Execution modes:");
     println!("  interpreter  - Use AST interpreter (default)");
+    println!("  fasl         - Use FASL compatibility evaluator");
     println!("  llvm         - Use LLVM ORC JIT compiler");
+    println!("  mlir         - Use strict MLIR -> LLVM ORC JIT compiler");
 }

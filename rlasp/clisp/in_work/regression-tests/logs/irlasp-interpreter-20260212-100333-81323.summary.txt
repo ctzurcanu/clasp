@@ -1,0 +1,19 @@
+Running mode=interpreter log=/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/irlasp-interpreter-20260212-100333-81323.log
+SUITE_TIMEOUT_S 180
+TIMEOUT_BIN gtimeout
+[1/7] suite=update-instance-abort
+SUITE update-instance-abort    TOTAL 9 FAILED 2 PASSED 7 TIME_S 0.062558
+[2/7] suite=structures
+SUITE structures               TOTAL 30 FAILED 10 PASSED 20 TIME_S 0.241780
+[3/7] suite=misc
+SUITE misc                     TOTAL 54 FAILED 3 PASSED 51 TIME_S 0.211489
+[4/7] suite=printer01
+SUITE printer01                TOTAL 101 FAILED 2 PASSED 99 TIME_S 0.266241
+[5/7] suite=types01
+SUITE types01                  TOTAL 25 FAILED 1 PASSED 24 TIME_S 0.108426
+[6/7] suite=control01
+SUITE control01                TOTAL 46 FAILED 1 PASSED 45 TIME_S 0.145179
+[7/7] suite=loop
+SUITE loop                     TOTAL 21 FAILED 1 PASSED 20 TIME_S 0.085668
+TOTAL 286 FAILED 20 COMPILE_ERRORS 0 RUN_ERRORS 0 NON_PASSING 20 PASSED 266 SUITE_TIME_SUM_S 1.121341 WALL_CLOCK_S 1.314257
+SUITES_TOTAL 7 SUITES_TIMED_OUT 0

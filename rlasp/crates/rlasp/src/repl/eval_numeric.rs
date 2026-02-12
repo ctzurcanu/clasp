@@ -813,7 +813,23 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             _ => Err("random requires a positive number".to_string()),
         },
 
-        "random-state-p" => Ok(EvalResult::Boolean(false)),
+        "make-random-state" => {
+            if args.len() > 1 {
+                return Err("make-random-state accepts at most 1 argument".to_string());
+            }
+            Ok(EvalResult::Symbol("%RANDOM-STATE%".to_string()))
+        }
+
+        "random-state-p" => {
+            let is_state = match args.get(0) {
+                Some(EvalResult::Symbol(s)) => {
+                    s.eq_ignore_ascii_case("%RANDOM-STATE%")
+                        || s.eq_ignore_ascii_case("*RANDOM-STATE*")
+                }
+                _ => false,
+            };
+            Ok(EvalResult::Boolean(is_state))
+        }
 
         // Bitwise logic operations
         "logand" => {

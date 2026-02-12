@@ -2254,30 +2254,119 @@ pub(super) fn eval_search(args: &[ASTNode], env: &mut HashMap<String, EvalResult
 }
 
 pub(super) fn eval_count(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (count item list) - count occurrences of item in list
-    if args.len() != 2 {
-        return Err("count requires 2 arguments (item list)".to_string());
+    if args.len() < 2 {
+        return Err("count requires at least 2 arguments (item sequence)".to_string());
     }
 
-    let item = eval_with_env(&args[0], env)?;
-    let list = eval_with_env(&args[1], env)?;
+    fn truthy(v: &EvalResult) -> bool {
+        !matches!(v, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
+    }
 
-    let mut current = list;
-    let mut count = 0i64;
-
-    loop {
-        match current {
-            EvalResult::Nil => return Ok(EvalResult::Fixnum(count)),
-            EvalResult::Cons(car, cdr) => {
-                let elem = car.borrow().clone();
-                if values_equal(&item, &elem) {
-                    count += 1;
-                }
-                current = cdr.borrow().clone();
-            }
-            _ => return Err("count: second argument must be a list".to_string()),
+    fn eval_non_negative_index(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<usize, String> {
+        match super::eval_types::primary_value(eval_with_env(ast, env)?) {
+            EvalResult::Fixnum(n) if n >= 0 => Ok(n as usize),
+            EvalResult::Bignum(ref b) => b.to_string().parse::<usize>().map_err(|_| "count: index must be a non-negative integer".to_string()),
+            _ => Err("count: index must be a non-negative integer".to_string()),
         }
     }
+
+    let item = super::eval_types::primary_value(eval_with_env(&args[0], env)?);
+    let sequence = super::eval_types::primary_value(eval_with_env(&args[1], env)?);
+    let mut test_fn: Option<EvalResult> = None;
+    let mut test_not_fn: Option<EvalResult> = None;
+    let mut key_fn: Option<EvalResult> = None;
+    let mut start: usize = 0;
+    let mut end: Option<usize> = None;
+
+    let mut i = 2;
+    while i + 1 < args.len() {
+        let key = match super::eval_types::primary_value(eval_with_env(&args[i], env)?) {
+            EvalResult::Symbol(s) => s.rsplit(':').next().unwrap_or(&s).trim_start_matches(':').to_ascii_lowercase(),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        match key.as_str() {
+            "test" => test_fn = Some(super::eval_types::primary_value(eval_with_env(&args[i + 1], env)?)),
+            "test-not" => test_not_fn = Some(super::eval_types::primary_value(eval_with_env(&args[i + 1], env)?)),
+            "key" => key_fn = Some(super::eval_types::primary_value(eval_with_env(&args[i + 1], env)?)),
+            "start" => start = eval_non_negative_index(&args[i + 1], env)?,
+            "end" => {
+                let v = super::eval_types::primary_value(eval_with_env(&args[i + 1], env)?);
+                end = match v {
+                    EvalResult::Nil => None,
+                    EvalResult::Fixnum(n) if n >= 0 => Some(n as usize),
+                    EvalResult::Bignum(b) => b.to_string().parse::<usize>().ok(),
+                    _ => return Err("count: :end must be NIL or a non-negative integer".to_string()),
+                };
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+
+    let mut matches_item = |elem: EvalResult| -> Result<bool, String> {
+        let probe = if let Some(keyf) = &key_fn {
+            super::eval_types::primary_value(call_function_with_values(keyf.clone(), &[elem], env)?)
+        } else {
+            elem
+        };
+        if let Some(tf) = &test_fn {
+            let r = super::eval_types::primary_value(call_function_with_values(tf.clone(), &[item.clone(), probe], env)?);
+            Ok(truthy(&r))
+        } else if let Some(tn) = &test_not_fn {
+            let r = super::eval_types::primary_value(call_function_with_values(tn.clone(), &[item.clone(), probe], env)?);
+            Ok(!truthy(&r))
+        } else {
+            Ok(values_equal(&item, &probe))
+        }
+    };
+
+    let mut count = 0i64;
+    match sequence {
+        EvalResult::Nil | EvalResult::Cons(_, _) => {
+            let mut idx = 0usize;
+            let stop = end.unwrap_or(usize::MAX);
+            let mut current = sequence;
+            loop {
+                match current {
+                    EvalResult::Nil => break,
+                    EvalResult::Cons(car, cdr) => {
+                        if idx >= start && idx < stop && matches_item(car.borrow().clone())? {
+                            count += 1;
+                        }
+                        idx += 1;
+                        current = cdr.borrow().clone();
+                    }
+                    _ => return Err("count: second argument must be a proper sequence".to_string()),
+                }
+            }
+        }
+        EvalResult::String(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let stop = end.unwrap_or(chars.len()).min(chars.len());
+            let begin = start.min(stop);
+            for ch in chars.into_iter().skip(begin).take(stop - begin) {
+                if matches_item(EvalResult::Character(ch))? {
+                    count += 1;
+                }
+            }
+        }
+        EvalResult::Array(arr) => {
+            let vals = arr.borrow();
+            let stop = end.unwrap_or(vals.len()).min(vals.len());
+            let begin = start.min(stop);
+            for elem in vals.iter().skip(begin).take(stop - begin) {
+                if matches_item(elem.clone())? {
+                    count += 1;
+                }
+            }
+        }
+        _ => return Err("count: second argument must be a sequence".to_string()),
+    }
+
+    Ok(EvalResult::Fixnum(count))
 }
 
 pub(super) fn eval_butlast(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {

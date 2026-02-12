@@ -437,9 +437,10 @@ impl Parser {
                 Ok(RVector::allocate(elements))
             }
 
-            TokenKind::HashDigit(_dim) => {
+            TokenKind::HashDigit(dim) => {
                 // Array notation: #2A(...) or #3A(...)
-                // For now, skip dimension info and treat as vector
+                // Convert nested list payload into nested vectors.
+                let array_rank = *dim as usize;
                 self.advance()?; // skip #<digit>
                 // Check for 'A' or 'a'
                 if let TokenKind::Symbol(s) = &self.current_token.kind {
@@ -448,7 +449,12 @@ impl Parser {
                     }
                 }
                 // Read the array contents (expect a list)
-                self.read_expr()
+                let payload = self.read_expr()?;
+                if array_rank == 0 {
+                    Ok(payload)
+                } else {
+                    self.array_literal_to_vector(payload, array_rank)
+                }
             }
 
             TokenKind::HashEquals(label) => {
@@ -722,6 +728,41 @@ impl Parser {
         }
 
         self.advance()?; // skip )
+
+        Ok(RVector::allocate(elements))
+    }
+
+    fn array_literal_to_vector(&self, obj: LispObject, depth: usize) -> ReaderResult<LispObject> {
+        if depth == 0 {
+            return Ok(obj);
+        }
+        if obj.is_nil() {
+            return Ok(RVector::allocate(Vec::new()));
+        }
+        if !obj.is_cons() {
+            return Ok(obj);
+        }
+
+        let mut elements = Vec::new();
+        let mut current = obj;
+        while let Some(cons_ptr) = current.as_cons_ptr() {
+            let cons = unsafe { &*cons_ptr };
+            let raw_elem = cons.car();
+            let elem = if depth > 1 {
+                self.array_literal_to_vector(raw_elem, depth - 1)?
+            } else {
+                raw_elem
+            };
+            elements.push(elem);
+            current = cons.cdr();
+        }
+
+        if !current.is_nil() {
+            return Err(ReaderError::InvalidSyntax {
+                msg: "Array literal must be a proper list".to_string(),
+                pos: self.current_token.pos,
+            });
+        }
 
         Ok(RVector::allocate(elements))
     }

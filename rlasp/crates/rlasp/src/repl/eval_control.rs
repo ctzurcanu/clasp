@@ -12,6 +12,25 @@ fn condition_true(value: &EvalResult) -> bool {
     !matches!(primary, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
 }
 
+fn canonical_block_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn extract_return_from_payload<'a>(err: &'a str, expected_block: &str) -> Option<&'a str> {
+    let trimmed = err
+        .split(" (callee ast:")
+        .next()
+        .unwrap_or(err)
+        .trim();
+    let rest = trimmed.strip_prefix("RETURN-FROM:")?;
+    let (block_name, payload) = rest.split_once(':')?;
+    if block_name.eq_ignore_ascii_case(expected_block) {
+        Some(payload)
+    } else {
+        None
+    }
+}
+
 /// Setf expander entry - stores either a simple updater function name
 /// or a complex expansion (lambda-list, store-vars, body)
 #[derive(Clone)]
@@ -157,11 +176,11 @@ pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
         return Err("block requires at least a name argument".to_string());
     }
 
-    let block_name = match &args[0] {
+    let block_name = canonical_block_name(&match &args[0] {
         ASTNode::Variable(name) => name.clone(),
         ASTNode::Constant(ConstantValue::Nil) => "nil".to_string(),
         _ => return Err("block name must be a symbol".to_string()),
-    };
+    });
 
     let body_forms = &args[1..];
 
@@ -170,9 +189,9 @@ pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     for form in body_forms {
         match eval_with_env(form, env) {
             Ok(val) => result = val,
-            Err(e) if e.starts_with(&format!("RETURN-FROM:{}:", block_name)) => {
+            Err(e) if extract_return_from_payload(&e, &block_name).is_some() => {
                 // Return from this block
-                let value_part = &e[format!("RETURN-FROM:{}:", block_name).len()..];
+                let value_part = extract_return_from_payload(&e, &block_name).unwrap_or("NIL");
                 return decode_return_value(value_part.to_string());
             }
             Err(e) => return Err(e),
@@ -188,11 +207,11 @@ pub(super) fn eval_return_from(args: &[ASTNode], env: &mut HashMap<String, EvalR
         return Err("return-from requires at least a name argument".to_string());
     }
 
-    let block_name = match &args[0] {
+    let block_name = canonical_block_name(&match &args[0] {
         ASTNode::Variable(name) => name.clone(),
         ASTNode::Constant(ConstantValue::Nil) => "nil".to_string(),
         _ => return Err("return-from name must be a symbol".to_string()),
-    };
+    });
 
     let return_val = if args.len() > 1 {
         eval_with_env(&args[1], env)?
@@ -619,15 +638,15 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         for form in body_forms {
             match eval_with_env(form, env) {
                 Ok(_) => {},
-                // Check RETURN-FROM:nil: FIRST (more specific pattern)
-                Err(e) if e.starts_with("RETURN-FROM:nil:") => {
+                // Check RETURN-FROM NIL FIRST (more specific pattern)
+                Err(e) if extract_return_from_payload(&e, "nil").is_some() => {
                     // Handle return-from nil format (from (return ...) which converts to (return-from nil ...))
                     if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
                     } else {
                         env.remove(&var_name);
                     }
-                    let value_part = &e["RETURN-FROM:nil:".len()..];
+                    let value_part = extract_return_from_payload(&e, "nil").unwrap_or("NIL");
                     return decode_return_value(value_part.to_string());
                 }
                 // Then check RETURN: (less specific pattern)
@@ -1492,6 +1511,11 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             }
                             _ => return Err("setf char: first argument must be a string".to_string()),
                         }
+                    } else if base_name.eq_ignore_ascii_case("slot-value") && place_args.len() >= 2 {
+                        let object = eval_with_env(&place_args[0], env)?;
+                        let slot_name = eval_with_env(&place_args[1], env)?;
+                        let clos_args = vec![object, slot_name, value.clone()];
+                        last_value = super::eval_clos::call_clos_builtin("set-slot-value", &clos_args, env)?;
                     } else if super::eval_list::is_car_cdr_accessor_name(base_name) && place_args.len() >= 1 {
                         // (setf (car list) value) or (setf (cadr list) value), etc.
                         // Evaluate the list expression

@@ -1,0 +1,89 @@
+; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.lisp
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.fasl
+
+Passed defstruct-predicate
+
+Passed copy-structure
+
+Passed structure-no-keyword-name-normal
+
+Passed structure-keyword-name-normal
+
+Passed structure-keyword-name-list
+
+Passed structure-keyword-name-vector
+
+Passed structure-use-readonly-value-positive
+
+Passed structure-use-readonly-value-negative
+
+Passed structure-use-readonly-value-implicit
+
+Passed struct-test-07-5.simplified
+
+Passed struct-test-15/10
+
+Passed struct-test-15/10a
+
+Passed struct-test-15/10b
+
+Passed struct-test-38-2
+
+Passed struct-test-45
+
+Passed sbcl-cross-compile-2
+
+Passed sbcl-cross-compile-3
+
+Passed sbcl-cross-compile-4
+
+Passed include-level-2
+
+Passed include-level-2a
+
+Passed include-level-2b
+
+Passed include-level-3
+
+Passed include-level-3a
+
+Passed include-level-4
+
+Passed include-level-5
+
+Passed include-level-5a
+
+Passed struct-test-56
+
+Passed struct-make-instance
+[ignore-errors] caught=Slot bar is unbound (callee ast: Variable("thunk"))
+
+Failed struct-slot-value.1
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((obj (make-instance (quote struct-clos) :bar 7))) (slot-value obj (quote bar)))
+[ignore-errors] caught=Slot bar is unbound (callee ast: Variable("thunk"))
+
+Failed struct-slot-value.2
+
+Unexpected error
+~tNIL
+while evaluating
+~t(let ((obj (make-instance (quote struct-clos)))) (setf (slot-value obj (quote foo)) 5) (values (slot-value obj (quote foo)) (slot-value obj (quote bar))))
+
+
+Failures:
+  ~/pprint-fill/
+~
+
+Unexpected Successes:
+  ~/pprint-fill/
+~
+
+Expected Failures:
+  ~/pprint-fill/
+
+Successes: (struct-slot-value.1 struct-slot-value.2)
+Error: REGRESSION-FAIL

@@ -130,8 +130,11 @@ func.func private @cc_vector_length(i64) -> i64
 // Higher-order functions
 func.func private @cc_some(i64, i64) -> i64
 func.func private @cc_every(i64, i64) -> i64
+func.func private @cc_every2(i64, i64, i64) -> i64
 func.func private @cc_find_if(i64, i64) -> i64
 func.func private @cc_find_if_not(i64, i64) -> i64
+func.func private @cc_values_pack(i64) -> i64
+func.func private @cc_multiple_value_list(i64) -> i64
 func.func private @cc_remove_if(i64, i64) -> i64
 func.func private @cc_remove_if_not(i64, i64) -> i64
 func.func private @cc_substitute_if(i64, i64, i64) -> i64

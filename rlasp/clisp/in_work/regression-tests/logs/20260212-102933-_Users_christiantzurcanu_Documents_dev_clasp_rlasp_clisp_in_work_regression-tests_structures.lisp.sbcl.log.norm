@@ -1,0 +1,206 @@
+; compiling file "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.lisp" (written 12 DEC 2025 08:25:13 AM):
+
+; file: /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.lisp
+; in: TEST-EXPECT-ERROR STRUCTURE-USE-READONLY-VALUE-NEGATIVE
+;     (CLASP-TESTS::FOO-0B-BAR CLASP-TESTS::OBJECT)
+; --> FUNCALL 
+; ==>
+;   1
+; 
+; caught STYLE-WARNING:
+;   undefined function: (COMMON-LISP:SETF CLASP-TESTS::FOO-0B-BAR)
+
+; in: TEST-EXPECT-ERROR INCLUDE-LEVEL-4
+;     (CLASP-TESTS::SUB-SUB-BLAH-A CLASP-TESTS::OBJECT)
+; --> FUNCALL 
+; ==>
+;   1
+; 
+; caught STYLE-WARNING:
+;   undefined function: (COMMON-LISP:SETF CLASP-TESTS::SUB-SUB-BLAH-A)
+
+; in: TEST-EXPECT-ERROR INCLUDE-LEVEL-5
+;     (CLASP-TESTS::SUB-SUB-BLAH1-A CLASP-TESTS::OBJECT)
+; --> FUNCALL 
+; ==>
+;   1
+; 
+; caught STYLE-WARNING:
+;   undefined function: (COMMON-LISP:SETF CLASP-TESTS::SUB-SUB-BLAH1-A)
+
+; in: TEST-TRUE STRUCTURE-NO-KEYWORD-NAME-NORMAL
+;     (CLASP-TESTS::COPY-OTTO CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::COPY-OTTO
+
+; in: TEST-TRUE STRUCTURE-KEYWORD-NAME-NORMAL
+;     (CLASP-TESTS::COPY-OTTO1 CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::COPY-OTTO1
+
+; in: TEST STRUCTURE-KEYWORD-NAME-LIST
+;     (CLASP-TESTS::COPY-OTTO2 CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::COPY-OTTO2
+
+; in: TEST STRUCTURE-KEYWORD-NAME-VECTOR
+;     (CLASP-TESTS::COPY-OTTO3 CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::COPY-OTTO3
+
+; in: TEST-TRUE STRUCTURE-NO-KEYWORD-NAME-NORMAL
+;     (CLASP-TESTS::OTTO-A CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO-A
+
+;     (CLASP-TESTS::OTTO-B CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO-B
+
+;     (CLASP-TESTS::OTTO-C CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO-C
+
+;     (CLASP-TESTS::OTTO-P CLASP-TESTS::COPY)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO-P
+
+; in: TEST-TRUE STRUCTURE-KEYWORD-NAME-NORMAL
+;     (CLASP-TESTS::OTTO1-A CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO1-A
+
+;     (CLASP-TESTS::OTTO1-B CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO1-B
+
+;     (CLASP-TESTS::OTTO1-C CLASP-TESTS::INSTANCE)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO1-C
+
+;     (CLASP-TESTS::OTTO1-P CLASP-TESTS::COPY)
+; 
+; caught STYLE-WARNING:
+;   undefined function: CLASP-TESTS::OTTO1-P
+; 
+; compilation unit finished
+;   Undefined functions:
+;     (SETF FOO-0B-BAR) (SETF SUB-SUB-BLAH-A) (SETF SUB-SUB-BLAH1-A) COPY-OTTO COPY-OTTO1 COPY-OTTO2 COPY-OTTO3 OTTO-A OTTO-B OTTO-C OTTO-P OTTO1-A OTTO1-B OTTO1-C OTTO1-P
+;   caught 15 STYLE-WARNING conditions
+
+; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/structures.fasl
+; compilation finished in 0:00:00.099
+Passed DEFSTRUCT-PREDICATE
+Passed COPY-STRUCTURE
+Passed STRUCTURE-NO-KEYWORD-NAME-NORMAL
+Passed STRUCTURE-KEYWORD-NAME-NORMAL
+Passed STRUCTURE-KEYWORD-NAME-LIST
+Passed STRUCTURE-KEYWORD-NAME-VECTOR
+Passed STRUCTURE-USE-READONLY-VALUE-POSITIVE
+Passed STRUCTURE-USE-READONLY-VALUE-NEGATIVE
+Passed STRUCTURE-USE-READONLY-VALUE-IMPLICIT
+Passed STRUCT-TEST-07-5.SIMPLIFIED
+Passed STRUCT-TEST-15/10
+Passed STRUCT-TEST-15/10A
+Passed STRUCT-TEST-15/10B
+Passed STRUCT-TEST-38-2
+Passed STRUCT-TEST-45
+Passed SBCL-CROSS-COMPILE-2
+Passed SBCL-CROSS-COMPILE-3
+Passed SBCL-CROSS-COMPILE-4
+Passed INCLUDE-LEVEL-2
+Passed INCLUDE-LEVEL-2A
+Passed INCLUDE-LEVEL-2B
+Passed INCLUDE-LEVEL-3
+WARNING: redefining CLASP-TESTS::COPY-BAR2 in DEFUN
+WARNING: Duplicate definition for COPY-BAR2 found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+WARNING: redefining CLASP-TESTS::BAR2-P in DEFUN
+WARNING: Duplicate definition for BAR2-P found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+WARNING: redefining (COMMON-LISP:SETF CLASP-TESTS::BAR0-B) in DEFUN
+WARNING: Duplicate definition for (SETF BAR0-B) found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+WARNING: redefining CLASP-TESTS::BAR0-B in DEFUN
+WARNING: Duplicate definition for BAR0-B found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+WARNING: redefining (COMMON-LISP:SETF CLASP-TESTS::BAR0-C) in DEFUN
+WARNING: Duplicate definition for (SETF BAR0-C) found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+WARNING: redefining CLASP-TESTS::BAR0-C in DEFUN
+WARNING: Duplicate definition for BAR0-C found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+WARNING: redefining CLASP-TESTS::MAKE-BAR2 in DEFUN
+WARNING: Duplicate definition for MAKE-BAR2 found in one file.
+See also:
+  The ANSI Standard, Section 3.2.2.3
+Passed INCLUDE-LEVEL-3A
+Passed INCLUDE-LEVEL-4
+Passed INCLUDE-LEVEL-5
+Passed INCLUDE-LEVEL-5A
+Passed STRUCT-TEST-56
+Passed STRUCT-MAKE-INSTANCE
+Failed STRUCT-SLOT-VALUE.1
+Unexpected error
+ Invalid initialization argument:
+   :BAR
+ in call for class #<STRUCTURE-CLASS CLASP-TESTS::STRUCT-CLOS>.
+See also:
+  The ANSI Standard, Section 7.1.2
+while evaluating
+ (LET ((OBJ (MAKE-INSTANCE 'STRUCT-CLOS BAR 7)))
+   (SLOT-VALUE OBJ 'BAR))
+Passed STRUCT-SLOT-VALUE.2
+
+Failures:
+  STRUCT-SLOT-VALUE.1
+
+Unexpected Successes:
+  SBCL-CROSS-COMPILE-4 INCLUDE-LEVEL-2B INCLUDE-LEVEL-3
+
+Successes: 26
+While evaluating the form starting at line 15, column 0
+  of #P"/var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6":
+Unhandled SIMPLE-ERROR in thread #<SB-THREAD:THREAD tid=259 "main thread" RUNNING
+                                    {70085504B3}>:
+  REGRESSION-FAIL
+
+Backtrace for: #<SB-THREAD:THREAD tid=259 "main thread" RUNNING {70085504B3}>
+0: (SB-DEBUG::DEBUGGER-DISABLED-HOOK #<SIMPLE-ERROR "REGRESSION-FAIL" {70068A1FD3}> #<unused argument> :QUIT T)
+1: (SB-DEBUG::RUN-HOOK SB-EXT:*INVOKE-DEBUGGER-HOOK* #<SIMPLE-ERROR "REGRESSION-FAIL" {70068A1FD3}>)
+2: (INVOKE-DEBUGGER #<SIMPLE-ERROR "REGRESSION-FAIL" {70068A1FD3}>)
+3: (ERROR "REGRESSION-FAIL")
+4: ((LAMBDA NIL :IN "/private/var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6"))
+5: (SB-INT:SIMPLE-EVAL-IN-LEXENV (LET ((OK (SHOW-TEST-SUMMARY))) (UNLESS OK (ERROR "REGRESSION-FAIL"))) #<NULL-LEXENV>)
+6: (SB-EXT:EVAL-TLF (LET ((OK (SHOW-TEST-SUMMARY))) (UNLESS OK (ERROR "REGRESSION-FAIL"))) 7 NIL)
+7: ((LABELS SB-FASL::EVAL-FORM :IN SB-INT:LOAD-AS-SOURCE) (LET ((OK (SHOW-TEST-SUMMARY))) (UNLESS OK (ERROR "REGRESSION-FAIL"))) 7)
+8: ((LAMBDA (SB-KERNEL:FORM &KEY :CURRENT-INDEX &ALLOW-OTHER-KEYS) :IN SB-INT:LOAD-AS-SOURCE) (LET ((OK (SHOW-TEST-SUMMARY))) (UNLESS OK (ERROR "REGRESSION-FAIL"))) :CURRENT-INDEX 7)
+9: (SB-C::%DO-FORMS-FROM-INFO #<FUNCTION (LAMBDA (SB-KERNEL:FORM &KEY :CURRENT-INDEX &ALLOW-OTHER-KEYS) :IN SB-INT:LOAD-AS-SOURCE) {105A50C6B}> #<SB-C::SOURCE-INFO {7008520463}> SB-C::INPUT-ERROR-IN-LOAD)
+10: (SB-INT:LOAD-AS-SOURCE #<SB-INT:FORM-TRACKING-STREAM for "file /var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6" {7008520233}> :VERBOSE NIL :PRINT NIL :CONTEXT "loading")
+11: ((LABELS SB-FASL::LOAD-STREAM-1 :IN LOAD) #<SB-INT:FORM-TRACKING-STREAM for "file /var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6" {7008520233}> NIL)
+12: (SB-FASL::CALL-WITH-LOAD-BINDINGS #<FUNCTION (LABELS SB-FASL::LOAD-STREAM-1 :IN LOAD) {105A5084B}> #<SB-INT:FORM-TRACKING-STREAM for "file /var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6" {7008520233}> NIL #<SB-INT:FORM-TRACKING-STREAM for "file /var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6" {7008520233}>)
+13: (LOAD #P"/var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T/lisp-regression-runner.jXmmL6" :VERBOSE NIL :PRINT NIL :IF-DOES-NOT-EXIST :ERROR :EXTERNAL-FORMAT :DEFAULT)
+14: (SB-IMPL::PROCESS-EVAL/LOAD-OPTIONS ((:LOAD . "/var/folders/bk/nmh337_90t9f5nqh4bmn_w5r0000gn/T//lisp-regression-runner.jXmmL6") (:QUIT)))
+15: (SB-IMPL::TOPLEVEL-INIT)
+16: ((FLET SB-UNIX::BODY :IN SB-IMPL::START-LISP))
+17: ((FLET "WITHOUT-INTERRUPTS-BODY-3" :IN SB-IMPL::START-LISP))
+18: (SB-IMPL::%START-LISP)
+
+unhandled condition in --disable-debugger mode, quitting

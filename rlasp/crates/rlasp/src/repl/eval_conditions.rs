@@ -806,21 +806,16 @@ pub fn eval_invoke_restart(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 
         // If the restart function is a Lambda, evaluate it
         if let ASTNode::Lambda { params, body, .. } = &restart.function {
-            // Bind parameters to arguments
-            for (i, param) in params.iter().enumerate() {
-                if let Some(arg_val) = restart_args.get(i) {
-                    call_env.insert(param.clone(), arg_val.clone());
-                } else {
-                    call_env.insert(param.clone(), EvalResult::Nil);
-                }
-            }
-
-            // Execute body
-            let mut result = EvalResult::Nil;
-            for form in body {
-                result = eval_with_env(form, &mut call_env)?;
-            }
-            return Ok(result);
+            let lambda = EvalResult::Lambda {
+                params: params.clone(),
+                defaults: HashMap::new(),
+                supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
+                body: body.clone(),
+                env: Rc::new(RefCell::new(call_env.clone())),
+                dynamic_env: false,
+            };
+            return super::eval_system::call_function_with_values(lambda, &restart_args, &mut call_env);
         }
 
         // Otherwise try to call it as a regular function

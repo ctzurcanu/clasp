@@ -1,5 +1,5 @@
 /// eval_clos.rs - Basic CLOS (Common Lisp Object System) support
-use super::eval_types::{EvalResult, Instance};
+use super::eval_types::{EvalResult, Instance, primary_value};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -20,6 +20,84 @@ fn normalize_slot_name(raw: &str) -> String {
     let base = raw.rsplit(':').next().unwrap_or(raw);
     let stripped = base.strip_prefix(':').unwrap_or(base);
     stripped.to_ascii_lowercase()
+}
+
+fn normalize_hash_slot_lookup_key(raw: &str) -> String {
+    let stripped = raw
+        .strip_prefix("sym:")
+        .or_else(|| raw.strip_prefix("key:"))
+        .or_else(|| raw.strip_prefix("str:"))
+        .or_else(|| raw.strip_prefix("num:"))
+        .unwrap_or(raw);
+    normalize_slot_name(stripped)
+}
+
+fn hash_slot_key_matches(existing_key: &str, normalized_slot_name: &str) -> bool {
+    existing_key.eq_ignore_ascii_case(normalized_slot_name)
+        || normalize_hash_slot_lookup_key(existing_key).eq_ignore_ascii_case(normalized_slot_name)
+}
+
+fn default_hash_slot_storage_key(normalized_slot_name: &str) -> String {
+    format!("sym:{}", normalized_slot_name)
+}
+
+pub const CLASS_NAME_OVERRIDE_SLOT_KEY: &str = "__class_name__";
+
+fn effective_instance_class_name(inst: &Instance) -> String {
+    if let Some(EvalResult::Symbol(name)) = inst.slots.borrow().get(CLASS_NAME_OVERRIDE_SLOT_KEY) {
+        return name.clone();
+    }
+    if let Some(EvalResult::String(name)) = inst.slots.borrow().get(CLASS_NAME_OVERRIDE_SLOT_KEY) {
+        return name.clone();
+    }
+    inst.class_name.clone()
+}
+
+fn lookup_function_binding(env: &HashMap<String, EvalResult>, name: &str) -> Option<EvalResult> {
+    let fn_prefix = super::eval_core::FUNCTION_NS_PREFIX;
+    let mut candidates = vec![
+        name.to_string(),
+        name.to_ascii_lowercase(),
+        name.to_ascii_uppercase(),
+    ];
+    if let Some(base) = name.rsplit(':').next() {
+        if !base.eq_ignore_ascii_case(name) {
+            candidates.push(base.to_string());
+            candidates.push(base.to_ascii_lowercase());
+            candidates.push(base.to_ascii_uppercase());
+        }
+    }
+    for candidate in candidates {
+        let fn_name = format!("{}{}", fn_prefix, candidate);
+        if let Some(v) = env.get(&fn_name).cloned() {
+            return Some(v);
+        }
+        if let Some(v) = env.get(&candidate).cloned() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn collect_class_lineage(
+    class_name: &str,
+    env: &HashMap<String, EvalResult>,
+    lineage: &mut Vec<String>,
+    visiting: &mut std::collections::HashSet<String>,
+) {
+    let key = class_name.to_uppercase();
+    if !visiting.insert(key) {
+        return;
+    }
+    if let Some(EvalResult::Array(supers)) = env.get(&class_supers_key(class_name)) {
+        let supers_vec = supers.borrow().clone();
+        for sup in supers_vec {
+            if let EvalResult::Symbol(sup_name) = sup {
+                collect_class_lineage(&sup_name, env, lineage, visiting);
+            }
+        }
+    }
+    lineage.push(class_name.to_string());
 }
 
 fn list_from_items(items: Vec<EvalResult>) -> EvalResult {
@@ -52,32 +130,23 @@ pub fn call_clos_builtin(
                 _ => return Err("make-instance: first argument must be a class name".to_string()),
             };
 
+            // DEFSTRUCT instances are represented with make-<name> constructors; if
+            // no class metadata exists, prefer that constructor path.
+            let has_class_metadata = env.contains_key(&class_slots_key(&class_name))
+                || env.contains_key(&class_initargs_key(&class_name))
+                || env.contains_key(&class_supers_key(&class_name));
+            if !has_class_metadata {
+                let ctor_name = format!("make-{}", class_name);
+                if let Some(ctor_fn) = lookup_function_binding(env, &ctor_name) {
+                    let ctor_args: Vec<EvalResult> = args.iter().skip(1).cloned().collect();
+                    let constructed = super::eval_system::call_function_with_values(ctor_fn, &ctor_args, env)?;
+                    return Ok(primary_value(constructed));
+                }
+            }
+
             // Start with defaults from class metadata (including inherited slots).
             let mut slots = HashMap::new();
             let mut initarg_to_slot: HashMap<String, String> = HashMap::new();
-
-            fn collect_class_lineage(
-                class_name: &str,
-                env: &HashMap<String, EvalResult>,
-                lineage: &mut Vec<String>,
-                visiting: &mut std::collections::HashSet<String>,
-            ) {
-                let key = class_name.to_uppercase();
-                if !visiting.insert(key.clone()) {
-                    return;
-                }
-
-                if let Some(EvalResult::Array(supers)) = env.get(&class_supers_key(class_name)) {
-                    let supers_vec = supers.borrow().clone();
-                    for sup in supers_vec {
-                        if let EvalResult::Symbol(sup_name) = sup {
-                            collect_class_lineage(&sup_name, env, lineage, visiting);
-                        }
-                    }
-                }
-
-                lineage.push(class_name.to_string());
-            }
 
             let mut lineage = Vec::new();
             let mut visiting = std::collections::HashSet::new();
@@ -311,17 +380,55 @@ pub fn call_clos_builtin(
 
             match object {
                 EvalResult::Instance(inst) => {
-                    let slots = inst.slots.borrow();
-                    slots.get(&slot_name)
-                        .cloned()
-                        .ok_or_else(|| format!("Slot {} is unbound", slot_name))
+                    if let Some(value) = inst.slots.borrow().get(&slot_name).cloned() {
+                        return Ok(value);
+                    }
+
+                    if let Some(update_fn) = lookup_function_binding(env, "update-instance-for-redefined-class") {
+                        let update_args = vec![
+                            EvalResult::Instance(inst.clone()),
+                            EvalResult::Nil,
+                            EvalResult::Nil,
+                            EvalResult::Nil,
+                        ];
+                        if let Err(e) = super::eval_system::call_function_with_values(update_fn, &update_args, env) {
+                            if !e.to_ascii_lowercase().contains("no applicable method") {
+                                return Err(e);
+                            }
+                        }
+                    }
+
+                    if let Some(value) = inst.slots.borrow().get(&slot_name).cloned() {
+                        return Ok(value);
+                    }
+
+                    let mut lineage = Vec::new();
+                    let mut visiting = std::collections::HashSet::new();
+                    let effective_class_name = effective_instance_class_name(inst);
+                    collect_class_lineage(&effective_class_name, env, &mut lineage, &mut visiting);
+                    for cls in lineage {
+                        if let Some(EvalResult::HashTable(slot_defaults)) = env.get(&class_slots_key(&cls)) {
+                            if let Some(default_val) = slot_defaults.borrow().get(&slot_name).cloned() {
+                                if !matches!(default_val, EvalResult::Symbol(ref s) if s.eq_ignore_ascii_case(":unbound")) {
+                                    inst.slots.borrow_mut().insert(slot_name.clone(), default_val.clone());
+                                    return Ok(default_val);
+                                }
+                            }
+                        }
+                    }
+
+                    Err(format!("Slot {} is unbound", slot_name))
                 }
                 EvalResult::HashTable(ht) => {
                     // Backward compatibility
                     let hash = ht.borrow();
-                    hash.get(&slot_name)
-                        .cloned()
-                        .ok_or_else(|| format!("Slot {} is unbound", slot_name))
+                    if let Some(v) = hash.get(&slot_name).cloned() {
+                        Ok(v)
+                    } else if let Some((_, v)) = hash.iter().find(|(k, _)| hash_slot_key_matches(k, &slot_name)) {
+                        Ok(v.clone())
+                    } else {
+                        Err(format!("Slot {} is unbound", slot_name))
+                    }
                 }
                 // Return NIL for NIL objects (allows graceful handling when object doesn't exist)
                 EvalResult::Nil => Ok(EvalResult::Nil),
@@ -349,7 +456,15 @@ pub fn call_clos_builtin(
                     Ok(new_value)
                 }
                 EvalResult::HashTable(ht) => {
-                    ht.borrow_mut().insert(slot_name, new_value.clone());
+                    let existing_key = {
+                        let hash = ht.borrow();
+                        hash.keys()
+                            .find(|k| hash_slot_key_matches(k, &slot_name))
+                            .cloned()
+                    };
+                    let mut hash = ht.borrow_mut();
+                    let key = existing_key.unwrap_or_else(|| default_hash_slot_storage_key(&slot_name));
+                    hash.insert(key, new_value.clone());
                     Ok(new_value)
                 }
                 _ => Err("set-slot-value: object must be an instance".to_string()),
@@ -376,7 +491,9 @@ pub fn call_clos_builtin(
                 }
                 EvalResult::HashTable(ht) => {
                     let hash = ht.borrow();
-                    Ok(EvalResult::Boolean(hash.contains_key(&slot_name)))
+                    let bound = hash.contains_key(&slot_name)
+                        || hash.keys().any(|k| hash_slot_key_matches(k, &slot_name));
+                    Ok(EvalResult::Boolean(bound))
                 }
                 _ => Ok(EvalResult::Boolean(false)),
             }
@@ -391,21 +508,17 @@ pub fn call_clos_builtin(
 
             let object = &args[0];
             let slot_name = match &args[1] {
-                EvalResult::Symbol(s) => {
-                    if s.starts_with(':') {
-                        s[1..].to_string()
-                    } else {
-                        s.to_string()
-                    }
-                }
-                EvalResult::String(s) => s.clone(),
+                EvalResult::Symbol(s) => normalize_slot_name(s),
+                EvalResult::String(s) => normalize_slot_name(s),
                 _ => return Err("slot-exists-p: slot-name must be a symbol or string".to_string()),
             };
 
             match object {
                 EvalResult::HashTable(ht) => {
                     let hash = ht.borrow();
-                    Ok(EvalResult::Boolean(hash.contains_key(&slot_name)))
+                    let exists = hash.contains_key(&slot_name)
+                        || hash.keys().any(|k| hash_slot_key_matches(k, &slot_name));
+                    Ok(EvalResult::Boolean(exists))
                 }
                 _ => Ok(EvalResult::Boolean(false)),
             }
@@ -426,7 +539,20 @@ pub fn call_clos_builtin(
 
             match object {
                 EvalResult::HashTable(ht) => {
-                    ht.borrow_mut().remove(&slot_name);
+                    let remove_key = {
+                        let hash = ht.borrow();
+                        hash.keys()
+                            .find(|k| hash_slot_key_matches(k, &slot_name))
+                            .cloned()
+                    };
+                    let mut hash = ht.borrow_mut();
+                    if let Some(key) = remove_key {
+                        hash.remove(&key);
+                    } else {
+                        let fallback = default_hash_slot_storage_key(&slot_name);
+                        hash.remove(&fallback);
+                        hash.remove(&slot_name);
+                    }
                     Ok(object.clone())
                 }
                 _ => Err("slot-makunbound: object must be an instance".to_string()),
@@ -439,8 +565,94 @@ pub fn call_clos_builtin(
         }
 
         "change-class" => {
-            // Change the class of an instance
-            Ok(EvalResult::Nil)
+            // (change-class instance new-class &rest initargs)
+            if args.len() < 2 {
+                return Err("change-class requires at least instance and new-class".to_string());
+            }
+
+            let inst = match &args[0] {
+                EvalResult::Instance(i) => i.clone(),
+                _ => return Err("change-class: first argument must be an instance".to_string()),
+            };
+            let new_class_name = match &args[1] {
+                EvalResult::Symbol(s) => s.clone(),
+                EvalResult::String(s) => s.clone(),
+                _ => return Err("change-class: new class must be a symbol or string".to_string()),
+            };
+
+            let mut new_slots = inst.slots.borrow().clone();
+            let mut initarg_to_slot: HashMap<String, String> = HashMap::new();
+
+            let mut lineage = Vec::new();
+            let mut visiting = std::collections::HashSet::new();
+            collect_class_lineage(&new_class_name, env, &mut lineage, &mut visiting);
+            for cls in &lineage {
+                if let Some(EvalResult::HashTable(slot_defaults)) = env.get(&class_slots_key(cls)) {
+                    for (slot_name, default_val) in slot_defaults.borrow().iter() {
+                        if !matches!(default_val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case(":unbound")) {
+                            new_slots
+                                .entry(normalize_slot_name(slot_name))
+                                .or_insert_with(|| default_val.clone());
+                        }
+                    }
+                }
+                if let Some(EvalResult::HashTable(initargs_map)) = env.get(&class_initargs_key(cls)) {
+                    for (initarg_name, slot_name_val) in initargs_map.borrow().iter() {
+                        if let EvalResult::Symbol(slot_name) = slot_name_val {
+                            initarg_to_slot.insert(
+                                normalize_slot_name(initarg_name),
+                                normalize_slot_name(slot_name),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let mut i = 2;
+            while i + 1 < args.len() {
+                if let EvalResult::Symbol(key) = &args[i] {
+                    let initarg = normalize_slot_name(key);
+                    let slot_name = initarg_to_slot
+                        .get(&initarg)
+                        .cloned()
+                        .unwrap_or(initarg);
+                    new_slots.insert(slot_name, args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+
+            let prospective = EvalResult::Instance(Instance {
+                class_name: new_class_name.clone(),
+                slots: Rc::new(RefCell::new(new_slots.clone())),
+            });
+
+            if let Some(update_fn) = lookup_function_binding(env, "update-instance-for-different-class") {
+                let mut update_args = Vec::with_capacity(args.len());
+                update_args.push(EvalResult::Instance(inst.clone()));
+                update_args.push(prospective.clone());
+                update_args.extend(args.iter().skip(2).cloned());
+                if let Err(e) = super::eval_system::call_function_with_values(update_fn, &update_args, env) {
+                    if !e.to_ascii_lowercase().contains("no applicable method") {
+                        return Err(e);
+                    }
+                }
+            }
+
+            {
+                let mut slots = inst.slots.borrow_mut();
+                *slots = new_slots;
+                slots.insert(
+                    CLASS_NAME_OVERRIDE_SLOT_KEY.to_string(),
+                    EvalResult::Symbol(new_class_name.clone()),
+                );
+            }
+
+            Ok(EvalResult::Instance(Instance {
+                class_name: new_class_name,
+                slots: inst.slots.clone(),
+            }))
         }
 
         "allocate-instance" => {

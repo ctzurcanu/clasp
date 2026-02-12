@@ -346,7 +346,13 @@ pub(super) fn primary_value(val: EvalResult) -> EvalResult {
 /// Get the class name of a value for CLOS method dispatch
 pub fn class_of(val: &EvalResult) -> String {
     match val {
-        EvalResult::Instance(inst) => inst.class_name.clone(),
+        EvalResult::Instance(inst) => {
+            if let Some(EvalResult::Symbol(name)) = inst.slots.borrow().get(super::eval_clos::CLASS_NAME_OVERRIDE_SLOT_KEY) {
+                name.clone()
+            } else {
+                inst.class_name.clone()
+            }
+        }
         EvalResult::Fixnum(_) => "FIXNUM".to_string(),
         EvalResult::Bignum(_) => "BIGNUM".to_string(),
         EvalResult::Ratio(_) => "RATIO".to_string(),

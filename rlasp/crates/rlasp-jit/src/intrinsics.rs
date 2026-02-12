@@ -13,6 +13,32 @@ use std::sync::{Mutex, Once};
 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 use malachite::Integer;
 
+fn as_symbol_ptr_checked(obj: LispObject) -> Option<*const rlasp_runtime::Symbol> {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+    let ptr = obj.as_general_ptr::<()>()?;
+    if ptr.is_null() {
+        return None;
+    }
+    if unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+        Some(ptr as *const rlasp_runtime::Symbol)
+    } else {
+        None
+    }
+}
+
+fn as_string_ptr_checked(obj: LispObject) -> Option<*const rlasp_runtime::RString> {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+    let ptr = obj.as_general_ptr::<()>()?;
+    if ptr.is_null() {
+        return None;
+    }
+    if unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::String) {
+        Some(ptr as *const rlasp_runtime::RString)
+    } else {
+        None
+    }
+}
+
 /// Box a fixnum (i64 → LispObject)
 #[no_mangle]
 pub extern "C" fn cc_box_fixnum(val: i64) -> usize {
@@ -238,6 +264,9 @@ pub extern "C" fn cc_add(a: usize, b: usize) -> usize {
         if let Some(fix) = obj.as_fixnum() {
             return Some(NumericValue::Fixnum(fix));
         }
+        if !obj.is_number() {
+            return None;
+        }
         if let Some(ptr) = obj.as_general_ptr::<Number>() {
             if ptr.is_null() {
                 return None;
@@ -407,6 +436,9 @@ pub extern "C" fn cc_sub(a: usize, b: usize) -> usize {
         if let Some(fix) = obj.as_fixnum() {
             return (Some(fix), None, None);
         }
+        if !obj.is_number() {
+            return (None, None, None);
+        }
         // General pointer (bignum, float, ratio)
         if let Some(ptr) = obj.as_general_ptr::<Number>() {
             if ptr.is_null() {
@@ -489,23 +521,24 @@ pub extern "C" fn cc_mul(a: usize, b: usize) -> usize {
     }
 
     // Check if either operand is actually a float type
-    let a_is_float = if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
+    let a_is_float = if a_obj.is_number() { if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
         !ptr.is_null() && matches!(unsafe { &(*ptr).value }, NumberValue::Float(_))
     } else {
         false
-    };
-    let b_is_float = if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
+    }} else { false };
+    let b_is_float = if b_obj.is_number() { if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
         !ptr.is_null() && matches!(unsafe { &(*ptr).value }, NumberValue::Float(_))
     } else {
         false
-    };
+    }} else { false };
 
     // If either is a float, do float arithmetic
     if a_is_float || b_is_float {
         let to_float = |obj: LispObject| -> Option<f64> {
             if let Some(n) = obj.as_fixnum() {
                 Some(n as f64)
-            } else if let Some(ptr) = obj.as_general_ptr::<Number>() {
+            } else if obj.is_number() {
+                let ptr = obj.as_general_ptr::<Number>()?;
                 if ptr.is_null() { return None; }
                 let num = unsafe { &*ptr };
                 match &num.value {
@@ -532,7 +565,8 @@ pub extern "C" fn cc_mul(a: usize, b: usize) -> usize {
     let to_rational = |obj: LispObject| -> Option<Rational> {
         if let Some(n) = obj.as_fixnum() {
             Some(Rational::from(n))
-        } else if let Some(ptr) = obj.as_general_ptr::<Number>() {
+        } else if obj.is_number() {
+            let ptr = obj.as_general_ptr::<Number>()?;
             if ptr.is_null() { return None; }
             let num = unsafe { &*ptr };
             match &num.value {
@@ -588,23 +622,24 @@ pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
     let b_obj = unsafe { LispObject::from_raw(b) };
 
     // Check if either operand is actually a float type (not just convertible)
-    let a_is_float = if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
+    let a_is_float = if a_obj.is_number() { if let Some(ptr) = a_obj.as_general_ptr::<Number>() {
         !ptr.is_null() && matches!(unsafe { &(*ptr).value }, NumberValue::Float(_))
     } else {
         false
-    };
-    let b_is_float = if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
+    }} else { false };
+    let b_is_float = if b_obj.is_number() { if let Some(ptr) = b_obj.as_general_ptr::<Number>() {
         !ptr.is_null() && matches!(unsafe { &(*ptr).value }, NumberValue::Float(_))
     } else {
         false
-    };
+    }} else { false };
 
     // Only use float division if at least one operand is actually a float
     if a_is_float || b_is_float {
         let to_float = |obj: LispObject| -> Option<f64> {
             if let Some(n) = obj.as_fixnum() {
                 Some(n as f64)
-            } else if let Some(ptr) = obj.as_general_ptr::<Number>() {
+            } else if obj.is_number() {
+                let ptr = obj.as_general_ptr::<Number>()?;
                 if ptr.is_null() { return None; }
                 let num = unsafe { &*ptr };
                 match &num.value {
@@ -635,7 +670,8 @@ pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
     let to_rational = |obj: LispObject| -> Option<Rational> {
         if let Some(n) = obj.as_fixnum() {
             Some(Rational::from(n))
-        } else if let Some(ptr) = obj.as_general_ptr::<Number>() {
+        } else if obj.is_number() {
+            let ptr = obj.as_general_ptr::<Number>()?;
             if ptr.is_null() { return None; }
             let num = unsafe { &*ptr };
             match &num.value {
@@ -755,7 +791,8 @@ pub extern "C" fn cc_numerator(obj: usize) -> usize {
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
     // Check if it's a Number
-    if let Some(ptr) = lisp_obj.as_general_ptr::<Number>() {
+    if lisp_obj.is_number() {
+        if let Some(ptr) = lisp_obj.as_general_ptr::<Number>() {
         if ptr.is_null() { return LispObject::nil().raw(); }
         let num = unsafe { &*ptr };
         // Access the value field - it's a public field in Number
@@ -766,6 +803,7 @@ pub extern "C" fn cc_numerator(obj: usize) -> usize {
                 return LispObject::fixnum(i64::exact_from(numerator)).raw();
             }
         }
+    }
     }
 
     LispObject::nil().raw()
@@ -781,7 +819,8 @@ pub extern "C" fn cc_denominator(obj: usize) -> usize {
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
     // Check if it's a Number
-    if let Some(ptr) = lisp_obj.as_general_ptr::<Number>() {
+    if lisp_obj.is_number() {
+        if let Some(ptr) = lisp_obj.as_general_ptr::<Number>() {
         if ptr.is_null() { return LispObject::nil().raw(); }
         let num = unsafe { &*ptr };
         // Access the value field
@@ -792,6 +831,7 @@ pub extern "C" fn cc_denominator(obj: usize) -> usize {
                 return LispObject::fixnum(i64::exact_from(denominator)).raw();
             }
         }
+    }
     }
 
     LispObject::nil().raw()
@@ -988,6 +1028,7 @@ pub extern "C" fn cc_gt(a: usize, b: usize) -> usize {
 /// Equal comparison (= a b)
 #[no_mangle]
 pub extern "C" fn cc_eq(a: usize, b: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
@@ -997,15 +1038,16 @@ pub extern "C" fn cc_eq(a: usize, b: usize) -> usize {
     }
 
     // Symbol equality by name (case-insensitive, matches interpreter)
-    if let (Some(a_sym_ptr), Some(b_sym_ptr)) = (
-        a_obj.as_general_ptr::<rlasp_runtime::Symbol>(),
-        b_obj.as_general_ptr::<rlasp_runtime::Symbol>(),
-    ) {
-        if !a_sym_ptr.is_null() && !b_sym_ptr.is_null() {
-            let a_sym = unsafe { &*a_sym_ptr };
-            let b_sym = unsafe { &*b_sym_ptr };
-            if a_sym.name().eq_ignore_ascii_case(b_sym.name()) {
-                return LispObject::t().raw();
+    if let (Some(a_ptr), Some(b_ptr)) = (a_obj.as_general_ptr::<()>(), b_obj.as_general_ptr::<()>()) {
+        if !a_ptr.is_null() && !b_ptr.is_null() {
+            if unsafe { TypeHeader::from_ptr(a_ptr) } == Some(ObjectType::Symbol)
+                && unsafe { TypeHeader::from_ptr(b_ptr) } == Some(ObjectType::Symbol)
+            {
+                let a_sym = unsafe { &*(a_ptr as *const rlasp_runtime::Symbol) };
+                let b_sym = unsafe { &*(b_ptr as *const rlasp_runtime::Symbol) };
+                if a_sym.name().eq_ignore_ascii_case(b_sym.name()) {
+                    return LispObject::t().raw();
+                }
             }
         }
     }
@@ -1667,24 +1709,26 @@ pub extern "C" fn cc_set_char(string: usize, index: usize, ch: usize) -> usize {
 /// Copy a sequence (list or string)
 #[no_mangle]
 pub extern "C" fn cc_copy_seq(seq: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
     let seq_obj = unsafe { LispObject::from_raw(seq) };
 
-    // Check if it's a string
-    if seq_obj.tag() == rlasp_runtime::Tag::General {
-        unsafe {
-            let ptr = (seq_obj.raw() & !0b11) as *const rlasp_runtime::RString;
-            if !ptr.is_null() {
-                let s = (*ptr).as_str();
-                return rlasp_runtime::RString::allocate(s.to_string()).raw();
+    if let Some(ptr) = seq_obj.as_general_ptr::<()>() {
+        if !ptr.is_null() {
+            match unsafe { TypeHeader::from_ptr(ptr) } {
+                Some(ObjectType::String) => {
+                    let str_ptr = ptr as *const rlasp_runtime::RString;
+                    let s = unsafe { &*str_ptr };
+                    return rlasp_runtime::RString::allocate(s.as_str().to_string()).raw();
+                }
+                Some(ObjectType::Vector) => {
+                    let vec_ptr = ptr as *const rlasp_runtime::RVector;
+                    let vec = unsafe { &*vec_ptr };
+                    let elements = vec.as_slice().to_vec();
+                    return rlasp_runtime::RVector::allocate(elements).raw();
+                }
+                _ => {}
             }
-        }
-    }
-
-    if let Some(vec_ptr) = seq_obj.as_general_ptr::<rlasp_runtime::RVector>() {
-        if !vec_ptr.is_null() {
-            let vec = unsafe { &*vec_ptr };
-            let elements = vec.as_slice().to_vec();
-            return rlasp_runtime::RVector::allocate(elements).raw();
         }
     }
 
@@ -1710,35 +1754,26 @@ pub extern "C" fn cc_copy_seq(seq: usize) -> usize {
 /// String equality comparison
 #[no_mangle]
 pub extern "C" fn cc_string_equal(a: usize, b: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
 
-    // Extract string from first object
-    let a_str = unsafe {
-        if a_obj.tag() == rlasp_runtime::Tag::General {
-            let ptr = (a_obj.raw() & !0b11) as *const rlasp_runtime::RString;
-            if !ptr.is_null() {
-                (*ptr).as_str()
-            } else {
-                return LispObject::nil().raw();
-            }
+    let extract_string = |obj: LispObject| -> Option<String> {
+        let ptr = obj.as_general_ptr::<()>()?;
+        if ptr.is_null() {
+            return None;
+        }
+        if unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::String) {
+            let str_ptr = ptr as *const rlasp_runtime::RString;
+            Some(unsafe { (&*str_ptr).as_str().to_string() })
         } else {
-            return LispObject::nil().raw();
+            None
         }
     };
 
-    // Extract string from second object
-    let b_str = unsafe {
-        if b_obj.tag() == rlasp_runtime::Tag::General {
-            let ptr = (b_obj.raw() & !0b11) as *const rlasp_runtime::RString;
-            if !ptr.is_null() {
-                (*ptr).as_str()
-            } else {
-                return LispObject::nil().raw();
-            }
-        } else {
-            return LispObject::nil().raw();
-        }
+    let (Some(a_str), Some(b_str)) = (extract_string(a_obj), extract_string(b_obj)) else {
+        return LispObject::nil().raw();
     };
 
     if a_str == b_str {
@@ -1752,11 +1787,13 @@ pub extern "C" fn cc_string_equal(a: usize, b: usize) -> usize {
 /// Args: (string1 string2 &key start1 end1 start2 end2)
 #[no_mangle]
 pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
     let args_obj = unsafe { LispObject::from_raw(args) };
 
     // Extract strings and optional keyword args from list
-    let mut string1: Option<&str> = None;
-    let mut string2: Option<&str> = None;
+    let mut string1: Option<String> = None;
+    let mut string2: Option<String> = None;
     let mut start1: usize = 0;
     let mut end1: Option<usize> = None;
     let mut start2: usize = 0;
@@ -1775,6 +1812,9 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
             if let Some(key) = &expect_value_for {
                 // This item is the value for the previous keyword
                 if let Some(val) = item.as_fixnum() {
+                    if val < 0 {
+                        return LispObject::nil().raw();
+                    }
                     match key.as_str() {
                         ":start1" | "start1" => start1 = val as usize,
                         ":end1" | "end1" => end1 = Some(val as usize),
@@ -1786,12 +1826,21 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
                 expect_value_for = None;
             } else {
                 // Check if it's a keyword
-                let is_keyword = if let Some(sym_ptr) = item.as_general_ptr::<rlasp_runtime::Symbol>() {
-                    let sym = unsafe { &*sym_ptr };
-                    let name = sym.name();
-                    if name.starts_with(':') || name == "start1" || name == "end1" || name == "start2" || name == "end2" {
-                        expect_value_for = Some(name.to_string());
-                        true
+                let is_keyword = if let Some(ptr) = item.as_general_ptr::<()>() {
+                    if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+                        let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                        let name = sym.name().to_ascii_lowercase();
+                        if name.starts_with(':')
+                            || name == "start1"
+                            || name == "end1"
+                            || name == "start2"
+                            || name == "end2"
+                        {
+                            expect_value_for = Some(name);
+                            true
+                        } else {
+                            false
+                        }
                     } else {
                         false
                     }
@@ -1801,17 +1850,15 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
 
                 if !is_keyword {
                     // It's a positional argument (string)
-                    let s = unsafe {
-                        if item.tag() == rlasp_runtime::Tag::General {
-                            let ptr = (item.raw() & !0b11) as *const rlasp_runtime::RString;
-                            if !ptr.is_null() {
-                                Some((*ptr).as_str())
-                            } else {
-                                None
-                            }
+                    let s = if let Some(ptr) = item.as_general_ptr::<()>() {
+                        if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::String) {
+                            let str_ptr = ptr as *const rlasp_runtime::RString;
+                            Some(unsafe { (&*str_ptr).as_str().to_string() })
                         } else {
                             None
                         }
+                    } else {
+                        None
                     };
 
                     match positional_idx {
@@ -1830,7 +1877,7 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
     }
 
     // Compare strings
-    if let (Some(s1), Some(s2)) = (string1, string2) {
+    if let (Some(s1), Some(s2)) = (string1.as_deref(), string2.as_deref()) {
         let e1 = end1.unwrap_or(s1.len());
         let e2 = end2.unwrap_or(s2.len());
 
@@ -2395,7 +2442,7 @@ pub extern "C" fn cc_print(obj: usize) -> usize {
 
 /// Format a LispObject as an s-expression (for use in format ~S directive)
 fn format_s_expr(obj: LispObject) -> String {
-    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString};
+    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString, Symbol, Number, NumberValue};
 
     if obj.is_nil() {
         "NIL".to_string()
@@ -2413,34 +2460,36 @@ fn format_s_expr(obj: LispObject) -> String {
         result.push(')');
         result
     } else if obj.is_general() {
-        // Check the type header to determine what kind of general object this is
-        if let Some(ptr) = obj.as_general_ptr::<RString>() {
-            if !ptr.is_null() {
-                unsafe {
-                    if let Some(obj_type) = TypeHeader::from_ptr(ptr) {
-                        match obj_type {
-                            ObjectType::String => {
-                                let string = &*ptr;
-                                // For ~S, print strings with quotes
-                                return format!("\"{}\"", string.as_str());
-                            }
-                            _ => {}
+        if let Some(ptr) = obj.as_general_ptr::<()>() {
+            if ptr.is_null() {
+                return "#<NULL-PTR>".to_string();
+            }
+            unsafe {
+                match TypeHeader::from_ptr(ptr) {
+                    Some(ObjectType::String) => {
+                        let string = &*(ptr as *const RString);
+                        // For ~S, print strings with quotes
+                        format!("\"{}\"", string.as_str())
+                    }
+                    Some(ObjectType::Symbol) => {
+                        let sym = &*(ptr as *const Symbol);
+                        sym.name().to_uppercase()
+                    }
+                    Some(ObjectType::Number) => {
+                        let num = &*(ptr as *const Number);
+                        match &num.value {
+                            NumberValue::Bignum(bn) => bn.to_string(),
+                            NumberValue::Ratio(ratio) => ratio.to_string(),
+                            NumberValue::Float(f) => f.to_string(),
+                            NumberValue::Complex(c) => format!("#C({} {})", c.re, c.im),
                         }
                     }
+                    _ => format!("{:?}", obj),
                 }
             }
+        } else {
+            format!("{:?}", obj)
         }
-        // Try as symbol
-        if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-            if !sym_ptr.is_null() {
-                unsafe {
-                    let sym = &*sym_ptr;
-                    return sym.name().to_uppercase();
-                }
-            }
-        }
-        // Fallback for other general objects
-        format!("{:?}", obj)
     } else {
         format!("{:?}", obj)
     }
@@ -2470,7 +2519,7 @@ fn format_list_sexpr(obj: LispObject, first: bool) -> String {
 /// Helper function to print a Lisp object in readable form
 /// Format a LispObject to a string (for use in format ~A directive)
 fn format_lisp_object(obj: LispObject) -> String {
-    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString, Number, NumberValue};
+    use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString, Symbol, Number, NumberValue};
 
     if obj.is_nil() {
         "NIL".to_string()
@@ -2488,68 +2537,43 @@ fn format_lisp_object(obj: LispObject) -> String {
         result.push(')');
         result
     } else if obj.is_general() {
-        // Check the type header to determine what kind of general object this is
-        if let Some(ptr) = obj.as_general_ptr::<RString>() {
+        if let Some(ptr) = obj.as_general_ptr::<()>() {
+            if ptr.is_null() {
+                return "#<NULL-PTR>".to_string();
+            }
             unsafe {
-                if let Some(obj_type) = TypeHeader::from_ptr(ptr) {
-                    match obj_type {
-                        ObjectType::String => {
-                            let string = &*ptr;
-                            return string.as_str().to_string();
-                        }
-                        ObjectType::Symbol => {
-                            // Cast to Symbol and get name
-                            let sym_ptr = ptr as *const rlasp_runtime::Symbol;
-                            let sym = &*sym_ptr;
-                            return sym.name().to_string();
-                        }
-                        ObjectType::Number => {
-                            // Cast to Number and check value type
-                            let num_ptr = ptr as *const Number;
-                            match &(*num_ptr).value {
-                                NumberValue::Ratio(r) => {
-                                    return format!("{}/{}", r.numerator_ref(), r.denominator_ref());
-                                }
-                                NumberValue::Bignum(b) => {
-                                    return b.to_string();
-                                }
-                                NumberValue::Float(f) => {
-                                    return f.to_string();
-                                }
-                                NumberValue::Complex(c) => {
-                                    if c.im >= 0.0 {
-                                        return format!("#C({} {})", c.re, c.im);
-                                    } else {
-                                        return format!("#C({} {})", c.re, c.im);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        ObjectType::Error => {
-                            // Format error object
-                            let err_ptr = ptr as *const rlasp_runtime::LispError;
-                            let err = &*err_ptr;
-                            if let Some(ref msg) = err.message {
-                                return format!("#<ERROR: {}>", msg);
-                            } else {
-                                return format!("#<ERROR: {:?}>", err.kind);
-                            }
-                        }
-                        _ => {}
+                match TypeHeader::from_ptr(ptr) {
+                    Some(ObjectType::String) => {
+                        let string = &*(ptr as *const RString);
+                        string.as_str().to_string()
                     }
+                    Some(ObjectType::Symbol) => {
+                        let sym = &*(ptr as *const Symbol);
+                        sym.name().to_string()
+                    }
+                    Some(ObjectType::Number) => {
+                        let num = &*(ptr as *const Number);
+                        match &num.value {
+                            NumberValue::Ratio(r) => format!("{}/{}", r.numerator_ref(), r.denominator_ref()),
+                            NumberValue::Bignum(b) => b.to_string(),
+                            NumberValue::Float(f) => f.to_string(),
+                            NumberValue::Complex(c) => format!("#C({} {})", c.re, c.im),
+                        }
+                    }
+                    Some(ObjectType::Error) => {
+                        let err = &*(ptr as *const rlasp_runtime::LispError);
+                        if let Some(ref msg) = err.message {
+                            format!("#<ERROR: {}>", msg)
+                        } else {
+                            format!("#<ERROR: {:?}>", err.kind)
+                        }
+                    }
+                    _ => format!("{:?}", obj),
                 }
             }
+        } else {
+            format!("{:?}", obj)
         }
-        // Fallback: try as symbol without type header check
-        if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-            unsafe {
-                let sym = &*sym_ptr;
-                return sym.name().to_string();
-            }
-        }
-        // Fallback for other general objects
-        format!("{:?}", obj)
     } else {
         format!("{:?}", obj)
     }
@@ -2699,8 +2723,11 @@ fn print_list(obj: LispObject, first: bool) {
 /// Format - basic implementation
 #[no_mangle]
 pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
     let dest_obj = unsafe { LispObject::from_raw(dest) };
     let args_obj = unsafe { LispObject::from_raw(args_and_control) };
+    let debug_format = std::env::var("RLASP_DEBUG_FORMAT").is_ok();
 
     // Extract control string (first argument) and remaining args
     let (control_obj, arg_list) = if let Some(cons_ptr) = args_obj.as_cons_ptr() {
@@ -2710,28 +2737,40 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
         return LispObject::nil().raw();
     };
 
-    let control_str = unsafe {
-        if control_obj.tag() == rlasp_runtime::Tag::General {
-            let ptr = (control_obj.raw() & !0b11) as *const rlasp_runtime::RString;
-            // Validate pointer is in reasonable address range
-            if ptr.is_null() || (ptr as usize) < 0x1000 {
-                return LispObject::nil().raw();
-            }
-            // Validate object type before accessing
-            if let Some(obj_type) = rlasp_runtime::TypeHeader::from_ptr(ptr as *const _) {
-                if obj_type == rlasp_runtime::ObjectType::String {
-                    (*ptr).as_str()
-                } else {
-                    // Not a string, return nil
-                    return LispObject::nil().raw();
-                }
-            } else {
-                return LispObject::nil().raw();
-            }
-        } else {
+    let control_str_owned = if let Some(ptr) = control_obj.as_general_ptr::<()>() {
+        if ptr.is_null() {
             return LispObject::nil().raw();
         }
+        match unsafe { TypeHeader::from_ptr(ptr) } {
+            Some(ObjectType::String) => unsafe {
+                let str_ptr = ptr as *const rlasp_runtime::RString;
+                (&*str_ptr).as_str().to_string()
+            },
+            Some(ObjectType::Symbol) => {
+                let raw = unsafe {
+                    let sym_ptr = ptr as *const rlasp_runtime::Symbol;
+                    (&*sym_ptr).name().to_string()
+                };
+                // Reader paths can represent string literals as symbols with quoted names.
+                if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+                    raw[1..raw.len() - 1].to_string()
+                } else {
+                    raw
+                }
+            }
+            _ => return LispObject::nil().raw(),
+        }
+    } else {
+        return LispObject::nil().raw();
     };
+    if debug_format {
+        eprintln!(
+            "[cc_format] dest_nil={} control='{}'",
+            dest_obj.is_nil(),
+            control_str_owned
+        );
+    }
+    let control_str = control_str_owned.as_str();
 
     let mut result = String::new();
     let mut chars = control_str.chars();
@@ -2767,6 +2806,19 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
                             let arg = cons.car();
                             if let Some(n) = arg.as_fixnum() {
                                 result.push_str(&n.to_string());
+                            } else {
+                                result.push_str(&format_lisp_object(arg));
+                            }
+                            arg_list = cons.cdr();
+                        }
+                    },
+                    'C' | 'c' => {
+                        // Character directive
+                        if let Some(cons_ptr) = arg_list.as_cons_ptr() {
+                            let cons = unsafe { &*cons_ptr };
+                            let arg = cons.car();
+                            if let Some(ch) = arg.as_character() {
+                                result.push(ch);
                             } else {
                                 result.push_str(&format_lisp_object(arg));
                             }
@@ -2949,11 +3001,35 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
         rlasp_runtime::RString::allocate(result).raw()
     } else {
         // Print to stdout (when dest is T or any non-NIL value)
+        if debug_format {
+            eprintln!("[cc_format] printing='{}'", result);
+        }
         print!("{}", result);
         use std::io::Write;
         let _ = std::io::stdout().flush();
         LispObject::nil().raw()
     }
+}
+
+/// Stack-call wrapper for FORMAT used by cc_funcall_stack/cc_apply.
+/// Expects one stack argument: a list of FORMAT arguments (dest control . args).
+#[no_mangle]
+pub extern "C" fn cc_format_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let Some(cons_ptr) = packed_args.as_cons_ptr() else {
+        stack_push_nil();
+        return;
+    };
+    if cons_ptr.is_null() {
+        stack_push_nil();
+        return;
+    }
+
+    let cons = unsafe { &*cons_ptr };
+    let dest = cons.car().raw();
+    let args_and_control = cons.cdr().raw();
+    let result = cc_format(dest, args_and_control);
+    stack_push_pointer(result);
 }
 
 /// Make a hash table
@@ -3270,8 +3346,6 @@ thread_local! {
 /// Uses name-based lookup since symbols aren't interned
 #[no_mangle]
 pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
-    use rlasp_runtime::Symbol;
-
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
 
     // NIL is self-evaluating
@@ -3280,8 +3354,7 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
     }
 
     // Try to get symbol name
-    let name = if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
-        if sym_ptr.is_null() { return LispObject::nil().raw(); }
+    let name = if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
         sym.name().to_string()
     } else {
@@ -3872,20 +3945,17 @@ pub extern "C" fn cc_symbol_package(symbol_obj: usize) -> usize {
 /// (symbol-plist symbol) - get property list of symbol
 #[no_mangle]
 pub extern "C" fn cc_symbol_plist(symbol_obj: usize) -> usize {
-    use rlasp_runtime::Symbol;
     let lo = unsafe { LispObject::from_raw(symbol_obj) };
-    if let Some(sym_ptr) = lo.as_general_ptr::<Symbol>() {
-        if !sym_ptr.is_null() {
-            let sym = unsafe { &*sym_ptr };
-            let entries = sym.plist_entries();
-            let mut list = cc_nil_value();
-            for (key, value) in entries.iter().rev() {
-                list = cc_cons(value.raw(), list);
-                let key_sym = rlasp_runtime::Symbol::allocate(key.clone()).raw();
-                list = cc_cons(key_sym, list);
-            }
-            return list;
+    if let Some(sym_ptr) = as_symbol_ptr_checked(lo) {
+        let sym = unsafe { &*sym_ptr };
+        let entries = sym.plist_entries();
+        let mut list = cc_nil_value();
+        for (key, value) in entries.iter().rev() {
+            list = cc_cons(value.raw(), list);
+            let key_sym = rlasp_runtime::Symbol::allocate(key.clone()).raw();
+            list = cc_cons(key_sym, list);
         }
+        return list;
     }
     LispObject::nil().raw()
 }
@@ -3904,15 +3974,12 @@ pub extern "C" fn cc_get_property(symbol_obj: usize, indicator_obj: usize, _defa
 /// (remprop symbol indicator) - remove a property
 #[no_mangle]
 pub extern "C" fn cc_remprop(symbol_obj: usize, indicator_obj: usize) -> usize {
-    use rlasp_runtime::Symbol;
     let lo = unsafe { LispObject::from_raw(symbol_obj) };
     let key_name = extract_name_string(indicator_obj);
-    if let Some(sym_ptr) = lo.as_general_ptr::<Symbol>() {
-        if !sym_ptr.is_null() {
-            let sym = unsafe { &*sym_ptr };
-            sym.remove_property(&key_name);
-            return LispObject::t().raw();
-        }
+    if let Some(sym_ptr) = as_symbol_ptr_checked(lo) {
+        let sym = unsafe { &*sym_ptr };
+        sym.remove_property(&key_name);
+        return LispObject::t().raw();
     }
     LispObject::nil().raw()
 }
@@ -4055,13 +4122,10 @@ pub fn is_jit_function(name: &str) -> bool {
 /// Uses name-based storage since symbols aren't interned
 #[no_mangle]
 pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
-    use rlasp_runtime::Symbol;
-
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
 
     // Try to get symbol name
-    let name = if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
-        if sym_ptr.is_null() { return value; }
+    let name = if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
         sym.name().to_string()
     } else {
@@ -4081,17 +4145,15 @@ pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
 /// (get symbol key &optional default)
 #[no_mangle]
 pub extern "C" fn cc_get_symbol_property(symbol: usize, key: usize) -> usize {
-    use rlasp_runtime::Symbol;
-
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
     let key_obj = unsafe { LispObject::from_raw(key) };
 
     // Get symbol's property list
-    if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
+    if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
 
         // Get key name if it's a symbol
-        let key_name = if let Some(key_sym_ptr) = key_obj.as_general_ptr::<Symbol>() {
+        let key_name = if let Some(key_sym_ptr) = as_symbol_ptr_checked(key_obj) {
             let key_sym = unsafe { &*key_sym_ptr };
             key_sym.name().to_string()
         } else {
@@ -4111,18 +4173,16 @@ pub extern "C" fn cc_get_symbol_property(symbol: usize, key: usize) -> usize {
 /// (setf (get symbol key) value)
 #[no_mangle]
 pub extern "C" fn cc_set_symbol_property(symbol: usize, key: usize, value: usize) -> usize {
-    use rlasp_runtime::Symbol;
-
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
     let key_obj = unsafe { LispObject::from_raw(key) };
     let val_obj = unsafe { LispObject::from_raw(value) };
 
     // Get symbol
-    if let Some(sym_ptr) = sym_obj.as_general_ptr::<Symbol>() {
+    if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
 
         // Get key name if it's a symbol
-        let key_name = if let Some(key_sym_ptr) = key_obj.as_general_ptr::<Symbol>() {
+        let key_name = if let Some(key_sym_ptr) = as_symbol_ptr_checked(key_obj) {
             let key_sym = unsafe { &*key_sym_ptr };
             key_sym.name().to_string()
         } else {
@@ -4144,7 +4204,8 @@ pub extern "C" fn cc_set_symbol_property(symbol: usize, key: usize, value: usize
 /// (gensym &optional prefix) -> symbol
 #[no_mangle]
 pub extern "C" fn cc_gensym(prefix: usize) -> usize {
-    use rlasp_runtime::Symbol;
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+    use rlasp_runtime::{RString, Symbol};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -4153,19 +4214,21 @@ pub extern "C" fn cc_gensym(prefix: usize) -> usize {
         "G".to_string()
     } else {
         let obj = unsafe { LispObject::from_raw(prefix) };
-        if let Some(str_ptr) = obj.as_general_ptr::<rlasp_runtime::RString>() {
-            if !str_ptr.is_null() {
-                let s = unsafe { &*str_ptr };
-                s.as_str().to_string()
-            } else {
+        if let Some(ptr) = obj.as_general_ptr::<()>() {
+            if ptr.is_null() {
                 "G".to_string()
-            }
-        } else if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
-            if !sym_ptr.is_null() {
-                let sym = unsafe { &*sym_ptr };
-                sym.name().to_string()
             } else {
-                "G".to_string()
+                match unsafe { TypeHeader::from_ptr(ptr) } {
+                    Some(ObjectType::String) => {
+                        let s = unsafe { &*(ptr as *const RString) };
+                        s.as_str().to_string()
+                    }
+                    Some(ObjectType::Symbol) => {
+                        let sym = unsafe { &*(ptr as *const Symbol) };
+                        sym.name().to_string()
+                    }
+                    _ => "G".to_string(),
+                }
             }
         } else {
             "G".to_string()
@@ -4721,6 +4784,7 @@ pub extern "C" fn cc_max(obj1: usize, obj2: usize) -> usize {
 
 #[no_mangle]
 pub extern "C" fn cc_equal(obj1: usize, obj2: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
     let obj1 = unsafe { LispObject::from_raw(obj1) };
     let obj2 = unsafe { LispObject::from_raw(obj2) };
 
@@ -4730,13 +4794,13 @@ pub extern "C" fn cc_equal(obj1: usize, obj2: usize) -> usize {
     }
 
     // Symbols by name (case-insensitive, matches interpreter)
-    if let (Some(s1_ptr), Some(s2_ptr)) = (
-        obj1.as_general_ptr::<rlasp_runtime::Symbol>(),
-        obj2.as_general_ptr::<rlasp_runtime::Symbol>(),
-    ) {
-        if !s1_ptr.is_null() && !s2_ptr.is_null() {
-            let s1 = unsafe { &*s1_ptr };
-            let s2 = unsafe { &*s2_ptr };
+    if let (Some(p1), Some(p2)) = (obj1.as_general_ptr::<()>(), obj2.as_general_ptr::<()>()) {
+        if !p1.is_null() && !p2.is_null()
+            && unsafe { TypeHeader::from_ptr(p1) } == Some(ObjectType::Symbol)
+            && unsafe { TypeHeader::from_ptr(p2) } == Some(ObjectType::Symbol)
+        {
+            let s1 = unsafe { &*(p1 as *const rlasp_runtime::Symbol) };
+            let s2 = unsafe { &*(p2 as *const rlasp_runtime::Symbol) };
             if s1.name().eq_ignore_ascii_case(s2.name()) {
                 return LispObject::t().raw();
             }
@@ -4751,14 +4815,16 @@ pub extern "C" fn cc_equal(obj1: usize, obj2: usize) -> usize {
     }
 
     // Check strings
-    if let (Some(s1_ptr), Some(s2_ptr)) = (
-        obj1.as_general_ptr::<rlasp_runtime::RString>(),
-        obj2.as_general_ptr::<rlasp_runtime::RString>()
-    ) {
-        let s1 = unsafe { &*s1_ptr };
-        let s2 = unsafe { &*s2_ptr };
-        if s1.as_str() == s2.as_str() {
-            return LispObject::t().raw();
+    if let (Some(p1), Some(p2)) = (obj1.as_general_ptr::<()>(), obj2.as_general_ptr::<()>()) {
+        if !p1.is_null() && !p2.is_null()
+            && unsafe { TypeHeader::from_ptr(p1) } == Some(ObjectType::String)
+            && unsafe { TypeHeader::from_ptr(p2) } == Some(ObjectType::String)
+        {
+            let s1 = unsafe { &*(p1 as *const rlasp_runtime::RString) };
+            let s2 = unsafe { &*(p2 as *const rlasp_runtime::RString) };
+            if s1.as_str() == s2.as_str() {
+                return LispObject::t().raw();
+            }
         }
     }
 
@@ -5507,19 +5573,46 @@ pub extern "C" fn cc_elt(sequence: usize, index: usize) -> usize {
 
 #[no_mangle]
 pub extern "C" fn cc_concatenate(result_type: usize, sequences: usize) -> usize {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
     let type_obj = unsafe { LispObject::from_raw(result_type) };
     let seqs_obj = unsafe { LispObject::from_raw(sequences) };
 
     // Check if result type is 'string - check if it's a symbol with name "string"
-    let is_string = if let Some(sym_ptr) = type_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-        let sym = unsafe { &*sym_ptr };
-        let name = sym.name();
-        name == "string" || name == "STRING"
+    let is_string = if let Some(ptr) = type_obj.as_general_ptr::<()>() {
+        if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+            let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+            let name = sym.name();
+            name.eq_ignore_ascii_case("string")
+        } else {
+            false
+        }
     } else {
         false
     };
 
     if is_string {
+        let append_char = |result: &mut String, obj: LispObject| -> bool {
+            if let Some(ch) = obj.as_character() {
+                result.push(ch);
+                true
+            } else if let Some(ptr) = obj.as_general_ptr::<()>() {
+                if ptr.is_null() {
+                    return false;
+                }
+                match unsafe { TypeHeader::from_ptr(ptr) } {
+                    Some(ObjectType::String) => {
+                        let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+                        result.push_str(s.as_str());
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        };
+
         // Concatenate into a string
         let mut result = String::new();
         let mut current = seqs_obj;
@@ -5527,9 +5620,38 @@ pub extern "C" fn cc_concatenate(result_type: usize, sequences: usize) -> usize 
             let cons = unsafe { &*cons_ptr };
             let seq = cons.car();
 
-            if let Some(str_ptr) = seq.as_general_ptr::<rlasp_runtime::RString>() {
-                let s = unsafe { &*str_ptr };
-                result.push_str(s.as_str());
+            if let Some(ptr) = seq.as_general_ptr::<()>() {
+                if !ptr.is_null() {
+                    match unsafe { TypeHeader::from_ptr(ptr) } {
+                        Some(ObjectType::String) => {
+                            let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+                            result.push_str(s.as_str());
+                        }
+                        Some(ObjectType::Vector) => {
+                            let vec = unsafe { &*(ptr as *const rlasp_runtime::RVector) };
+                            for elem in vec.as_slice() {
+                                if !append_char(&mut result, *elem) {
+                                    return LispObject::nil().raw();
+                                }
+                            }
+                        }
+                        _ => return LispObject::nil().raw(),
+                    }
+                }
+            } else if let Some(_seq_cons_ptr) = seq.as_cons_ptr() {
+                let mut seq_current = seq;
+                while let Some(cell_ptr) = seq_current.as_cons_ptr() {
+                    let cell = unsafe { &*cell_ptr };
+                    if !append_char(&mut result, cell.car()) {
+                        return LispObject::nil().raw();
+                    }
+                    seq_current = cell.cdr();
+                }
+                if !seq_current.is_nil() {
+                    return LispObject::nil().raw();
+                }
+            } else if !seq.is_nil() {
+                return LispObject::nil().raw();
             }
             current = cons.cdr();
         }
@@ -6258,6 +6380,8 @@ pub fn register_builtin_intrinsics() {
         ("set-symbol-value", cc_set_symbol_value as usize),
         ("ratio", cc_ratio as usize),
         ("complex", cc_complex as usize),
+        ("typep", crate::intrinsics_clos::cc_typep as usize),
+        ("subtypep", crate::intrinsics_clos::cc_subtypep as usize),
     ];
 
     for (name, addr) in arity_2_intrinsics {
@@ -6265,6 +6389,16 @@ pub fn register_builtin_intrinsics() {
             registry.insert(name.to_string(), FunctionEntry { address: *addr, arity: 2, expects_args_list: false });
         }
     }
+    // FORMAT is used pervasively by the regression harness (message/test reporting).
+    // Through funcall/apply it must use stack calling convention.
+    registry.insert(
+        "format".to_string(),
+        FunctionEntry {
+            address: cc_format_stack as usize,
+            arity: 2,
+            expects_args_list: true,
+        },
+    );
 
     // Three-argument functions (arity 3)
     let arity_3_intrinsics: &[(&str, usize)] = &[
@@ -6633,22 +6767,50 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         }
 
         let obj = unsafe { LispObject::from_raw(current_func_ref) };
+        let function_name_of = |value: LispObject| -> Option<String> {
+            if !value.is_general() {
+                return None;
+            }
+            let ptr = value.as_general_ptr::<()>()?;
+            if ptr.is_null() {
+                return None;
+            }
+            match unsafe { TypeHeader::from_ptr(ptr) } {
+                Some(ObjectType::Symbol) => {
+                    let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                    Some(sym.name().to_string())
+                }
+                Some(ObjectType::String) => {
+                    let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+                    Some(s.as_str().to_string())
+                }
+                _ => None,
+            }
+        };
 
         if debug_enabled && count < trace_limit {
             // Try to get function name for debug output - be careful about dereferencing
-            let name_str = if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-                // Check pointer is non-null before dereferencing
-                if !symbol_ptr.is_null() {
-                    let symbol = unsafe { &*symbol_ptr };
-                    symbol.name().to_string()
-                } else {
-                    "<null-symbol>".to_string()
-                }
-            } else if let Some(func_id) = obj.as_fixnum() {
+            let name_str = if let Some(func_id) = obj.as_fixnum() {
                 if let Some(name) = extract_function_name(current_func_ref) {
                     name
                 } else {
                     format!("<id:{}>", func_id)
+                }
+            } else if let Some(name) = function_name_of(obj) {
+                name
+            } else if obj.is_general() {
+                if let Some(ptr) = obj.as_general_ptr::<()>() {
+                    if !ptr.is_null() {
+                        if let Some(t) = unsafe { TypeHeader::from_ptr(ptr) } {
+                            format!("<general:{:?}>", t)
+                        } else {
+                            "<general:unknown>".to_string()
+                        }
+                    } else {
+                        "<general:null>".to_string()
+                    }
+                } else {
+                    "<general?>".to_string()
                 }
             } else {
                 "<unknown>".to_string()
@@ -6689,10 +6851,26 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 };
 
                 if let Some(address) = func_address {
+                    if debug_enabled && count < trace_limit {
+                        eprintln!(
+                            "[funcall_stack closure #{}] lambda_id={} captured={} addr=0x{:x}",
+                            count,
+                            lambda_id,
+                            captured.len(),
+                            address
+                        );
+                    }
                     unsafe {
                         // Call lambda function
                         let f: extern "C" fn() = std::mem::transmute(address);
                         f();
+                    }
+                    if debug_enabled && count < trace_limit {
+                        eprintln!(
+                            "[funcall_stack closure-return #{}] lambda_id={}",
+                            count,
+                            lambda_id
+                        );
                     }
                     if let Some((next_func_ref, next_num_args)) = take_tailcall_request() {
                         if stack_depth() > 0 {
@@ -6709,18 +6887,12 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
     }
 
     // Try to extract function name from symbol or fixnum
-    let name_opt = if let Some(symbol_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-        // Check pointer is non-null before dereferencing
-        if !symbol_ptr.is_null() {
-            let symbol = unsafe { &*symbol_ptr };
-            Some(symbol.name().to_string())
-        } else {
-            None
-        }
-    } else if let Some(func_id) = obj.as_fixnum() {
+    let name_opt = if let Some(func_id) = obj.as_fixnum() {
         // Function reference stored as ID
         let id_map = get_id_map().lock().unwrap();
         id_map.get(&func_id).cloned()
+    } else if let Some(name) = function_name_of(obj) {
+        Some(name)
     } else {
         None
     };
@@ -6775,6 +6947,19 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
     };
 
     if let Some(entry) = func_entry {
+        let resolved_name = name_opt.as_deref().unwrap_or("<unknown>");
+        if debug_enabled {
+            let is_builtin_format =
+                resolved_name.eq_ignore_ascii_case("format") && entry.address == cc_format as usize;
+            eprintln!(
+                "[funcall_stack resolved #{}] name={} addr=0x{:x} expects_args_list={} builtin_format={}",
+                count,
+                resolved_name,
+                entry.address,
+                entry.expects_args_list,
+                is_builtin_format
+            );
+        }
         // Debug: trace calls to functions with expects_args_list
         if entry.expects_args_list && std::env::var("RLASP_TRACE_ARGS_LIST").is_ok() {
             use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6902,6 +7087,224 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     stack_push_nil();
                 }
             }
+            "parse-integer" | "PARSE-INTEGER" => {
+                use malachite::Integer;
+                use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+                use rlasp_runtime::header::{ObjectType, TypeHeader};
+                use rlasp_runtime::{Number, Symbol, RString};
+
+                let mut args = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(unsafe { LispObject::from_raw(stack_pop_pointer()) });
+                }
+                args.reverse();
+
+                let clear_mvs_and_nil = || {
+                    MULTIPLE_VALUES.with(|slot| {
+                        slot.borrow_mut().clear();
+                    });
+                    stack_push_nil();
+                };
+
+                let set_two_values = |primary: LispObject, secondary: LispObject| {
+                    MULTIPLE_VALUES.with(|slot| {
+                        *slot.borrow_mut() = vec![primary, secondary];
+                    });
+                    stack_push_pointer(primary.raw());
+                };
+
+                let extract_string = |obj: LispObject| -> Option<String> {
+                    let ptr = obj.as_general_ptr::<()>()?;
+                    if ptr.is_null() {
+                        return None;
+                    }
+                    match unsafe { TypeHeader::from_ptr(ptr) } {
+                        Some(ObjectType::String) => {
+                            let s = unsafe { &*(ptr as *const RString) };
+                            Some(s.as_str().to_string())
+                        }
+                        Some(ObjectType::Symbol) => {
+                            let sym = unsafe { &*(ptr as *const Symbol) };
+                            let name = sym.name();
+                            if name.len() >= 2 && name.starts_with('"') && name.ends_with('"') {
+                                Some(name[1..name.len() - 1].to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+
+                let extract_keyword = |obj: LispObject| -> Option<String> {
+                    let ptr = obj.as_general_ptr::<()>()?;
+                    if ptr.is_null() {
+                        return None;
+                    }
+                    if unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+                        let sym = unsafe { &*(ptr as *const Symbol) };
+                        Some(sym.name().to_ascii_uppercase())
+                    } else {
+                        None
+                    }
+                };
+
+                let mut parse_error = false;
+                let mut final_values: Option<(LispObject, LispObject)> = None;
+
+                if let Some(first_arg) = args.first().copied() {
+                    if let Some(text) = extract_string(first_arg) {
+                        let mut radix: u32 = 10;
+                        let mut start: usize = 0;
+                        let mut end: usize = text.len();
+                        let mut junk_allowed = false;
+
+                        let mut i = 1usize;
+                        while i + 1 < args.len() {
+                            let Some(key) = extract_keyword(args[i]) else {
+                                i += 1;
+                                continue;
+                            };
+                            let val = args[i + 1];
+                            match key.as_str() {
+                                ":RADIX" => {
+                                    if let Some(n) = val.as_fixnum() {
+                                        if (2..=36).contains(&(n as i64)) {
+                                            radix = n as u32;
+                                        } else {
+                                            parse_error = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                ":START" => {
+                                    if let Some(n) = val.as_fixnum() {
+                                        if n < 0 {
+                                            parse_error = true;
+                                            break;
+                                        }
+                                        start = n as usize;
+                                    }
+                                }
+                                ":END" => {
+                                    if val.is_nil() {
+                                        end = text.len();
+                                    } else if let Some(n) = val.as_fixnum() {
+                                        if n < 0 {
+                                            parse_error = true;
+                                            break;
+                                        }
+                                        end = n as usize;
+                                    }
+                                }
+                                ":JUNK-ALLOWED" => {
+                                    junk_allowed = !val.is_nil();
+                                }
+                                _ => {}
+                            }
+                            i += 2;
+                        }
+
+                        if !parse_error {
+                            if start > text.len() {
+                                parse_error = true;
+                            }
+                            end = end.min(text.len());
+                            if start > end {
+                                parse_error = true;
+                            }
+                        }
+
+                        if !parse_error {
+                            let mut pos = start;
+                            while pos < end {
+                                let Some(ch) = text[pos..end].chars().next() else { break };
+                                if ch.is_whitespace() {
+                                    pos += ch.len_utf8();
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            let mut is_negative = false;
+                            if pos < end {
+                                if let Some(ch) = text[pos..end].chars().next() {
+                                    if ch == '+' || ch == '-' {
+                                        is_negative = ch == '-';
+                                        pos += ch.len_utf8();
+                                    }
+                                }
+                            }
+
+                            let mut acc = Integer::from(0);
+                            let mut parsed_any = false;
+                            while pos < end {
+                                let Some(ch) = text[pos..end].chars().next() else { break };
+                                if let Some(d) = ch.to_digit(radix) {
+                                    parsed_any = true;
+                                    acc = acc * Integer::from(radix as i64) + Integer::from(d as i64);
+                                    pos += ch.len_utf8();
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if !parsed_any {
+                                if junk_allowed {
+                                    final_values = Some((LispObject::nil(), LispObject::fixnum(pos as i64)));
+                                } else {
+                                    parse_error = true;
+                                }
+                            } else {
+                                if !junk_allowed {
+                                    while pos < end {
+                                        let Some(ch) = text[pos..end].chars().next() else { break };
+                                        if ch.is_whitespace() {
+                                            pos += ch.len_utf8();
+                                        } else {
+                                            parse_error = true;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if !parse_error {
+                                    if is_negative {
+                                        acc = -acc;
+                                    }
+
+                                    const MAX_FIXNUM: i64 = (1 << 61) - 1;
+                                    const MIN_FIXNUM: i64 = -(1 << 61);
+                                    let primary = if i64::convertible_from(&acc) {
+                                        let n = i64::exact_from(&acc);
+                                        if (MIN_FIXNUM..=MAX_FIXNUM).contains(&n) {
+                                            LispObject::fixnum(n)
+                                        } else {
+                                            unsafe { LispObject::from_raw(Number::allocate_bignum(acc).raw()) }
+                                        }
+                                    } else {
+                                        unsafe { LispObject::from_raw(Number::allocate_bignum(acc).raw()) }
+                                    };
+                                    let secondary = LispObject::fixnum(pos as i64);
+                                    final_values = Some((primary, secondary));
+                                }
+                            }
+                        }
+                    } else {
+                        parse_error = true;
+                    }
+                } else {
+                    parse_error = true;
+                }
+
+                if parse_error {
+                    clear_mvs_and_nil();
+                } else if let Some((primary, secondary)) = final_values {
+                    set_two_values(primary, secondary);
+                } else {
+                    clear_mvs_and_nil();
+                }
+            }
             "coerce" => {
                 // Simplified coerce: (coerce obj type) - return obj for now
                 let _type_arg = stack_pop_pointer();
@@ -6920,6 +7323,96 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 items.reverse();  // Stack is LIFO
                 let vec = rlasp_runtime::RVector::allocate(items);
                 stack_push_pointer(vec.raw());
+            }
+            "string/=" | "STRING/=" => {
+                use rlasp_runtime::header::{ObjectType, TypeHeader};
+                let b = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+                let a = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+
+                let as_string = |obj: LispObject| -> Option<String> {
+                    let coerced = unsafe { LispObject::from_raw(cc_string(obj.raw())) };
+                    let ptr = coerced.as_general_ptr::<()>()?;
+                    if ptr.is_null() || unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::String) {
+                        return None;
+                    }
+                    let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+                    Some(s.as_str().to_string())
+                };
+
+                if let (Some(sa), Some(sb)) = (as_string(a), as_string(b)) {
+                    let mut diff = None;
+                    let mut iter_a = sa.chars();
+                    let mut iter_b = sb.chars();
+                    let mut idx: usize = 0;
+                    loop {
+                        match (iter_a.next(), iter_b.next()) {
+                            (Some(ca), Some(cb)) => {
+                                if ca != cb {
+                                    diff = Some(idx);
+                                    break;
+                                }
+                                idx += 1;
+                            }
+                            (Some(_), None) | (None, Some(_)) => {
+                                diff = Some(idx);
+                                break;
+                            }
+                            (None, None) => break,
+                        }
+                    }
+                    if let Some(i) = diff {
+                        stack_push_pointer(LispObject::fixnum(i as i64).raw());
+                    } else {
+                        stack_push_nil();
+                    }
+                } else {
+                    stack_push_nil();
+                }
+            }
+            "string-not-equal" | "STRING-NOT-EQUAL" => {
+                use rlasp_runtime::header::{ObjectType, TypeHeader};
+                let b = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+                let a = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+
+                let as_string = |obj: LispObject| -> Option<String> {
+                    let coerced = unsafe { LispObject::from_raw(cc_string(obj.raw())) };
+                    let ptr = coerced.as_general_ptr::<()>()?;
+                    if ptr.is_null() || unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::String) {
+                        return None;
+                    }
+                    let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+                    Some(s.as_str().to_string())
+                };
+
+                if let (Some(sa), Some(sb)) = (as_string(a), as_string(b)) {
+                    let mut diff = None;
+                    let mut iter_a = sa.chars();
+                    let mut iter_b = sb.chars();
+                    let mut idx: usize = 0;
+                    loop {
+                        match (iter_a.next(), iter_b.next()) {
+                            (Some(ca), Some(cb)) => {
+                                if !ca.eq_ignore_ascii_case(&cb) {
+                                    diff = Some(idx);
+                                    break;
+                                }
+                                idx += 1;
+                            }
+                            (Some(_), None) | (None, Some(_)) => {
+                                diff = Some(idx);
+                                break;
+                            }
+                            (None, None) => break,
+                        }
+                    }
+                    if let Some(i) = diff {
+                        stack_push_pointer(LispObject::fixnum(i as i64).raw());
+                    } else {
+                        stack_push_nil();
+                    }
+                } else {
+                    stack_push_nil();
+                }
             }
             "define-condition" | "DEFINE-CONDITION" => {
                 // Macro that should have been expanded - just return the condition name
@@ -7068,7 +7561,7 @@ pub extern "C" fn cc_eval(args_and_env: usize) -> usize {
 
 /// Recursively evaluate a Lisp form
 fn eval_form(form: LispObject) -> usize {
-    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::Symbol;
 
     // Self-evaluating: numbers, strings, nil, t
     if form.as_fixnum().is_some() {
@@ -7080,12 +7573,12 @@ fn eval_form(form: LispObject) -> usize {
     if let Some(num_ptr) = form.as_general_ptr::<rlasp_runtime::Number>() {
         return form.raw();
     }
-    if let Some(str_ptr) = form.as_general_ptr::<RString>() {
+    if as_string_ptr_checked(form).is_some() {
         return form.raw();
     }
 
     // Symbol - for now just return itself (no environment lookup)
-    if let Some(sym_ptr) = form.as_general_ptr::<Symbol>() {
+    if let Some(sym_ptr) = as_symbol_ptr_checked(form) {
         let sym = unsafe { &*sym_ptr };
         let name = sym.name();
         // T evaluates to itself
@@ -7107,7 +7600,7 @@ fn eval_form(form: LispObject) -> usize {
         let cdr = cons.cdr();
 
         // Get function name
-        let func_name = if let Some(sym_ptr) = car.as_general_ptr::<Symbol>() {
+        let func_name = if let Some(sym_ptr) = as_symbol_ptr_checked(car) {
             let sym = unsafe { &*sym_ptr };
             sym.name().to_string()
         } else {
@@ -7470,6 +7963,53 @@ fn truthy_obj(obj: LispObject) -> bool {
     !obj.is_nil()
 }
 
+thread_local! {
+    static MULTIPLE_VALUES: std::cell::RefCell<Vec<LispObject>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Store a packed list of values as the current multiple-values and return primary value.
+#[no_mangle]
+pub extern "C" fn cc_values_pack(values_list: usize) -> usize {
+    let values_obj = unsafe { LispObject::from_raw(values_list) };
+    let values = list_to_vec(values_obj);
+    let primary = values.first().copied().unwrap_or_else(LispObject::nil);
+    MULTIPLE_VALUES.with(|slot| {
+        *slot.borrow_mut() = values;
+    });
+    primary.raw()
+}
+
+/// Return all current multiple values as a list.
+/// Falls back to a single-element list containing `primary_value`.
+#[no_mangle]
+pub extern "C" fn cc_multiple_value_list(primary_value: usize) -> usize {
+    let primary_obj = unsafe { LispObject::from_raw(primary_value) };
+    let maybe_values = MULTIPLE_VALUES.with(|slot| {
+        let mut vals = slot.borrow_mut();
+        if vals.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut *vals))
+        }
+    });
+
+    let values = if let Some(vals) = maybe_values {
+        if vals.first().map(|v| v.raw()) == Some(primary_value) {
+            vals
+        } else {
+            vec![primary_obj]
+        }
+    } else {
+        vec![primary_obj]
+    };
+
+    let mut result = LispObject::nil();
+    for value in values.iter().rev() {
+        result = rlasp_runtime::Cons::allocate(*value, result);
+    }
+    result.raw()
+}
+
 fn call_func_1(func: LispObject, arg: LispObject) -> LispObject {
     stack_push_pointer(arg.raw());
     cc_funcall_stack(func.raw(), 1);
@@ -7478,6 +8018,21 @@ fn call_func_1(func: LispObject, arg: LispObject) -> LispObject {
 }
 
 fn call_func_2(func: LispObject, a: LispObject, b: LispObject) -> LispObject {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
+    if let Some(ptr) = func.as_general_ptr::<()>() {
+        if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+            let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+            let name = sym.name();
+            if name.eq_ignore_ascii_case("equalp") {
+                return unsafe { LispObject::from_raw(cc_equalp(a.raw(), b.raw())) };
+            }
+            if name.eq_ignore_ascii_case("equal") {
+                return unsafe { LispObject::from_raw(cc_equal(a.raw(), b.raw())) };
+            }
+        }
+    }
+
     stack_push_pointer(a.raw());
     stack_push_pointer(b.raw());
     cc_funcall_stack(func.raw(), 2);
@@ -7513,6 +8068,25 @@ pub extern "C" fn cc_every(predicate: usize, list: usize) -> usize {
         let result = cc_funcall_1(pred.raw(), elem.raw());
         let result_obj = unsafe { LispObject::from_raw(result) };
         if result_obj.is_nil() {
+            return LispObject::nil().raw();
+        }
+    }
+    LispObject::t().raw()
+}
+
+/// (every predicate list1 list2) - returns T if predicate is true for all pairs.
+#[no_mangle]
+pub extern "C" fn cc_every2(predicate: usize, list1: usize, list2: usize) -> usize {
+    let pred = unsafe { LispObject::from_raw(predicate) };
+    let list1_obj = unsafe { LispObject::from_raw(list1) };
+    let list2_obj = unsafe { LispObject::from_raw(list2) };
+
+    let elements1 = list_to_vec(list1_obj);
+    let elements2 = list_to_vec(list2_obj);
+    let n = std::cmp::min(elements1.len(), elements2.len());
+    for i in 0..n {
+        let result = call_func_2(pred, elements1[i], elements2[i]);
+        if result.is_nil() {
             return LispObject::nil().raw();
         }
     }
@@ -7880,15 +8454,11 @@ pub extern "C" fn cc_acons(key: usize, value: usize, alist: usize) -> usize {
 /// (getf plist key &optional default) - get value from property list
 #[no_mangle]
 pub extern "C" fn cc_getf(plist: usize, key: usize, default: usize) -> usize {
-    use rlasp_runtime::Symbol;
-
     let plist_obj = unsafe { LispObject::from_raw(plist) };
     let key_obj = unsafe { LispObject::from_raw(key) };
 
     // Helper to compare two objects for equality (symbol names or eq)
     fn objects_equal(a: LispObject, b: LispObject) -> bool {
-        use rlasp_runtime::Symbol;
-
         // First try raw equality (same object)
         if a.raw() == b.raw() {
             return true;
@@ -7896,8 +8466,8 @@ pub extern "C" fn cc_getf(plist: usize, key: usize, default: usize) -> usize {
 
         // If both are symbols, compare names
         if let (Some(sym_a), Some(sym_b)) = (
-            a.as_general_ptr::<Symbol>(),
-            b.as_general_ptr::<Symbol>()
+            as_symbol_ptr_checked(a),
+            as_symbol_ptr_checked(b)
         ) {
             let name_a = unsafe { (*sym_a).name() };
             let name_b = unsafe { (*sym_b).name() };
@@ -8044,15 +8614,15 @@ pub fn init_standard_cl_variables() {
         b.insert("*features*".to_string(), features_list.raw());
         b.insert("*module-provider-functions*".to_string(), LispObject::nil().raw());
 
-        // Standard streams - use NIL as placeholder for now
-        // In a full implementation, these would be stream objects
+        // Standard streams: use T for output-like streams so FORMAT prints
+        // to stdout in JIT mode. Input remains NIL placeholder.
         b.insert("*standard-input*".to_string(), LispObject::nil().raw());
-        b.insert("*standard-output*".to_string(), LispObject::nil().raw());
-        b.insert("*error-output*".to_string(), LispObject::nil().raw());
-        b.insert("*trace-output*".to_string(), LispObject::nil().raw());
-        b.insert("*debug-io*".to_string(), LispObject::nil().raw());
-        b.insert("*query-io*".to_string(), LispObject::nil().raw());
-        b.insert("*terminal-io*".to_string(), LispObject::nil().raw());
+        b.insert("*standard-output*".to_string(), LispObject::t().raw());
+        b.insert("*error-output*".to_string(), LispObject::t().raw());
+        b.insert("*trace-output*".to_string(), LispObject::t().raw());
+        b.insert("*debug-io*".to_string(), LispObject::t().raw());
+        b.insert("*query-io*".to_string(), LispObject::t().raw());
+        b.insert("*terminal-io*".to_string(), LispObject::t().raw());
 
         // Readtable - NIL as placeholder
         b.insert("*readtable*".to_string(), LispObject::nil().raw());

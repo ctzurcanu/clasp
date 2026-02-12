@@ -4,10 +4,10 @@
 ;; Uses local regression-tests files under in_work.
 
 (defparameter *runner-dir*
-  #P"/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/")
+  "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/")
 
-(load (merge-pathnames #P"framework.lisp" *runner-dir*))
-(load (merge-pathnames #P"set-unexpected-failures.lisp" *runner-dir*))
+(load (concatenate 'string *runner-dir* "framework.lisp"))
+(load (concatenate 'string *runner-dir* "set-unexpected-failures.lisp"))
 
 (in-package #:clasp-tests)
 
@@ -62,16 +62,18 @@
     "run-program"
     "snapshot"))
 
-(let* ((requested (or (ext:getenv "TEST_SUITES") ""))
-       (requested-suites (unless (string= requested "")
-                           (core:split requested ","))))
-  (loop for suite in *irlasp-suites*
-        when (or (null requested-suites)
-                 (member suite requested-suites :test #'equal))
-          do (message :emph "~%Running ~a suite..." suite)
-             (load-if-compiled-correctly
-              (merge-pathnames (make-pathname :name suite :type "lisp")
-                               *runner-dir*))))
+(let ((requested (or (ext:getenv "TEST_SUITES") "")))
+  ;; Regression harness invokes this runner one suite at a time.
+  ;; Keeping execution on a single concrete suite path avoids MLIR
+  ;; failures in complex top-level suite selection forms.
+  (if (string= requested "")
+      (progn
+        (message :err "TEST_SUITES is required for run-all-irlasp.lisp")
+        (sys:quit 2))
+      (progn
+        (message :emph "~%Running ~a suite..." requested)
+        (load-if-compiled-correctly
+         (concatenate 'string *runner-dir* requested ".lisp")))))
 
 (show-test-summary)
 (sys:quit 0)

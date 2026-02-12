@@ -1,0 +1,19 @@
+Running mode=mlir log=/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/logs/irlasp-mlir-20260212-100623-89073.log
+SUITE_TIMEOUT_S 240
+TIMEOUT_BIN gtimeout
+[1/7] suite=update-instance-abort
+SUITE update-instance-abort    TOTAL 9 FAILED 2 PASSED 7 TIME_S 0.055706
+[2/7] suite=structures
+SUITE structures               TOTAL 30 FAILED 4 PASSED 26 TIME_S 0.222329
+[3/7] suite=misc
+SUITE misc                     TOTAL 54 FAILED 3 PASSED 51 TIME_S 0.177245
+[4/7] suite=printer01
+SUITE printer01                TOTAL 101 FAILED 2 PASSED 99 TIME_S 0.258380
+[5/7] suite=types01
+SUITE types01                  TOTAL 25 FAILED 1 PASSED 24 TIME_S 0.097391
+[6/7] suite=control01
+SUITE control01                TOTAL 46 FAILED 1 PASSED 45 TIME_S 0.136437
+[7/7] suite=loop
+SUITE loop                     TOTAL 21 FAILED 1 PASSED 20 TIME_S 0.101744
+TOTAL 286 FAILED 14 COMPILE_ERRORS 0 RUN_ERRORS 0 NON_PASSING 14 PASSED 272 SUITE_TIME_SUM_S 1.049232 WALL_CLOCK_S 1.225011
+SUITES_TOTAL 7 SUITES_TIMED_OUT 0

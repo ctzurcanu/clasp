@@ -17,6 +17,11 @@ use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 
+#[inline]
+fn trace_generic_enabled() -> bool {
+    std::env::var("RLASP_TRACE_GENERIC").is_ok()
+}
+
 /// Debug print macro - only prints in debug builds
 macro_rules! debug_println {
     ($($arg:tt)*) => {
@@ -276,6 +281,9 @@ pub extern "C" fn cc_defclass(class_name: usize, slot_names: usize, superclasses
 #[no_mangle]
 pub extern "C" fn cc_defgeneric(name: usize, _lambda_list: usize) -> usize {
     let name_str = extract_string_from_cons_list(name);
+    if trace_generic_enabled() {
+        eprintln!("[generic defgeneric] name={}", name_str);
+    }
 
     let mut registry = get_generic_registry().lock().unwrap();
     registry.entry(name_str).or_insert_with(|| GenericFunction {
@@ -300,6 +308,12 @@ pub extern "C" fn cc_defmethod(generic_name: usize, specializers: usize, functio
 pub extern "C" fn cc_defmethod_qualified(generic_name: usize, specializers: usize, function_ptr: usize, _arity: usize, qualifier_raw: usize) -> usize {
     let name_str = extract_string_from_cons_list(generic_name);
     let spec_list = extract_string_list(specializers);
+    if trace_generic_enabled() {
+        eprintln!(
+            "[generic defmethod] name={} specializers={:?} fn_ref=0x{:x} qualifier={}",
+            name_str, spec_list, function_ptr, qualifier_raw
+        );
+    }
 
     let qualifier = match qualifier_raw {
         1 => MethodQualifier::Before,
@@ -814,18 +828,36 @@ fn extract_arg_classes(args_obj: LispObject) -> Vec<String> {
 /// Get class name for an object (for method dispatch)
 #[inline]
 fn get_object_class_name(obj: LispObject) -> String {
-    if let Some(inst_ptr) = obj.as_instance_ptr() {
-        let inst = unsafe { &*inst_ptr };
-        let class = unsafe { &*inst.class() };
-        class.name().to_string()
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
+    if obj.is_nil() {
+        "NULL".to_string()
     } else if obj.is_fixnum() {
         "FIXNUM".to_string()
-    } else if obj.is_nil() {
-        "NULL".to_string()
     } else if obj.as_cons_ptr().is_some() {
         "CONS".to_string()
     } else if obj.as_character().is_some() {
         "CHARACTER".to_string()
+    } else if obj.is_general() {
+        let raw_ptr = obj.as_general_ptr_unchecked::<u8>();
+        if !raw_ptr.is_null() {
+            if let Some(obj_type) = unsafe { TypeHeader::from_ptr(raw_ptr as *const _) } {
+                return match obj_type {
+                    ObjectType::Symbol => "SYMBOL".to_string(),
+                    ObjectType::String => "STRING".to_string(),
+                    ObjectType::Vector => "VECTOR".to_string(),
+                    ObjectType::Error => "ERROR".to_string(),
+                    ObjectType::Number => "NUMBER".to_string(),
+                    ObjectType::Package => "PACKAGE".to_string(),
+                    ObjectType::Pathname => "PATHNAME".to_string(),
+                    ObjectType::Stream => "STREAM".to_string(),
+                    ObjectType::HashTable => "HASH-TABLE".to_string(),
+                    ObjectType::Closure => "FUNCTION".to_string(),
+                    _ => "T".to_string(),
+                };
+            }
+        }
+        "T".to_string()
     } else {
         "T".to_string()
     }
@@ -1047,27 +1079,7 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
         return LispObject::t().raw();
     }
 
-    // For instances, check CPL
-    if let Some(inst_ptr) = obj.as_instance_ptr() {
-        // Validate the instance pointer is reasonable (not tiny address)
-        if (inst_ptr as usize) < 0x1000 {
-            return LispObject::nil().raw();
-        }
-        let inst = unsafe { &*inst_ptr };
-        let class_ptr = inst.class();
-        // Validate class pointer is reasonable
-        if class_ptr.is_null() || (class_ptr as usize) < 0x1000 {
-            return LispObject::nil().raw();
-        }
-        let class = unsafe { &*class_ptr };
-
-        if class.is_subclass_of(&name_str) {
-            return LispObject::t().raw();
-        }
-        return LispObject::nil().raw();
-    }
-
-    // For built-in types, check class name
+    // Built-in and runtime object types.
     let obj_class = get_object_class_name(obj);
     if obj_class.eq_ignore_ascii_case(&name_str) {
         return LispObject::t().raw();
@@ -1147,6 +1159,12 @@ pub fn execute_stack_based_dispatch(gf_name: &str, num_args: usize) {
 
     // Get the class of the argument
     let arg_class = get_class_of_object(arg_obj);
+    if trace_generic_enabled() {
+        eprintln!(
+            "[generic dispatch] gf={} arg_class={} num_args={}",
+            gf_name, arg_class, num_args
+        );
+    }
 
     // Push the argument back for the method to consume
     stack_push_pointer(arg_raw);
@@ -1156,6 +1174,10 @@ pub fn execute_stack_based_dispatch(gf_name: &str, num_args: usize) {
     let gf = match registry.get(gf_name) {
         Some(gf) => gf,
         None => {
+            if trace_generic_enabled() {
+                let keys: Vec<String> = registry.keys().cloned().collect();
+                eprintln!("[generic dispatch] gf missing={} known={:?}", gf_name, keys);
+            }
             // Generic function not found - clean up all arguments and push nil
             drop(registry);
             for _ in 0..num_args {
@@ -1169,6 +1191,12 @@ pub fn execute_stack_based_dispatch(gf_name: &str, num_args: usize) {
     // Find matching primary method based on specializer
     let mut best_method: Option<&Method> = None;
     for method in &gf.methods {
+        if trace_generic_enabled() {
+            eprintln!(
+                "[generic candidate] gf={} qualifier={:?} specializers={:?}",
+                gf_name, method.qualifier, method.specializers
+            );
+        }
         if method.qualifier == MethodQualifier::Primary {
             // Check if specializer matches
             if method.specializers.is_empty() {
@@ -1191,6 +1219,12 @@ pub fn execute_stack_based_dispatch(gf_name: &str, num_args: usize) {
     }
 
     if let Some(method) = best_method {
+        if trace_generic_enabled() {
+            eprintln!(
+                "[generic selected] gf={} specializers={:?} fn_ref=0x{:x}",
+                gf_name, method.specializers, method.function_ptr
+            );
+        }
         // The function_ptr in Method is a lambda reference from cc_make_lambda_ref_str
         // which contains the function name. We need to extract the name and look up
         // the actual function address in the registry.
@@ -1234,25 +1268,40 @@ pub fn execute_stack_based_dispatch(gf_name: &str, num_args: usize) {
         }
     } else {
         // No applicable method found
+        if trace_generic_enabled() {
+            eprintln!("[generic no-method] gf={} arg_class={}", gf_name, arg_class);
+        }
         drop(registry);
         debug_println!("[DEBUG] No applicable method found for generic function '{}'", gf_name);
         // Clean up all arguments
         for _ in 0..num_args {
             let _ = stack_pop_pointer();
         }
-        stack_push_nil();
+        let err = rlasp_runtime::LispError::allocate(
+            rlasp_runtime::error::ErrorKind::UndefinedFunction,
+            Some(format!("No applicable method for generic function '{}'", gf_name)),
+        );
+        stack_push_pointer(err.raw());
     }
 }
 
 /// Get the class name of an object
 fn get_class_of_object(obj: LispObject) -> String {
-    // Check for instance
-    if let Some(instance_ptr) = obj.as_general_ptr::<Instance>() {
-        let instance = unsafe { &*instance_ptr };
-        let class_ptr = instance.class();
-        if !class_ptr.is_null() {
-            let class = unsafe { &*class_ptr };
-            return class.name().to_string();
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
+
+    // Check general heap objects by runtime header.
+    if obj.is_general() {
+        let raw_ptr = obj.as_general_ptr_unchecked::<u8>();
+        if !raw_ptr.is_null() {
+            if let Some(obj_type) = unsafe { TypeHeader::from_ptr(raw_ptr as *const _) } {
+                match obj_type {
+                    ObjectType::Symbol => return "SYMBOL".to_string(),
+                    ObjectType::String => return "STRING".to_string(),
+                    ObjectType::Vector => return "VECTOR".to_string(),
+                    ObjectType::Number => return "NUMBER".to_string(),
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -1263,10 +1312,6 @@ fn get_class_of_object(obj: LispObject) -> String {
         "FIXNUM".to_string()
     } else if obj.as_cons_ptr().is_some() {
         "CONS".to_string()
-    } else if obj.as_general_ptr::<rlasp_runtime::Symbol>().is_some() {
-        "SYMBOL".to_string()
-    } else if obj.as_general_ptr::<rlasp_runtime::RString>().is_some() {
-        "STRING".to_string()
     } else {
         "T".to_string()
     }

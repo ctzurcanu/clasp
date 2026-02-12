@@ -3029,11 +3029,47 @@ impl StackMLIRCodegen {
             "multiple-value-prog1" | "multiple-value-setq" | "nth-value" | "values" => {
                 // Multiple values - for now, just handle first value or nil
                 if base_name == "values" {
+                    // Evaluate all args and pack as current multiple-values.
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                    for arg in args.iter().rev() {
+                        self.compile_expr(arg)?;
+                        let car = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", car));
+                        let cdr = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cdr));
+                        let cons_cell = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", cons_cell, car, cdr));
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", cons_cell));
+                    }
+                    let values_list = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", values_list));
+                    let primary = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_values_pack({}) : (i64) -> i64", primary, values_list));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", primary));
+                } else if base_name == "multiple-value-list" {
                     if args.is_empty() {
                         self.writeln("func.call @stack_push_nil() : () -> ()");
                     } else {
-                        // Return first value
                         self.compile_expr(&args[0])?;
+                        let primary = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", primary));
+                        let errp = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_errorp({}) : (i64) -> i64", errp, primary));
+                        let nil_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        let is_error = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", is_error, errp, nil_val));
+                        self.writeln(&format!("scf.if {} {{", is_error));
+                        self.indent();
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", primary));
+                        self.dedent();
+                        self.writeln("} else {");
+                        self.indent();
+                        let mv_list = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_multiple_value_list({}) : (i64) -> i64", mv_list, primary));
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", mv_list));
+                        self.dedent();
+                        self.writeln("}");
                     }
                 } else if base_name == "multiple-value-bind" && args.len() >= 3 {
                     // (multiple-value-bind (vars...) values-form body...)
@@ -3065,20 +3101,20 @@ impl StackMLIRCodegen {
 
                     // Evaluate the values-form
                     self.compile_expr(&args[1])?;
-                    let first_value = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", first_value));
+                    let primary_value = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", primary_value));
+                    let mv_list = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_multiple_value_list({}) : (i64) -> i64", mv_list, primary_value));
 
-                    // Bind first variable to the value, rest to NIL
-                    // (Since we don't have true multiple values yet, only first gets the actual value)
+                    // Bind each variable from the corresponding index in mv_list.
                     for (i, var_name) in var_names.iter().enumerate() {
-                        if i == 0 {
-                            self.symbol_table.insert(var_name.clone(), first_value.clone());
-                        } else {
-                            // Bind to NIL
-                            let nil_val = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                            self.symbol_table.insert(var_name.clone(), nil_val);
-                        }
+                        let idx_raw = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", idx_raw, i));
+                        let idx_boxed = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", idx_boxed, idx_raw));
+                        let var_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nth({}, {}) : (i64, i64) -> i64", var_val, idx_boxed, mv_list));
+                        self.symbol_table.insert(var_name.clone(), var_val);
                     }
 
                     // Execute body
@@ -3126,8 +3162,40 @@ impl StackMLIRCodegen {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                     return Ok(());
                 }
-                // Execute first form (the protected form)
-                self.compile_expr(&args[0])?;
+                if base_name == "ignore-errors" {
+                    // (ignore-errors form) -> on error, return (values nil error)
+                    self.compile_expr(&args[0])?;
+                    let protected = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", protected));
+
+                    let errp = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_errorp({}) : (i64) -> i64", errp, protected));
+                    let nil_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                    let is_error = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", is_error, errp, nil_val));
+
+                    self.writeln(&format!("scf.if {} {{", is_error));
+                    self.indent();
+                    let list_tail_nil = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", list_tail_nil));
+                    let error_cell = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", error_cell, protected, list_tail_nil));
+                    let values_list = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", values_list, nil_val, error_cell));
+                    let primary = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_values_pack({}) : (i64) -> i64", primary, values_list));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", primary));
+                    self.dedent();
+                    self.writeln("} else {");
+                    self.indent();
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", protected));
+                    self.dedent();
+                    self.writeln("}");
+                } else {
+                    // Execute first form (the protected form)
+                    self.compile_expr(&args[0])?;
+                }
                 return Ok(());
             }
 
@@ -7179,12 +7247,21 @@ impl StackMLIRCodegen {
                 }
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
-                let list = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", list));
                 let pred = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", pred));
+                let list1 = self.fresh_ssa();
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_every({}, {}) : (i64, i64) -> i64", result, pred, list));
+                if args.len() >= 3 {
+                    self.compile_expr(&args[2])?;
+                    let list2 = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", list2));
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", list1));
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", pred));
+                    self.writeln(&format!("{} = func.call @cc_every2({}, {}, {}) : (i64, i64, i64) -> i64", result, pred, list1, list2));
+                } else {
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", list1));
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", pred));
+                    self.writeln(&format!("{} = func.call @cc_every({}, {}) : (i64, i64) -> i64", result, pred, list1));
+                }
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -8088,6 +8165,22 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            "string/=" | "string-not-equal" => {
+                // String inequality - keep full argument list so runtime can process keyword args.
+                if args.len() < 2 {
+                    anyhow::bail!("{} requires at least 2 arguments", func_name);
+                }
+
+                for arg in args {
+                    self.compile_expr(arg)?;
+                }
+                let fn_sym = self.create_symbol_constant(func_name);
+                let num_args_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, args.len()));
+                self.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", fn_sym, num_args_ssa));
+                Ok(())
+            }
+
             // Evaluation and compilation
             "load-mlir" => {
                 if args.is_empty() {
@@ -8697,10 +8790,10 @@ impl StackMLIRCodegen {
                 return Ok(());
             }
 
-            "string/=" | "string<" | "string>" | "string<=" | "string>=" |
+            "string<" | "string>" | "string<=" | "string>=" |
             "string-upcase" | "string-downcase" | "string-capitalize" | "nstring-upcase" |
             "nstring-downcase" | "nstring-capitalize" | "string-trim" | "string-left-trim" |
-            "string-right-trim" | "schar" | "string-not-equal" |
+            "string-right-trim" | "schar" |
             "string-lessp" | "string-greaterp" | "string-not-greaterp" | "string-not-lessp" |
             // Characters
             "character" | "char-code" | "char-int" | "code-char" | "char-name" | "name-char" |
@@ -9220,36 +9313,12 @@ impl StackMLIRCodegen {
             return Ok(());
         }
 
-        // Track the effective number of arguments on stack for cleanup
-        let effective_num_args;
-
-        // Check if the function has special parameters
-        if self.special_param_functions.contains(&actual_func_name) {
-            // Collect arguments into a list for cc_arg extraction
-            // Push all arguments to stack first
-            for arg in args {
-                self.compile_expr(arg)?;
-            }
-
-            // Create a list from the arguments on the stack
-            let argc = args.len();
-            let argc_ssa = self.fresh_ssa();
-            let tagged_argc = (argc as i64) << 2;  // Tag as fixnum
-            self.writeln(&format!("{} = arith.constant {} : i64", argc_ssa, tagged_argc));
-
-            let args_list = self.fresh_ssa();
-            self.writeln(&format!("{} = func.call @cc_collect_args({}) : (i64) -> i64", args_list, argc_ssa));
-
-            // Push the args list to stack
-            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", args_list));
-            effective_num_args = 1;  // Single list argument on stack
-        } else {
-            // Simple case: push all arguments to stack
-            for arg in args {
-                self.compile_expr(arg)?;
-            }
-            effective_num_args = args.len();
+        // Always push raw arguments. cc_funcall_stack handles args-list packing
+        // for functions registered with expects_args_list.
+        for arg in args {
+            self.compile_expr(arg)?;
         }
+        let effective_num_args = args.len();
 
         if is_local_function {
             // Local functions from flet/labels are not in the global registry.
@@ -9275,27 +9344,10 @@ impl StackMLIRCodegen {
             .cloned()
             .unwrap_or_else(|| base_name.to_string());
 
-        let effective_num_args;
-        if self.special_param_functions.contains(&actual_func_name) {
-            for arg in args {
-                self.compile_expr(arg)?;
-            }
-
-            let argc = args.len();
-            let argc_ssa = self.fresh_ssa();
-            let tagged_argc = (argc as i64) << 2;
-            self.writeln(&format!("{} = arith.constant {} : i64", argc_ssa, tagged_argc));
-
-            let args_list = self.fresh_ssa();
-            self.writeln(&format!("{} = func.call @cc_collect_args({}) : (i64) -> i64", args_list, argc_ssa));
-            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", args_list));
-            effective_num_args = 1;
-        } else {
-            for arg in args {
-                self.compile_expr(arg)?;
-            }
-            effective_num_args = args.len();
+        for arg in args {
+            self.compile_expr(arg)?;
         }
+        let effective_num_args = args.len();
 
         let func_sym = self.create_symbol_constant(&actual_func_name);
         let num_args_ssa = self.fresh_ssa();
