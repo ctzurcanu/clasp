@@ -1503,13 +1503,19 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
         ExecutionMode::MlirJit => {
             let lower = file_path.to_ascii_lowercase();
             if lower.ends_with(".mlir") || lower.ends_with(".mlirbc") {
-                if let Err(e) = execute_mlir_artifact_path(file_path, "mlir") {
+                if let Err(e) = execute_mlir_artifact_path(file_path, "mlir", true) {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
             } else {
                 let source = read_source();
-                if let Err(e) = eval_file_mlir(&source, file_path, true, MlirBehavior::Strict) {
+                if let Err(e) = eval_file_mlir_via_artifact(
+                    &source,
+                    file_path,
+                    true,
+                    MlirBehavior::Strict,
+                    true,
+                ) {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
@@ -2309,6 +2315,71 @@ fn eval_file_fasl(source: &str, file_path: &str) -> std::result::Result<(), Stri
     Ok(())
 }
 
+fn env_var_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false)
+}
+
+fn mlir_artifact_path_for_source(file_path: &str) -> String {
+    let mut stem = std::path::Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module")
+        .to_string();
+    if stem.is_empty() {
+        stem = "module".to_string();
+    }
+    format!("/tmp/{}.mlirbc", stem)
+}
+
+fn eval_file_mlir_via_artifact(
+    source: &str,
+    file_path: &str,
+    init_runtime: bool,
+    default_behavior: MlirBehavior,
+    respect_compile_only: bool,
+) -> std::result::Result<(), String> {
+    let compile_only_requested = respect_compile_only && env_var_truthy("RLASP_MLIR_COMPILE_ONLY");
+    let artifact_path = mlir_artifact_path_for_source(file_path);
+
+    let prev_save_artifacts = std::env::var_os("RLASP_SAVE_ARTIFACTS");
+    let prev_compile_only = std::env::var_os("RLASP_MLIR_COMPILE_ONLY");
+    let prev_selective_eval = std::env::var_os("RLASP_MLIR_SELECTIVE_EVAL");
+
+    std::env::set_var("RLASP_SAVE_ARTIFACTS", "1");
+    std::env::set_var("RLASP_MLIR_COMPILE_ONLY", "1");
+    if compile_only_requested {
+        // Compile-only runs must not execute top-level runtime forms.
+        std::env::set_var("RLASP_MLIR_SELECTIVE_EVAL", "1");
+    }
+
+    let compile_result = eval_file_mlir(source, file_path, init_runtime, default_behavior);
+
+    match prev_save_artifacts {
+        Some(v) => std::env::set_var("RLASP_SAVE_ARTIFACTS", v),
+        None => std::env::remove_var("RLASP_SAVE_ARTIFACTS"),
+    }
+    match prev_compile_only {
+        Some(v) => std::env::set_var("RLASP_MLIR_COMPILE_ONLY", v),
+        None => std::env::remove_var("RLASP_MLIR_COMPILE_ONLY"),
+    }
+    match prev_selective_eval {
+        Some(v) => std::env::set_var("RLASP_MLIR_SELECTIVE_EVAL", v),
+        None => std::env::remove_var("RLASP_MLIR_SELECTIVE_EVAL"),
+    }
+
+    compile_result?;
+    if compile_only_requested {
+        return Ok(());
+    }
+
+    execute_mlir_artifact_path(&artifact_path, "mlir", init_runtime)
+}
+
 fn eval_file_mlir(
     source: &str,
     file_path: &str,
@@ -2432,15 +2503,23 @@ fn eval_file_mlir(
         match ast {
             rlasp::ir::ASTNode::Setq { var, value } => {
                 if let rlasp::ir::ASTNode::Lambda { params, defaults, supplied_p_vars, key_params, body } = value.as_ref() {
-                    defuns.push((
-                        var.clone(),
-                        params.clone(),
-                        defaults.clone(),
-                        supplied_p_vars.clone(),
-                        key_params.clone(),
-                        body.clone(),
-                    ));
-                    user_functions.insert(var.clone(), params.clone());
+                    // Only treat SETQ+LAMBDA as a function definition when the
+                    // binding targets a function-designator slot (%FN%...).
+                    // Other lambda-valued SETQ forms can be executable top-level code
+                    // and must remain in __main.
+                    if var.to_ascii_uppercase().starts_with("%FN%") {
+                        defuns.push((
+                            var.clone(),
+                            params.clone(),
+                            defaults.clone(),
+                            supplied_p_vars.clone(),
+                            key_params.clone(),
+                            body.clone(),
+                        ));
+                        user_functions.insert(var.clone(), params.clone());
+                    } else {
+                        toplevel_forms.push(ast.clone());
+                    }
                 } else if matches!(value.as_ref(), rlasp::ir::ASTNode::Macro { .. }) {
                     // Skip macro definitions - they're handled by the interpreter
                 } else {
@@ -3647,7 +3726,11 @@ fn resolve_path_for_mlir_io(path: &str) -> String {
     }
 }
 
-fn execute_mlir_artifact_path(path: &str, source_label: &str) -> std::result::Result<(), String> {
+fn execute_mlir_artifact_path(
+    path: &str,
+    source_label: &str,
+    init_runtime: bool,
+) -> std::result::Result<(), String> {
     use std::path::Path;
 
     let resolved_path = resolve_path_for_mlir_io(path);
@@ -3673,7 +3756,7 @@ fn execute_mlir_artifact_path(path: &str, source_label: &str) -> std::result::Re
     }
     .map_err(|e| format!("{}: lowering failed: {}", source_label, e))?;
 
-    jit_execute_llvm_ir(&llvm_ir_text, &resolved_path)
+    jit_execute_llvm_ir(&llvm_ir_text, &resolved_path, init_runtime)
         .map_err(|e| format!("{}: JIT execution failed: {}", source_label, e))
 }
 
@@ -3958,7 +4041,13 @@ fn load_object_with_options(
     // Nested MLIR load execution can leave transient arguments on the eval stack.
     // Reset around load boundaries so subsequent calls observe a clean stack.
     rlasp_runtime::eval_stack::stack_clear();
-    let load_result = eval_file_mlir(&contents, &source_label, false, MlirBehavior::Strict);
+    let load_result = eval_file_mlir_via_artifact(
+        &contents,
+        &source_label,
+        false,
+        MlirBehavior::Strict,
+        true,
+    );
     rlasp_runtime::eval_stack::stack_clear();
 
     match load_result {
@@ -4168,7 +4257,7 @@ pub extern "C" fn cc_load_mlir(path_obj: usize) -> usize {
     };
 
     let path = normalize_path_string(&raw_path);
-    match execute_mlir_artifact_path(&path, "load-mlir") {
+    match execute_mlir_artifact_path(&path, "load-mlir", false) {
         Ok(()) => unsafe { rlasp_jit::intrinsics::cc_t_value() },
         Err(e) => {
             eprintln!("{}", e);
@@ -4178,7 +4267,11 @@ pub extern "C" fn cc_load_mlir(path_obj: usize) -> usize {
 }
 
 /// JIT compile and execute LLVM IR text
-fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Result<(), String> {
+fn jit_execute_llvm_ir(
+    llvm_ir_text: &str,
+    source_path: &str,
+    init_runtime: bool,
+) -> std::result::Result<(), String> {
     use inkwell::context::Context;
     use inkwell::memory_buffer::MemoryBuffer;
     use llvm_sys::orc2::*;
@@ -4205,6 +4298,8 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
     // Collect function names before transferring module
     let mut lambda_names: Vec<String> = Vec::new();
     let mut fn_names: Vec<String> = Vec::new();
+    let mut method_names: Vec<String> = Vec::new();
+    let mut local_function_names: Vec<String> = Vec::new();
     for func_val in module.get_functions() {
         let func_name = func_val.get_name().to_str().unwrap_or("");
         if func_name.starts_with("__lambda_") {
@@ -4212,6 +4307,16 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
         }
         if func_name.starts_with("%FN%") {
             fn_names.push(func_name.to_string());
+        }
+        if func_name.starts_with("local_") {
+            local_function_names.push(func_name.to_string());
+        }
+        let is_method = func_name.ends_with("_primary")
+            || func_name.ends_with("_before")
+            || func_name.ends_with("_after")
+            || func_name.ends_with("_around");
+        if is_method {
+            method_names.push(func_name.to_string());
         }
     }
 
@@ -4343,6 +4448,24 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
                 }
             }
         }
+        for func_name in &method_names {
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                unsafe {
+                    cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                }
+            }
+        }
+        for func_name in &local_function_names {
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                if expects_args_list(func_name) {
+                    unsafe { cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
+                } else {
+                    unsafe { cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
+                }
+            }
+        }
     }
 
     // Keep loaded MLIR artifacts semantically aligned with normal -m mlir source execution:
@@ -4350,14 +4473,16 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
     rlasp_jit::intrinsics::register_builtin_intrinsics();
     rlasp_jit::intrinsics::cc_set_eval_bridge(cc_eval_bridge as usize);
 
-    // Ensure standard CL variables are initialized
-    rlasp_jit::intrinsics::init_standard_cl_variables();
+    if init_runtime {
+        rlasp_jit::intrinsics::init_standard_cl_variables();
+    }
 
     // Execute __main or batch functions
     let trace_batches = std::env::var("RLASP_TRACE_BATCHES").is_ok();
     let trace_batch_index = std::env::var("RLASP_TRACE_BATCH_INDEX")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
+    let trace_load_mlir = std::env::var("RLASP_TRACE_LOAD_MLIR").is_ok();
 
     if let Ok(__main_addr) = lookup_symbol("__main") {
         unsafe {
@@ -4373,8 +4498,16 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
                 }
             }
 
-            println!("[load-mlir: {} batches, {} functions, {} lambdas]",
-                batch_count, fn_names.len(), lambda_names.len());
+            if trace_load_mlir {
+                println!(
+                    "[load-mlir: {} batches, {} functions, {} lambdas, {} methods, {} local]",
+                    batch_count,
+                    fn_names.len(),
+                    lambda_names.len(),
+                    method_names.len(),
+                    local_function_names.len()
+                );
+            }
 
             if batch_count > 0 && trace_batches {
                 for i in 0..batch_count {
@@ -4385,7 +4518,9 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
                     }
                     let batch_name = format!("__main_batch_{}", i);
                     if let Ok(batch_addr) = lookup_symbol(&batch_name) {
-                        println!("[load-mlir: batch {}/{}]", i, batch_count);
+                        if trace_load_mlir {
+                            println!("[load-mlir: batch {}/{}]", i, batch_count);
+                        }
                         stack_clear();
                         let jit_fn: extern "C" fn() = std::mem::transmute(batch_addr);
                         jit_fn();
@@ -4394,15 +4529,39 @@ fn jit_execute_llvm_ir(llvm_ir_text: &str, source_path: &str) -> std::result::Re
                         }
                     }
                 }
-                println!("[load-mlir: {} batches executed]", batch_count);
+                if trace_load_mlir {
+                    println!("[load-mlir: {} batches executed]", batch_count);
+                }
             } else {
                 // Keep artifact execution aligned with source mode:
                 // run __main once (which invokes batches in-order) unless explicit batch tracing.
                 stack_clear();
                 let jit_fn: extern "C" fn() = std::mem::transmute(__main_addr);
                 jit_fn();
-                if stack_depth() > 0 {
-                    let _ = stack_pop_pointer();
+                let depth = stack_depth();
+                if depth > 0 {
+                    let result = stack_pop_pointer();
+                    if trace_load_mlir {
+                        println!("[load-mlir: __main result {}]", format_jit_result(result as i64));
+                    }
+                    let result_obj = unsafe { rlasp_runtime::LispObject::from_raw(result) };
+                    if result_obj.is_error() {
+                        let mut detail = format_jit_result(result as i64);
+                        if let Some(kind) = result_obj.as_error_kind() {
+                            detail = format!("{} ({:?})", detail, kind);
+                        }
+                        if let Some(ptr) = result_obj.as_general_ptr::<rlasp_runtime::LispError>() {
+                            unsafe {
+                                if let Some(msg) = &(*ptr).message {
+                                    detail = format!("{}: {}", detail, msg);
+                                }
+                            }
+                        }
+                        return Err(format!(
+                            "MLIR artifact __main error: {}",
+                            detail
+                        ));
+                    }
                 }
             }
         }
@@ -5060,7 +5219,7 @@ fn compile_ast_to_llvm<'ctx>(
                     }
                     "array-total-size-limit" => {
                         let i64_type = context.i64_type();
-                        let const_val = i64_type.const_int(1_000_000, false);
+                        let const_val = i64_type.const_int(16_777_216, false);
                         let box_fn = codegen.module().get_function("cc_box_fixnum")
                             .ok_or("cc_box_fixnum not found")?;
                         let call = codegen.builder().build_call(box_fn, &[const_val.into()], "box_array_total_size_limit")

@@ -7,13 +7,16 @@ use super::object::LispObject;
 pub struct RString {
     header: crate::header::TypeHeader,
     data: String,
+    ascii_only: bool,
 }
 
 impl RString {
     pub fn new(s: String) -> Self {
+        let ascii_only = s.is_ascii();
         Self {
             header: crate::header::TypeHeader::new(crate::header::ObjectType::String),
             data: s,
+            ascii_only,
         }
     }
 
@@ -22,20 +25,42 @@ impl RString {
     }
 
     pub fn len_chars(&self) -> usize {
-        self.data.chars().count()
+        if self.ascii_only {
+            self.data.len()
+        } else {
+            self.data.chars().count()
+        }
     }
 
     pub fn char_at(&self, index: usize) -> Option<char> {
-        self.data.chars().nth(index)
+        if self.ascii_only {
+            self.data.as_bytes().get(index).map(|b| *b as char)
+        } else {
+            self.data.chars().nth(index)
+        }
     }
 
     pub fn set_char(&mut self, index: usize, ch: char) -> bool {
-        let mut chars: Vec<char> = self.data.chars().collect();
-        if index >= chars.len() {
-            return false;
+        if self.ascii_only && ch.is_ascii() {
+            // Fast-path ASCII string mutation for tight loops (e.g. character benchmarks).
+            let bytes = unsafe { self.data.as_bytes_mut() };
+            if index >= bytes.len() {
+                return false;
+            }
+            bytes[index] = ch as u8;
+            return true;
         }
-        chars[index] = ch;
-        self.data = chars.into_iter().collect();
+
+        let start = match self.data.char_indices().nth(index) {
+            Some((i, _)) => i,
+            None => return false,
+        };
+        let end = match self.data.char_indices().nth(index + 1) {
+            Some((i, _)) => i,
+            None => self.data.len(),
+        };
+        self.data.replace_range(start..end, &ch.to_string());
+        self.ascii_only = self.data.is_ascii();
         true
     }
 

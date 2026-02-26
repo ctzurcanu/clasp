@@ -68,7 +68,7 @@ result_line() {
 }
 
 CSV_FILE="${LOG_DIR}/benchmark-results.csv"
-echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,result_match" >"$CSV_FILE"
+echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,result_match" >"$CSV_FILE"
 
 while IFS='|' read -r bench_file bench_args_raw; do
   [[ -z "$bench_file" ]] && continue
@@ -93,8 +93,11 @@ while IFS='|' read -r bench_file bench_args_raw; do
   interp_time="${LOG_DIR}/${bench_name}.irlasp-interpret.time"
   mlir_compile_out="${LOG_DIR}/${bench_name}.irlasp-mlir-compile.out"
   mlir_compile_time="${LOG_DIR}/${bench_name}.irlasp-mlir-compile.time"
-  mlir_total_out="${LOG_DIR}/${bench_name}.irlasp-mlir-total.out"
-  mlir_total_time="${LOG_DIR}/${bench_name}.irlasp-mlir-total.time"
+  mlir_exec_out="${LOG_DIR}/${bench_name}.irlasp-mlir-exec.out"
+  mlir_exec_time="${LOG_DIR}/${bench_name}.irlasp-mlir-exec.time"
+  mlirbc_path="/tmp/${bench_name}.mlirbc"
+  : >"$mlir_exec_out"
+  : >"$mlir_exec_time"
 
   run_timed "$sbcl_out" "$sbcl_time" \
     "$SBCL_BIN" --noinform --disable-debugger \
@@ -117,44 +120,71 @@ while IFS='|' read -r bench_file bench_args_raw; do
   interp_rc="$RUN_RC"
   interp_s="$RUN_TIME_S"
 
+  rm -f "$mlirbc_path"
   run_timed "$mlir_compile_out" "$mlir_compile_time" \
-    env RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
+    env RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SELECTIVE_EVAL=1 "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
   mlir_compile_rc="$RUN_RC"
   mlir_compile_s="$RUN_TIME_S"
 
-  run_timed "$mlir_total_out" "$mlir_total_time" \
-    "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
-  mlir_total_rc="$RUN_RC"
-  mlir_total_s="$RUN_TIME_S"
-  if [[ "$mlir_compile_rc" -eq 0 && "$mlir_total_rc" -eq 0 ]]; then
-    mlir_exec_s="$(float_sub_floor_zero "$mlir_total_s" "$mlir_compile_s")"
-    mlir_exec_rc=0
+  if [[ "$mlir_compile_rc" -eq 0 && -f "$mlirbc_path" ]]; then
+    run_timed "$mlir_exec_out" "$mlir_exec_time" \
+      "$IRLASP_BIN" -m mlir "$mlirbc_path" "${args[@]}"
+    mlir_exec_rc="$RUN_RC"
+    mlir_exec_s="$RUN_TIME_S"
   else
+    if [[ "$mlir_compile_rc" -eq 0 ]]; then
+      echo "ERROR: missing MLIR artifact at $mlirbc_path" >>"$mlir_compile_out"
+    fi
     mlir_exec_s="0.000000"
     mlir_exec_rc=1
   fi
+  mlir_total_s="$(float_add "$mlir_compile_s" "$mlir_exec_s")"
 
   sbcl_result="$(result_line "$sbcl_out")"
   clasp_result="$(result_line "$clasp_out")"
   interp_result="$(result_line "$interp_out")"
-  mlir_result="$(result_line "$mlir_total_out")"
-  if [[ -n "$sbcl_result" && "$sbcl_result" == "$clasp_result" && "$sbcl_result" == "$interp_result" && "$sbcl_result" == "$mlir_result" ]]; then
-    result_match="1"
-  else
-    result_match="0"
+  mlir_result="$(result_line "$mlir_exec_out")"
+  cl_baseline="none"
+  cl_expected=""
+  if [[ "$sbcl_rc" -eq 0 && -n "$sbcl_result" ]]; then
+    cl_baseline="sbcl"
+    cl_expected="$sbcl_result"
+  elif [[ "$clasp_rc" -eq 0 && -n "$clasp_result" ]]; then
+    cl_baseline="clasp"
+    cl_expected="$clasp_result"
+  fi
+  cl_expected_present="0"
+  interp_match_cl="0"
+  mlir_match_cl="0"
+  result_match="0"
+  if [[ -n "$cl_expected" ]]; then
+    cl_expected_present="1"
+    if [[ "$interp_rc" -eq 0 && "$interp_result" == "$cl_expected" ]]; then
+      interp_match_cl="1"
+    fi
+    if [[ "$mlir_exec_rc" -eq 0 && "$mlir_result" == "$cl_expected" ]]; then
+      mlir_match_cl="1"
+    fi
+    if [[ "$interp_match_cl" == "1" && "$mlir_match_cl" == "1" ]]; then
+      result_match="1"
+    fi
   fi
 
   args_for_csv="${bench_args_raw//,/;}"
-  echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${result_match}" >>"$CSV_FILE"
+  echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${cl_baseline},${cl_expected_present},${interp_match_cl},${mlir_match_cl},${result_match}" >>"$CSV_FILE"
 
-  printf '%-22s sbcl=%8ss clasp=%8ss interp=%8ss mlir_compile=%8ss mlir_exec=%8ss mlir_total=%8ss match=%s\n' \
-    "$bench_name" "$sbcl_s" "$clasp_s" "$interp_s" "$mlir_compile_s" "$mlir_exec_s" "$mlir_total_s" "$result_match"
+  printf '%-22s sbcl=%8ss clasp=%8ss interp=%8ss mlir_compile=%8ss mlir_exec=%8ss mlir_total=%8ss baseline=%s interp_match=%s mlir_match=%s match=%s\n' \
+    "$bench_name" "$sbcl_s" "$clasp_s" "$interp_s" "$mlir_compile_s" "$mlir_exec_s" "$mlir_total_s" "$cl_baseline" "$interp_match_cl" "$mlir_match_cl" "$result_match"
 done <<'EOF'
 fibonacci_recursive.lisp|28
 fibonacci_iterative.lisp|900000
 tco_sum.lisp|5000
 sieve_primes.lisp|900000
 gcd_loop.lisp|140000 832040 514229
+list_sum.lisp|1200000
+hash_table_stress.lisp|1200000 20000
+vector_dot.lisp|1500000
+string_count.lisp|120000
 EOF
 
 echo "CSV: $CSV_FILE"

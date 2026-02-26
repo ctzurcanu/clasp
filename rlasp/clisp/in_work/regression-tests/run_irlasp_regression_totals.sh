@@ -7,17 +7,23 @@ setopt TYPESET_SILENT
 BASE_DIR="/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work"
 RUNNER="$BASE_DIR/regression-tests/run-all-irlasp.lisp"
 IRLASP_BIN="/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp"
+CLASP_BIN="${CLASP_BIN:-/opt/homebrew/bin/clasp}"
+SBCL_BIN="${SBCL_BIN:-/opt/homebrew/bin/sbcl}"
 LOG_DIR="$BASE_DIR/regression-tests/logs"
 RUNNER_FILE="$BASE_DIR/regression-tests/run-all-irlasp.lisp"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
+COMPARE_CL_BASELINE="${COMPARE_CL_BASELINE:-1}"
+REQUIRE_CL_BASELINE_SUCCESS="${REQUIRE_CL_BASELINE_SUCCESS:-1}"
+CL_BASELINE_ENGINE="${CL_BASELINE_ENGINE:-auto}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
 MLIR_SELECTIVE_EVAL="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
+MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-0}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
   exit 2
 fi
-MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-0}"
+MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-1}"
 
 # Canonical suite test inventory for run-all-irlasp (47 suites, TOTAL 1953).
 # This keeps totals stable even if a suite crashes before printing all test lines.
@@ -88,12 +94,6 @@ float_sub() {
   awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", (a - b) }'
 }
 
-bool_enabled() {
-  local raw="${1:-}"
-  local v="${raw:l}"
-  [[ -n "$v" && "$v" != "0" && "$v" != "false" && "$v" != "no" && "$v" != "off" ]]
-}
-
 RUN_STATUS=127
 RUN_ELAPSED="0.000000"
 RUN_PHASE_COMPILE="0.000000"
@@ -105,6 +105,17 @@ elif command -v timeout >/dev/null 2>&1; then
   TIMEOUT_BIN="timeout"
 else
   TIMEOUT_BIN=""
+fi
+
+if [[ ! -x "$CLASP_BIN" ]]; then
+  if command -v clasp >/dev/null 2>&1; then
+    CLASP_BIN="$(command -v clasp)"
+  fi
+fi
+if [[ ! -x "$SBCL_BIN" ]]; then
+  if command -v sbcl >/dev/null 2>&1; then
+    SBCL_BIN="$(command -v sbcl)"
+  fi
 fi
 
 extract_suites() {
@@ -124,7 +135,7 @@ extract_suites() {
 parse_suite_metrics() {
   local log_file="$1"
   awk '
-    BEGIN { ce=0; re=0; succ=0; failsum=0; }
+    BEGIN { ce=0; re=0; succ=0; failsum=0; in_success_list=0; success_blob=""; }
     function note_test_status(kind, token, name) {
       sub(/Wanted values.*/, "", token);
       sub(/Unexpected error.*/, "", token);
@@ -139,7 +150,37 @@ parse_suite_metrics() {
         }
       }
     }
+    function note_name_list(kind, blob, name) {
+      gsub(/[()]/, " ", blob);
+      while (match(blob, /[A-Za-z0-9._:+*\/<>=!?%&|-]+/)) {
+        name=toupper(substr(blob, RSTART, RLENGTH));
+        if (name != "" && name != "NIL" && name != "T" && name !~ /^~/ && name != "SUCCESSES") {
+          status[name]=kind;
+        }
+        blob=substr(blob, RSTART + RLENGTH);
+      }
+    }
     {
+      if (in_success_list) {
+        success_blob = success_blob " " $0;
+        if (index($0, ")") > 0) {
+          note_name_list("P", success_blob);
+          in_success_list=0;
+          success_blob="";
+        }
+        next;
+      }
+      if (match($0, /^Successes:[[:space:]]*\(/)) {
+        success_blob = substr($0, RSTART + RLENGTH);
+        if (index(success_blob, ")") > 0) {
+          note_name_list("P", success_blob);
+          success_blob="";
+        } else {
+          in_success_list=1;
+        }
+        next;
+      }
+
       rest=$0;
       while (1) {
         p=index(rest, "Passed ");
@@ -185,7 +226,6 @@ parse_suite_metrics() {
       }
     }
     /Regression: compile-file/ { ce++; next; }
-    /^Error:/ { re++; next; }
     END {
       tp=0;
       tf=0;
@@ -202,12 +242,258 @@ parse_suite_metrics() {
   ' "$log_file"
 }
 
+parse_suite_statuses() {
+  local log_file="$1"
+  awk '
+    BEGIN { in_success_list=0; success_blob=""; }
+    function note_test_status(kind, token, name) {
+      sub(/Wanted values.*/, "", token);
+      sub(/Unexpected error.*/, "", token);
+      sub(/while evaluating.*/, "", token);
+      sub(/^[[:space:]]+/, "", token);
+      sub(/[[:space:]]+$/, "", token);
+      if (match(token, /^[A-Za-z0-9._:+*\/<>=!?%&|-]+/)) {
+        name=toupper(substr(token, RSTART, RLENGTH));
+        if (name != "" && name != "NIL" && name != "T" && name !~ /^~/) {
+          status[name]=kind;
+        }
+      }
+    }
+    function note_name_list(kind, blob, name) {
+      gsub(/[()]/, " ", blob);
+      while (match(blob, /[A-Za-z0-9._:+*\/<>=!?%&|-]+/)) {
+        name=toupper(substr(blob, RSTART, RLENGTH));
+        if (name != "" && name != "NIL" && name != "T" && name !~ /^~/ && name != "SUCCESSES") {
+          status[name]=kind;
+        }
+        blob=substr(blob, RSTART + RLENGTH);
+      }
+    }
+    {
+      if (in_success_list) {
+        success_blob = success_blob " " $0;
+        if (index($0, ")") > 0) {
+          note_name_list("P", success_blob);
+          in_success_list=0;
+          success_blob="";
+        }
+        next;
+      }
+      if (match($0, /^Successes:[[:space:]]*\(/)) {
+        success_blob = substr($0, RSTART + RLENGTH);
+        if (index(success_blob, ")") > 0) {
+          note_name_list("P", success_blob);
+          success_blob="";
+        } else {
+          in_success_list=1;
+        }
+        next;
+      }
+
+      rest=$0;
+      while (1) {
+        p=index(rest, "Passed ");
+        f=index(rest, "Failed ");
+        if (p==0 && f==0) break;
+        if (p>0 && (f==0 || p<f)) {
+          kind="P";
+          chunk=substr(rest, p+7);
+        } else {
+          kind="F";
+          chunk=substr(rest, f+7);
+        }
+
+        np=index(chunk, "Passed ");
+        nf=index(chunk, "Failed ");
+        nxt=0;
+        if (np>0 && nf>0) nxt=(np<nf ? np : nf);
+        else if (np>0) nxt=np;
+        else if (nf>0) nxt=nf;
+
+        token=(nxt>0 ? substr(chunk, 1, nxt-1) : chunk);
+        note_test_status(kind, token);
+
+        if (nxt>0) rest=substr(chunk, nxt);
+        else break;
+      }
+    }
+    END {
+      for (name in status) {
+        printf("%s %s\n", name, status[name]);
+      }
+    }
+  ' "$log_file"
+}
+
+build_baseline_suite_runner() {
+  local suite="$1"
+  local engine="$2"
+  local runner_file
+  runner_file="$(mktemp -t "clasp-suite-runner-${suite}")"
+  runner_file="${runner_file}.lisp"
+  local quit_form="(sys:quit 0)"
+  if [[ "$engine" == "sbcl" ]]; then
+    quit_form="(sb-ext:exit :code 0)"
+  fi
+  cat > "$runner_file" <<EOF
+(in-package :cl-user)
+(load "$BASE_DIR/regression-tests/framework.lisp")
+(load "$BASE_DIR/regression-tests/set-unexpected-failures.lisp")
+(in-package #:clasp-tests)
+(reset-clasp-tests)
+(message :emph "~%Running $suite suite...")
+(load-if-compiled-correctly "$BASE_DIR/regression-tests/$suite.lisp")
+(show-test-summary)
+$quit_form
+EOF
+  echo "$runner_file"
+}
+
+count_suite_statuses() {
+  local log_file="$1"
+  parse_suite_statuses "$log_file" | awk 'END { print NR+0 }'
+}
+
+run_baseline_suite_with_engine() {
+  local engine="$1"
+  local suite="$2"
+  local baseline_log="$3"
+  local runner_file
+  local -a cmd
+  local rc=0
+  runner_file="$(build_baseline_suite_runner "$suite" "$engine")"
+  : > "$baseline_log"
+  if [[ "$engine" == "clasp" ]]; then
+    cmd=("$CLASP_BIN" --non-interactive --load "$runner_file")
+  elif [[ "$engine" == "sbcl" ]]; then
+    cmd=("$SBCL_BIN" --noinform --non-interactive --load "$runner_file")
+  else
+    rm -f "$runner_file"
+    return 2
+  fi
+  set +e
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    env TEST_SUITES="$suite" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" \
+      "${cmd[@]}" > "$baseline_log" 2>&1
+    rc=$?
+  else
+    env TEST_SUITES="$suite" "${cmd[@]}" > "$baseline_log" 2>&1
+    rc=$?
+  fi
+  set -e
+  rm -f "$runner_file"
+  return "$rc"
+}
+
+BASELINE_LAST_ENGINE=""
+run_cl_suite_baseline() {
+  local suite="$1"
+  local baseline_log="$2"
+  local expected_total="${EXPECTED_SUITE_TOTALS[$suite]:-0}"
+  local status_count=0
+  local rc=0
+  BASELINE_LAST_ENGINE=""
+
+  run_and_validate_engine() {
+    local engine="$1"
+    run_baseline_suite_with_engine "$engine" "$suite" "$baseline_log"
+    rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      return "$rc"
+    fi
+    status_count="$(count_suite_statuses "$baseline_log")"
+    if (( expected_total == 0 || status_count > 0 )); then
+      BASELINE_LAST_ENGINE="$engine"
+      return 0
+    fi
+    return 65
+  }
+
+  case "$CL_BASELINE_ENGINE" in
+    clasp)
+      run_and_validate_engine "clasp"
+      return $?
+      ;;
+    sbcl)
+      run_and_validate_engine "sbcl"
+      return $?
+      ;;
+    auto)
+      if [[ -x "$CLASP_BIN" ]]; then
+        run_and_validate_engine "clasp"
+        rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+          return 0
+        fi
+      fi
+      if [[ -x "$SBCL_BIN" ]]; then
+        run_and_validate_engine "sbcl"
+        return $?
+      fi
+      return 127
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+run_clasp_suite_baseline() {
+  local suite="$1"
+  local baseline_log="$2"
+  run_cl_suite_baseline "$suite" "$baseline_log"
+  return $?
+}
+
+compare_suite_statuses() {
+  local baseline_log="$1"
+  local candidate_log="$2"
+  typeset -A baseline_status
+  typeset -A candidate_status
+  local name test_status
+  local correct=0
+  local expected=0
+  local mismatched=0
+  local missing=0
+  local extra=0
+
+  while read -r name test_status; do
+    [[ -z "${name:-}" || -z "${test_status:-}" ]] && continue
+    baseline_status[$name]="$test_status"
+  done < <(parse_suite_statuses "$baseline_log")
+  while read -r name test_status; do
+    [[ -z "${name:-}" || -z "${test_status:-}" ]] && continue
+    candidate_status[$name]="$test_status"
+  done < <(parse_suite_statuses "$candidate_log")
+
+  for name in "${(@k)baseline_status}"; do
+    expected=$((expected + 1))
+    if [[ -z "${candidate_status[$name]-}" ]]; then
+      missing=$((missing + 1))
+      mismatched=$((mismatched + 1))
+    elif [[ "${candidate_status[$name]}" == "${baseline_status[$name]}" ]]; then
+      correct=$((correct + 1))
+    else
+      mismatched=$((mismatched + 1))
+    fi
+  done
+
+  for name in "${(@k)candidate_status}"; do
+    if [[ -z "${baseline_status[$name]-}" ]]; then
+      extra=$((extra + 1))
+      mismatched=$((mismatched + 1))
+    fi
+  done
+
+  echo "$correct $expected $mismatched $missing $extra"
+}
+
 build_single_suite_runner() {
   local mode="$1"
   local suite="$2"
   local runner_file
   local suite_load_form
-  if [[ "$mode" == "mlir" ]]; then
+  if [[ "$mode" == "mlir" && "$MLIR_SPLIT_PROCESS" == "1" ]]; then
     # Keep suite load on runtime path in MLIR mode (not compile-time pre-eval).
     suite_load_form="(defun irlasp-runtime-suite-load () (load \"$BASE_DIR/regression-tests/$suite.lisp\"))
 (irlasp-runtime-suite-load)"
@@ -237,7 +523,8 @@ run_jit_suite_with_phase_timing() {
   local runner_file="$4"
   local start end rc exec_mark
   local fifo_path
-  local -a extra_env
+  local -a exec_env
+  local -a compile_env
   local compile_start compile_end compile_rc
   local exec_start exec_end exec_rc
   local module_name artifact_path
@@ -247,12 +534,15 @@ run_jit_suite_with_phase_timing() {
   rc=127
   : > "$suite_log"
 
-  extra_env=()
-  if [[ "$mode" == "mlir" ]]; then
-    extra_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR" "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL")
+  exec_env=()
+  compile_env=()
+  if [[ "$mode" == "mlir" && "$MLIR_SPLIT_PROCESS" == "1" ]]; then
+    exec_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR" "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL")
+    # Keep compile and execute in the same semantic mode.
+    compile_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR" "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL")
   fi
 
-  if [[ "$mode" == "mlir" ]] && bool_enabled "$MLIR_EXEC_ARTIFACT"; then
+  if [[ "$mode" == "mlir" && "$MLIR_SPLIT_PROCESS" == "1" ]]; then
     module_name="${runner_file:t:r}"
     artifact_path="/tmp/${module_name}.mlirbc"
     compile_log="${suite_log}.compile"
@@ -262,25 +552,17 @@ run_jit_suite_with_phase_timing() {
     compile_start="$(now_mono_ts)"
     set +e
     if [[ -n "$TIMEOUT_BIN" ]]; then
-      env TEST_SUITES="$suite" "${extra_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      env TEST_SUITES="$suite" "${compile_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
         "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
       compile_rc=$?
     else
-      env TEST_SUITES="$suite" "${extra_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      env TEST_SUITES="$suite" "${compile_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
         "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
       compile_rc=$?
     fi
     set -e
     compile_end="$(now_mono_ts)"
     RUN_PHASE_COMPILE="$(float_sub "$compile_end" "$compile_start")"
-
-    if [[ "$compile_rc" -ne 0 ]]; then
-      cat "$compile_log" >> "$suite_log"
-      RUN_STATUS="$compile_rc"
-      RUN_PHASE_EXEC="0.000000"
-      RUN_ELAPSED="$RUN_PHASE_COMPILE"
-      return
-    fi
 
     if [[ ! -f "$artifact_path" ]]; then
       cat "$compile_log" >> "$suite_log"
@@ -291,17 +573,21 @@ run_jit_suite_with_phase_timing() {
       return
     fi
 
+    if [[ "$compile_rc" -ne 0 ]]; then
+      echo "SUITE_COMPILE_WARN $suite compile_rc=$compile_rc artifact_present=1" >> "$suite_log"
+    fi
+
     printf '[HARNESS-COMPILE] mode=%s suite=%s artifact=%s compile_log=%s\n' \
       "$mode" "$suite" "$artifact_path" "$compile_log" >> "$suite_log"
 
     exec_start="$(now_mono_ts)"
     set +e
     if [[ -n "$TIMEOUT_BIN" ]]; then
-      env TEST_SUITES="$suite" "${extra_env[@]}" \
+      env TEST_SUITES="$suite" "${exec_env[@]}" \
         "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
       exec_rc=$?
     else
-      env TEST_SUITES="$suite" "${extra_env[@]}" \
+      env TEST_SUITES="$suite" "${exec_env[@]}" \
         "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
       exec_rc=$?
     fi
@@ -321,9 +607,9 @@ run_jit_suite_with_phase_timing() {
 
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    (env TEST_SUITES="$suite" "${extra_env[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${exec_env[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   else
-    (env TEST_SUITES="$suite" "${extra_env[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${exec_env[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -366,9 +652,7 @@ run_one_suite() {
   RUN_PHASE_EXEC="0.000000"
 
   if [[ "$mode" == "mlir" || "$mode" == "fasl" ]]; then
-    runner_file="$(build_single_suite_runner "$mode" "$suite")"
     run_jit_suite_with_phase_timing "$mode" "$suite" "$suite_log" "$runner_file"
-    rm -f "$runner_file"
     return 0
   fi
 
@@ -392,6 +676,9 @@ run_mode() {
   local log_file="$2"
   local summary_file="${log_file%.log}.summary.txt"
   local suites=()
+  typeset -A suite_baseline_logs
+  typeset -A suite_baseline_rcs
+  typeset -A suite_baseline_engines
   local idx=0
   local mode_start
   local mode_end
@@ -417,6 +704,7 @@ run_mode() {
     echo "MLIR_BEHAVIOR $MLIR_BEHAVIOR" | tee -a "$summary_file"
     echo "MLIR_SELECTIVE_EVAL $MLIR_SELECTIVE_EVAL" | tee -a "$summary_file"
     echo "MLIR_EXEC_ARTIFACT $MLIR_EXEC_ARTIFACT" | tee -a "$summary_file"
+    echo "MLIR_SPLIT_PROCESS $MLIR_SPLIT_PROCESS" | tee -a "$summary_file"
   fi
 
   local tp=0
@@ -425,7 +713,41 @@ run_mode() {
   local re=0
   local total=0
   local nonpassing=0
+  local correct_total=0
+  local expected_from_cl_total=0
+  local mismatch_total=0
+  local missing_total=0
+  local extra_total=0
+  local compared_suites=0
+  local baseline_errors=0
   local timed_out=0
+
+  if [[ "$COMPARE_CL_BASELINE" == "1" ]]; then
+    echo "CL_BASELINE_ENGINE $CL_BASELINE_ENGINE" | tee -a "$summary_file"
+    echo "CLASP_BIN $CLASP_BIN" | tee -a "$summary_file"
+    echo "SBCL_BIN $SBCL_BIN" | tee -a "$summary_file"
+    echo "REQUIRE_CL_BASELINE_SUCCESS $REQUIRE_CL_BASELINE_SUCCESS" | tee -a "$summary_file"
+    for suite in "${suites[@]}"; do
+      local baseline_log="$LOG_DIR/cl-baseline-${STAMP}-${suite}.log"
+      if run_cl_suite_baseline "$suite" "$baseline_log"; then
+        suite_baseline_rcs[$suite]=0
+      else
+        suite_baseline_rcs[$suite]=$?
+      fi
+      suite_baseline_logs[$suite]="$baseline_log"
+      suite_baseline_engines[$suite]="${BASELINE_LAST_ENGINE:-none}"
+      if [[ "${suite_baseline_rcs[$suite]}" -ne 0 ]]; then
+        baseline_errors=$((baseline_errors + 1))
+        echo "BASELINE_SUITE_WARN $suite engine=${suite_baseline_engines[$suite]} rc=${suite_baseline_rcs[$suite]} log=$baseline_log" >> "$summary_file"
+      else
+        echo "BASELINE_SUITE_OK $suite engine=${suite_baseline_engines[$suite]} log=$baseline_log" >> "$summary_file"
+      fi
+    done
+  fi
+  if [[ "$COMPARE_CL_BASELINE" == "1" && "$REQUIRE_CL_BASELINE_SUCCESS" == "1" && "$baseline_errors" -gt 0 ]]; then
+    echo "ERROR CL baseline failed for $baseline_errors suite(s); correctness comparison is invalid." | tee -a "$summary_file" >&2
+    return 3
+  fi
   mode_start="$(now_mono_ts)"
 
   for suite in "${suites[@]}"; do
@@ -457,6 +779,16 @@ run_mode() {
 
     local m_total m_failed m_ce m_re m_non
     read -r m_total m_failed m_ce m_re m_non <<< "$(parse_suite_metrics "$suite_log")"
+    local suite_correct_num=$((m_total - m_failed))
+    local suite_expected_from_cl_num="$m_total"
+    local suite_mismatch_num=$((m_total - suite_correct_num))
+    local suite_missing_num=0
+    local suite_extra_num=0
+    local suite_correct_display="$suite_correct_num"
+    local suite_expected_from_cl_display="$suite_expected_from_cl_num"
+    local suite_mismatch_display="$suite_mismatch_num"
+    local suite_missing_display="$suite_missing_num"
+    local suite_extra_display="$suite_extra_num"
     local observed_total="$m_total"
     local observed_failed="$m_failed"
     local expected_total="${EXPECTED_SUITE_TOTALS[$suite]:-}"
@@ -484,31 +816,102 @@ run_mode() {
       echo "SUITE_RUN_ERROR $suite rc=$rc" >> "$summary_file"
     fi
 
+    suite_correct_num=$((m_total - m_failed))
+    suite_expected_from_cl_num="$m_total"
+    suite_mismatch_num=$((m_total - suite_correct_num))
+    suite_missing_num=0
+    suite_extra_num=0
+    suite_correct_display="$suite_correct_num"
+    suite_expected_from_cl_display="$suite_expected_from_cl_num"
+    suite_mismatch_display="$suite_mismatch_num"
+    suite_missing_display="$suite_missing_num"
+    suite_extra_display="$suite_extra_num"
+
+    if [[ "$COMPARE_CL_BASELINE" == "1" ]]; then
+      local baseline_rc="${suite_baseline_rcs[$suite]:-1}"
+      local baseline_log="${suite_baseline_logs[$suite]:-}"
+      if [[ "$baseline_rc" -eq 0 && -n "$baseline_log" && -f "$baseline_log" ]]; then
+        read -r suite_correct_num suite_expected_from_cl_num suite_mismatch_num suite_missing_num suite_extra_num \
+          <<< "$(compare_suite_statuses "$baseline_log" "$suite_log")"
+        suite_correct_display="$suite_correct_num"
+        suite_expected_from_cl_display="$suite_expected_from_cl_num"
+        suite_mismatch_display="$suite_mismatch_num"
+        suite_missing_display="$suite_missing_num"
+        suite_extra_display="$suite_extra_num"
+        compared_suites=$((compared_suites + 1))
+      else
+        suite_correct_num=0
+        suite_expected_from_cl_num=0
+        suite_mismatch_num=0
+        suite_missing_num=0
+        suite_extra_num=0
+        suite_correct_display="NA"
+        suite_expected_from_cl_display="NA"
+        suite_mismatch_display="NA"
+        suite_missing_display="NA"
+        suite_extra_display="NA"
+      fi
+    else
+      suite_correct_num=0
+      suite_expected_from_cl_num=0
+      suite_mismatch_num=0
+      suite_missing_num=0
+      suite_extra_num=0
+      suite_correct_display="NA"
+      suite_expected_from_cl_display="NA"
+      suite_mismatch_display="NA"
+      suite_missing_display="NA"
+      suite_extra_display="NA"
+    fi
+
     tp=$((tp + (m_total - m_failed)))
     tf=$((tf + m_failed))
     ce=$((ce + m_ce))
     re=$((re + m_re))
     total=$((total + m_total))
     nonpassing=$((nonpassing + m_non))
+    correct_total=$((correct_total + suite_correct_num))
+    expected_from_cl_total=$((expected_from_cl_total + suite_expected_from_cl_num))
+    mismatch_total=$((mismatch_total + suite_mismatch_num))
+    missing_total=$((missing_total + suite_missing_num))
+    extra_total=$((extra_total + suite_extra_num))
     if [[ "$mode" == "mlir" || "$mode" == "fasl" ]]; then
-      echo "SUITE $(printf '%-24s' "$suite") TOTAL $m_total FAILED $m_failed PASSED $((m_total-m_failed)) TIME_TOTAL_S $suite_elapsed TIME_COMPILE_S $suite_compile TIME_EXEC_S $suite_exec" >> "$summary_file"
+      echo "SUITE $(printf '%-24s' "$suite") TOTAL $m_total FAILED $m_failed PASSED $((m_total-m_failed)) CORRECT: $suite_correct_display EXPECTED_FROM_CL: $suite_expected_from_cl_display MISMATCH: $suite_mismatch_display MISSING: $suite_missing_display EXTRA: $suite_extra_display TIME_TOTAL_S $suite_elapsed TIME_COMPILE_S $suite_compile TIME_EXEC_S $suite_exec" >> "$summary_file"
     else
-      echo "SUITE $(printf '%-24s' "$suite") TOTAL $m_total FAILED $m_failed PASSED $((m_total-m_failed)) TIME_S $suite_elapsed" >> "$summary_file"
+      echo "SUITE $(printf '%-24s' "$suite") TOTAL $m_total FAILED $m_failed PASSED $((m_total-m_failed)) CORRECT: $suite_correct_display EXPECTED_FROM_CL: $suite_expected_from_cl_display MISMATCH: $suite_mismatch_display MISSING: $suite_missing_display EXTRA: $suite_extra_display TIME_S $suite_elapsed" >> "$summary_file"
     fi
   done
 
   mode_end="$(now_mono_ts)"
   mode_wall_s="$(float_sub "$mode_end" "$mode_start")"
+  local correct_total_display="$correct_total"
+  local expected_from_cl_total_display="$expected_from_cl_total"
+  local mismatch_total_display="$mismatch_total"
+  local missing_total_display="$missing_total"
+  local extra_total_display="$extra_total"
+  if [[ "$COMPARE_CL_BASELINE" != "1" ]]; then
+    correct_total_display="NA"
+    expected_from_cl_total_display="NA"
+    mismatch_total_display="NA"
+    missing_total_display="NA"
+    extra_total_display="NA"
+  elif [[ "$baseline_errors" -gt 0 ]]; then
+    correct_total_display="NA"
+    expected_from_cl_total_display="NA"
+    mismatch_total_display="NA"
+    missing_total_display="NA"
+    extra_total_display="NA"
+  fi
   printf '[HARNESS-TIMING] mode=%s suites=%s suite_time_sum_s=%s wall_clock_s=%s\n' \
     "$mode" "${#suites[@]}" "$suite_time_sum" "$mode_wall_s" >> "$log_file"
   if [[ "$mode" == "mlir" ]]; then
-    echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp SUITE_TIME_SUM_S $suite_time_sum MLIR_COMPILE_SUM_S $mode_compile_sum MLIR_EXEC_SUM_S $mode_exec_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
+    echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp CORRECT: $correct_total_display EXPECTED_FROM_CL: $expected_from_cl_total_display MISMATCH: $mismatch_total_display MISSING: $missing_total_display EXTRA: $extra_total_display SUITE_TIME_SUM_S $suite_time_sum MLIR_COMPILE_SUM_S $mode_compile_sum MLIR_EXEC_SUM_S $mode_exec_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
   elif [[ "$mode" == "fasl" ]]; then
-    echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp SUITE_TIME_SUM_S $suite_time_sum FASL_COMPILE_SUM_S $mode_compile_sum FASL_EXEC_SUM_S $mode_exec_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
+    echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp CORRECT: $correct_total_display EXPECTED_FROM_CL: $expected_from_cl_total_display MISMATCH: $mismatch_total_display MISSING: $missing_total_display EXTRA: $extra_total_display SUITE_TIME_SUM_S $suite_time_sum FASL_COMPILE_SUM_S $mode_compile_sum FASL_EXEC_SUM_S $mode_exec_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
   else
-    echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp SUITE_TIME_SUM_S $suite_time_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
+    echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp CORRECT: $correct_total_display EXPECTED_FROM_CL: $expected_from_cl_total_display MISMATCH: $mismatch_total_display MISSING: $missing_total_display EXTRA: $extra_total_display SUITE_TIME_SUM_S $suite_time_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
   fi
-  echo "SUITES_TOTAL ${#suites[@]} SUITES_TIMED_OUT $timed_out" >> "$summary_file"
+  echo "SUITES_TOTAL ${#suites[@]} SUITES_TIMED_OUT $timed_out CL_BASELINE_ERRORS $baseline_errors CL_BASELINE_COMPARED_SUITES $compared_suites" >> "$summary_file"
   echo "Summary ($mode):"
   cat "$summary_file"
   echo

@@ -1014,7 +1014,7 @@ impl StackMLIRCodegen {
                     return Ok(());
                 } else if name == "array-total-size-limit" {
                     let val_ssa = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.constant 1000000 : i64", val_ssa));
+                    self.writeln(&format!("{} = arith.constant 16777216 : i64", val_ssa));
                     let boxed_ssa = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", boxed_ssa, val_ssa));
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_ssa));

@@ -10,7 +10,7 @@ use rlasp_runtime::eval_stack::{
 };
 use rlasp_runtime::string::RString;
 use std::io::Write;
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, Once, OnceLock};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 use malachite::Integer;
@@ -41,6 +41,44 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static FUNCALL_LOOKUP_CACHE: std::cell::RefCell<std::collections::HashMap<i64, CachedFunctionResolution>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    static FUNCALL_OBJECT_LOOKUP_CACHE: std::cell::RefCell<std::collections::HashMap<usize, CachedFunctionResolution>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+static BRIDGE_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+static TRACE_FUNCALL_ENABLED: OnceLock<bool> = OnceLock::new();
+static TRACE_FUNCALL_LIMIT: OnceLock<usize> = OnceLock::new();
+static TRACE_ARGS_LIST_ENABLED: OnceLock<bool> = OnceLock::new();
+static TRACE_TESTS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+#[inline]
+fn bridge_trace_enabled() -> bool {
+    *BRIDGE_TRACE_ENABLED.get_or_init(|| std::env::var("RLASP_BRIDGE_TRACE").is_ok())
+}
+
+#[inline]
+fn funcall_trace_enabled() -> bool {
+    *TRACE_FUNCALL_ENABLED.get_or_init(|| std::env::var("RLASP_TRACE_FUNCALL").is_ok())
+}
+
+#[inline]
+fn funcall_trace_limit() -> usize {
+    *TRACE_FUNCALL_LIMIT.get_or_init(|| {
+        std::env::var("RLASP_TRACE_FUNCALL_LIMIT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(9000)
+    })
+}
+
+#[inline]
+fn trace_args_list_enabled() -> bool {
+    *TRACE_ARGS_LIST_ENABLED.get_or_init(|| std::env::var("RLASP_TRACE_ARGS_LIST").is_ok())
+}
+
+#[inline]
+fn trace_tests_enabled() -> bool {
+    *TRACE_TESTS_ENABLED.get_or_init(|| std::env::var("RLASP_TRACE_TESTS").is_ok())
 }
 
 pub fn runtime_debug_stack_snapshot() -> Vec<String> {
@@ -87,7 +125,7 @@ fn try_eval_bridge(form_obj: usize) -> Option<usize> {
 }
 
 pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Option<usize> {
-    let bridge_trace = std::env::var("RLASP_BRIDGE_TRACE").is_ok();
+    let bridge_trace = bridge_trace_enabled();
     let function_lower = function_name.to_ascii_lowercase();
     let function_base = function_lower
         .rsplit(':')
@@ -1967,6 +2005,18 @@ pub extern "C" fn cc_mod(a: usize, b: usize) -> usize {
 
     let a_obj = unsafe { LispObject::from_raw(a) };
     let b_obj = unsafe { LispObject::from_raw(b) };
+
+    // Fast path: fixnum/fixnum with CL MOD semantics.
+    if let (Some(a_fix), Some(b_fix)) = (a_obj.as_fixnum(), b_obj.as_fixnum()) {
+        if b_fix == 0 {
+            return LispObject::nil().raw();
+        }
+        let mut r = a_fix % b_fix;
+        if r != 0 && ((r > 0 && b_fix < 0) || (r < 0 && b_fix > 0)) {
+            r += b_fix;
+        }
+        return LispObject::fixnum(r).raw();
+    }
 
     // Try to get bignum first, then fallback to fixnum
     let a_bigint = if let Some(a_val) = a_obj.as_fixnum() {
@@ -4201,14 +4251,16 @@ pub extern "C" fn cc_gethash(key: usize, table: usize, default: usize) -> usize 
 
     if let Some(table_key) = hash_table_key(table_obj) {
         if let Some(meta) = HASH_TABLE_META.lock().unwrap().get(&table_key).cloned() {
-            for (stored_key, stored_value) in &meta.entries {
-                if hash_test_matches(meta.test, key_obj, *stored_key) {
-                    set_multiple_values_pair(*stored_value, LispObject::t());
-                    return stored_value.raw();
+            if hash_meta_requires_entry_tracking(&meta) {
+                for (stored_key, stored_value) in &meta.entries {
+                    if hash_test_matches(meta.test, key_obj, *stored_key) {
+                        set_multiple_values_pair(*stored_value, LispObject::t());
+                        return stored_value.raw();
+                    }
                 }
+                set_multiple_values_pair(default_obj, LispObject::nil());
+                return default_obj.raw();
             }
-            set_multiple_values_pair(default_obj, LispObject::nil());
-            return default_obj.raw();
         }
     }
 
@@ -4239,14 +4291,16 @@ pub extern "C" fn cc_puthash(key: usize, value: usize, table: usize) -> usize {
     if let Some(table_key) = hash_table_key(table_obj) {
         let meta_snapshot = HASH_TABLE_META.lock().unwrap().get(&table_key).cloned();
         if let Some(mut meta) = meta_snapshot {
-            let idx = meta
-                .entries
-                .iter()
-                .position(|(stored_key, _)| hash_test_matches(meta.test, key_obj, *stored_key));
-            if let Some(i) = idx {
-                meta.entries[i] = (key_obj, value_obj);
-            } else {
-                meta.entries.push((key_obj, value_obj));
+            if hash_meta_requires_entry_tracking(&meta) {
+                let idx = meta
+                    .entries
+                    .iter()
+                    .position(|(stored_key, _)| hash_test_matches(meta.test, key_obj, *stored_key));
+                if let Some(i) = idx {
+                    meta.entries[i] = (key_obj, value_obj);
+                } else {
+                    meta.entries.push((key_obj, value_obj));
+                }
             }
             HASH_TABLE_META.lock().unwrap().insert(table_key, meta);
         }
@@ -4268,7 +4322,9 @@ pub extern "C" fn cc_hash_table_count(table: usize) -> usize {
     let table_obj = unsafe { LispObject::from_raw(table) };
     if let Some(key) = hash_table_key(table_obj) {
         if let Some(meta) = HASH_TABLE_META.lock().unwrap().get(&key) {
-            return LispObject::fixnum(meta.entries.len() as i64).raw();
+            if hash_meta_requires_entry_tracking(meta) {
+                return LispObject::fixnum(meta.entries.len() as i64).raw();
+            }
         }
     }
     if let Some(ht_ptr) = table_obj.as_hash_table_ptr() {
@@ -10089,23 +10145,26 @@ pub extern "C" fn cc_remhash(key: usize, hash_table: usize) -> usize {
     if let Some(table_key) = hash_table_key(ht_obj) {
         let meta_snapshot = HASH_TABLE_META.lock().unwrap().get(&table_key).cloned();
         if let Some(mut meta) = meta_snapshot {
-            if let Some(idx) = meta
-                .entries
-                .iter()
-                .position(|(stored_key, _)| hash_test_matches(meta.test, key_obj, *stored_key))
-            {
-                meta.entries.remove(idx);
-                HASH_TABLE_META.lock().unwrap().insert(table_key, meta);
-                if let Some(ht_ptr) = ht_obj.as_hash_table_ptr() {
-                    if !ht_ptr.is_null() {
-                        let ht = unsafe { &mut *(ht_ptr as *mut rlasp_runtime::HashTable) };
-                        let _ = ht.remove(key_obj);
+            if hash_meta_requires_entry_tracking(&meta) {
+                if let Some(idx) = meta
+                    .entries
+                    .iter()
+                    .position(|(stored_key, _)| hash_test_matches(meta.test, key_obj, *stored_key))
+                {
+                    meta.entries.remove(idx);
+                    HASH_TABLE_META.lock().unwrap().insert(table_key, meta);
+                    if let Some(ht_ptr) = ht_obj.as_hash_table_ptr() {
+                        if !ht_ptr.is_null() {
+                            let ht = unsafe { &mut *(ht_ptr as *mut rlasp_runtime::HashTable) };
+                            let _ = ht.remove(key_obj);
+                        }
                     }
+                    return LispObject::t().raw();
                 }
-                return LispObject::t().raw();
+                HASH_TABLE_META.lock().unwrap().insert(table_key, meta);
+                return LispObject::nil().raw();
             }
             HASH_TABLE_META.lock().unwrap().insert(table_key, meta);
-            return LispObject::nil().raw();
         }
     }
 
@@ -10591,9 +10650,43 @@ fn hash_test_matches(test: LispObject, probe: LispObject, candidate: LispObject)
     cc_equal(probe.raw(), candidate.raw()) != LispObject::nil().raw()
 }
 
+fn hash_test_designator_name(test: LispObject) -> Option<String> {
+    if let Some(name) = symbol_or_string_name(test) {
+        return Some(strip_package_prefix(&name).to_ascii_uppercase());
+    }
+    if let Some(name) = extract_function_name(test.raw()) {
+        return Some(strip_package_prefix(&name).to_ascii_uppercase());
+    }
+    None
+}
+
+fn hash_meta_requires_entry_tracking(meta: &HashTableMeta) -> bool {
+    if !meta.weakness.is_nil() {
+        return true;
+    }
+    match hash_test_designator_name(meta.test).as_deref() {
+        // Default CL hash-table behavior can use the runtime hash table storage directly.
+        Some("EQ") | Some("EQL") => false,
+        // Non-default tests still require explicit test-aware entry tracking.
+        Some("EQUAL") | Some("EQUALP") => true,
+        // Unknown/custom tests must stay on explicit entry tracking for correctness.
+        _ => true,
+    }
+}
+
 fn hash_table_meta_entries(table_obj: LispObject) -> Option<Vec<(LispObject, LispObject)>> {
     let key = hash_table_key(table_obj)?;
-    HASH_TABLE_META.lock().unwrap().get(&key).map(|m| m.entries.clone())
+    HASH_TABLE_META
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(|m| {
+            if hash_meta_requires_entry_tracking(m) {
+                Some(m.entries.clone())
+            } else {
+                None
+            }
+        })
 }
 
 fn looks_weak_collectable(obj: LispObject) -> bool {
@@ -10638,7 +10731,7 @@ static ARRAY_ELEMENT_TYPE_META: std::sync::LazyLock<Mutex<std::collections::Hash
 static ARRAY_ADJUSTABLE_META: std::sync::LazyLock<Mutex<std::collections::HashMap<usize, bool>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-const ARRAY_TOTAL_SIZE_LIMIT_RUNTIME: usize = 1_000_000;
+const ARRAY_TOTAL_SIZE_LIMIT_RUNTIME: usize = 16_777_216;
 
 fn normalize_array_element_type_name(type_obj: LispObject) -> Option<String> {
     if let Some(name) = keyword_name(type_obj) {
@@ -12330,6 +12423,72 @@ fn resolve_fixnum_function_cached(func_id: i64) -> Option<CachedFunctionResoluti
     Some(resolved)
 }
 
+fn function_name_from_func_obj(value: LispObject) -> Option<String> {
+    if !value.is_general() {
+        return None;
+    }
+    let ptr = value.as_general_ptr::<()>()?;
+    if ptr.is_null() {
+        return None;
+    }
+    match unsafe { rlasp_runtime::TypeHeader::from_ptr(ptr) } {
+        Some(rlasp_runtime::ObjectType::Symbol) => {
+            let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+            Some(sym.name().to_string())
+        }
+        Some(rlasp_runtime::ObjectType::String) => {
+            let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+            Some(s.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn resolve_non_fixnum_function_cached(
+    func_ref: usize,
+    value: LispObject,
+) -> Option<CachedFunctionResolution> {
+    let epoch = FUNCTION_LOOKUP_EPOCH.load(Ordering::Acquire);
+
+    if let Some(hit) = FUNCALL_OBJECT_LOOKUP_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache.get(&func_ref).and_then(|entry| {
+            if entry.epoch == epoch {
+                Some(entry.clone())
+            } else {
+                None
+            }
+        })
+    }) {
+        return Some(hit);
+    }
+
+    let name = function_name_from_func_obj(value)?;
+    let entry = {
+        let registry = get_registry().lock().unwrap();
+        lookup_function_entry_unlocked(&registry, &name).map(|resolved| CachedFunctionEntry {
+            address: resolved.address,
+            arity: resolved.arity,
+            expects_args_list: resolved.expects_args_list,
+        })
+    };
+
+    let dispatch_name = strip_package_prefix(&name).to_ascii_lowercase();
+    let force_bridge = should_force_bridge_dispatch(&name, &dispatch_name);
+    let resolved = CachedFunctionResolution {
+        epoch,
+        name,
+        dispatch_name,
+        force_bridge,
+        entry,
+    };
+
+    FUNCALL_OBJECT_LOOKUP_CACHE.with(|cache| {
+        cache.borrow_mut().insert(func_ref, resolved.clone());
+    });
+    Some(resolved)
+}
+
 /// Register a function in the global registry
 /// Called by the JIT system after compiling each function
 #[no_mangle]
@@ -13023,11 +13182,8 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
     }
 
     // Optional tracing for debugging stack overflows
-    let debug_enabled = std::env::var("RLASP_TRACE_FUNCALL").is_ok();
-    let trace_limit = std::env::var("RLASP_TRACE_FUNCALL_LIMIT")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(9000);
+    let debug_enabled = funcall_trace_enabled();
+    let trace_limit = funcall_trace_limit();
 
     let (_depth_guard, call_depth) = FuncallDepthGuard::enter();
     // Debug: track call count
@@ -13055,26 +13211,6 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         let expected_depth_after = depth_before - current_num_args + 1;
 
         let obj = unsafe { LispObject::from_raw(current_func_ref) };
-        let function_name_of = |value: LispObject| -> Option<String> {
-            if !value.is_general() {
-                return None;
-            }
-            let ptr = value.as_general_ptr::<()>()?;
-            if ptr.is_null() {
-                return None;
-            }
-            match unsafe { TypeHeader::from_ptr(ptr) } {
-                Some(ObjectType::Symbol) => {
-                    let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                    Some(sym.name().to_string())
-                }
-                Some(ObjectType::String) => {
-                    let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
-                    Some(s.as_str().to_string())
-                }
-                _ => None,
-            }
-        };
 
         if debug_enabled && count < trace_limit {
             // Try to get function name for debug output - be careful about dereferencing
@@ -13084,7 +13220,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 } else {
                     format!("<id:{}>", func_id)
                 }
-            } else if let Some(name) = function_name_of(obj) {
+            } else if let Some(name) = function_name_from_func_obj(obj) {
                 name
             } else if obj.is_general() {
                 if let Some(ptr) = obj.as_general_ptr::<()>() {
@@ -13219,15 +13355,15 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
         } else {
             (None, None)
         }
-    } else if let Some(name) = function_name_of(obj) {
-        let entry = {
-            let registry = get_registry().lock().unwrap();
-            lookup_function_entry_unlocked(&registry, &name)
-        };
-        let dispatch_name_owned = strip_package_prefix(&name).to_ascii_lowercase();
-        force_bridge_dispatch = should_force_bridge_dispatch(&name, dispatch_name_owned.as_str());
-        dispatch_name_owned_opt = Some(dispatch_name_owned);
-        (Some(name), entry)
+    } else if let Some(resolved) = resolve_non_fixnum_function_cached(current_func_ref, obj) {
+        dispatch_name_owned_opt = Some(resolved.dispatch_name);
+        force_bridge_dispatch = resolved.force_bridge;
+        let entry = resolved.entry.map(|cached| FunctionEntry {
+            address: cached.address,
+            arity: cached.arity,
+            expects_args_list: cached.expects_args_list,
+        });
+        (Some(resolved.name), entry)
     } else {
         (None, None)
     };
@@ -13292,7 +13428,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             );
         }
         // Debug: trace calls to functions with expects_args_list
-        if entry.expects_args_list && std::env::var("RLASP_TRACE_ARGS_LIST").is_ok() {
+        if entry.expects_args_list && trace_args_list_enabled() {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
             let tc = TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -13317,7 +13453,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 for _ in 0..current_num_args {
                     args.push(stack_pop_pointer());
                 }
-                if std::env::var("RLASP_TRACE_TESTS").is_ok()
+                if trace_tests_enabled()
                     && resolved_name.eq_ignore_ascii_case("%TEST")
                     && !args.is_empty()
                 {
@@ -15683,31 +15819,94 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
             | "char-greaterp"
             | "char-not-lessp"
             | "char-not-greaterp" => {
-                let mut args: Vec<LispObject> = Vec::new();
-                for _ in 0..current_num_args {
-                    args.push(unsafe { LispObject::from_raw(stack_pop_pointer()) });
-                }
-                args.reverse();
-
-                let mut chars: Vec<char> = Vec::with_capacity(args.len());
-                let mut bad = false;
-                for arg in &args {
-                    if let Some(ch) = arg.as_character() {
-                        chars.push(ch);
-                    } else {
-                        bad = true;
-                        break;
+                let cmp_case = |a: char, b: char| -> std::cmp::Ordering { a.cmp(&b) };
+                let cmp_folded = |a: char, b: char| -> std::cmp::Ordering {
+                    a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase())
+                };
+                let dispatch_pair = |name: &str, a: char, b: char| -> bool {
+                    match name {
+                        "char=" => cmp_case(a, b) == std::cmp::Ordering::Equal,
+                        "char/=" => cmp_case(a, b) != std::cmp::Ordering::Equal,
+                        "char<" => cmp_case(a, b) == std::cmp::Ordering::Less,
+                        "char>" => cmp_case(a, b) == std::cmp::Ordering::Greater,
+                        "char<=" => matches!(
+                            cmp_case(a, b),
+                            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                        ),
+                        "char>=" => matches!(
+                            cmp_case(a, b),
+                            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                        ),
+                        "char-equal" => cmp_folded(a, b) == std::cmp::Ordering::Equal,
+                        "char-not-equal" => cmp_folded(a, b) != std::cmp::Ordering::Equal,
+                        "char-lessp" => cmp_folded(a, b) == std::cmp::Ordering::Less,
+                        "char-greaterp" => cmp_folded(a, b) == std::cmp::Ordering::Greater,
+                        "char-not-lessp" => matches!(
+                            cmp_folded(a, b),
+                            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                        ),
+                        "char-not-greaterp" => matches!(
+                            cmp_folded(a, b),
+                            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                        ),
+                        _ => false,
                     }
-                }
+                };
+                let all_pairwise =
+                    |cmp: fn(char, char) -> std::cmp::Ordering,
+                     predicate: fn(std::cmp::Ordering) -> bool,
+                     chars: &[char]|
+                     -> bool { chars.windows(2).all(|w| predicate(cmp(w[0], w[1]))) };
+                let all_distinct = |cmp: fn(char, char) -> std::cmp::Ordering, chars: &[char]| -> bool {
+                    for i in 0..chars.len() {
+                        for j in (i + 1)..chars.len() {
+                            if cmp(chars[i], chars[j]) == std::cmp::Ordering::Equal {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                };
+                let dispatch_multi = |name: &str, chars: &[char]| -> bool {
+                    match name {
+                        "char=" => all_pairwise(cmp_case, |o| o == std::cmp::Ordering::Equal, chars),
+                        "char/=" => all_distinct(cmp_case, chars),
+                        "char<" => all_pairwise(cmp_case, |o| o == std::cmp::Ordering::Less, chars),
+                        "char>" => all_pairwise(cmp_case, |o| o == std::cmp::Ordering::Greater, chars),
+                        "char<=" => all_pairwise(
+                            cmp_case,
+                            |o| matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal),
+                            chars,
+                        ),
+                        "char>=" => all_pairwise(
+                            cmp_case,
+                            |o| matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal),
+                            chars,
+                        ),
+                        "char-equal" => all_pairwise(cmp_folded, |o| o == std::cmp::Ordering::Equal, chars),
+                        "char-not-equal" => all_distinct(cmp_folded, chars),
+                        "char-lessp" => all_pairwise(cmp_folded, |o| o == std::cmp::Ordering::Less, chars),
+                        "char-greaterp" => {
+                            all_pairwise(cmp_folded, |o| o == std::cmp::Ordering::Greater, chars)
+                        }
+                        "char-not-lessp" => all_pairwise(
+                            cmp_folded,
+                            |o| matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal),
+                            chars,
+                        ),
+                        "char-not-greaterp" => all_pairwise(
+                            cmp_folded,
+                            |o| matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal),
+                            chars,
+                        ),
+                        _ => false,
+                    }
+                };
 
-                if bad {
-                    stack_push_pointer(
-                        rlasp_runtime::LispError::type_error(
-                            "character comparison requires character arguments",
-                        )
-                        .raw(),
-                    );
-                } else if chars.len() < 2 {
+                if current_num_args < 2 {
+                    for _ in 0..current_num_args {
+                        let _ = stack_pop_pointer();
+                    }
                     stack_push_pointer(
                         rlasp_runtime::LispError::allocate(
                             rlasp_runtime::error::ErrorKind::InvalidArgument,
@@ -15715,76 +15914,53 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                         )
                         .raw(),
                     );
-                } else {
-                        let cmp_case = |a: char, b: char| -> std::cmp::Ordering {
-                            a.cmp(&b)
-                        };
-                        let cmp_folded = |a: char, b: char| -> std::cmp::Ordering {
-                            a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase())
-                        };
-                        let all_pairwise = |cmp: fn(char, char) -> std::cmp::Ordering,
-                                            predicate: fn(std::cmp::Ordering) -> bool,
-                                            chars: &[char]|
-                         -> bool {
-                            chars
-                                .windows(2)
-                                .all(|w| predicate(cmp(w[0], w[1])))
-                        };
-                        let all_distinct =
-                            |cmp: fn(char, char) -> std::cmp::Ordering, chars: &[char]| -> bool {
-                                for i in 0..chars.len() {
-                                    for j in (i + 1)..chars.len() {
-                                        if cmp(chars[i], chars[j]) == std::cmp::Ordering::Equal {
-                                            return false;
-                                        }
-                                    }
-                                }
-                                true
-                            };
-
-                        let ok = match dispatch_name {
-                            "char=" => all_pairwise(cmp_case, |o| o == std::cmp::Ordering::Equal, &chars),
-                            "char/=" => all_distinct(cmp_case, &chars),
-                            "char<" => all_pairwise(cmp_case, |o| o == std::cmp::Ordering::Less, &chars),
-                            "char>" => all_pairwise(cmp_case, |o| o == std::cmp::Ordering::Greater, &chars),
-                            "char<=" => all_pairwise(
-                                cmp_case,
-                                |o| matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal),
-                                &chars,
-                            ),
-                            "char>=" => all_pairwise(
-                                cmp_case,
-                                |o| matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal),
-                                &chars,
-                            ),
-                            "char-equal" => {
-                                all_pairwise(cmp_folded, |o| o == std::cmp::Ordering::Equal, &chars)
-                            }
-                            "char-not-equal" => all_distinct(cmp_folded, &chars),
-                            "char-lessp" => {
-                                all_pairwise(cmp_folded, |o| o == std::cmp::Ordering::Less, &chars)
-                            }
-                            "char-greaterp" => {
-                                all_pairwise(cmp_folded, |o| o == std::cmp::Ordering::Greater, &chars)
-                            }
-                            "char-not-lessp" => all_pairwise(
-                                cmp_folded,
-                                |o| matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal),
-                                &chars,
-                            ),
-                            "char-not-greaterp" => all_pairwise(
-                                cmp_folded,
-                                |o| matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal),
-                                &chars,
-                            ),
-                            _ => false,
-                        };
-
-                        if ok {
-                            stack_push_pointer(LispObject::t().raw());
-                        } else {
-                            stack_push_nil();
+                } else if current_num_args == 2 {
+                    let right = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+                    let left = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+                    let ok = match (left.as_character(), right.as_character()) {
+                        (Some(a), Some(b)) => dispatch_pair(dispatch_name, a, b),
+                        _ => {
+                            stack_push_pointer(
+                                rlasp_runtime::LispError::type_error(
+                                    "character comparison requires character arguments",
+                                )
+                                .raw(),
+                            );
+                            continue;
                         }
+                    };
+                    if ok {
+                        stack_push_pointer(LispObject::t().raw());
+                    } else {
+                        stack_push_nil();
+                    }
+                } else {
+                    let mut chars: Vec<char> = Vec::with_capacity(current_num_args as usize);
+                    let mut bad = false;
+                    for _ in 0..current_num_args {
+                        let arg = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+                        if let Some(ch) = arg.as_character() {
+                            chars.push(ch);
+                        } else {
+                            bad = true;
+                        }
+                    }
+                    if bad {
+                        stack_push_pointer(
+                            rlasp_runtime::LispError::type_error(
+                                "character comparison requires character arguments",
+                            )
+                            .raw(),
+                        );
+                        continue;
+                    }
+                    chars.reverse();
+                    let ok = dispatch_multi(dispatch_name, &chars);
+                    if ok {
+                        stack_push_pointer(LispObject::t().raw());
+                    } else {
+                        stack_push_nil();
+                    }
                 }
             }
             "define-condition" | "DEFINE-CONDITION" => {

@@ -1,0 +1,31 @@
+(in-package #:cl-user)
+
+(defun bench-int-arg-from-end (from-end default)
+  (let* ((count (handler-case (si:argc) (error () 0)))
+         (idx (- count from-end)))
+    (if (< idx 0)
+        default
+        (let ((raw (handler-case (si:argv idx) (error () nil))))
+          (if (stringp raw)
+              (handler-case (parse-integer raw :junk-allowed nil)
+                (error () default))
+              default)))))
+
+(defun bench-report (algo args result)
+  (format t "~&ALGO=~A ARGS=~S RESULT=~S~%" algo args result)
+  (finish-output))
+
+(defun hash-table-stress (n buckets)
+  (let ((h (make-hash-table :test #'eql))
+        (acc 0))
+    (dotimes (i n)
+      (let* ((k (mod i buckets))
+             (v (gethash k h 0)))
+        (setf (gethash k h) (+ v 1))))
+    (dotimes (k buckets acc)
+      (setf acc (+ acc (gethash k h 0))))))
+
+(let* ((n (bench-int-arg-from-end 2 1200000))
+       (buckets (bench-int-arg-from-end 1 20000))
+       (result (hash-table-stress n buckets)))
+  (bench-report "hash_table_stress" (list n buckets) result))
