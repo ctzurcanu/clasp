@@ -45,6 +45,328 @@ fn ensure_binding(bindings: &mut Vec<(String, ASTNode)>, name: &str, init: ASTNo
     }
 }
 
+fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNode {
+    fn canonical_name(name: &str) -> String {
+        name.rsplit(':')
+            .next()
+            .unwrap_or(name)
+            .to_ascii_lowercase()
+    }
+    fn is_nil_designator(node: &ASTNode) -> bool {
+        match node {
+            ASTNode::Constant(ConstantValue::Nil) => true,
+            ASTNode::Variable(v) => v.eq_ignore_ascii_case("nil"),
+            _ => false,
+        }
+    }
+    fn block_name_designator(node: &ASTNode) -> Option<String> {
+        match node {
+            ASTNode::Constant(ConstantValue::Nil) => Some("nil".to_string()),
+            ASTNode::Variable(v) => Some(v.clone()),
+            ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+    fn loop_return_form(value: ASTNode) -> ASTNode {
+        ASTNode::progn(vec![
+            ASTNode::setq(
+                "__loop_return_values__",
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("multiple-value-list".to_string())),
+                    args: vec![value],
+                },
+            ),
+            ASTNode::setq(
+                "__loop_return_value__",
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("first".to_string())),
+                    args: vec![ASTNode::Variable("__loop_return_values__".to_string())],
+                },
+            ),
+            ASTNode::setq("__loop_returned__", ASTNode::t()),
+            ASTNode::setq("__loop_break__", ASTNode::t()),
+            ASTNode::Call {
+                function: Box::new(ASTNode::Variable("values-list".to_string())),
+                args: vec![ASTNode::Variable("__loop_return_values__".to_string())],
+            },
+        ])
+    }
+    fn matches_loop_block_name(name: &Option<String>, loop_name: &Option<String>) -> bool {
+        match name {
+            None => loop_name.is_none(),
+            Some(n) => {
+                if n.eq_ignore_ascii_case("nil") {
+                    loop_name.is_none()
+                } else if let Some(loop_n) = loop_name {
+                    n.eq_ignore_ascii_case(loop_n)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    match ast {
+        ASTNode::Call { function, args } => {
+            let callee_name = match function.as_ref() {
+                ASTNode::Variable(name) => Some(name.as_str()),
+                ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.as_str()),
+                _ => None,
+            };
+            if let Some(name) = callee_name {
+                let normalized = canonical_name(name);
+                if normalized == "return" {
+                    let value = args.get(0).map(|a| rewrite_loop_return_calls(a, loop_name)).unwrap_or_else(ASTNode::nil);
+                    return loop_return_form(value);
+                }
+                if normalized == "return-from" {
+                    let matches_target = args
+                        .get(0)
+                        .and_then(block_name_designator)
+                        .map(|n| {
+                            if n.eq_ignore_ascii_case("nil") {
+                                loop_name.is_none()
+                            } else if let Some(loop_n) = loop_name {
+                                n.eq_ignore_ascii_case(loop_n)
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if matches_target {
+                        let value = args.get(1).map(|a| rewrite_loop_return_calls(a, loop_name)).unwrap_or_else(ASTNode::nil);
+                        return loop_return_form(value);
+                    }
+                }
+                if normalized == "return-from"
+                    && args.get(0).map_or(false, is_nil_designator)
+                    && loop_name.is_none()
+                {
+                    let value = args.get(1).map(|a| rewrite_loop_return_calls(a, loop_name)).unwrap_or_else(ASTNode::nil);
+                    return loop_return_form(value);
+                }
+            }
+            ASTNode::Call {
+                function: Box::new(rewrite_loop_return_calls(function, loop_name)),
+                args: args.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            }
+        }
+        ASTNode::If { test, then_branch, else_branch } => ASTNode::If {
+            test: Box::new(rewrite_loop_return_calls(test, loop_name)),
+            then_branch: Box::new(rewrite_loop_return_calls(then_branch, loop_name)),
+            else_branch: Box::new(rewrite_loop_return_calls(else_branch, loop_name)),
+        },
+        ASTNode::Cond { clauses } => ASTNode::Cond {
+            clauses: clauses
+                .iter()
+                .map(|(test, result)| {
+                    (
+                        rewrite_loop_return_calls(test, loop_name),
+                        rewrite_loop_return_calls(result, loop_name),
+                    )
+                })
+                .collect(),
+        },
+        ASTNode::Let { bindings, body } => ASTNode::Let {
+            bindings: bindings
+                .iter()
+                .map(|(n, v)| (n.clone(), rewrite_loop_return_calls(v, loop_name)))
+                .collect(),
+            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::LetStar { bindings, body } => ASTNode::LetStar {
+            bindings: bindings
+                .iter()
+                .map(|(n, v)| (n.clone(), rewrite_loop_return_calls(v, loop_name)))
+                .collect(),
+            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::Setq { var, value } => ASTNode::Setq {
+            var: var.clone(),
+            value: Box::new(rewrite_loop_return_calls(value, loop_name)),
+        },
+        ASTNode::ReturnFrom { block_name, value } => {
+            if matches_loop_block_name(block_name, loop_name) {
+                let val = value
+                    .as_ref()
+                    .map(|v| rewrite_loop_return_calls(v, loop_name))
+                    .unwrap_or_else(ASTNode::nil);
+                loop_return_form(val)
+            } else {
+                ASTNode::ReturnFrom {
+                    block_name: block_name.clone(),
+                    value: value.as_ref().map(|v| Box::new(rewrite_loop_return_calls(v, loop_name))),
+                }
+            }
+        }
+        ASTNode::Progn { exprs } => ASTNode::Progn {
+            exprs: exprs.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::Dotimes { var, count, result, body } => ASTNode::Dotimes {
+            var: var.clone(),
+            count: Box::new(rewrite_loop_return_calls(count, loop_name)),
+            result: result.as_ref().map(|r| Box::new(rewrite_loop_return_calls(r, loop_name))),
+            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::Dolist { var, list, result, body } => ASTNode::Dolist {
+            var: var.clone(),
+            list: Box::new(rewrite_loop_return_calls(list, loop_name)),
+            result: result.as_ref().map(|r| Box::new(rewrite_loop_return_calls(r, loop_name))),
+            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::Loop { var, start, limit, when_condition, collect, sum, else_collect, else_sum } => ASTNode::Loop {
+            var: var.clone(),
+            start: start.as_ref().map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
+            limit: Box::new(rewrite_loop_return_calls(limit, loop_name)),
+            when_condition: when_condition.as_ref().map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
+            collect: collect.as_ref().map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
+            sum: sum.as_ref().map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
+            else_collect: else_collect.as_ref().map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
+            else_sum: else_sum.as_ref().map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
+        },
+        ASTNode::DottedPair { car, cdr } => ASTNode::DottedPair {
+            car: Box::new(rewrite_loop_return_calls(car, loop_name)),
+            cdr: Box::new(rewrite_loop_return_calls(cdr, loop_name)),
+        },
+        ASTNode::Backquote(inner) => ASTNode::Backquote(Box::new(rewrite_loop_return_calls(inner, loop_name))),
+        ASTNode::Unquote(inner) => ASTNode::Unquote(Box::new(rewrite_loop_return_calls(inner, loop_name))),
+        ASTNode::UnquoteSplicing(inner) => {
+            ASTNode::UnquoteSplicing(Box::new(rewrite_loop_return_calls(inner, loop_name)))
+        }
+        ASTNode::CCall { function, args } => ASTNode::CCall {
+            function: function.clone(),
+            args: args.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::CppMethodCall { object, method, args } => ASTNode::CppMethodCall {
+            object: Box::new(rewrite_loop_return_calls(object, loop_name)),
+            method: method.clone(),
+            args: args.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::HashTable { entries } => ASTNode::HashTable {
+            entries: entries
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        rewrite_loop_return_calls(k, loop_name),
+                        rewrite_loop_return_calls(v, loop_name),
+                    )
+                })
+                .collect(),
+        },
+        ASTNode::Vector(items) => {
+            ASTNode::Vector(items.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect())
+        }
+        ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => ASTNode::Defmethod {
+            generic_name: generic_name.clone(),
+            qualifier: qualifier.clone(),
+            specializers: specializers.clone(),
+            params: params.clone(),
+            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+        },
+        ASTNode::Defclass { name, superclasses, slots } => ASTNode::Defclass {
+            name: name.clone(),
+            superclasses: superclasses.clone(),
+            slots: slots.clone(),
+        },
+        ASTNode::Defgeneric { name, lambda_list } => ASTNode::Defgeneric {
+            name: name.clone(),
+            lambda_list: lambda_list.clone(),
+        },
+        // Preserve nested lexical control boundaries and quoted forms.
+        ASTNode::Lambda { .. }
+        | ASTNode::Macro { .. }
+        | ASTNode::Block { .. }
+        | ASTNode::Quote(_)
+        | ASTNode::Constant(_)
+        | ASTNode::Variable(_) => ast.clone(),
+    }
+}
+
+fn contains_loop_return_state(nodes: &[ASTNode]) -> bool {
+    fn walk(ast: &ASTNode) -> bool {
+        match ast {
+            ASTNode::Setq { var, value } => {
+                if var == "__loop_returned__" || var == "__loop_break__" {
+                    return true;
+                }
+                walk(value)
+            }
+            ASTNode::Call { function, args } => walk(function) || args.iter().any(walk),
+            ASTNode::If { test, then_branch, else_branch } => {
+                walk(test) || walk(then_branch) || walk(else_branch)
+            }
+            ASTNode::Cond { clauses } => clauses.iter().any(|(t, r)| walk(t) || walk(r)),
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                bindings.iter().any(|(_, v)| walk(v)) || body.iter().any(walk)
+            }
+            ASTNode::Progn { exprs } => exprs.iter().any(walk),
+            ASTNode::Dotimes { count, result, body, .. } => {
+                walk(count) || result.as_ref().map_or(false, |r| walk(r)) || body.iter().any(walk)
+            }
+            ASTNode::Dolist { list, result, body, .. } => {
+                walk(list) || result.as_ref().map_or(false, |r| walk(r)) || body.iter().any(walk)
+            }
+            ASTNode::Loop { start, limit, when_condition, collect, sum, else_collect, else_sum, .. } => {
+                start.as_ref().map_or(false, |s| walk(s))
+                    || walk(limit)
+                    || when_condition.as_ref().map_or(false, |c| walk(c))
+                    || collect.as_ref().map_or(false, |c| walk(c))
+                    || sum.as_ref().map_or(false, |s| walk(s))
+                    || else_collect.as_ref().map_or(false, |c| walk(c))
+                    || else_sum.as_ref().map_or(false, |s| walk(s))
+            }
+            ASTNode::ReturnFrom { value, .. } => value.as_ref().map_or(false, |v| walk(v)),
+            ASTNode::Quote(_) | ASTNode::Lambda { .. } | ASTNode::Macro { .. } | ASTNode::Block { .. } => false,
+            ASTNode::DottedPair { car, cdr } => walk(car) || walk(cdr),
+            ASTNode::Backquote(inner) | ASTNode::Unquote(inner) | ASTNode::UnquoteSplicing(inner) => walk(inner),
+            ASTNode::CCall { args, .. } => args.iter().any(walk),
+            ASTNode::CppMethodCall { object, args, .. } => walk(object) || args.iter().any(walk),
+            ASTNode::HashTable { entries } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
+            ASTNode::Vector(items) => items.iter().any(walk),
+            ASTNode::Defmethod { body, .. } => body.iter().any(walk),
+            ASTNode::Defclass { .. } | ASTNode::Defgeneric { .. } | ASTNode::Constant(_) | ASTNode::Variable(_) => false,
+        }
+    }
+    nodes.iter().any(walk)
+}
+
+fn loop_list_type_guard(list_var: &str) -> ASTNode {
+    // Signal TYPE-ERROR if LIST-VAR is neither NIL nor CONS.
+    ASTNode::If {
+        test: Box::new(ASTNode::Call {
+            function: Box::new(ASTNode::Variable("and".to_string())),
+            args: vec![
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("not".to_string())),
+                    args: vec![ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("null".to_string())),
+                        args: vec![ASTNode::Variable(list_var.to_string())],
+                    }],
+                },
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("not".to_string())),
+                    args: vec![ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("consp".to_string())),
+                        args: vec![ASTNode::Variable(list_var.to_string())],
+                    }],
+                },
+            ],
+        }),
+        then_branch: Box::new(ASTNode::Call {
+            // Exit the loop block immediately so later loop forms do not run after type failure.
+            function: Box::new(ASTNode::Variable("return-from".to_string())),
+            args: vec![
+                ASTNode::nil(),
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("error".to_string())),
+                    args: vec![ASTNode::Quote(Box::new(ASTNode::Variable("type-error".to_string())))],
+                },
+            ],
+        }),
+        else_branch: Box::new(ASTNode::nil()),
+    }
+}
+
 /// Parse and expand a loop form
 pub fn expand_loop(args: &[ASTNode]) -> ASTNode {
     if args.is_empty() {
@@ -66,7 +388,12 @@ pub fn expand_loop(args: &[ASTNode]) -> ASTNode {
     // Parse loop clauses
     let mut parser = LoopParser::new(args);
     parser.parse();
-    parser.generate()
+    let expanded = parser.generate();
+    if std::env::var("RLASP_TRACE_LOOP_EXPAND").is_ok() {
+        eprintln!("[loop-expand] input={:?}", args);
+        eprintln!("[loop-expand] output={:?}", expanded);
+    }
+    expanded
 }
 
 /// Check if a node is any loop keyword
@@ -1130,6 +1457,8 @@ impl<'a> LoopParser<'a> {
         let mut has_never = false;
         let mut while_conditions: Vec<ASTNode> = Vec::new();  // :while conditions
         let mut needs_break_var = false; // Needed for ordered :while/:until handling
+        let mut has_loop_return = false;
+        let mut numeric_last_vars: Vec<(String, String)> = Vec::new();
 
         // First pass: collect all variable initializations and iteration info
         for clause in &self.clauses {
@@ -1230,10 +1559,16 @@ impl<'a> LoopParser<'a> {
                 LoopClause::ForBelow { var, limit } => {
                     numeric_iters.push((var.clone(), ASTNode::Constant(ConstantValue::Fixnum(0)), limit.clone(), None, false, false));
                     bindings.push((var.clone(), ASTNode::Constant(ConstantValue::Fixnum(0))));
+                    let last_var = format!("__loop_last_num_{}__", numeric_last_vars.len());
+                    bindings.push((last_var.clone(), ASTNode::nil()));
+                    numeric_last_vars.push((var.clone(), last_var));
                 }
                 LoopClause::ForFromTo { var, start, end, step, inclusive, down } => {
                     numeric_iters.push((var.clone(), start.clone(), end.clone(), step.clone(), *inclusive, *down));
                     bindings.push((var.clone(), start.clone()));
+                    let last_var = format!("__loop_last_num_{}__", numeric_last_vars.len());
+                    bindings.push((last_var.clone(), ASTNode::nil()));
+                    numeric_last_vars.push((var.clone(), last_var));
                 }
                 LoopClause::Collect { into, .. } | LoopClause::Append { into, .. } | LoopClause::Nconc { into, .. } => {
                     let var = into.clone().unwrap_or_else(|| "__loop_result__".to_string());
@@ -1319,31 +1654,64 @@ impl<'a> LoopParser<'a> {
                 LoopClause::Until { .. } => {
                     needs_break_var = true;
                 }
+                LoopClause::Return { .. } => {
+                    needs_break_var = true;
+                    has_loop_return = true;
+                }
                 _ => {}
             }
         }
 
+        // Build the loop body
+        let mut body = self.build_body(&collect_var, &sum_var, &count_var, &destructure, &loop_name);
+        if contains_loop_return_state(&body) {
+            needs_break_var = true;
+            has_loop_return = true;
+        }
         if needs_break_var {
             ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
         }
-
-        // Build the loop body
-        let mut body = self.build_body(&collect_var, &sum_var, &count_var, &destructure);
+        if has_loop_return {
+            ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+            ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+            ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+        }
+        if !numeric_last_vars.is_empty() {
+            ensure_binding(&mut bindings, "__loop_any_iter__", ASTNode::nil());
+        }
 
         let mut for_equals_pre_iter: Vec<ASTNode> = Vec::new();
         let mut for_equals_post_iter: Vec<ASTNode> = Vec::new();
         let mut has_for_equals_then = false;
         for (var, init, then_expr) in &for_equals_clauses {
+            let init_rewritten = rewrite_loop_return_calls(init, &loop_name);
+            if contains_loop_return_state(std::slice::from_ref(&init_rewritten)) {
+                needs_break_var = true;
+                has_loop_return = true;
+                ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+            }
             if let Some(step_expr) = then_expr {
+                let step_rewritten = rewrite_loop_return_calls(step_expr, &loop_name);
+                if contains_loop_return_state(std::slice::from_ref(&step_rewritten)) {
+                    needs_break_var = true;
+                    has_loop_return = true;
+                    ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                }
                 has_for_equals_then = true;
                 for_equals_pre_iter.push(ASTNode::If {
                     test: Box::new(ASTNode::Variable("__loop_first__".to_string())),
-                    then_branch: Box::new(ASTNode::setq(var.clone(), init.clone())),
+                    then_branch: Box::new(ASTNode::setq(var.clone(), init_rewritten)),
                     else_branch: Box::new(ASTNode::nil()),
                 });
-                for_equals_post_iter.push(ASTNode::setq(var.clone(), step_expr.clone()));
+                for_equals_post_iter.push(ASTNode::setq(var.clone(), step_rewritten));
             } else {
-                for_equals_pre_iter.push(ASTNode::setq(var.clone(), init.clone()));
+                for_equals_pre_iter.push(ASTNode::setq(var.clone(), init_rewritten));
             }
         }
         if has_for_equals_then {
@@ -1379,6 +1747,12 @@ impl<'a> LoopParser<'a> {
             //   (loop for i from 0 and n in list ...)
             // by binding list vars before body and advancing the list each iteration.
             if iter_list.is_some() || !in_iters.is_empty() {
+                if iter_list.is_some() {
+                    while_body.push(loop_list_type_guard("__loop_list__"));
+                }
+                for (_var, list_var, _) in &in_iters {
+                    while_body.push(loop_list_type_guard(list_var));
+                }
                 if let Some((car_var, cdr_var)) = &destructure {
                     while_body.push(ASTNode::setq(
                         car_var.clone(),
@@ -1406,6 +1780,12 @@ impl<'a> LoopParser<'a> {
                     }
                 }
             }
+            if !numeric_last_vars.is_empty() {
+                while_body.push(ASTNode::setq("__loop_any_iter__".to_string(), ASTNode::t()));
+                for (var, last_var) in &numeric_last_vars {
+                    while_body.push(ASTNode::setq(last_var.clone(), ASTNode::Variable(var.clone())));
+                }
+            }
 
             while_body.extend(body);
 
@@ -1423,9 +1803,20 @@ impl<'a> LoopParser<'a> {
 
             if iter_list.is_some() {
                 let next_list = if let Some(step) = &iter_step {
-                    ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("funcall".to_string())),
-                        args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                    let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                    if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                        needs_break_var = true;
+                        has_loop_return = true;
+                        ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                        rewritten
+                    } else {
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("funcall".to_string())),
+                            args: vec![rewritten, ASTNode::Variable("__loop_list__".to_string())],
+                        }
                     }
                 } else {
                     ASTNode::Call {
@@ -1440,9 +1831,20 @@ impl<'a> LoopParser<'a> {
             }
             for (_var, list_var, by) in in_iters.iter().rev() {
                 let next_list = if let Some(step) = by {
-                    ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("funcall".to_string())),
-                        args: vec![step.clone(), ASTNode::Variable(list_var.clone())],
+                    let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                    if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                        needs_break_var = true;
+                        has_loop_return = true;
+                        ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                        rewritten
+                    } else {
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("funcall".to_string())),
+                            args: vec![rewritten, ASTNode::Variable(list_var.clone())],
+                        }
                     }
                 } else {
                     ASTNode::Call {
@@ -1502,6 +1904,7 @@ impl<'a> LoopParser<'a> {
             // Iterates over successive cdrs of list
             // Using nth because it returns NIL for out-of-bounds access
             let mut iter_body = Vec::new();
+            iter_body.push(loop_list_type_guard("__loop_list__"));
             for (i, var) in vars.iter().enumerate() {
                 iter_body.push(ASTNode::setq(var.clone(), ASTNode::Call {
                     function: Box::new(ASTNode::Variable("nth".to_string())),
@@ -1515,9 +1918,20 @@ impl<'a> LoopParser<'a> {
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
             let next_list = if let Some(step) = on_by {
-                ASTNode::Call {
-                    function: Box::new(ASTNode::Variable("funcall".to_string())),
-                    args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                    needs_break_var = true;
+                    has_loop_return = true;
+                    ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                    rewritten
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![rewritten, ASTNode::Variable("__loop_list__".to_string())],
+                    }
                 }
             } else {
                 ASTNode::Call {
@@ -1541,13 +1955,25 @@ impl<'a> LoopParser<'a> {
             // Simple :on iteration
             // var = __loop_list__ (the current tail)
             let mut iter_body = Vec::new();
+            iter_body.push(loop_list_type_guard("__loop_list__"));
             iter_body.push(ASTNode::setq(var.clone(), ASTNode::Variable("__loop_list__".to_string())));
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
             let next_list = if let Some(step) = on_by {
-                ASTNode::Call {
-                    function: Box::new(ASTNode::Variable("funcall".to_string())),
-                    args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                    needs_break_var = true;
+                    has_loop_return = true;
+                    ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                    rewritten
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![rewritten, ASTNode::Variable("__loop_list__".to_string())],
+                    }
                 }
             } else {
                 ASTNode::Call {
@@ -1612,6 +2038,12 @@ impl<'a> LoopParser<'a> {
         } else if iter_list.is_some() || !in_iters.is_empty() {
             // List iteration with :in
             let mut iter_body = Vec::new();
+            if iter_list.is_some() {
+                iter_body.push(loop_list_type_guard("__loop_list__"));
+            }
+            for (_var, list_var, _) in &in_iters {
+                iter_body.push(loop_list_type_guard(list_var));
+            }
             if let Some((car_var, cdr_var)) = &destructure {
                 // Destructuring: (setq car_var (caar __loop_list__)) (setq cdr_var (cdar __loop_list__))
                 iter_body.push(ASTNode::setq(
@@ -1644,9 +2076,20 @@ impl<'a> LoopParser<'a> {
             let mut step_forms: Vec<ASTNode> = Vec::new();
             if iter_list.is_some() {
                 let next_list = if let Some(step) = &iter_step {
-                    ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("funcall".to_string())),
-                        args: vec![step.clone(), ASTNode::Variable("__loop_list__".to_string())],
+                    let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                    if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                        needs_break_var = true;
+                        has_loop_return = true;
+                        ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                        rewritten
+                    } else {
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("funcall".to_string())),
+                            args: vec![rewritten, ASTNode::Variable("__loop_list__".to_string())],
+                        }
                     }
                 } else {
                     ASTNode::Call {
@@ -1658,9 +2101,20 @@ impl<'a> LoopParser<'a> {
             }
             for (_var, list_var, by) in in_iters.iter().rev() {
                 let next_list = if let Some(step) = by {
-                    ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("funcall".to_string())),
-                        args: vec![step.clone(), ASTNode::Variable(list_var.clone())],
+                    let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                    if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                        needs_break_var = true;
+                        has_loop_return = true;
+                        ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                        ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                        rewritten
+                    } else {
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("funcall".to_string())),
+                            args: vec![rewritten, ASTNode::Variable(list_var.clone())],
+                        }
                     }
                 } else {
                     ASTNode::Call {
@@ -1869,30 +2323,54 @@ impl<'a> LoopParser<'a> {
             full_body.extend(initially);
         }
         full_body.push(loop_code);
+        if !numeric_last_vars.is_empty() {
+            let mut restore_body = Vec::new();
+            for (var, last_var) in &numeric_last_vars {
+                restore_body.push(ASTNode::setq(var.clone(), ASTNode::Variable(last_var.clone())));
+            }
+            full_body.push(ASTNode::If {
+                test: Box::new(ASTNode::Variable("__loop_any_iter__".to_string())),
+                then_branch: Box::new(ASTNode::progn(restore_body)),
+                else_branch: Box::new(ASTNode::nil()),
+            });
+        }
 
-        if let Some(finally) = finally_body {
-            full_body.extend(finally);
+        let normal_exit_result = if let Some(finally) = finally_body {
+            ASTNode::progn(finally)
         } else {
             // Default return value
             if let Some(var) = &collect_var {
-                full_body.push(ASTNode::Call {
+                ASTNode::Call {
                     function: Box::new(ASTNode::Variable("nreverse".to_string())),
                     args: vec![ASTNode::Variable(var.clone())],
-                });
+                }
             } else if let Some(var) = &sum_var {
-                full_body.push(ASTNode::Variable(var.clone()));
+                ASTNode::Variable(var.clone())
             } else if let Some(var) = &count_var {
-                full_body.push(ASTNode::Variable(var.clone()));
+                ASTNode::Variable(var.clone())
             } else if let Some(var) = &max_var {
-                full_body.push(ASTNode::Variable(var.clone()));
+                ASTNode::Variable(var.clone())
             } else if let Some(var) = &min_var {
-                full_body.push(ASTNode::Variable(var.clone()));
+                ASTNode::Variable(var.clone())
             } else if has_always || has_never {
                 // :always and :never return T if they complete without returning nil
-                full_body.push(ASTNode::t());
+                ASTNode::t()
             } else {
-                full_body.push(ASTNode::nil());
+                ASTNode::nil()
             }
+        };
+
+        if has_loop_return {
+            full_body.push(ASTNode::If {
+                test: Box::new(ASTNode::Variable("__loop_returned__".to_string())),
+                then_branch: Box::new(ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("values-list".to_string())),
+                    args: vec![ASTNode::Variable("__loop_return_values__".to_string())],
+                }),
+                else_branch: Box::new(normal_exit_result),
+            });
+        } else {
+            full_body.push(normal_exit_result);
         }
 
         // Wrap in block for return (use loop_name if given, else nil)
@@ -1925,6 +2403,7 @@ impl<'a> LoopParser<'a> {
         sum_var: &Option<String>,
         count_var: &Option<String>,
         _destructure: &Option<(String, String)>,
+        loop_name: &Option<String>,
     ) -> Vec<ASTNode> {
         let mut body = Vec::new();
 
@@ -2054,10 +2533,30 @@ impl<'a> LoopParser<'a> {
                     add_expr(&mut body, &mut cond_stack, incf_expr);
                 }
                 LoopClause::Return { expr } => {
-                    let return_expr = ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("return".to_string())),
-                        args: vec![expr.clone()],
-                    };
+                    // Encode LOOP RETURN as loop-state updates so all backends can
+                    // implement it without non-local control-flow support.
+                    let return_expr = ASTNode::progn(vec![
+                        ASTNode::setq(
+                            "__loop_return_values__".to_string(),
+                            ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("multiple-value-list".to_string())),
+                                args: vec![expr.clone()],
+                            },
+                        ),
+                        ASTNode::setq(
+                            "__loop_return_value__".to_string(),
+                            ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("first".to_string())),
+                                args: vec![ASTNode::Variable("__loop_return_values__".to_string())],
+                            },
+                        ),
+                        ASTNode::setq("__loop_returned__".to_string(), ASTNode::t()),
+                        ASTNode::setq("__loop_break__".to_string(), ASTNode::t()),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("values-list".to_string())),
+                            args: vec![ASTNode::Variable("__loop_return_values__".to_string())],
+                        },
+                    ]);
                     add_expr(&mut body, &mut cond_stack, return_expr);
                 }
                 LoopClause::Nconc { expr, into } => {
@@ -2225,5 +2724,8 @@ impl<'a> LoopParser<'a> {
         }
 
         body
+            .into_iter()
+            .map(|expr| rewrite_loop_return_calls(&expr, loop_name))
+            .collect()
     }
 }

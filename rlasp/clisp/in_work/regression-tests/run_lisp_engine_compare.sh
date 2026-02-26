@@ -238,7 +238,7 @@ run_mlir_with_phase_timing() {
   local file_path="$1"
   local log_file="$2"
   local timeout_s="$3"
-  local selective_eval="${RLASP_MLIR_SELECTIVE_EVAL:-1}"
+  local selective_eval="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
 
   local start="$(now_mono_ts)"
   local exec_mark=""
@@ -256,7 +256,7 @@ run_mlir_with_phase_timing() {
     (env RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
     print -r -- "$line"
     if [[ -z "$exec_mark" && "$line" == "[Executing __main]"* ]]; then
       exec_mark="$(now_mono_ts)"
@@ -386,7 +386,7 @@ CSV_FILE="$LOG_DIR/lisp-engine-compare-$STAMP.csv"
   echo "REGRESSION_ROOT: ${REGRESSION_ROOT:-<none>}"
   echo "SUITE_LIST_SOURCE: $SUITE_LIST_SOURCE"
   echo "TIMEOUT_BIN: ${TIMEOUT_BIN:-<none>}"
-  echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-1}"
+  echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-0}"
   echo "TIMEOUTS_S: SBCL=$SBCL_TIMEOUT_S CLASP=$CLASP_TIMEOUT_S IRLASP_INTERP=$IRLASP_INTERP_TIMEOUT_S IRLASP_MLIR=$IRLASP_MLIR_TIMEOUT_S"
   echo "IRLASP_BIN: $IRLASP_BIN"
   echo "SBCL_BIN: ${SBCL_BIN:-<missing>}"
@@ -602,19 +602,54 @@ for file_path in "${FILES[@]}"; do
     normalize_output "$interp_raw" "$interp_norm"
     normalize_output "$mlir_raw" "$mlir_norm"
 
-    baseline_engine="sbcl"
-    baseline_norm="$sbcl_norm"
-    if [[ "$sbcl_status" -eq 0 ]]; then
-      if cmp -s "$sbcl_norm" "$baseline_norm"; then sbcl_match="MATCH"; else sbcl_match="DIFF"; DIFF_COUNT[sbcl]=$(( DIFF_COUNT[sbcl] + 1 )); fi
-    fi
-    if [[ "$clasp_status" -eq 0 ]]; then
-      if cmp -s "$clasp_norm" "$baseline_norm"; then clasp_match="MATCH"; else clasp_match="DIFF"; DIFF_COUNT[clasp]=$(( DIFF_COUNT[clasp] + 1 )); fi
-    fi
-    if [[ "$interp_status" -eq 0 ]]; then
-      if cmp -s "$interp_norm" "$baseline_norm"; then interp_match="MATCH"; else interp_match="DIFF"; DIFF_COUNT[irlasp_interpreter]=$(( DIFF_COUNT[irlasp_interpreter] + 1 )); fi
-    fi
-    if [[ "$mlir_status" -eq 0 ]]; then
-      if cmp -s "$mlir_norm" "$baseline_norm"; then mlir_match="MATCH"; else mlir_match="DIFF"; DIFF_COUNT[irlasp_mlir]=$(( DIFF_COUNT[irlasp_mlir] + 1 )); fi
+    baseline_engine="none"
+    baseline_norm=""
+    case "$EFFECTIVE_BASELINE_POLICY" in
+      clasp)
+        if [[ "$clasp_status" -eq 0 ]]; then
+          baseline_engine="clasp"
+          baseline_norm="$clasp_norm"
+        fi
+        ;;
+      sbcl)
+        if [[ "$sbcl_status" -eq 0 ]]; then
+          baseline_engine="sbcl"
+          baseline_norm="$sbcl_norm"
+        fi
+        ;;
+      sbcl_and_clasp)
+        if [[ "$clasp_status" -eq 0 ]]; then
+          baseline_engine="clasp"
+          baseline_norm="$clasp_norm"
+        elif [[ "$sbcl_status" -eq 0 ]]; then
+          baseline_engine="sbcl"
+          baseline_norm="$sbcl_norm"
+        fi
+        ;;
+      *)
+        if [[ "$clasp_status" -eq 0 ]]; then
+          baseline_engine="clasp"
+          baseline_norm="$clasp_norm"
+        elif [[ "$sbcl_status" -eq 0 ]]; then
+          baseline_engine="sbcl"
+          baseline_norm="$sbcl_norm"
+        fi
+        ;;
+    esac
+
+    if [[ -n "$baseline_norm" ]]; then
+      if [[ "$sbcl_status" -eq 0 ]]; then
+        if cmp -s "$sbcl_norm" "$baseline_norm"; then sbcl_match="MATCH"; else sbcl_match="DIFF"; DIFF_COUNT[sbcl]=$(( DIFF_COUNT[sbcl] + 1 )); fi
+      fi
+      if [[ "$clasp_status" -eq 0 ]]; then
+        if cmp -s "$clasp_norm" "$baseline_norm"; then clasp_match="MATCH"; else clasp_match="DIFF"; DIFF_COUNT[clasp]=$(( DIFF_COUNT[clasp] + 1 )); fi
+      fi
+      if [[ "$interp_status" -eq 0 ]]; then
+        if cmp -s "$interp_norm" "$baseline_norm"; then interp_match="MATCH"; else interp_match="DIFF"; DIFF_COUNT[irlasp_interpreter]=$(( DIFF_COUNT[irlasp_interpreter] + 1 )); fi
+      fi
+      if [[ "$mlir_status" -eq 0 ]]; then
+        if cmp -s "$mlir_norm" "$baseline_norm"; then mlir_match="MATCH"; else mlir_match="DIFF"; DIFF_COUNT[irlasp_mlir]=$(( DIFF_COUNT[irlasp_mlir] + 1 )); fi
+      fi
     fi
     [[ "$sbcl_match" == "MATCH" ]] && MATCH_COUNT[sbcl]=$(( MATCH_COUNT[sbcl] + 1 ))
     [[ "$clasp_match" == "MATCH" ]] && MATCH_COUNT[clasp]=$(( MATCH_COUNT[clasp] + 1 ))

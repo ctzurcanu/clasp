@@ -7,13 +7,20 @@ use super::object::LispObject;
 pub struct RVector {
     header: crate::header::TypeHeader,
     data: Vec<LispObject>,
+    dims: Vec<usize>,
+    displacement: Option<(usize, usize)>,
+    fill_pointer: Option<usize>,
 }
 
 impl RVector {
     pub fn new(elements: Vec<LispObject>) -> Self {
+        let len = elements.len();
         Self {
             header: crate::header::TypeHeader::new(crate::header::ObjectType::Vector),
             data: elements,
+            dims: vec![len],
+            displacement: None,
+            fill_pointer: None,
         }
     }
 
@@ -37,6 +44,35 @@ impl RVector {
 
     pub fn as_slice(&self) -> &[LispObject] {
         &self.data
+    }
+
+    pub fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+
+    pub fn set_dims(&mut self, dims: Vec<usize>) {
+        self.dims = dims;
+    }
+
+    pub fn displacement(&self) -> Option<(LispObject, usize)> {
+        self.displacement
+            .map(|(base_raw, offset)| (unsafe { LispObject::from_raw(base_raw) }, offset))
+    }
+
+    pub fn set_displacement(&mut self, base: LispObject, offset: usize) {
+        self.displacement = Some((base.raw(), offset));
+    }
+
+    pub fn clear_displacement(&mut self) {
+        self.displacement = None;
+    }
+
+    pub fn fill_pointer(&self) -> Option<usize> {
+        self.fill_pointer
+    }
+
+    pub fn set_fill_pointer(&mut self, fill_pointer: Option<usize>) {
+        self.fill_pointer = fill_pointer;
     }
 
     pub fn allocate(elements: Vec<LispObject>) -> LispObject {

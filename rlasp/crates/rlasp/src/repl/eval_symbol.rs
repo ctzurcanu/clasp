@@ -16,10 +16,8 @@ thread_local! {
         // Initialize with default features as a proper list
         let mut list = EvalResult::Nil;
         // Include OS features that ASDF expects
-        // NOTE: We don't claim to be SBCL or CLASP to avoid triggering implementation-specific code
-        // that we can't support. ASDF will use generic fallbacks.
         for feat in &["OS-MACOSX", "OS-UNIX", "UNICODE", "DARWIN", "UNIX", "IEEE-FLOATING-POINT",
-                      "ANSI-CL", "COMMON-LISP", "RLASP"] {
+                      "ANSI-CL", "COMMON-LISP", "RLASP", "CLASP"] {
             list = EvalResult::Cons(
                 Rc::new(RefCell::new(EvalResult::Symbol(format!(":{}", feat)))),
                 Rc::new(RefCell::new(list)),
@@ -93,14 +91,66 @@ pub fn call_symbol_builtin(name: &str, args: &[EvalResult], env: &HashMap<String
         "symbol-package" => {
             match args.get(0) {
                 Some(EvalResult::Symbol(s)) => {
-                    // Extract package from symbol
-                    if let Some(pos) = s.find(':') {
-                        let pkg = &s[..pos];
-                        Ok(EvalResult::Symbol(pkg.to_string()))
-                    } else {
-                        // Default package
-                        Ok(EvalResult::Symbol("COMMON-LISP-USER".to_string()))
+                    let raw = s.trim();
+                    if raw.eq_ignore_ascii_case("NIL") || raw.eq_ignore_ascii_case("T") {
+                        return Ok(EvalResult::Package("COMMON-LISP".to_string()));
                     }
+                    if raw.starts_with("#:") {
+                        return Ok(EvalResult::Nil);
+                    }
+                    if raw.starts_with(':') {
+                        return Ok(EvalResult::Package("KEYWORD".to_string()));
+                    }
+                    if let Some((pkg, _)) = raw.split_once("::").or_else(|| raw.split_once(':')) {
+                        if !pkg.is_empty() {
+                            let key = pkg.to_uppercase();
+                            let canonical = super::eval_package::PACKAGES.with(|p| {
+                                p.borrow()
+                                    .get(&key)
+                                    .map(|pkg| pkg.get_name().to_string())
+                            });
+                            return Ok(EvalResult::Package(canonical.unwrap_or(key)));
+                        }
+                    }
+
+                    let base = raw
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(raw)
+                        .to_uppercase();
+                    let current = super::eval_package::get_current_package();
+                    let inferred = super::eval_package::PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        if let Some(pkg) = packages.get(&current) {
+                            if pkg.has_symbol(&base) {
+                                return Some(pkg.get_name().to_string());
+                            }
+                            for used in pkg.get_use_list() {
+                                if let Some(used_pkg) = packages.get(used) {
+                                    if used_pkg
+                                        .get_external_symbols()
+                                        .iter()
+                                        .any(|sym| sym.eq_ignore_ascii_case(&base))
+                                    {
+                                        return Some(used_pkg.get_name().to_string());
+                                    }
+                                }
+                            }
+                        }
+                        let mut candidates: Vec<String> = packages
+                            .values()
+                            .filter(|pkg| pkg.has_symbol(&base))
+                            .map(|pkg| pkg.get_name().to_string())
+                            .collect();
+                        candidates.sort_unstable();
+                        candidates.dedup();
+                        if candidates.len() == 1 {
+                            Some(candidates.remove(0))
+                        } else {
+                            None
+                        }
+                    });
+                    Ok(EvalResult::Package(inferred.unwrap_or(current)))
                 }
                 _ => Err("symbol-package requires a symbol".to_string()),
             }

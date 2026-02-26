@@ -183,6 +183,36 @@ thread_local! {
             report_fn: None,
             documentation: None,
         });
+        map.insert("PACKAGE-ERROR".to_string(), ConditionType {
+            name: "PACKAGE-ERROR".to_string(),
+            parent_types: vec!["ERROR".to_string()],
+            slots: vec![],
+            report_fn: None,
+            documentation: None,
+        });
+        map.insert("NAME-CONFLICT".to_string(), ConditionType {
+            name: "NAME-CONFLICT".to_string(),
+            parent_types: vec!["PACKAGE-ERROR".to_string()],
+            slots: vec![
+                ConditionSlot {
+                    name: "CANDIDATES".to_string(),
+                    initarg: Some(":CANDIDATES".to_string()),
+                    initform: Some(ASTNode::nil()),
+                    reader: Some("NAME-CONFLICT-CANDIDATES".to_string()),
+                    writer: None,
+                    accessor: None,
+                },
+            ],
+            report_fn: None,
+            documentation: None,
+        });
+        map.insert("PACKAGE-LOCK-VIOLATION".to_string(), ConditionType {
+            name: "PACKAGE-LOCK-VIOLATION".to_string(),
+            parent_types: vec!["PACKAGE-ERROR".to_string()],
+            slots: vec![],
+            report_fn: None,
+            documentation: None,
+        });
         RefCell::new(map)
     };
 }
@@ -210,6 +240,28 @@ pub struct Restart {
 thread_local! {
     pub static HANDLER_STACK: RefCell<Vec<Vec<Handler>>> = RefCell::new(Vec::new());
     pub static RESTART_STACK: RefCell<Vec<Vec<Restart>>> = RefCell::new(Vec::new());
+    static LAST_RESTART_INVOCATION: RefCell<Option<(String, EvalResult)>> = RefCell::new(None);
+    static PENDING_SIGNAL_CONDITION: RefCell<Option<EvalResult>> = RefCell::new(None);
+}
+
+pub fn clear_last_restart_invocation() {
+    LAST_RESTART_INVOCATION.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+pub fn take_last_restart_invocation() -> Option<(String, EvalResult)> {
+    LAST_RESTART_INVOCATION.with(|slot| slot.borrow_mut().take())
+}
+
+pub fn set_pending_signaled_condition(condition: EvalResult) {
+    PENDING_SIGNAL_CONDITION.with(|slot| {
+        *slot.borrow_mut() = Some(condition);
+    });
+}
+
+pub fn take_pending_signaled_condition() -> Option<EvalResult> {
+    PENDING_SIGNAL_CONDITION.with(|slot| slot.borrow_mut().take())
 }
 
 /// Push a handler cluster onto the stack
@@ -242,13 +294,19 @@ pub fn pop_restarts() {
 
 /// Find a restart by name
 pub fn find_restart_by_name(name: &str) -> Option<Restart> {
-    let name_upper = name.to_uppercase();
+    let name_upper = name.rsplit(':').next().unwrap_or(name).to_uppercase();
     RESTART_STACK.with(|stack| {
         let stack = stack.borrow();
         // Search from innermost to outermost
         for cluster in stack.iter().rev() {
             for restart in cluster.iter().rev() {
-                if restart.name.to_uppercase() == name_upper {
+                let restart_name = restart
+                    .name
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(restart.name.as_str())
+                    .to_uppercase();
+                if restart_name == name_upper {
                     return Some(restart.clone());
                 }
             }
@@ -515,6 +573,21 @@ pub fn condition_typep(condition: &ConditionInstance, type_name: &str) -> bool {
     })
 }
 
+fn handler_matches_condition(handler_type: &str, condition_type: &str) -> bool {
+    let handler_upper = handler_type.to_uppercase();
+    if handler_upper == "T" || handler_upper == "CONDITION" {
+        return true;
+    }
+    CONDITION_TYPES.with(|types| {
+        let types = types.borrow();
+        if let Some(cond_type) = types.get(condition_type) {
+            cond_type.is_subtype_of(&handler_upper, &types)
+        } else {
+            handler_upper == condition_type
+        }
+    })
+}
+
 /// Evaluate (signal condition)
 pub fn eval_signal(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     if args.is_empty() {
@@ -535,23 +608,8 @@ pub fn eval_signal(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> R
         let stack = stack.borrow();
         for cluster in stack.iter().rev() {
             for handler in cluster.iter().rev() {
-                // Check if this handler's condition type matches
-                let handler_type = handler.condition_type.to_uppercase();
-                if handler_type == condition_type ||
-                   handler_type == "T" ||
-                   handler_type == "CONDITION" {
-                    // Also check inheritance
-                    let type_matches = CONDITION_TYPES.with(|types| {
-                        let types = types.borrow();
-                        if let Some(cond_type) = types.get(&condition_type) {
-                            cond_type.is_subtype_of(&handler_type, &types)
-                        } else {
-                            handler_type == condition_type || handler_type == "T"
-                        }
-                    });
-                    if type_matches {
-                        return Some(handler.clone());
-                    }
+                if handler_matches_condition(&handler.condition_type, &condition_type) {
+                    return Some(handler.clone());
                 }
             }
         }
@@ -583,6 +641,54 @@ pub fn eval_signal(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> R
     }
 
     // signal returns nil (unless a handler transfers control)
+    Ok(EvalResult::Nil)
+}
+
+pub fn signal_condition_value(condition: EvalResult, env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    // Get the condition type name
+    let condition_type = match &condition {
+        EvalResult::Condition(c) => c.borrow().type_name.clone(),
+        EvalResult::Symbol(s) => s.trim_start_matches(':').trim_start_matches('\'').to_uppercase(),
+        _ => return Ok(EvalResult::Nil),
+    };
+
+    // Walk the handler stack from innermost to outermost
+    let matching_handler = HANDLER_STACK.with(|stack| {
+        let stack = stack.borrow();
+        for cluster in stack.iter().rev() {
+            for handler in cluster.iter().rev() {
+                if handler_matches_condition(&handler.condition_type, &condition_type) {
+                    return Some(handler.clone());
+                }
+            }
+        }
+        None
+    });
+
+    // If we found a matching handler, invoke it
+    if let Some(handler) = matching_handler {
+        // Call the handler function with the condition
+        let handler_env = handler.env.borrow().clone();
+        let mut call_env = handler_env;
+        call_env.extend(env.clone());
+
+        // Create a call to the handler function with the condition
+        let call = ASTNode::Call {
+            function: Box::new(handler.handler_fn),
+            args: vec![match &condition {
+                EvalResult::Condition(_) => ASTNode::Variable("__condition__".to_string()),
+                _ => ASTNode::Variable(condition_type.clone()),
+            }],
+        };
+
+        // Store condition in env for the call
+        if let EvalResult::Condition(c) = &condition {
+            call_env.insert("__condition__".to_string(), EvalResult::Condition(c.clone()));
+        }
+
+        eval_with_env(&call, &mut call_env)?;
+    }
+
     Ok(EvalResult::Nil)
 }
 
@@ -632,19 +738,34 @@ pub fn eval_handler_bind(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     // Parse handler bindings from first argument
     let mut handlers = Vec::new();
 
-    if let ASTNode::Call { function: _, args: binding_list } = &args[0] {
-        for binding in binding_list {
+    if let ASTNode::Call { function: first_binding, args: binding_rest } = &args[0] {
+        for binding in std::iter::once(first_binding.as_ref()).chain(binding_rest.iter()) {
             // Each binding is (condition-type handler-function)
             if let ASTNode::Call { function: cond_type_node, args: handler_args } = binding {
                 let cond_type = match cond_type_node.as_ref() {
-                    ASTNode::Variable(name) => name.trim_start_matches(':').to_uppercase(),
+                    ASTNode::Variable(name) => name
+                        .trim_start_matches(':')
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(name.as_str())
+                        .to_uppercase(),
                     _ => continue,
                 };
 
                 if let Some(handler_fn_node) = handler_args.get(0) {
+                    let handler_fn = match handler_fn_node {
+                        // #'foo / #'(lambda ...) is read as (function foo).
+                        ASTNode::Call { function: fn_head, args: fn_args }
+                            if matches!(fn_head.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("function"))
+                                && fn_args.len() == 1 =>
+                        {
+                            fn_args[0].clone()
+                        }
+                        _ => handler_fn_node.clone(),
+                    };
                     handlers.push(Handler {
                         condition_type: cond_type,
-                        handler_fn: handler_fn_node.clone(),
+                        handler_fn,
                         env: Rc::new(RefCell::new(env.clone())),
                     });
                 }
@@ -652,20 +773,18 @@ pub fn eval_handler_bind(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
         }
     }
 
-    // Push handlers onto the stack
+    // Push handlers onto the stack and ensure cleanup on all exits.
     push_handlers(handlers);
-
-    // Execute body forms
-    let body = &args[1..];
-    let mut result = EvalResult::Nil;
-    for form in body {
-        result = eval_with_env(form, env)?;
-    }
-
-    // Pop handlers from the stack
+    let result = (|| {
+        let body = &args[1..];
+        let mut result = EvalResult::Nil;
+        for form in body {
+            result = eval_with_env(form, env)?;
+        }
+        Ok(result)
+    })();
     pop_handlers();
-
-    Ok(result)
+    result
 }
 
 /// Evaluate (restart-case form (restart-name (params) options... body...)...)
@@ -688,23 +807,12 @@ pub fn eval_restart_case(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
                 _ => continue,
             };
 
-            // First arg should be params list (we'll treat the rest as body)
-            let params = if let Some(ASTNode::Call { function: first_param, args: rest_params }) = clause_args.get(0) {
-                let mut params = vec![match first_param.as_ref() {
-                    ASTNode::Variable(v) => v.clone(),
-                    _ => String::new(),
-                }];
-                for p in rest_params {
-                    if let ASTNode::Variable(v) = p {
-                        params.push(v.clone());
-                    }
-                }
-                params.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()
-            } else if let Some(ASTNode::Constant(ConstantValue::Nil)) = clause_args.get(0) {
-                Vec::new()
-            } else {
-                Vec::new()
-            };
+            // First arg is the restart lambda list. Parse it with the same helper used for
+            // ordinary lambdas so &rest/&optional/&key semantics are preserved.
+            let (params, defaults, supplied_p_vars, key_params) = clause_args
+                .get(0)
+                .map(super::eval_core::extract_params_with_defaults)
+                .unwrap_or_else(|| (Vec::new(), HashMap::new(), HashMap::new(), HashMap::new()));
 
             // Parse options and body
             let mut interactive = None;
@@ -747,9 +855,9 @@ pub fn eval_restart_case(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
             // Create a lambda for the restart function
             let restart_fn = ASTNode::Lambda {
                 params,
-                defaults: HashMap::new(),
-                supplied_p_vars: HashMap::new(),
-                key_params: HashMap::new(),
+                defaults,
+                supplied_p_vars,
+                key_params,
                 body,
             };
 
@@ -785,8 +893,8 @@ pub fn eval_invoke_restart(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     // Get restart name
     let restart_name = eval_with_env(&args[0], env)?;
     let name = match restart_name {
-        EvalResult::Symbol(s) => s.trim_start_matches(':').to_uppercase(),
-        EvalResult::String(s) => s.to_uppercase(),
+        EvalResult::Symbol(s) => s.trim_start_matches(':').rsplit(':').next().unwrap_or(s.as_str()).to_uppercase(),
+        EvalResult::String(s) => s.rsplit(':').next().unwrap_or(s.as_str()).to_uppercase(),
         _ => return Err("invoke-restart: restart designator must be a symbol or string".to_string()),
     };
 
@@ -815,7 +923,11 @@ pub fn eval_invoke_restart(args: &[ASTNode], env: &mut HashMap<String, EvalResul
                 env: Rc::new(RefCell::new(call_env.clone())),
                 dynamic_env: false,
             };
-            return super::eval_system::call_function_with_values(lambda, &restart_args, &mut call_env);
+            let out = super::eval_system::call_function_with_values(lambda, &restart_args, &mut call_env)?;
+            LAST_RESTART_INVOCATION.with(|slot| {
+                *slot.borrow_mut() = Some((name.clone(), out.clone()));
+            });
+            return Ok(out);
         }
 
         // Otherwise try to call it as a regular function
@@ -829,7 +941,11 @@ pub fn eval_invoke_restart(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             args: call_args,
         };
 
-        return eval_with_env(&call, &mut call_env);
+        let out = eval_with_env(&call, &mut call_env)?;
+        LAST_RESTART_INVOCATION.with(|slot| {
+            *slot.borrow_mut() = Some((name.clone(), out.clone()));
+        });
+        return Ok(out);
     }
 
     Err(format!("No restart named {} is active", name))
@@ -844,8 +960,8 @@ pub fn eval_find_restart(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     // Get restart name
     let restart_name = eval_with_env(&args[0], env)?;
     let name = match restart_name {
-        EvalResult::Symbol(s) => s.trim_start_matches(':').to_uppercase(),
-        EvalResult::String(s) => s.to_uppercase(),
+        EvalResult::Symbol(s) => s.trim_start_matches(':').rsplit(':').next().unwrap_or(s.as_str()).to_uppercase(),
+        EvalResult::String(s) => s.rsplit(':').next().unwrap_or(s.as_str()).to_uppercase(),
         _ => return Err("find-restart: restart designator must be a symbol or string".to_string()),
     };
 
@@ -884,8 +1000,8 @@ pub fn eval_invoke_restart_interactively(args: &[ASTNode], env: &mut HashMap<Str
     // Get restart name
     let restart_name = eval_with_env(&args[0], env)?;
     let name = match restart_name {
-        EvalResult::Symbol(s) => s.trim_start_matches(':').to_uppercase(),
-        EvalResult::String(s) => s.to_uppercase(),
+        EvalResult::Symbol(s) => s.trim_start_matches(':').rsplit(':').next().unwrap_or(s.as_str()).to_uppercase(),
+        EvalResult::String(s) => s.rsplit(':').next().unwrap_or(s.as_str()).to_uppercase(),
         _ => return Err("invoke-restart-interactively: restart designator must be a symbol".to_string()),
     };
 
@@ -911,4 +1027,22 @@ pub fn eval_invoke_restart_interactively(args: &[ASTNode], env: &mut HashMap<Str
     } else {
         Err(format!("No restart named {} is active", name))
     }
+}
+
+/// Evaluate (continue &optional condition)
+///
+/// CL defines CONTINUE as invoking the CONTINUE restart when available.
+pub fn eval_continue(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() > 1 {
+        return Err("continue accepts at most one optional condition argument".to_string());
+    }
+    // Evaluate optional condition argument for side effects/consistency, but the
+    // current restart lookup remains dynamic and condition-agnostic in this runtime.
+    if let Some(arg) = args.get(0) {
+        let _ = eval_with_env(arg, env)?;
+    }
+    eval_invoke_restart(
+        &[ASTNode::Quote(Box::new(ASTNode::Variable("CONTINUE".to_string())))],
+        env,
+    )
 }

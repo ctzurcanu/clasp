@@ -26,14 +26,15 @@ pub fn is_skip_marker(obj: &LispObject) -> bool {
 /// Default features available in rlasp
 const DEFAULT_FEATURES: &[&str] = &[
     "RLASP",
-    "SBCL",
-    "SB-UNICODE",
+    "CLASP",
     "COMMON-LISP",
     "ANSI-CL",
     "IEEE-FLOATING-POINT",
-    "UNICODE",         // For ASDF unicode support
+    "UNICODE",
     "UNIX",
-    "DARWIN",          // macOS
+    "DARWIN",
+    "OS-UNIX",
+    "OS-MACOSX",
 ];
 
 /// Check if a feature is present
@@ -108,6 +109,8 @@ fn evaluate_feature_expr(expr: LispObject) -> bool {
 pub struct Parser {
     lexer: Lexer,
     current_token: Token,
+    /// End position of the last consumed token before skipping trailing whitespace/comments.
+    last_token_end_pos: usize,
     /// Label map for circular references (#n= / #n#)
     label_map: HashMap<u8, LispObject>,
 }
@@ -133,6 +136,7 @@ impl Parser {
         Ok(Parser {
             lexer,
             current_token,
+            last_token_end_pos: 0,
             label_map: HashMap::new(),
         })
     }
@@ -140,6 +144,14 @@ impl Parser {
     /// Parse one s-expression
     pub fn read(&mut self) -> ReaderResult<LispObject> {
         self.read_expr()
+    }
+
+    /// Parse one s-expression and return both read positions:
+    /// 1) before trailing whitespace/comments are skipped
+    /// 2) after trailing whitespace/comments are skipped (start of next token)
+    pub fn read_with_positions(&mut self) -> ReaderResult<(LispObject, usize, usize)> {
+        let obj = self.read_expr()?;
+        Ok((obj, self.last_token_end_pos, self.current_token.pos))
     }
 
     fn read_expr(&mut self) -> ReaderResult<LispObject> {
@@ -199,13 +211,9 @@ impl Parser {
                         pos: self.current_token.pos,
                     });
                 }
-                // Create Ratio as a tagged list: (ratio numerator denominator)
-                let ratio_sym = rlasp_runtime::Symbol::allocate("ratio");
-                Ok(rlasp_runtime::Cons::list(&[
-                    ratio_sym,
-                    Self::integer_to_lisp_object(num),
-                    Self::integer_to_lisp_object(denom),
-                ]))
+                Ok(rlasp_runtime::Number::allocate_ratio(
+                    malachite::Rational::from_integers(num, denom),
+                ))
             }
 
             TokenKind::String(s) => {
@@ -312,9 +320,52 @@ impl Parser {
                 }
                 self.advance()?; // skip )
 
-                // Return as a tagged list: (complex real imag)
-                let complex_sym = rlasp_runtime::Symbol::allocate("complex");
-                Ok(rlasp_runtime::Cons::list(&[complex_sym, real, imag]))
+                let to_f64 = |obj: LispObject| -> Option<f64> {
+                    if let Some(n) = obj.as_fixnum() {
+                        return Some(n as f64);
+                    }
+                    if let Some(f) = obj.as_float() {
+                        return Some(f);
+                    }
+                    if !obj.is_number() {
+                        return None;
+                    }
+                    let ptr = obj.as_general_ptr::<rlasp_runtime::Number>()?;
+                    if ptr.is_null() {
+                        return None;
+                    }
+                    match &unsafe { &*ptr }.value {
+                        rlasp_runtime::NumberValue::Float(f) => Some(*f),
+                        rlasp_runtime::NumberValue::Bignum(b) => b.to_string().parse::<f64>().ok(),
+                        rlasp_runtime::NumberValue::Ratio(r) => {
+                            let mut num_s = r.numerator_ref().to_string();
+                            if *r < malachite::Rational::from(0) {
+                                num_s = format!("-{}", num_s);
+                            }
+                            let den_s = r.denominator_ref().to_string();
+                            let num = num_s.parse::<f64>().ok()?;
+                            let den = den_s.parse::<f64>().ok()?;
+                            if den == 0.0 {
+                                None
+                            } else {
+                                Some(num / den)
+                            }
+                        }
+                        rlasp_runtime::NumberValue::Complex(c) => {
+                            if c.im == 0.0 { Some(c.re) } else { None }
+                        }
+                    }
+                };
+
+                let real_f = to_f64(real).ok_or_else(|| ReaderError::InvalidSyntax {
+                    msg: "#C real part must be a real number".to_string(),
+                    pos: self.current_token.pos,
+                })?;
+                let imag_f = to_f64(imag).ok_or_else(|| ReaderError::InvalidSyntax {
+                    msg: "#C imaginary part must be a real number".to_string(),
+                    pos: self.current_token.pos,
+                })?;
+                Ok(rlasp_runtime::Number::allocate_complex(num_complex::Complex::new(real_f, imag_f)))
             }
 
             TokenKind::HashPlus => {
@@ -768,6 +819,7 @@ impl Parser {
     }
 
     fn advance(&mut self) -> ReaderResult<()> {
+        self.last_token_end_pos = self.lexer.position();
         self.current_token = self.lexer.next_token()?;
         Ok(())
     }

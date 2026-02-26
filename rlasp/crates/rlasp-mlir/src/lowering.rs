@@ -5,6 +5,21 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Command;
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_temp_path(stem: &str, ext: &str) -> PathBuf {
+    let pid = std::process::id();
+    let ctr = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("{stem}-{pid}-{nanos}-{ctr}.{ext}"))
+}
 
 pub fn lower_mlir_to_llvm(mlir_text: &str) -> Result<String> {
     // First, use mlir-opt to lower all dialects to LLVM dialect
@@ -37,8 +52,7 @@ fn merge_with_runtime_decls(mlir_text: &str) -> String {
 pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
     let merged_mlir = merge_with_runtime_decls(mlir_text);
 
-    let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join("mlirbc_input.mlir");
+    let input_path = unique_temp_path("mlirbc_input", "mlir");
     std::fs::write(&input_path, &merged_mlir)?;
 
     let mlir_opt_paths = [
@@ -58,12 +72,15 @@ pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
         .arg(input_path.to_str().unwrap())
         .output()?;
 
-    if !output.status.success() {
+    let result = if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("mlir-opt --emit=bytecode failed: {}", stderr));
-    }
+        Err(anyhow::anyhow!("mlir-opt --emit=bytecode failed: {}", stderr))
+    } else {
+        Ok(())
+    };
 
-    Ok(())
+    let _ = std::fs::remove_file(&input_path);
+    result
 }
 
 fn find_mlir_opt() -> Result<&'static str> {
@@ -120,17 +137,19 @@ pub fn lower_mlir_file_to_llvm(file_path: &str) -> Result<String> {
 fn lower_to_llvm_dialect(mlir_text: &str) -> Result<String> {
     let merged_mlir = merge_with_runtime_decls(mlir_text);
 
-    let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join("scf_input.mlir");
+    let input_path = unique_temp_path("scf_input", "mlir");
     std::fs::write(&input_path, &merged_mlir)?;
-    std::fs::write("/tmp/debug_scf.mlir", &merged_mlir)?;
+    if std::env::var("RLASP_SAVE_DEBUG_SCF").is_ok() {
+        let _ = std::fs::write("/tmp/debug_scf.mlir", &merged_mlir);
+    }
 
-    run_mlir_opt_lowering(input_path.to_str().unwrap())
+    let result = run_mlir_opt_lowering(input_path.to_str().unwrap());
+    let _ = std::fs::remove_file(&input_path);
+    result
 }
 
 fn translate_llvm_dialect_to_ir(llvm_dialect_mlir: &str) -> Result<String> {
-    let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join("llvm_dialect.mlir");
+    let input_path = unique_temp_path("llvm_dialect", "mlir");
     std::fs::write(&input_path, llvm_dialect_mlir)?;
 
     let mlir_translate = find_mlir_translate()?;
@@ -141,14 +160,17 @@ fn translate_llvm_dialect_to_ir(llvm_dialect_mlir: &str) -> Result<String> {
         .arg(input_path.to_str().unwrap())
         .output()?;
 
-    if !output.status.success() {
+    let result = if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("mlir-translate failed: {}", stderr));
-    }
+        Err(anyhow::anyhow!("mlir-translate failed: {}", stderr))
+    } else {
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    let _ = std::fs::remove_file(&input_path);
 
     // mlir-translate generates all necessary function declarations
     // from the function calls in the MLIR, so we don't need to add them manually
-    Ok(String::from_utf8(output.stdout)?)
+    result
 }
 
 fn mlir_to_llvm_ir(mlir_text: &str) -> Result<String> {

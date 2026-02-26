@@ -120,7 +120,12 @@ pub fn call_clos_builtin(
     args: &[EvalResult],
     env: &mut HashMap<String, EvalResult>
 ) -> Result<EvalResult, String> {
-    match name {
+    let name_norm = name
+        .rsplit(':')
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    match name_norm.as_str() {
         "make-instance" => {
             // (make-instance class-name &rest initargs)
             // Get class name from first argument
@@ -278,8 +283,12 @@ pub fn call_clos_builtin(
             if args.len() < 2 {
                 return Err("subtypep requires 2 arguments".to_string());
             }
+            let normalize_type_name = |raw: &str| -> String {
+                let base = raw.rsplit(':').next().unwrap_or(raw);
+                base.strip_prefix("CLASS-").unwrap_or(base).to_uppercase()
+            };
             let type1 = match &args[0] {
-                EvalResult::Symbol(s) => s.to_uppercase(),
+                EvalResult::Symbol(s) => normalize_type_name(s),
                 EvalResult::Nil => "NULL".to_string(),
                 EvalResult::Cons(_, _) => {
                     // Compound type specifier like (CONS ...), (AND ...), (MEMBER ...) etc.
@@ -289,7 +298,7 @@ pub fn call_clos_builtin(
                 _ => return Err("subtypep: type must be a symbol".to_string()),
             };
             let type2 = match &args[1] {
-                EvalResult::Symbol(s) => s.to_uppercase(),
+                EvalResult::Symbol(s) => normalize_type_name(s),
                 EvalResult::Nil => "NULL".to_string(),
                 EvalResult::Cons(_, _) => {
                     // Compound type specifier — return (values NIL NIL) — unknown
@@ -312,6 +321,8 @@ pub fn call_clos_builtin(
                 true  // Everything is subtype of T
             } else if type1 == "NIL" || type1 == "NULL" {
                 true  // NIL is subtype of everything
+            } else if super::eval_types::is_subclass(&type1, &type2) {
+                true
             } else {
                 match (type1.as_str(), type2.as_str()) {
                     // Number hierarchy
@@ -356,6 +367,10 @@ pub fn call_clos_builtin(
                     _ => false,
                 }
             };
+
+            if std::env::var("RLASP_DEBUG_SUBTYPEP").is_ok() {
+                eprintln!("[subtypep-debug] type1={} type2={} result={}", type1, type2, is_subtype);
+            }
 
             // Return (values subtype-p valid-p) per CL spec
             // valid-p is T when we are certain about the result

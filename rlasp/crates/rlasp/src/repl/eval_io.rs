@@ -387,7 +387,9 @@ pub(super) fn make_output_stream() -> EvalResult {
 pub(super) fn stream_write_text(stream: &EvalResult, text: &str) -> Result<(), String> {
     match stream {
         EvalResult::Array(arr) => {
-            let mut cells = arr.borrow_mut();
+            let mut cells = arr
+                .try_borrow_mut()
+                .map_err(|_| "stream is already mutably borrowed".to_string())?;
             match stream_tag(&cells) {
                 Some(STREAM_OUTPUT_TAG) => {
                     if matches!(cells.get(2), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
@@ -1064,6 +1066,7 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 let mut out = format_for_prin1(obj);
                 out.push('\n');
                 write_to_destination(args.get(1), &out)?;
+                // Match clasp regression semantics: pprint yields zero values.
                 Ok(EvalResult::MultipleValues(vec![]))
             } else {
                 Ok(EvalResult::Nil)
@@ -1455,12 +1458,16 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             let stream = args.get(0).ok_or_else(|| "read-byte requires a stream".to_string())?;
             let eof_error_p = args.get(1).map(truthy).unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
+            if !matches!(stream, EvalResult::Array(_) | EvalResult::Instance(_)) {
+                return Err("TYPE-ERROR".to_string());
+            }
             if let Some(result) = read_raw_byte_from_file_stream(stream) {
-                return match result? {
-                    Some(byte) => Ok(EvalResult::Fixnum(byte as i64)),
-                    None => {
+                return match result {
+                    Ok(Some(byte)) => Ok(EvalResult::Fixnum(byte as i64)),
+                    Ok(None) => {
                         if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) }
                     }
+                    Err(_) => Err("TYPE-ERROR".to_string()),
                 };
             }
             if let Some(result) = read_byte_from_instance_stream(stream) {
@@ -1471,7 +1478,13 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     }
                 };
             }
-            let as_char = call_io_builtin("read-char", &[stream.clone(), EvalResult::Boolean(false), EvalResult::Nil])?;
+            let as_char = match call_io_builtin(
+                "read-char",
+                &[stream.clone(), EvalResult::Boolean(false), EvalResult::Nil],
+            ) {
+                Ok(v) => v,
+                Err(_) => return Err("TYPE-ERROR".to_string()),
+            };
             match as_char {
                 EvalResult::Character(c) => Ok(EvalResult::Fixnum(c as u32 as i64)),
                 _ => {
@@ -1544,8 +1557,31 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return Err("make-string-input-stream requires a string".to_string());
             };
             let source = to_string_designator(src)?;
-            let start = args.get(1).and_then(to_fixnum).unwrap_or(0).max(0) as usize;
-            let end = args.get(2).and_then(to_fixnum).map(|n| n.max(0) as usize).unwrap_or(char_len(&source));
+            let mut start = args.get(1).and_then(to_fixnum).unwrap_or(0).max(0) as usize;
+            let mut end = args
+                .get(2)
+                .and_then(to_fixnum)
+                .map(|n| n.max(0) as usize)
+                .unwrap_or(char_len(&source));
+            let mut i = 1usize;
+            while i + 1 < args.len() {
+                if let Some(key) = keyword_name(&args[i]) {
+                    match key.as_str() {
+                        "start" => {
+                            if let Some(n) = to_fixnum(&args[i + 1]) {
+                                start = n.max(0) as usize;
+                            }
+                        }
+                        "end" => {
+                            if let Some(n) = to_fixnum(&args[i + 1]) {
+                                end = n.max(0) as usize;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += 2;
+            }
             Ok(make_input_stream_range(source, start, end))
         }
 
@@ -1584,7 +1620,20 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             if args.is_empty() {
                 Ok(make_input_stream(String::new()))
             } else {
-                Ok(args[0].clone())
+                let mut content = String::new();
+                for arg in args {
+                    let input_ok = matches!(
+                        call_io_builtin("input-stream-p", &[arg.clone()])?,
+                        EvalResult::Boolean(true) | EvalResult::Bool(true)
+                    );
+                    if !input_ok {
+                        return Err("TYPE-ERROR".to_string());
+                    }
+                    let rem = stream_remaining_input(arg)
+                        .ok_or_else(|| "TYPE-ERROR".to_string())?;
+                    content.push_str(&rem);
+                }
+                Ok(make_input_stream(content))
             }
         }
 
@@ -1892,10 +1941,7 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                                     return call_io_builtin("stream-external-format", &[last.clone()]);
                                 }
                             }
-                            return Ok(list2(
-                                EvalResult::Symbol(":default".to_string()),
-                                EvalResult::Symbol(":lf".to_string()),
-                            ));
+                            return Ok(EvalResult::Symbol(":DEFAULT".to_string()));
                         }
                         _ => {}
                     }
@@ -1926,8 +1972,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                         _ => {}
                     }
                 }
+                return Err("TYPE-ERROR".to_string());
             }
-            Ok(EvalResult::Symbol("CHARACTER".to_string()))
+            Err("TYPE-ERROR".to_string())
         }
 
         "set-stream-element-type" => {

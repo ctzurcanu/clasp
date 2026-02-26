@@ -42,6 +42,42 @@ pub fn register_char_builtins(env: &mut HashMap<String, EvalResult>) {
 }
 
 pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
+    let simple_upcase = |c: char| {
+        if !(c.is_lowercase() || c.is_uppercase()) {
+            return c;
+        }
+        let mut mapped = c.to_uppercase();
+        let first = mapped.next().unwrap_or(c);
+        if mapped.next().is_some() {
+            c
+        } else {
+            first
+        }
+    };
+    let simple_downcase = |c: char| {
+        if !(c.is_lowercase() || c.is_uppercase()) {
+            return c;
+        }
+        let mut mapped = c.to_lowercase();
+        let first = mapped.next().unwrap_or(c);
+        if mapped.next().is_some() {
+            c
+        } else {
+            first
+        }
+    };
+    let is_upper_case = |c: char| {
+        let up = simple_upcase(c);
+        let down = simple_downcase(c);
+        c == up && c != down
+    };
+    let is_lower_case = |c: char| {
+        let up = simple_upcase(c);
+        let down = simple_downcase(c);
+        c == down && c != up
+    };
+    let lower1 = |c: char| simple_downcase(c);
+
     match name {
         "characterp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Character(_))))),
 
@@ -77,27 +113,27 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         },
 
         "upper-case-p" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(c.is_uppercase())),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(is_upper_case(*c))),
             _ => Err("upper-case-p requires a character".to_string()),
         },
 
         "lower-case-p" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(c.is_lowercase())),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(is_lower_case(*c))),
             _ => Err("lower-case-p requires a character".to_string()),
         },
 
         "both-case-p" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(c.is_alphabetic())),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(is_upper_case(*c) || is_lower_case(*c))),
             _ => Err("both-case-p requires a character".to_string()),
         },
 
         "char-upcase" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Character(c.to_ascii_uppercase())),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Character(simple_upcase(*c))),
             _ => Err("char-upcase requires a character".to_string()),
         },
 
         "char-downcase" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Character(c.to_ascii_lowercase())),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Character(simple_downcase(*c))),
             _ => Err("char-downcase requires a character".to_string()),
         },
 
@@ -163,42 +199,42 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
         "char-equal" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a.to_ascii_lowercase() == b.to_ascii_lowercase()))
+                Ok(EvalResult::Boolean(lower1(*a) == lower1(*b)))
             },
             _ => Err("char-equal requires two characters".to_string()),
         },
 
         "char-not-equal" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a.to_ascii_lowercase() != b.to_ascii_lowercase()))
+                Ok(EvalResult::Boolean(lower1(*a) != lower1(*b)))
             },
             _ => Err("char-not-equal requires two characters".to_string()),
         },
 
         "char-lessp" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a.to_ascii_lowercase() < b.to_ascii_lowercase()))
+                Ok(EvalResult::Boolean(lower1(*a) < lower1(*b)))
             },
             _ => Err("char-lessp requires two characters".to_string()),
         },
 
         "char-greaterp" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a.to_ascii_lowercase() > b.to_ascii_lowercase()))
+                Ok(EvalResult::Boolean(lower1(*a) > lower1(*b)))
             },
             _ => Err("char-greaterp requires two characters".to_string()),
         },
 
         "char-not-greaterp" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a.to_ascii_lowercase() <= b.to_ascii_lowercase()))
+                Ok(EvalResult::Boolean(lower1(*a) <= lower1(*b)))
             },
             _ => Err("char-not-greaterp requires two characters".to_string()),
         },
 
         "char-not-lessp" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a.to_ascii_lowercase() >= b.to_ascii_lowercase()))
+                Ok(EvalResult::Boolean(lower1(*a) >= lower1(*b)))
             },
             _ => Err("char-not-lessp requires two characters".to_string()),
         },

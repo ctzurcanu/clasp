@@ -19,6 +19,7 @@ libc = { workspace = true }
 inkwell = { workspace = true }
 llvm-sys = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
+num-complex = { workspace = true }
 
 [build-dependencies]
 # No dependencies needed for build script

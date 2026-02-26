@@ -113,6 +113,11 @@ func.func private @cc_magnitude(i64) -> i64
 func.func private @cc_print(i64) -> i64
 func.func private @cc_format(i64, i64) -> i64
 func.func private @cc_load(i64) -> i64
+func.func private @cc_load_stack(i64) -> i64
+func.func private @cc_compile_file_stack(i64) -> i64
+func.func private @cc_make_string_output_stream() -> i64
+func.func private @cc_get_output_stream_string(i64) -> i64
+func.func private @cc_make_string_input_stream(i64) -> i64
 
 // Arrays
 func.func private @cc_make_array(i64) -> i64
@@ -136,6 +141,7 @@ func.func private @cc_find_if_not(i64, i64) -> i64
 func.func private @cc_values_pack(i64) -> i64
 func.func private @cc_multiple_value_list(i64) -> i64
 func.func private @cc_remove_if(i64, i64) -> i64
+func.func private @cc_remove_if_full(i64, i64, i64) -> i64
 func.func private @cc_remove_if_not(i64, i64) -> i64
 func.func private @cc_substitute_if(i64, i64, i64) -> i64
 func.func private @cc_position_if(i64, i64) -> i64
@@ -148,6 +154,7 @@ func.func private @cc_nconc(i64, i64) -> i64
 func.func private @cc_acons(i64, i64, i64) -> i64
 func.func private @cc_getf(i64, i64, i64) -> i64
 func.func private @cc_map_nil(i64, i64) -> i64
+func.func private @cc_map(i64, i64, i64) -> i64
 func.func private @cc_clrhash(i64) -> i64
 func.func private @cc_set_difference(i64, i64) -> i64
 func.func private @cc_substitute(i64, i64, i64) -> i64
@@ -166,6 +173,7 @@ func.func private @cc_t_value() -> i64
 
 // Hash tables
 func.func private @cc_make_hash_table() -> i64
+func.func private @cc_make_hash_table_stack()
 func.func private @cc_gethash(i64, i64, i64) -> i64
 func.func private @cc_puthash(i64, i64, i64) -> i64
 func.func private @cc_maphash_stack(i64, i64)
@@ -195,12 +203,14 @@ func.func private @cc_pushnew(i64, i64, i64, i64, i64) -> i64
 func.func private @cc_assoc(i64, i64) -> i64
 func.func private @cc_search(i64, i64) -> i64
 func.func private @cc_elt(i64, i64) -> i64
+func.func private @cc_set_elt(i64, i64, i64) -> i64
 func.func private @cc_concatenate(i64, i64) -> i64
 func.func private @cc_remove_duplicates(i64) -> i64
 func.func private @cc_remhash(i64, i64) -> i64
 
 // Symbols
 func.func private @cc_make_symbol(!llvm.ptr, i64) -> i64
+func.func private @cc_make_function_ref_const(!llvm.ptr) -> i64
 func.func private @cc_symbol_value(i64) -> i64
 func.func private @cc_set_symbol_value(i64, i64) -> i64
 func.func private @cc_get_symbol_property(i64, i64) -> i64
@@ -213,6 +223,7 @@ func.func private @cc_symbol_package(i64) -> i64
 func.func private @cc_symbol_plist(i64) -> i64
 func.func private @cc_get_property(i64, i64, i64) -> i64
 func.func private @cc_remprop(i64, i64) -> i64
+func.func private @cc_makunbound(i64) -> i64
 func.func private @cc_make_symbol_from_name(i64) -> i64
 func.func private @cc_copy_symbol(i64, i64) -> i64
 func.func private @cc_intern(i64, i64) -> i64
@@ -224,6 +235,9 @@ func.func private @cc_package_nicknames(i64) -> i64
 func.func private @cc_package_use_list(i64) -> i64
 func.func private @cc_package_used_by_list(i64) -> i64
 func.func private @cc_package_shadowing_symbols(i64) -> i64
+func.func private @cc_package_external_symbols(i64) -> i64
+func.func private @cc_package_all_symbols(i64) -> i64
+func.func private @cc_all_symbols() -> i64
 func.func private @cc_use_package(i64, i64) -> i64
 func.func private @cc_unuse_package(i64, i64) -> i64
 func.func private @cc_export(i64, i64) -> i64
@@ -252,6 +266,10 @@ func.func private @cc_build_range(i64, i64, i64) -> i64
 func.func private @cc_fboundp(i64) -> i64
 func.func private @cc_boundp(i64) -> i64
 func.func private @cc_functionp(i64) -> i64
+func.func private @cc_valid_function_name_p(i64) -> i64
+func.func private @cc_function_block_name(i64) -> i64
+func.func private @cc_progv_push(i64, i64) -> i64
+func.func private @cc_progv_pop(i64) -> i64
 
 // Evaluation
 func.func private @cc_read_from_string(i64) -> i64

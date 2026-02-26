@@ -291,6 +291,15 @@ impl Interpreter {
                         }
                     }
                     ConstantValue::Float(f) => Value::Float(*f),
+                    ConstantValue::Ratio(num_s, den_s) => {
+                        let num = num_s.parse::<f64>().ok();
+                        let den = den_s.parse::<f64>().ok();
+                        match (num, den) {
+                            (Some(n), Some(d)) if d != 0.0 => Value::Float(n / d),
+                            _ => Value::Object(LispObject::nil()),
+                        }
+                    }
+                    ConstantValue::Complex(_re, _im) => Value::Object(LispObject::nil()),
                     ConstantValue::Character(ch) => Value::Object(LispObject::from_char(*ch)),
                     ConstantValue::String(_s) => Value::Object(LispObject::nil()), // TODO: proper string handling
                     ConstantValue::Nil => Value::Object(LispObject::nil()),

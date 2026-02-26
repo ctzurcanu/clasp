@@ -3,7 +3,7 @@
 use crate::ir::ASTNode;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use malachite::Integer;
 use malachite::Rational;
 
@@ -11,6 +11,8 @@ use malachite::Rational;
 thread_local! {
     pub(super) static RETURN_VALUE: RefCell<Option<EvalResult>> = RefCell::new(None);
     pub(super) static GENSYM_COUNTER: RefCell<u64> = RefCell::new(0);
+    pub(super) static ACTIVE_BLOCK_STACK: RefCell<Vec<(String, u64)>> = RefCell::new(Vec::new());
+    pub(super) static NEXT_BLOCK_ID: Cell<u64> = Cell::new(1);
     /// Class registry: maps class name -> list of superclass names
     pub static CLASS_HIERARCHY: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
     /// Global dynamic variable store for special variables (*earmuffs*)
@@ -280,7 +282,14 @@ impl std::fmt::Display for EvalResult {
             EvalResult::ForeignFunction(_) => write!(f, "#<FOREIGN-FUNCTION>"),
             EvalResult::Instance(inst) => write!(f, "#<{} instance>", inst.class_name),
             EvalResult::GenericFunction(gf) => write!(f, "#<GENERIC-FUNCTION {}>", gf.borrow().name),
-            EvalResult::Condition(cond) => write!(f, "#<CONDITION {}>", cond.borrow().type_name),
+            EvalResult::Condition(cond) => {
+                let cond_ref = cond.borrow();
+                if let Some(EvalResult::String(msg)) = cond_ref.slots.get("FORMAT-CONTROL") {
+                    write!(f, "#<CONDITION {}: {}>", cond_ref.type_name, msg)
+                } else {
+                    write!(f, "#<CONDITION {}>", cond_ref.type_name)
+                }
+            }
             EvalResult::Package(name) => write!(f, "#<PACKAGE \"{}\">", name),
         }
     }

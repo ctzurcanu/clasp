@@ -143,6 +143,11 @@ impl Lexer {
         Ok(token)
     }
 
+    /// Current character position in the input stream.
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
     // Helper methods
 
     fn current_char(&self) -> char {
@@ -549,7 +554,7 @@ impl Lexer {
             "page" => '\x0C',
             "null" => '\0',
             "backspace" => '\x08',
-            "rubout" | "delete" => '\x7F',
+            "rubout" | "delete" | "del" => '\x7F',
             // Control characters
             "nul" => '\x00',
             "sub" => '\x1A',
@@ -606,22 +611,48 @@ impl Lexer {
             }
         }
 
-        // Handle Common Lisp float suffixes (e.g., 1.0d0, 2.5e0, 3.14f0, 5.0l0, 6.0s0)
-        // Strip the suffix and parse as f64
-        let float_text = if let Some(pos) = text.find(|c| c == 'd' || c == 'D' || c == 'e' || c == 'E' || c == 'f' || c == 'F' || c == 'l' || c == 'L' || c == 's' || c == 'S') {
-            let (num_part, suffix_part) = text.split_at(pos);
-            // Check if it's actually a float suffix (followed by optional sign and digits)
-            let suffix_rest = &suffix_part[1..]; // skip the letter
-            if suffix_rest.is_empty() || suffix_rest.chars().all(|c| c.is_ascii_digit() || c == '+' || c == '-') {
-                num_part
-            } else {
-                &text
+        // Common Lisp float notation:
+        // - exponent markers: e/f/s (single-style), d/l (double-style)
+        // - examples: 1.0e3, 1.0d0, .5, -2.5
+        let valid_exp = |exp: &str| -> bool {
+            if exp.is_empty() {
+                return false;
             }
-        } else {
-            &text
+            let mut chars = exp.chars();
+            let first = chars.next().unwrap();
+            if first == '+' || first == '-' {
+                let rest: String = chars.collect();
+                !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+            } else {
+                first.is_ascii_digit() && chars.all(|c| c.is_ascii_digit())
+            }
         };
 
-        if let Ok(f) = float_text.parse::<f64>() {
+        let mut parsed_float: Option<f64> = None;
+        if let Some((idx, marker)) = text
+            .char_indices()
+            .skip(1)
+            .find(|(_, c)| matches!(*c, 'd' | 'D' | 'e' | 'E' | 'f' | 'F' | 'l' | 'L' | 's' | 'S'))
+        {
+            let (mantissa, marker_and_exp) = text.split_at(idx);
+            let exp_part = &marker_and_exp[1..];
+            if !mantissa.is_empty() && valid_exp(exp_part) {
+                let normalized = format!("{}e{}", mantissa, exp_part);
+                parsed_float = match marker.to_ascii_lowercase() {
+                    // CL defaults E/F/S to single-float semantics.
+                    'e' | 'f' | 's' => normalized.parse::<f32>().ok().map(|v| v as f64),
+                    // D/L are double-float semantics.
+                    'd' | 'l' => normalized.parse::<f64>().ok(),
+                    _ => None,
+                };
+            }
+        }
+
+        if parsed_float.is_none() && text.contains('.') {
+            parsed_float = text.parse::<f64>().ok();
+        }
+
+        if let Some(f) = parsed_float {
             return Ok(Token::new(TokenKind::Float(f), start_pos));
         }
 

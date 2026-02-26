@@ -8,12 +8,10 @@ fn get_string_designator(arg: &EvalResult) -> Result<String, String> {
     match arg {
         EvalResult::String(s) => Ok(s.clone()),
         EvalResult::Symbol(s) => {
-            // For symbols, use the print name (uppercase, without leading colon for keywords)
-            if s.starts_with(':') {
-                Ok(s[1..].to_uppercase())
-            } else {
-                Ok(s.to_uppercase())
-            }
+            // For symbols, use SYMBOL-NAME semantics: strip package prefix.
+            let stripped = if s.starts_with(':') { &s[1..] } else { s.as_str() };
+            let base = stripped.rsplit(':').next().unwrap_or(stripped);
+            Ok(base.to_uppercase())
         }
         EvalResult::Character(c) => Ok(c.to_string()),
         EvalResult::Array(arr) => {
@@ -40,7 +38,11 @@ fn get_string_designator(arg: &EvalResult) -> Result<String, String> {
 fn get_char_bag(arg: &Option<&EvalResult>) -> Result<HashSet<char>, String> {
     match arg {
         Some(EvalResult::String(s)) => Ok(s.chars().collect()),
-        Some(EvalResult::Symbol(s)) => Ok(s.chars().collect()),
+        Some(EvalResult::Symbol(s)) => {
+            let stripped = if s.starts_with(':') { &s[1..] } else { s.as_str() };
+            let base = stripped.rsplit(':').next().unwrap_or(stripped);
+            Ok(base.chars().collect())
+        }
         Some(EvalResult::Nil) => Ok(HashSet::new()),
         Some(EvalResult::Cons(_, _)) => {
             // For a list, we'd need to iterate - for now just use empty set

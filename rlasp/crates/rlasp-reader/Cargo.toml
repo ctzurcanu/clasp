@@ -9,5 +9,6 @@ license.workspace = true
 rlasp-runtime = { path = "../rlasp-runtime" }
 thiserror = { workspace = true }
 malachite = { workspace = true }
+num-complex = { workspace = true }
 
 [dev-dependencies]

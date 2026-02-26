@@ -1344,6 +1344,56 @@ pub(super) fn eval_sqrt(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     Ok(EvalResult::Float(num.sqrt()))
 }
 
+pub(super) fn eval_isqrt(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("isqrt requires 1 argument".to_string());
+    }
+
+    let value = primary_value(eval_with_env(&args[0], env)?);
+    let n = match value {
+        EvalResult::Fixnum(v) => {
+            if v < 0 {
+                return Err("isqrt requires a non-negative integer".to_string());
+            }
+            Integer::from(v)
+        }
+        EvalResult::Bignum(v) => {
+            if v < 0 {
+                return Err("isqrt requires a non-negative integer".to_string());
+            }
+            v
+        }
+        _ => return Err("isqrt requires a non-negative integer".to_string()),
+    };
+
+    // Exact integer sqrt via monotonic binary search.
+    if n <= 1 {
+        return if i64::convertible_from(&n) {
+            Ok(EvalResult::Fixnum(i64::exact_from(&n)))
+        } else {
+            Ok(EvalResult::Bignum(n))
+        };
+    }
+
+    let mut lo = Integer::from(0);
+    let mut hi = &n + Integer::from(1);
+    while &lo + Integer::from(1) < hi {
+        let mid = (&lo + &hi) >> 1;
+        let mid_sq = &mid * &mid;
+        if mid_sq <= n {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if i64::convertible_from(&lo) {
+        Ok(EvalResult::Fixnum(i64::exact_from(&lo)))
+    } else {
+        Ok(EvalResult::Bignum(lo))
+    }
+}
+
 pub(super) fn eval_complex(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     // (complex real &optional imaginary)
     if args.is_empty() || args.len() > 2 {

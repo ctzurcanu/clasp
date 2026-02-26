@@ -255,6 +255,9 @@ pub extern "C" fn stack_pop_pointer() -> usize {
         let depth = s.depth();
         if depth == 0 {
             eprintln!("[STACK ERROR] stack_pop_pointer called on empty stack!");
+            if std::env::var("RLASP_STACK_ERROR_BACKTRACE").is_ok() {
+                eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+            }
             return crate::symbol::NIL_SYMBOL.raw();
         }
         s.pop_pointer().unwrap_or_else(|| {

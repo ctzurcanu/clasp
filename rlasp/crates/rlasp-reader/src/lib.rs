@@ -25,7 +25,7 @@ pub mod parser;
 pub mod reader;
 pub mod error;
 
-pub use reader::{Reader, read_from_string, read_all_from_string};
+pub use reader::{Reader, read_from_string, read_all_from_string, read_from_string_with_positions};
 pub use error::{ReaderError, ReaderResult};
 pub use token::Token;
 pub use lexer::Lexer;

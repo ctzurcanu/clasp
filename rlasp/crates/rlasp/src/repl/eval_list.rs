@@ -123,147 +123,31 @@ pub(super) fn eval_car_cdr_accessor(
 }
 
 pub(super) fn eval_caar(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
-        return Err("caar requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(car, _) => {
-            let car_val = car.borrow();
-            match &*car_val {
-                EvalResult::Cons(car2, _) => Ok(car2.borrow().clone()),
-                _ => Err("caar: car is not a cons".to_string()),
-            }
-        },
-        _ => Err("caar requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("caar", args, env)
 }
 
 pub(super) fn eval_cdar(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
-        return Err("cdar requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(car, _) => {
-            let car_val = car.borrow();
-            match &*car_val {
-                EvalResult::Cons(_, cdr2) => Ok(cdr2.borrow().clone()),
-                _ => Err("cdar: car is not a cons".to_string()),
-            }
-        },
-        _ => Err("cdar requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("cdar", args, env)
 }
 
 pub(super) fn eval_cadr(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
-        return Err("cadr requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(_, cdr) => {
-            let cdr_val = cdr.borrow();
-            match &*cdr_val {
-                EvalResult::Cons(car2, _) => Ok(car2.borrow().clone()),
-                _ => Err("cadr: not enough elements".to_string()),
-            }
-        },
-        _ => Err("cadr requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("cadr", args, env)
 }
 
 pub(super) fn eval_cddr(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
-        return Err("cddr requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(_, cdr) => {
-            let cdr_val = cdr.borrow();
-            match &*cdr_val {
-                EvalResult::Cons(_, cdr2) => Ok(cdr2.borrow().clone()),
-                _ => Err("cddr: not enough elements".to_string()),
-            }
-        },
-        _ => Err("cddr requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("cddr", args, env)
 }
 
 pub(super) fn eval_caddr(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
-        return Err("caddr requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(_, cdr) => {
-            let cdr_val = cdr.borrow();
-            match &*cdr_val {
-                EvalResult::Cons(_, cdr2) => {
-                    let cdr2_val = cdr2.borrow();
-                    match &*cdr2_val {
-                        EvalResult::Cons(car3, _) => Ok(car3.borrow().clone()),
-                        _ => Err("caddr: not enough elements".to_string()),
-                    }
-                }
-                _ => Err("caddr: not enough elements".to_string()),
-            }
-        },
-        _ => Err("caddr requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("caddr", args, env)
 }
 
 pub(super) fn eval_cadddr(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    // (cadddr x) = (car (cdr (cdr (cdr x)))) = fourth element
-    if args.len() != 1 {
-        return Err("cadddr requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(_, cdr) => {
-            let cdr_val = cdr.borrow();
-            match &*cdr_val {
-                EvalResult::Cons(_, cdr2) => {
-                    let cdr2_val = cdr2.borrow();
-                    match &*cdr2_val {
-                        EvalResult::Cons(_, cdr3) => {
-                            let cdr3_val = cdr3.borrow();
-                            match &*cdr3_val {
-                                EvalResult::Cons(car4, _) => Ok(car4.borrow().clone()),
-                                _ => Err("cadddr: not enough elements".to_string()),
-                            }
-                        }
-                        _ => Err("cadddr: not enough elements".to_string()),
-                    }
-                }
-                _ => Err("cadddr: not enough elements".to_string()),
-            }
-        },
-        _ => Err("cadddr requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("cadddr", args, env)
 }
 
 pub(super) fn eval_cdddr(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
-    if args.len() != 1 {
-        return Err("cdddr requires 1 argument".to_string());
-    }
-    let val = eval_with_env(&args[0], env)?;
-    match val {
-        EvalResult::Cons(_, cdr) => {
-            let cdr_val = cdr.borrow();
-            match &*cdr_val {
-                EvalResult::Cons(_, cdr2) => {
-                    let cdr2_val = cdr2.borrow();
-                    match &*cdr2_val {
-                        EvalResult::Cons(_, cdr3) => Ok(cdr3.borrow().clone()),
-                        _ => Err("cdddr: not enough elements".to_string()),
-                    }
-                }
-                _ => Err("cdddr: not enough elements".to_string()),
-            }
-        },
-        _ => Err("cdddr requires a list".to_string()),
-    }
+    eval_car_cdr_accessor("cdddr", args, env)
 }
 
 pub(super) fn eval_rplacd(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -604,7 +488,7 @@ pub(super) fn eval_mapcar(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     Ok(result)
 }
 
-pub(super) fn apply_function(
+pub fn apply_function(
     func: &EvalResult,
     args: &[EvalResult],
     env: &mut HashMap<String, EvalResult>,
@@ -625,22 +509,19 @@ pub(super) fn apply_function(
         }
         EvalResult::Symbol(name) => {
             // Handle function name - look up in environment or call builtin
-            if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env }) = env.get(name).cloned() {
-                // User-defined function - use full lambda call handler
-                eval_lambda_call_with_values(params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, args, env)
-            } else {
-                // Try calling as a builtin by creating an AST call
-                // Use result_to_ast_quoted to properly handle all types including Cons
-                let ast_args: Result<Vec<ASTNode>, String> = args.iter()
-                    .map(|a| super::eval_system::result_to_ast_quoted(a))
-                    .collect();
-                let ast_args = ast_args?;
-                let call = ASTNode::Call {
-                    function: Box::new(ASTNode::Variable(name.clone())),
-                    args: ast_args,
-                };
-                eval_with_env(&call, env)
+            let base = name.rsplit(':').next().unwrap_or(name);
+            let force_builtin_dispatch =
+                super::eval_core::should_force_extension_builtin_dispatch(name, base);
+            if !force_builtin_dispatch {
+                if let Some(EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env }) = env.get(name).cloned() {
+                    // User-defined function - use full lambda call handler
+                    return eval_lambda_call_with_values(params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, args, env);
+                }
             }
+            // apply-function receives already evaluated values. Route symbol
+            // designators through value-based dispatch to preserve runtime
+            // objects (e.g. stream/process handles) without AST round-tripping.
+            super::eval_system::call_function_with_values(EvalResult::Symbol(name.clone()), args, env)
         }
         _ => Err("mapcar: first argument must be a function".to_string()),
     }

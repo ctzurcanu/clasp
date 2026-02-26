@@ -107,7 +107,8 @@ thread_local! {
         // Initialize COMMON-LISP package with all standard symbols
         let mut cl_pkg = Package::new("COMMON-LISP", vec!["CL"]);
         for sym in CL_SYMBOLS {
-            cl_pkg.add_external_symbol(sym);
+            let identity = make_identity_for_package_symbol("COMMON-LISP", sym);
+            cl_pkg.add_external_symbol_identity(sym, &identity);
         }
         map.insert("COMMON-LISP".to_string(), cl_pkg.clone());
         map.insert("CL".to_string(), cl_pkg);
@@ -117,6 +118,10 @@ thread_local! {
         cl_user.use_package("COMMON-LISP");
         map.insert("COMMON-LISP-USER".to_string(), cl_user.clone());
         map.insert("CL-USER".to_string(), cl_user);
+        // Several regression tests expect this package to exist.
+        let mut ast_tooling = Package::new("AST-TOOLING", vec![]);
+        ast_tooling.use_package("COMMON-LISP");
+        map.insert("AST-TOOLING".to_string(), ast_tooling);
         std::cell::RefCell::new(map)
     };
     pub static CURRENT_PACKAGE: std::cell::RefCell<String> =
@@ -127,8 +132,8 @@ thread_local! {
 pub struct Package {
     name: String,
     nicknames: Vec<String>,
-    external_symbols: HashMap<String, bool>,
-    internal_symbols: HashMap<String, bool>,
+    external_symbols: HashMap<String, String>,
+    internal_symbols: HashMap<String, String>,
     use_list: Vec<String>,  // Packages this package uses (inherits from)
     shadowing_symbols: Vec<String>,  // Symbols that shadow inherited symbols
     locked: bool,
@@ -174,12 +179,24 @@ impl Package {
 
     /// Add an internal symbol
     pub fn add_internal_symbol(&mut self, name: &str) {
-        self.internal_symbols.insert(name.to_string(), true);
+        let upper = name.to_uppercase();
+        self.internal_symbols.insert(upper.clone(), upper);
+    }
+
+    pub fn add_internal_symbol_identity(&mut self, base_name: &str, symbol_identity: &str) {
+        self.internal_symbols
+            .insert(base_name.to_uppercase(), symbol_identity.to_string());
     }
 
     /// Add an external symbol
     pub fn add_external_symbol(&mut self, name: &str) {
-        self.external_symbols.insert(name.to_string(), true);
+        let upper = name.to_uppercase();
+        self.external_symbols.insert(upper.clone(), upper);
+    }
+
+    pub fn add_external_symbol_identity(&mut self, base_name: &str, symbol_identity: &str) {
+        self.external_symbols
+            .insert(base_name.to_uppercase(), symbol_identity.to_string());
     }
 
     /// Remove a symbol from the package (unintern)
@@ -198,7 +215,7 @@ impl Package {
         // Create an internal symbol with this name if it doesn't exist
         if !self.external_symbols.contains_key(&name_upper) &&
            !self.internal_symbols.contains_key(&name_upper) {
-            self.internal_symbols.insert(name_upper.clone(), true);
+            self.internal_symbols.insert(name_upper.clone(), name_upper.clone());
         }
         // Add to shadowing symbols if not already present
         if !self.shadowing_symbols.contains(&name_upper) {
@@ -210,7 +227,7 @@ impl Package {
     pub fn shadowing_import(&mut self, name: &str) {
         let name_upper = name.to_uppercase();
         // Add as internal symbol
-        self.internal_symbols.insert(name_upper.clone(), true);
+        self.internal_symbols.insert(name_upper.clone(), name_upper.clone());
         // Add to shadowing symbols if not already present
         if !self.shadowing_symbols.contains(&name_upper) {
             self.shadowing_symbols.push(name_upper);
@@ -246,6 +263,42 @@ pub fn get_current_package() -> String {
     CURRENT_PACKAGE.with(|p| p.borrow().clone())
 }
 
+pub fn is_package_locked(pkg_name: &str) -> bool {
+    let key = pkg_name.to_uppercase();
+    PACKAGES.with(|p| {
+        let packages = p.borrow();
+        if let Some(pkg) = packages.get(&key) {
+            if pkg.locked {
+                return true;
+            }
+            let canonical = pkg.get_name().to_string();
+            return packages
+                .values()
+                .any(|candidate| candidate.get_name() == canonical && candidate.locked);
+        }
+        packages
+            .values()
+            .any(|pkg| pkg.get_name().eq_ignore_ascii_case(&key) && pkg.locked)
+    })
+}
+
+pub fn is_current_package_locked() -> bool {
+    is_package_locked(&get_current_package())
+}
+
+fn ensure_package_unlocked(pkg_name: &str, env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
+    let locked = is_package_locked(pkg_name);
+    if std::env::var("RLASP_DEBUG_PKGLOCK").is_ok() {
+        eprintln!("[pkglock] ensure pkg={} locked={}", pkg_name, locked);
+    }
+    if locked {
+        signal_package_lock_violation("Package is locked", env)?;
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
 /// Check if a package uses CL/COMMON-LISP (directly or transitively)
 /// This is used to determine if unqualified CL builtins should be accessible
 pub fn package_uses_cl(pkg_name: &str) -> bool {
@@ -278,10 +331,26 @@ pub fn package_uses_cl(pkg_name: &str) -> bool {
 }
 
 fn package_designator_key(arg: &EvalResult) -> Result<String, String> {
+    let parse_printed_package = |raw: &str| -> Option<String> {
+        let s = raw.trim();
+        let upper = s.to_ascii_uppercase();
+        if !upper.starts_with("#<PACKAGE \"") || !s.ends_with('>') {
+            return None;
+        }
+        let first_quote = s.find('"')?;
+        let last_quote = s.rfind('"')?;
+        if last_quote <= first_quote {
+            return None;
+        }
+        Some(s[first_quote + 1..last_quote].to_uppercase())
+    };
     match arg {
         EvalResult::Package(name) => Ok(name.to_uppercase()),
+        EvalResult::Character(c) => Ok(c.to_string().to_uppercase()),
         EvalResult::String(name) | EvalResult::Symbol(name) => {
-            if name.starts_with(':') {
+            if let Some(pkg_name) = parse_printed_package(name) {
+                Ok(pkg_name)
+            } else if name.starts_with(':') {
                 Ok(name[1..].to_uppercase())
             } else if let Some((_, tail)) = name.rsplit_once(':') {
                 Ok(tail.to_uppercase())
@@ -305,6 +374,7 @@ fn designator_to_package_name(arg: &EvalResult) -> Result<String, String> {
 
 fn designator_to_nickname(arg: &EvalResult) -> Result<String, String> {
     match arg {
+        EvalResult::Character(c) => Ok(c.to_string().to_uppercase()),
         EvalResult::String(name) | EvalResult::Symbol(name) => {
             if name.starts_with(':') {
                 Ok(name[1..].to_uppercase())
@@ -316,8 +386,218 @@ fn designator_to_nickname(arg: &EvalResult) -> Result<String, String> {
     }
 }
 
-pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
-    match name {
+fn symbol_base_name(symbol_name: &str) -> String {
+    let stripped = if symbol_name.starts_with(':') {
+        &symbol_name[1..]
+    } else {
+        symbol_name
+    };
+    stripped
+        .rsplit(':')
+        .next()
+        .unwrap_or(stripped)
+        .to_uppercase()
+}
+
+fn symbol_identity_of(arg: &EvalResult, default_pkg: Option<&str>) -> Result<String, String> {
+    match arg {
+        EvalResult::MultipleValues(vals) => {
+            if let Some(first) = vals.first() {
+                symbol_identity_of(first, default_pkg)
+            } else {
+                Ok("NIL".to_string())
+            }
+        }
+        EvalResult::Symbol(s) => Ok(s.to_string()),
+        EvalResult::String(s) => {
+            let base = symbol_base_name(s);
+            if s.contains(':') || default_pkg.is_none() {
+                Ok(s.to_string())
+            } else {
+                Ok(format!("{}::{}", default_pkg.unwrap(), base))
+            }
+        }
+        EvalResult::Bool(true) | EvalResult::Boolean(true) => Ok("T".to_string()),
+        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => Ok("NIL".to_string()),
+        _ => Err("symbol designator must be a symbol or string".to_string()),
+    }
+}
+
+fn symbol_list_from_arg(arg: &EvalResult, default_pkg: Option<&str>) -> Result<Vec<String>, String> {
+    match arg {
+        EvalResult::Symbol(_) | EvalResult::String(_) | EvalResult::Bool(_) | EvalResult::Boolean(_) | EvalResult::Nil => {
+            Ok(vec![symbol_identity_of(arg, default_pkg)?])
+        }
+        EvalResult::Cons(_, _) => {
+            let mut out = Vec::new();
+            let mut cur = arg.clone();
+            while let EvalResult::Cons(car, cdr) = cur {
+                out.push(symbol_identity_of(&car.borrow(), default_pkg)?);
+                cur = cdr.borrow().clone();
+            }
+            Ok(out)
+        }
+        _ => Err("expected symbol designator or list of symbol designators".to_string()),
+    }
+}
+
+fn vec_to_list(mut values: Vec<EvalResult>) -> EvalResult {
+    let mut result = EvalResult::Nil;
+    while let Some(v) = values.pop() {
+        result = EvalResult::Cons(
+            std::rc::Rc::new(std::cell::RefCell::new(v)),
+            std::rc::Rc::new(std::cell::RefCell::new(result)),
+        );
+    }
+    result
+}
+
+fn make_condition(type_name: &str, slots: HashMap<String, EvalResult>) -> EvalResult {
+    EvalResult::Condition(std::rc::Rc::new(std::cell::RefCell::new(
+        super::eval_conditions::ConditionInstance {
+            type_name: type_name.to_uppercase(),
+            slots,
+        },
+    )))
+}
+
+fn signal_unhandled(condition: EvalResult) -> Result<EvalResult, String> {
+    super::eval_conditions::set_pending_signaled_condition(condition);
+    Err("__SIGNAL_CONDITION__".to_string())
+}
+
+fn package_exists(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    PACKAGES.with(|p| p.borrow().contains_key(&upper))
+}
+
+fn make_identity_for_package_symbol(pkg_name: &str, sym_name: &str) -> String {
+    format!("{}::{}", pkg_name.to_uppercase(), symbol_base_name(sym_name))
+}
+
+fn normalize_symbol_identity_for_home_package(identity: &str, home_pkg: &str, base_name: &str) -> String {
+    if identity.contains(':') || identity.eq_ignore_ascii_case("NIL") || identity.eq_ignore_ascii_case("T") {
+        identity.to_string()
+    } else {
+        make_identity_for_package_symbol(home_pkg, base_name)
+    }
+}
+
+fn rebind_package_aliases(packages: &mut HashMap<String, Package>, package: Package) {
+    let canonical = package.get_name().to_uppercase();
+    packages.retain(|_, existing| existing.get_name().to_uppercase() != canonical);
+    packages.insert(canonical.clone(), package.clone());
+    for nick in &package.nicknames {
+        packages.insert(nick.to_uppercase(), package.clone());
+    }
+}
+
+fn signal_condition_with_restart(
+    condition: EvalResult,
+    restart_name: Option<&str>,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<Option<EvalResult>, String> {
+    use super::eval_conditions::{Restart, clear_last_restart_invocation, pop_restarts, push_restarts, signal_condition_value, take_last_restart_invocation};
+    use crate::ir::ASTNode;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    clear_last_restart_invocation();
+
+    if let Some(name) = restart_name {
+        let (params, body) = if name.eq_ignore_ascii_case("CONTINUE") {
+            (Vec::new(), vec![ASTNode::nil()])
+        } else {
+            (vec!["VALUE".to_string()], vec![ASTNode::Variable("VALUE".to_string())])
+        };
+        let restart = Restart {
+            name: name.to_uppercase(),
+            function: ASTNode::Lambda {
+                params,
+                defaults: HashMap::new(),
+                supplied_p_vars: HashMap::new(),
+                key_params: HashMap::new(),
+                body,
+            },
+            env: Rc::new(RefCell::new(env.clone())),
+            interactive: None,
+            report: None,
+            test: None,
+        };
+        push_restarts(vec![restart]);
+        let signaled = signal_condition_value(condition.clone(), env);
+        pop_restarts();
+        signaled?;
+    } else {
+        signal_condition_value(condition.clone(), env)?;
+    }
+
+    if let Some((_name, value)) = take_last_restart_invocation() {
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
+}
+
+fn signal_package_error(
+    message: &str,
+    env: &mut HashMap<String, EvalResult>,
+    continuable: bool,
+) -> Result<EvalResult, String> {
+    let mut slots = HashMap::new();
+    slots.insert("FORMAT-CONTROL".to_string(), EvalResult::String(message.to_string()));
+    let condition = make_condition("PACKAGE-ERROR", slots);
+    let restart = if continuable { Some("CONTINUE") } else { None };
+    let restart_result = signal_condition_with_restart(condition.clone(), restart, env)?;
+    if continuable && restart_result.is_some() {
+        Ok(EvalResult::Nil)
+    } else {
+        signal_unhandled(condition)
+    }
+}
+
+fn signal_package_lock_violation(
+    message: &str,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
+    let mut slots = HashMap::new();
+    slots.insert("FORMAT-CONTROL".to_string(), EvalResult::String(message.to_string()));
+    let condition = make_condition("PACKAGE-LOCK-VIOLATION", slots);
+    let _ = signal_condition_with_restart(condition.clone(), None, env)?;
+    signal_unhandled(condition)
+}
+
+fn signal_name_conflict(
+    candidates: Vec<String>,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<Option<String>, String> {
+    let candidate_values = candidates
+        .iter()
+        .map(|s| EvalResult::Symbol(s.clone()))
+        .collect::<Vec<_>>();
+    let mut slots = HashMap::new();
+    slots.insert("CANDIDATES".to_string(), vec_to_list(candidate_values));
+    let condition = make_condition("NAME-CONFLICT", slots);
+    let restart_value = signal_condition_with_restart(condition.clone(), Some("RESOLVE-CONFLICT"), env)?;
+    if let Some(v) = restart_value {
+        let chosen = symbol_identity_of(&v, None)?;
+        return Ok(Some(chosen));
+    }
+    signal_unhandled(condition)?;
+    Ok(None)
+}
+
+pub fn call_package_builtin(
+    name: &str,
+    args: &[EvalResult],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
+    let name_lower_full = name.to_ascii_lowercase();
+    let name_lower = name_lower_full
+        .rsplit(':')
+        .next()
+        .unwrap_or(name_lower_full.as_str());
+    match name_lower {
         "packagep" => {
             // Check if object is (or designates) a package.
             let is_pkg = match args.get(0) {
@@ -325,7 +605,9 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     let key = name.to_uppercase();
                     PACKAGES.with(|p| p.borrow().contains_key(&key))
                 }
-                Some(EvalResult::String(_)) | Some(EvalResult::Symbol(_)) => {
+                Some(EvalResult::String(_))
+                | Some(EvalResult::Symbol(_))
+                | Some(EvalResult::Character(_)) => {
                     match package_designator_key(&args[0]) {
                         Ok(key) => PACKAGES.with(|p| p.borrow().contains_key(&key)),
                         Err(_) => false,
@@ -339,6 +621,19 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "find-package" => {
             // (find-package name)
             match args.get(0) {
+                Some(EvalResult::Character(c)) => {
+                    let pkg_name = c.to_string().to_uppercase();
+                    PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        if let Some(pkg) = packages.get(&pkg_name) {
+                            Ok(EvalResult::Package(pkg.get_name().to_string()))
+                        } else if rlasp_jit::intrinsics::is_jit_package(&pkg_name) {
+                            Ok(EvalResult::Package(pkg_name.clone()))
+                        } else {
+                            Ok(EvalResult::Nil)
+                        }
+                    })
+                }
                 Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
                     // Accept plain names, keyword symbols, and package-qualified symbols.
                     let raw = if name.starts_with('#') {
@@ -423,27 +718,22 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "package-nicknames" => {
             // Return list of package nicknames
-            match args.get(0) {
-                Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    PACKAGES.with(|p| {
-                        if let Some(pkg) = p.borrow().get(&name.to_uppercase()) {
-                            let mut result = EvalResult::Nil;
-                            for nn in pkg.nicknames.iter().rev() {
-                                result = EvalResult::Cons(
-                                    std::rc::Rc::new(std::cell::RefCell::new(
-                                        EvalResult::String(nn.clone())
-                                    )),
-                                    std::rc::Rc::new(std::cell::RefCell::new(result))
-                                );
-                            }
-                            Ok(result)
-                        } else {
-                            Ok(EvalResult::Nil)
-                        }
-                    })
+            let pkg_name = match args.get(0) {
+                Some(arg) => designator_to_package_name(arg)?,
+                None => get_current_package(),
+            };
+            PACKAGES.with(|p| {
+                if let Some(pkg) = p.borrow().get(&pkg_name) {
+                    Ok(vec_to_list(
+                        pkg.nicknames
+                            .iter()
+                            .map(|n| EvalResult::String(n.clone()))
+                            .collect(),
+                    ))
+                } else {
+                    Ok(EvalResult::Nil)
                 }
-                _ => Ok(EvalResult::Nil),
-            }
+            })
         }
 
         "package-add-nickname" => {
@@ -452,24 +742,39 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             }
             let pkg_name = designator_to_package_name(&args[0])?;
             let nickname = designator_to_nickname(&args[1])?;
-            PACKAGES.with(|p| {
-                let mut packages = p.borrow_mut();
-                if !packages.contains_key(&pkg_name) {
-                    return Err(format!("No package named {}", pkg_name));
+            let pkg = PACKAGES.with(|p| p.borrow().get(&pkg_name).cloned());
+            let mut pkg = match pkg {
+                Some(p) => p,
+                None => return signal_package_error(&format!("No package named {}", pkg_name), env, false),
+            };
+            if pkg.nicknames.iter().any(|n| n.eq_ignore_ascii_case(&nickname)) {
+                return signal_package_error(
+                    &format!("Package {} already has nickname {}", pkg_name, nickname),
+                    env,
+                    false,
+                );
+            }
+            let nickname_owner = PACKAGES.with(|p| {
+                p.borrow()
+                    .get(&nickname.to_uppercase())
+                    .map(|owner| owner.get_name().to_string())
+            });
+            if let Some(owner) = nickname_owner {
+                if owner != pkg_name {
+                    return signal_package_error(
+                        &format!("Nickname {} is already in use", nickname),
+                        env,
+                        false,
+                    );
                 }
-                if packages.contains_key(&nickname) {
-                    return Err(format!("Nickname {} is already in use", nickname));
-                }
+            }
 
-                let mut pkg = packages.get(&pkg_name).cloned().unwrap();
-                if pkg.nicknames.iter().any(|n| n.eq_ignore_ascii_case(&nickname)) {
-                    return Err(format!("Package {} already has nickname {}", pkg_name, nickname));
-                }
-                pkg.nicknames.push(nickname.clone());
-                packages.insert(pkg_name.clone(), pkg.clone());
-                packages.insert(nickname.clone(), pkg);
-                Ok(EvalResult::String(nickname))
-            })
+            ensure_package_unlocked(&pkg_name, env)?;
+            pkg.nicknames.push(nickname.clone());
+            PACKAGES.with(|p| {
+                rebind_package_aliases(&mut p.borrow_mut(), pkg);
+            });
+            Ok(EvalResult::String(nickname))
         }
 
         "package-remove-nickname" => {
@@ -478,25 +783,22 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             }
             let pkg_name = designator_to_package_name(&args[0])?;
             let nickname = designator_to_nickname(&args[1])?;
-            PACKAGES.with(|p| {
-                let mut packages = p.borrow_mut();
-                let mut pkg = match packages.get(&pkg_name).cloned() {
-                    Some(p) => p,
-                    None => return Err(format!("No package named {}", pkg_name)),
-                };
+            let pkg = PACKAGES.with(|p| p.borrow().get(&pkg_name).cloned());
+            let mut pkg = match pkg {
+                Some(p) => p,
+                None => return signal_package_error(&format!("No package named {}", pkg_name), env, false),
+            };
+            let before = pkg.nicknames.len();
+            pkg.nicknames.retain(|n| !n.eq_ignore_ascii_case(&nickname));
+            if pkg.nicknames.len() == before {
+                return Ok(EvalResult::Nil);
+            }
 
-                let before = pkg.nicknames.len();
-                pkg.nicknames.retain(|n| !n.eq_ignore_ascii_case(&nickname));
-                if pkg.nicknames.len() == before {
-                    return Ok(EvalResult::Nil);
-                }
-                packages.remove(&nickname.to_uppercase());
-                packages.insert(pkg_name.clone(), pkg.clone());
-                for nick in pkg.nicknames.iter() {
-                    packages.insert(nick.to_uppercase(), pkg.clone());
-                }
-                Ok(EvalResult::String(nickname))
-            })
+            ensure_package_unlocked(&pkg_name, env)?;
+            PACKAGES.with(|p| {
+                rebind_package_aliases(&mut p.borrow_mut(), pkg);
+            });
+            Ok(EvalResult::String(nickname))
         }
 
         "lock-package" => {
@@ -549,37 +851,117 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "list-all-packages" => {
             // Return list of all packages
             PACKAGES.with(|p| {
-                let mut result = EvalResult::Nil;
-                for name in p.borrow().keys() {
-                    result = EvalResult::Cons(
-                        std::rc::Rc::new(std::cell::RefCell::new(
-                            EvalResult::Symbol(name.clone())
-                        )),
-                        std::rc::Rc::new(std::cell::RefCell::new(result))
-                    );
+                let mut unique: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                for pkg in p.borrow().values() {
+                    unique.insert(pkg.get_name().to_string());
                 }
-                Ok(result)
+                Ok(vec_to_list(
+                    unique
+                        .into_iter()
+                        .map(EvalResult::Package)
+                        .collect(),
+                ))
             })
         }
 
         "make-package" => {
             // (make-package package-name &key nicknames use)
-            match args.get(0) {
+            let pkg_name = match args.get(0) {
                 Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    // Strip leading colon for keywords
-                    let pkg_name = if name.starts_with(':') {
+                    if name.starts_with("#<PACKAGE \"") && name.ends_with('>') {
+                        let first_quote = name.find('"').unwrap_or(0);
+                        let last_quote = name.rfind('"').unwrap_or(name.len());
+                        if last_quote > first_quote {
+                            name[first_quote + 1..last_quote].to_uppercase()
+                        } else {
+                            name.to_uppercase()
+                        }
+                    } else if name.starts_with(':') {
                         name[1..].to_uppercase()
+                    } else if let Some((_, tail)) = name.rsplit_once(':') {
+                        tail.to_uppercase()
                     } else {
                         name.to_uppercase()
-                    };
-                    PACKAGES.with(|p| {
-                        let mut packages = p.borrow_mut();
-                        packages.insert(pkg_name.clone(), Package::new(&pkg_name, vec![]));
-                    });
-                    Ok(EvalResult::Package(pkg_name))
+                    }
                 }
-                _ => Err("make-package requires a package name".to_string()),
+                _ => return Err("make-package requires a package name".to_string()),
+            };
+
+            let mut nicknames: Vec<String> = Vec::new();
+            let mut use_packages: Vec<String> = Vec::new();
+            let mut i = 1usize;
+            while i + 1 < args.len() {
+                let key = match &args[i] {
+                    EvalResult::Symbol(s) | EvalResult::String(s) => s.trim_start_matches(':').to_ascii_uppercase(),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                match key.as_str() {
+                    "NICKNAMES" => {
+                        match &args[i + 1] {
+                            EvalResult::Cons(_, _) => {
+                                let mut cur = args[i + 1].clone();
+                                while let EvalResult::Cons(car, cdr) = cur {
+                                    nicknames.push(designator_to_nickname(&car.borrow())?);
+                                    cur = cdr.borrow().clone();
+                                }
+                            }
+                            EvalResult::Nil => {}
+                            other => {
+                                nicknames.push(designator_to_nickname(other)?);
+                            }
+                        }
+                        i += 2;
+                    }
+                    "USE" => {
+                        match &args[i + 1] {
+                            EvalResult::Cons(_, _) => {
+                                let mut cur = args[i + 1].clone();
+                                while let EvalResult::Cons(car, cdr) = cur {
+                                    use_packages.push(designator_to_package_name(&car.borrow())?);
+                                    cur = cdr.borrow().clone();
+                                }
+                            }
+                            EvalResult::Nil => {}
+                            other => {
+                                use_packages.push(designator_to_package_name(other)?);
+                            }
+                        }
+                        i += 2;
+                    }
+                    _ => i += 2,
+                }
             }
+
+            if package_exists(&pkg_name) {
+                return signal_package_error(
+                    &format!("Package {} already exists", pkg_name),
+                    env,
+                    true,
+                );
+            }
+            for nn in &nicknames {
+                if package_exists(nn) {
+                    return signal_package_error(
+                        &format!("Package nickname {} already exists", nn),
+                        env,
+                        true,
+                    );
+                }
+            }
+
+            PACKAGES.with(|p| {
+                let mut packages = p.borrow_mut();
+                let mut pkg = Package::new(&pkg_name, vec![]);
+                pkg.nicknames = nicknames.clone();
+                for used in &use_packages {
+                    pkg.use_package(used);
+                }
+                rebind_package_aliases(&mut packages, pkg);
+            });
+            Ok(EvalResult::Package(pkg_name))
         }
 
         "in-package" => {
@@ -614,61 +996,144 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "export" => {
             // (export symbols &optional package)
-            // Mark symbols as external
             if args.is_empty() {
                 return Ok(EvalResult::Boolean(true));
             }
 
-            // Get symbol name(s)
-            let symbols = match &args[0] {
-                EvalResult::Symbol(s) => vec![s.clone()],
-                EvalResult::String(s) => vec![s.clone()],
-                EvalResult::Cons(_, _) => {
-                    // List of symbols
-                    let mut syms = Vec::new();
-                    let mut current = args[0].clone();
-                    while let EvalResult::Cons(car, cdr) = current {
-                        if let EvalResult::Symbol(s) = &*car.borrow() {
-                            syms.push(s.clone());
-                        }
-                        current = cdr.borrow().clone();
-                    }
-                    syms
-                }
-                _ => return Ok(EvalResult::Boolean(true)),
-            };
-
             // Get package name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    EvalResult::String(name) => name.to_uppercase(),
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
             };
 
-            // Add symbols to package's external symbols
-            PACKAGES.with(|p| {
-                let mut packages = p.borrow_mut();
-                if let Some(pkg) = packages.get_mut(&pkg_name) {
-                    for sym in &symbols {
-                        let sym_name = if sym.starts_with(':') {
-                            sym[1..].to_uppercase()
-                        } else {
-                            sym.to_uppercase()
-                        };
-                        pkg.add_external_symbol(&sym_name);
+            let symbols = symbol_list_from_arg(&args[0], Some(&pkg_name))?;
+            for sym in symbols {
+                let base = symbol_base_name(&sym);
+                let source_state = PACKAGES.with(|p| {
+                    let packages = p.borrow();
+                    packages.get(&pkg_name).map(|pkg| {
+                        (
+                            pkg.internal_symbols.get(&base).cloned(),
+                            pkg.external_symbols.get(&base).cloned(),
+                        )
+                    })
+                });
+                let (internal_sym, external_sym) = source_state.unwrap_or((None, None));
+
+                let export_sym = if let Some(es) = &external_sym {
+                    es.clone()
+                } else if let Some(isym) = &internal_sym {
+                    isym.clone()
+                } else {
+                    let continued = signal_package_error(
+                        &format!("Symbol {} is not accessible in {}", sym, pkg_name),
+                        env,
+                        true,
+                    );
+                    if continued.is_err() {
+                        return continued;
+                    }
+                    sym.clone()
+                };
+
+                // Resolve conflicts in packages using this package.
+                let users = PACKAGES.with(|p| {
+                    let packages = p.borrow();
+                    packages
+                        .values()
+                        .filter(|pkg| {
+                            pkg.get_name() != pkg_name
+                                && pkg.get_use_list().iter().any(|u| u.eq_ignore_ascii_case(&pkg_name))
+                        })
+                        .map(|pkg| pkg.get_name().to_string())
+                        .collect::<Vec<_>>()
+                });
+                for user in users {
+                    let (present, inherited_other, is_shadowing) = PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        let mut present: Option<String> = None;
+                        let mut inherited: Option<String> = None;
+                        let mut shadowing = false;
+                        if let Some(pkg) = packages.get(&user) {
+                            present = pkg
+                                .internal_symbols
+                                .get(&base)
+                                .cloned()
+                                .or_else(|| pkg.external_symbols.get(&base).cloned());
+                            shadowing = pkg.shadowing_symbols.contains(&base);
+                            for used in pkg.get_use_list() {
+                                if used.eq_ignore_ascii_case(&pkg_name) {
+                                    continue;
+                                }
+                                if let Some(other) = packages.get(used) {
+                                    if let Some(sym) = other.external_symbols.get(&base) {
+                                        inherited = Some(sym.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        (present, inherited, shadowing)
+                    });
+
+                    if is_shadowing {
+                        // A shadowing symbol suppresses inherited name conflicts.
+                        continue;
+                    }
+
+                    if let Some(old_present) = present {
+                        if !old_present.eq_ignore_ascii_case(&export_sym) {
+                            let chosen = signal_name_conflict(vec![old_present.clone(), export_sym.clone()], env)?;
+                            let chosen = match chosen {
+                                Some(c) => c,
+                                None => continue,
+                            };
+                            PACKAGES.with(|p| {
+                                let mut packages = p.borrow_mut();
+                                if let Some(pkg) = packages.get_mut(&user) {
+                                    if chosen.eq_ignore_ascii_case(&old_present) {
+                                        pkg.add_internal_symbol_identity(&base, &old_present);
+                                        if !pkg.shadowing_symbols.contains(&base) {
+                                            pkg.shadowing_symbols.push(base.clone());
+                                        }
+                                    } else {
+                                        pkg.internal_symbols.remove(&base);
+                                        pkg.external_symbols.remove(&base);
+                                    }
+                                }
+                            });
+                        }
+                    } else if let Some(old_inherited) = inherited_other {
+                        if !old_inherited.eq_ignore_ascii_case(&export_sym) {
+                            let chosen = signal_name_conflict(vec![old_inherited.clone(), export_sym.clone()], env)?;
+                            let chosen = chosen.unwrap_or(old_inherited.clone());
+                            PACKAGES.with(|p| {
+                                let mut packages = p.borrow_mut();
+                                if let Some(pkg) = packages.get_mut(&user) {
+                                    pkg.add_internal_symbol_identity(&base, &chosen);
+                                    if !pkg.shadowing_symbols.contains(&base) {
+                                        pkg.shadowing_symbols.push(base.clone());
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
-            });
+
+                if !matches!(external_sym, Some(ref e) if e.eq_ignore_ascii_case(&export_sym)) {
+                    ensure_package_unlocked(&pkg_name, env)?;
+                    PACKAGES.with(|p| {
+                        let mut packages = p.borrow_mut();
+                        if let Some(pkg) = packages.get_mut(&pkg_name) {
+                            pkg.add_external_symbol_identity(&base, &export_sym);
+                        }
+                    });
+                }
+            }
 
             Ok(EvalResult::Boolean(true))
         }
@@ -676,6 +1141,15 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "unexport" => {
             // (unexport symbols &optional package)
             // Mark symbols as internal
+            let pkg_name = if args.len() > 1 {
+                match &args[1] {
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
+                }
+            } else {
+                get_current_package()
+            };
+            ensure_package_unlocked(&pkg_name, env)?;
             Ok(EvalResult::Boolean(true))
         }
 
@@ -685,59 +1159,59 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 return Ok(EvalResult::Boolean(true));
             }
 
-            // Get symbol name(s)
-            let symbols = match &args[0] {
-                EvalResult::Symbol(s) => vec![s.clone()],
-                EvalResult::String(s) => vec![s.clone()],
-                EvalResult::Cons(_, _) => {
-                    // List of symbols
-                    let mut syms = Vec::new();
-                    let mut current = args[0].clone();
-                    while let EvalResult::Cons(car, cdr) = current {
-                        if let EvalResult::Symbol(s) = &*car.borrow() {
-                            syms.push(s.clone());
-                        } else if let EvalResult::String(s) = &*car.borrow() {
-                            syms.push(s.clone());
-                        }
-                        current = cdr.borrow().clone();
-                    }
-                    syms
-                }
-                EvalResult::Nil => return Ok(EvalResult::Boolean(true)),
-                _ => return Ok(EvalResult::Boolean(true)),
-            };
-
             // Get package name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    EvalResult::String(name) => name.to_uppercase(),
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
             };
+            let symbols = symbol_list_from_arg(&args[0], Some(&pkg_name))?;
 
-            // Add symbols to package's internal symbols
-            PACKAGES.with(|p| {
-                let mut packages = p.borrow_mut();
-                if let Some(pkg) = packages.get_mut(&pkg_name) {
-                    for sym in &symbols {
-                        let sym_name = if sym.starts_with(':') {
-                            sym[1..].to_uppercase()
-                        } else {
-                            sym.to_uppercase()
-                        };
-                        pkg.add_internal_symbol(&sym_name);
+            for sym in symbols {
+                let base = symbol_base_name(&sym);
+                let existing = PACKAGES.with(|p| {
+                    let packages = p.borrow();
+                    packages
+                        .get(&pkg_name)
+                        .and_then(|pkg| pkg.internal_symbols.get(&base).cloned().or_else(|| pkg.external_symbols.get(&base).cloned()))
+                });
+
+                if let Some(existing_sym) = existing {
+                    if existing_sym.eq_ignore_ascii_case(&sym) {
+                        continue;
                     }
+                    let chosen = signal_name_conflict(vec![existing_sym.clone(), sym.clone()], env)?;
+                    let chosen = match chosen {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    if !chosen.eq_ignore_ascii_case(&existing_sym) && !chosen.eq_ignore_ascii_case(&sym) {
+                        return signal_package_error("resolve-conflict must select one of the candidates", env, false);
+                    }
+                    if chosen.eq_ignore_ascii_case(&sym) {
+                        ensure_package_unlocked(&pkg_name, env)?;
+                        PACKAGES.with(|p| {
+                            let mut packages = p.borrow_mut();
+                            if let Some(pkg) = packages.get_mut(&pkg_name) {
+                                pkg.add_internal_symbol_identity(&base, &sym);
+                                pkg.external_symbols.remove(&base);
+                            }
+                        });
+                    }
+                    continue;
                 }
-            });
+
+                ensure_package_unlocked(&pkg_name, env)?;
+                PACKAGES.with(|p| {
+                    let mut packages = p.borrow_mut();
+                    if let Some(pkg) = packages.get_mut(&pkg_name) {
+                        pkg.add_internal_symbol_identity(&base, &sym);
+                    }
+                });
+            }
 
             Ok(EvalResult::Boolean(true))
         }
@@ -750,25 +1224,16 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
             // Get list of packages to use
             let pkgs_to_use: Vec<String> = match &args[0] {
-                EvalResult::Symbol(name) | EvalResult::String(name) => {
-                    let pkg_name = if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else {
-                        name.to_uppercase()
-                    };
-                    vec![pkg_name]
+                EvalResult::Package(_) | EvalResult::Symbol(_) | EvalResult::String(_) => {
+                    vec![designator_to_package_name(&args[0])?]
                 }
                 EvalResult::Cons(_, _) => {
                     let mut pkgs = Vec::new();
                     let mut current = args[0].clone();
                     while let EvalResult::Cons(car, cdr) = current {
-                        if let EvalResult::Symbol(s) | EvalResult::String(s) = &*car.borrow() {
-                            let pkg_name = if s.starts_with(':') {
-                                s[1..].to_uppercase()
-                            } else {
-                                s.to_uppercase()
-                            };
-                            pkgs.push(pkg_name);
+                        match designator_to_package_name(&car.borrow()) {
+                            Ok(pkg_name) => pkgs.push(pkg_name),
+                            Err(_) => {}
                         }
                         current = cdr.borrow().clone();
                     }
@@ -780,29 +1245,104 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Get target package (defaults to current package)
             let target_pkg = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Package(name) => name.clone(),
-                    EvalResult::Symbol(name) | EvalResult::String(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
             };
+            ensure_package_unlocked(&target_pkg, env)?;
 
-            // Add each package to the target's use-list
-            PACKAGES.with(|p| {
-                let mut packages = p.borrow_mut();
-                if let Some(pkg) = packages.get_mut(&target_pkg) {
-                    for used_pkg in &pkgs_to_use {
-                        pkg.use_package(used_pkg);
+            for used_pkg in &pkgs_to_use {
+                let exported = PACKAGES.with(|p| {
+                    let packages = p.borrow();
+                    packages
+                        .get(used_pkg)
+                        .map(|pkg| {
+                            pkg.external_symbols
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                });
+
+                for (base, new_sym) in exported {
+                    let (present, inherited_other, is_shadowing) = PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        let mut present: Option<String> = None;
+                        let mut inherited: Option<String> = None;
+                        let mut shadowing = false;
+                        if let Some(pkg) = packages.get(&target_pkg) {
+                            present = pkg
+                                .internal_symbols
+                                .get(&base)
+                                .cloned()
+                                .or_else(|| pkg.external_symbols.get(&base).cloned());
+                            shadowing = pkg.shadowing_symbols.contains(&base);
+                            for already_used in pkg.get_use_list() {
+                                if already_used.eq_ignore_ascii_case(used_pkg) {
+                                    continue;
+                                }
+                                if let Some(other) = packages.get(already_used) {
+                                    if let Some(sym) = other.external_symbols.get(&base) {
+                                        inherited = Some(sym.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        (present, inherited, shadowing)
+                    });
+
+                    if is_shadowing {
+                        // A shadowing symbol suppresses inherited name conflicts.
+                        continue;
+                    }
+
+                    if let Some(old_present) = present {
+                        if !old_present.eq_ignore_ascii_case(&new_sym) {
+                            let chosen = signal_name_conflict(vec![old_present.clone(), new_sym.clone()], env)?
+                                .unwrap_or(old_present.clone());
+                            PACKAGES.with(|p| {
+                                let mut packages = p.borrow_mut();
+                                if let Some(pkg) = packages.get_mut(&target_pkg) {
+                                    if chosen.eq_ignore_ascii_case(&old_present) {
+                                        pkg.add_internal_symbol_identity(&base, &old_present);
+                                        if !pkg.shadowing_symbols.contains(&base) {
+                                            pkg.shadowing_symbols.push(base.clone());
+                                        }
+                                    } else {
+                                        pkg.internal_symbols.remove(&base);
+                                        pkg.external_symbols.remove(&base);
+                                    }
+                                }
+                            });
+                        }
+                    } else if let Some(old_inherited) = inherited_other {
+                        if !old_inherited.eq_ignore_ascii_case(&new_sym) {
+                            let chosen = signal_name_conflict(vec![old_inherited.clone(), new_sym.clone()], env)?
+                                .unwrap_or(old_inherited.clone());
+                            PACKAGES.with(|p| {
+                                let mut packages = p.borrow_mut();
+                                if let Some(pkg) = packages.get_mut(&target_pkg) {
+                                    pkg.add_internal_symbol_identity(&base, &chosen);
+                                    if !pkg.shadowing_symbols.contains(&base) {
+                                        pkg.shadowing_symbols.push(base.clone());
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
-            });
+
+                PACKAGES.with(|p| {
+                    let mut packages = p.borrow_mut();
+                    if let Some(pkg) = packages.get_mut(&target_pkg) {
+                        pkg.use_package(used_pkg);
+                    }
+                });
+            }
 
             Ok(EvalResult::Boolean(true))
         }
@@ -815,25 +1355,16 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
             // Get list of packages to unuse
             let pkgs_to_unuse: Vec<String> = match &args[0] {
-                EvalResult::Symbol(name) | EvalResult::String(name) => {
-                    let pkg_name = if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else {
-                        name.to_uppercase()
-                    };
-                    vec![pkg_name]
+                EvalResult::Package(_) | EvalResult::Symbol(_) | EvalResult::String(_) => {
+                    vec![designator_to_package_name(&args[0])?]
                 }
                 EvalResult::Cons(_, _) => {
                     let mut pkgs = Vec::new();
                     let mut current = args[0].clone();
                     while let EvalResult::Cons(car, cdr) = current {
-                        if let EvalResult::Symbol(s) | EvalResult::String(s) = &*car.borrow() {
-                            let pkg_name = if s.starts_with(':') {
-                                s[1..].to_uppercase()
-                            } else {
-                                s.to_uppercase()
-                            };
-                            pkgs.push(pkg_name);
+                        match designator_to_package_name(&car.borrow()) {
+                            Ok(pkg_name) => pkgs.push(pkg_name),
+                            Err(_) => {}
                         }
                         current = cdr.borrow().clone();
                     }
@@ -845,18 +1376,13 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Get target package (defaults to current package)
             let target_pkg = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(name) | EvalResult::String(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
             };
+            ensure_package_unlocked(&target_pkg, env)?;
 
             // Remove each package from the target's use-list
             PACKAGES.with(|p| {
@@ -878,6 +1404,7 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 Some(arg) => designator_to_package_name(arg)?,
                 None => return Err("rename-package requires a package designator".to_string()),
             };
+            ensure_package_unlocked(&old_pkg_name, env)?;
 
             // Get new name from second arg
             let new_name = match args.get(1) {
@@ -975,34 +1502,14 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 return Err("unintern requires a symbol".to_string());
             }
 
-            // Get symbol name
-            let sym_name = match &args[0] {
-                EvalResult::Symbol(s) => {
-                    if s.starts_with(':') {
-                        s[1..].to_uppercase()
-                    } else {
-                        s.to_uppercase()
-                    }
-                }
-                EvalResult::String(s) => s.to_uppercase(),
-                // CL booleans T/NIL are symbols and should be accepted as designators.
-                EvalResult::Bool(true) | EvalResult::Boolean(true) => "T".to_string(),
-                EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => "NIL".to_string(),
-                _ => return Err("unintern requires a symbol".to_string()),
-            };
+            let sym_identity = symbol_identity_of(&args[0], None)?;
+            let sym_name = symbol_base_name(&sym_identity);
 
             // Get package name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    EvalResult::String(name) => name.to_uppercase(),
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
@@ -1013,8 +1520,34 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 return Ok(EvalResult::Nil);
             }
 
+            let protected_pkg = matches!(
+                pkg_name.as_str(),
+                "COMMON-LISP" | "CL" | "KEYWORD" | "CORE"
+            );
+            if protected_pkg {
+                return signal_package_error(
+                    &format!("Cannot unintern {} from {}", sym_name, pkg_name),
+                    env,
+                    false,
+                );
+            }
+
+            let present = PACKAGES.with(|p| {
+                p.borrow()
+                    .get(&pkg_name)
+                    .map(|pkg| {
+                        pkg.internal_symbols.contains_key(&sym_name)
+                            || pkg.external_symbols.contains_key(&sym_name)
+                    })
+                    .unwrap_or(false)
+            });
+            if !present {
+                return Ok(EvalResult::Nil);
+            }
+            ensure_package_unlocked(&pkg_name, env)?;
+
             // Remove symbol from package
-            let result = PACKAGES.with(|p| {
+            let removed = PACKAGES.with(|p| {
                 let mut packages = p.borrow_mut();
                 if let Some(pkg) = packages.get_mut(&pkg_name) {
                     pkg.unintern(&sym_name)
@@ -1023,15 +1556,49 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 }
             });
 
-            Ok(EvalResult::Boolean(result))
+            if !removed {
+                return Ok(EvalResult::Nil);
+            }
+
+            // If uninterning exposed multiple inherited symbols with the same name, signal conflict.
+            let candidates = PACKAGES.with(|p| {
+                let packages = p.borrow();
+                let mut out: Vec<String> = Vec::new();
+                if let Some(pkg) = packages.get(&pkg_name) {
+                    for used in pkg.get_use_list() {
+                        if let Some(other) = packages.get(used) {
+                            if let Some(sym) = other.external_symbols.get(&sym_name) {
+                                if !out.iter().any(|v| v.eq_ignore_ascii_case(sym)) {
+                                    out.push(sym.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                out
+            });
+            if candidates.len() > 1 {
+                let chosen = signal_name_conflict(candidates.clone(), env)?.unwrap_or_else(|| candidates[0].clone());
+                PACKAGES.with(|p| {
+                    let mut packages = p.borrow_mut();
+                    if let Some(pkg) = packages.get_mut(&pkg_name) {
+                        pkg.add_internal_symbol_identity(&sym_name, &chosen);
+                        if !pkg.shadowing_symbols.contains(&sym_name) {
+                            pkg.shadowing_symbols.push(sym_name.clone());
+                        }
+                    }
+                });
+            }
+
+            Ok(EvalResult::Boolean(true))
         }
 
         "find-symbol" => {
             // (find-symbol string &optional package)
             // Return symbol and status (:internal, :external, :inherited, or nil) as multiple values
             let name = match args.get(0) {
-                Some(EvalResult::String(s)) => s.to_uppercase(),
-                Some(EvalResult::Symbol(s)) => s.to_uppercase(),
+                Some(EvalResult::String(s)) => symbol_base_name(s),
+                Some(EvalResult::Symbol(s)) => symbol_base_name(s),
                 _ => return Err("find-symbol requires a string".to_string()),
             };
 
@@ -1058,24 +1625,26 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             } else {
                 get_current_package()
             };
-
             // Look up symbol in package (including inherited symbols)
             let result = PACKAGES.with(|p| {
                 let packages = p.borrow();
                 if let Some(pkg) = packages.get(&pkg_name) {
                     // First check direct symbols
-                    if pkg.external_symbols.contains_key(&name) {
-                        return Some((name.clone(), ":EXTERNAL"));
+                    if let Some(sym) = pkg.external_symbols.get(&name) {
+                        let identity = normalize_symbol_identity_for_home_package(sym, pkg.get_name(), &name);
+                        return Some((identity, ":EXTERNAL"));
                     }
-                    if pkg.internal_symbols.contains_key(&name) {
-                        return Some((name.clone(), ":INTERNAL"));
+                    if let Some(sym) = pkg.internal_symbols.get(&name) {
+                        let identity = normalize_symbol_identity_for_home_package(sym, pkg.get_name(), &name);
+                        return Some((identity, ":INTERNAL"));
                     }
 
                     // Check inherited symbols from used packages
                     for used_pkg_name in pkg.get_use_list() {
                         if let Some(used_pkg) = packages.get(used_pkg_name) {
-                            if used_pkg.external_symbols.contains_key(&name) {
-                                return Some((name.clone(), ":INHERITED"));
+                            if let Some(sym) = used_pkg.external_symbols.get(&name) {
+                                let identity = normalize_symbol_identity_for_home_package(sym, used_pkg.get_name(), &name);
+                                return Some((identity, ":INHERITED"));
                             }
                         }
                     }
@@ -1149,8 +1718,8 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             let name = match args.get(0) {
                 Some(EvalResult::String(s)) => s.to_uppercase(),
                 Some(EvalResult::Symbol(s)) => {
-                    // If it's a symbol, get its name
-                    if s.starts_with(':') { s[1..].to_uppercase() } else { s.to_uppercase() }
+                    // Symbol designator uses SYMBOL-NAME semantics (package prefix stripped).
+                    symbol_base_name(s)
                 }
                 Some(EvalResult::Nil) => "NIL".to_string(),
                 _ => return Err("intern requires a string".to_string()),
@@ -1159,11 +1728,8 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Get package name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(n) => {
-                        if n.starts_with(':') { n[1..].to_uppercase() } else { n.to_uppercase() }
-                    }
-                    EvalResult::String(n) => n.to_uppercase(),
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
@@ -1174,16 +1740,19 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             let existing_status = PACKAGES.with(|p| {
                 let packages = p.borrow();
                 if let Some(pkg) = packages.get(&pkg_name) {
-                    if pkg.external_symbols.contains_key(&name) {
-                        Some(":EXTERNAL")
-                    } else if pkg.internal_symbols.contains_key(&name) {
-                        Some(":INTERNAL")
+                    if let Some(sym) = pkg.external_symbols.get(&name) {
+                        let identity = normalize_symbol_identity_for_home_package(sym, pkg.get_name(), &name);
+                        Some((identity, ":EXTERNAL"))
+                    } else if let Some(sym) = pkg.internal_symbols.get(&name) {
+                        let identity = normalize_symbol_identity_for_home_package(sym, pkg.get_name(), &name);
+                        Some((identity, ":INTERNAL"))
                     } else {
                         // Check inherited from use-list
                         for used_pkg_name in pkg.get_use_list() {
                             if let Some(used_pkg) = packages.get(used_pkg_name) {
-                                if used_pkg.external_symbols.contains_key(&name) {
-                                    return Some(":INHERITED");
+                                if let Some(sym) = used_pkg.external_symbols.get(&name) {
+                                    let identity = normalize_symbol_identity_for_home_package(sym, used_pkg.get_name(), &name);
+                                    return Some((identity, ":INHERITED"));
                                 }
                             }
                         }
@@ -1195,16 +1764,18 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             });
 
             let (symbol_name, status) = match existing_status {
-                Some(s) => (name.clone(), s),
+                Some((s, status)) => (s, status),
                 None => {
+                    ensure_package_unlocked(&pkg_name, env)?;
                     // Need to intern - use mutable borrow
+                    let symbol_name = make_identity_for_package_symbol(&pkg_name, &name);
                     PACKAGES.with(|p| {
                         let mut packages = p.borrow_mut();
                         if let Some(pkg) = packages.get_mut(&pkg_name) {
-                            pkg.add_internal_symbol(&name);
+                            pkg.add_internal_symbol_identity(&name, &symbol_name);
                         }
                     });
-                    (name.clone(), "NIL")
+                    (symbol_name, "NIL")
                 }
             };
 
@@ -1227,8 +1798,31 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             match args.get(0) {
                 Some(arg @ (EvalResult::String(_) | EvalResult::Symbol(_) | EvalResult::Package(_))) => {
                     let pkg_name = designator_to_package_name(arg)?;
+                    let users = PACKAGES.with(|p| {
+                        let packages = p.borrow();
+                        packages
+                            .values()
+                            .filter(|pkg| {
+                                pkg.get_name() != pkg_name
+                                    && pkg.get_use_list().iter().any(|u| u.eq_ignore_ascii_case(&pkg_name))
+                            })
+                            .map(|pkg| pkg.get_name().to_string())
+                            .collect::<Vec<_>>()
+                    });
+                    if !users.is_empty() {
+                        signal_package_error(
+                            &format!("Cannot delete package {}; it is used by {:?}", pkg_name, users),
+                            env,
+                            true,
+                        )?;
+                    }
+                    ensure_package_unlocked(&pkg_name, env)?;
                     PACKAGES.with(|p| {
                         let mut packages = p.borrow_mut();
+                        // Remove references from use-lists first.
+                        for pkg in packages.values_mut() {
+                            pkg.unuse_package(&pkg_name);
+                        }
                         packages.retain(|_, pkg| pkg.get_name() != pkg_name);
                     });
                     Ok(EvalResult::Boolean(true))
@@ -1252,9 +1846,15 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         if let Some(pkg) = packages.get(&pkg_name) {
                             let mut result = EvalResult::Nil;
                             for sym_name in pkg.get_shadowing_symbols().iter().rev() {
+                                let identity = pkg
+                                    .internal_symbols
+                                    .get(sym_name)
+                                    .cloned()
+                                    .or_else(|| pkg.external_symbols.get(sym_name).cloned())
+                                    .unwrap_or_else(|| sym_name.clone());
                                 result = EvalResult::Cons(
                                     std::rc::Rc::new(std::cell::RefCell::new(
-                                        EvalResult::Symbol(sym_name.clone())
+                                        EvalResult::Symbol(identity)
                                     )),
                                     std::rc::Rc::new(std::cell::RefCell::new(result))
                                 );
@@ -1272,29 +1872,18 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         "package-use-list" => {
             // Return list of packages used by this package
             let pkg_name = match args.get(0) {
-                Some(EvalResult::Package(name)) => name.clone(),
-                Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else {
-                        name.to_uppercase()
-                    }
-                }
-                _ => return Ok(EvalResult::Nil),
+                Some(arg) => designator_to_package_name(arg)?,
+                None => return Ok(EvalResult::Nil),
             };
             PACKAGES.with(|p| {
                 let packages = p.borrow();
                 if let Some(pkg) = packages.get(&pkg_name) {
-                    let mut result = EvalResult::Nil;
-                    for used_name in pkg.get_use_list().iter().rev() {
-                        result = EvalResult::Cons(
-                            std::rc::Rc::new(std::cell::RefCell::new(
-                                EvalResult::Symbol(used_name.clone())
-                            )),
-                            std::rc::Rc::new(std::cell::RefCell::new(result))
-                        );
-                    }
-                    Ok(result)
+                    Ok(vec_to_list(
+                        pkg.get_use_list()
+                            .iter()
+                            .map(|used_name| EvalResult::Package(used_name.clone()))
+                            .collect(),
+                    ))
                 } else {
                     Ok(EvalResult::Nil)
                 }
@@ -1303,32 +1892,24 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "package-used-by-list" => {
             // Return list of packages that use this package
-            match args.get(0) {
-                Some(EvalResult::String(name)) | Some(EvalResult::Symbol(name)) => {
-                    let target_pkg_name = if name.starts_with(':') {
-                        name[1..].to_uppercase()
-                    } else {
-                        name.to_uppercase()
-                    };
-                    PACKAGES.with(|p| {
-                        let packages = p.borrow();
-                        let mut result = EvalResult::Nil;
-                        // Find all packages that have target_pkg_name in their use-list
-                        for (pkg_name, pkg) in packages.iter() {
-                            if pkg.get_use_list().iter().any(|u| u == &target_pkg_name) {
-                                result = EvalResult::Cons(
-                                    std::rc::Rc::new(std::cell::RefCell::new(
-                                        EvalResult::Symbol(pkg_name.clone())
-                                    )),
-                                    std::rc::Rc::new(std::cell::RefCell::new(result))
-                                );
-                            }
+            let target_pkg_name = match args.get(0) {
+                Some(arg) => designator_to_package_name(arg)?,
+                None => return Ok(EvalResult::Nil),
+            };
+            PACKAGES.with(|p| {
+                let packages = p.borrow();
+                let mut users: Vec<EvalResult> = Vec::new();
+                // Find all canonical packages that have target_pkg_name in their use-list
+                for pkg in packages.values() {
+                    if pkg.get_use_list().iter().any(|u| u == &target_pkg_name) {
+                        let canonical = pkg.get_name().to_string();
+                        if !users.iter().any(|v| matches!(v, EvalResult::Package(n) if n == &canonical)) {
+                            users.push(EvalResult::Package(canonical));
                         }
-                        Ok(result)
-                    })
+                    }
                 }
-                _ => Ok(EvalResult::Nil),
-            }
+                Ok(vec_to_list(users))
+            })
         }
 
         "shadow" => {
@@ -1359,18 +1940,13 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Get package name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(name) | EvalResult::String(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
             };
+            ensure_package_unlocked(&pkg_name, env)?;
 
             // Add shadowing symbols
             PACKAGES.with(|p| {
@@ -1418,18 +1994,13 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             // Get package name
             let pkg_name = if args.len() > 1 {
                 match &args[1] {
-                    EvalResult::Symbol(name) | EvalResult::String(name) => {
-                        if name.starts_with(':') {
-                            name[1..].to_uppercase()
-                        } else {
-                            name.to_uppercase()
-                        }
-                    }
-                    _ => get_current_package(),
+                    EvalResult::Nil => get_current_package(),
+                    other => designator_to_package_name(other)?,
                 }
             } else {
                 get_current_package()
             };
+            ensure_package_unlocked(&pkg_name, env)?;
 
             // Add symbols with shadowing
             PACKAGES.with(|p| {
@@ -1463,7 +2034,7 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         if let Some(pkg) = packages.get(&pkg_name) {
                             let mut result = EvalResult::Nil;
                             // Add internal symbols
-                            for sym_name in pkg.internal_symbols.keys() {
+                            for sym_name in pkg.internal_symbols.values() {
                                 result = EvalResult::Cons(
                                     std::rc::Rc::new(std::cell::RefCell::new(
                                         EvalResult::Symbol(sym_name.clone())
@@ -1472,7 +2043,7 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                                 );
                             }
                             // Add external symbols
-                            for sym_name in pkg.external_symbols.keys() {
+                            for sym_name in pkg.external_symbols.values() {
                                 result = EvalResult::Cons(
                                     std::rc::Rc::new(std::cell::RefCell::new(
                                         EvalResult::Symbol(sym_name.clone())
@@ -1503,7 +2074,7 @@ pub fn call_package_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         let packages = p.borrow();
                         if let Some(pkg) = packages.get(&pkg_name) {
                             let mut result = EvalResult::Nil;
-                            for sym_name in pkg.external_symbols.keys() {
+                            for sym_name in pkg.external_symbols.values() {
                                 result = EvalResult::Cons(
                                     std::rc::Rc::new(std::cell::RefCell::new(
                                         EvalResult::Symbol(sym_name.clone())

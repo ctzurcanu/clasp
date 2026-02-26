@@ -51,6 +51,18 @@ impl HashTable {
         table.remove(&hash).is_some()
     }
 
+    /// Remove all entries from the hash table.
+    pub fn clear(&self) {
+        let mut table = self.table.write().unwrap();
+        table.clear();
+    }
+
+    /// Return the number of entries in the hash table.
+    pub fn count(&self) -> usize {
+        let table = self.table.read().unwrap();
+        table.len()
+    }
+
     /// Get all key-value pairs
     pub fn entries(&self) -> Vec<(LispObject, LispObject)> {
         let table = self.table.read().unwrap();

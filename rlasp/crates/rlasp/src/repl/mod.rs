@@ -72,7 +72,24 @@ impl Repl {
         }
 
         // 5. Evaluate with persistent environment
-        eval::eval_with_persistent_env(&ast, &mut self.env)
+        match eval::eval_with_persistent_env(&ast, &mut self.env) {
+            Ok(v) => Ok(v),
+            Err(e) if e == "__SIGNAL_CONDITION__" => {
+                if let Some(cond) = eval::eval_conditions::take_pending_signaled_condition() {
+                    Err(format!("{}", cond))
+                } else {
+                    Err(e)
+                }
+            }
+            Err(e) if e == "__MP_SIGNAL_CONDITION__" => {
+                if let Some(cond) = eval::take_pending_mp_signal_condition() {
+                    Err(format!("{}", cond))
+                } else {
+                    Err(e)
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Evaluate all forms in a file
@@ -110,6 +127,16 @@ impl Repl {
                 Err(e) => {
                     if std::env::var("RLASP_DEBUG_LOAD_ERROR").is_ok() {
                         eprintln!("[load-error] ast={:?}", ast);
+                    }
+                    if e == "__SIGNAL_CONDITION__" {
+                        if let Some(cond) = eval::eval_conditions::take_pending_signaled_condition() {
+                            return Err(format!("{}", cond));
+                        }
+                    }
+                    if e == "__MP_SIGNAL_CONDITION__" {
+                        if let Some(cond) = eval::take_pending_mp_signal_condition() {
+                            return Err(format!("{}", cond));
+                        }
                     }
                     return Err(e);
                 }

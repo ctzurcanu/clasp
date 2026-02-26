@@ -21,6 +21,12 @@ impl Reader {
         self.parser.read()
     }
 
+    /// Read one s-expression and return reader positions:
+    /// (object, before-trailing-whitespace, after-trailing-whitespace).
+    pub fn read_with_positions(&mut self) -> ReaderResult<(LispObject, usize, usize)> {
+        self.parser.read_with_positions()
+    }
+
     /// Read all s-expressions from the input
     pub fn read_all(&mut self) -> ReaderResult<Vec<LispObject>> {
         let mut exprs = Vec::new();
@@ -44,6 +50,13 @@ impl Reader {
 pub fn read_from_string(input: &str) -> ReaderResult<LispObject> {
     let mut reader = Reader::from_string(input)?;
     reader.read()
+}
+
+/// Convenience function to read a single s-expression from a string
+/// while also returning read positions.
+pub fn read_from_string_with_positions(input: &str) -> ReaderResult<(LispObject, usize, usize)> {
+    let mut reader = Reader::from_string(input)?;
+    reader.read_with_positions()
 }
 
 /// Convenience function to read all s-expressions from a string

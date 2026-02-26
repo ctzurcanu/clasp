@@ -73,7 +73,9 @@ pub struct Constant {
 pub enum ConstantValue {
     Fixnum(i64),
     Bignum(String), // String representation of large integer
+    Ratio(String, String), // Signed numerator, positive denominator
     Float(f64),
+    Complex(f64, f64), // Complex literal components
     Character(char),
     String(String),
     Nil,

@@ -86,10 +86,10 @@ fn list_to_vec(list: &EvalResult) -> Option<Vec<EvalResult>> {
     }
 }
 
-fn directory_list_to_string(dir: &EvalResult) -> Option<String> {
+fn directory_list_to_string_with_mode(dir: &EvalResult) -> Option<(String, bool)> {
     let items = list_to_vec(dir)?;
     if items.is_empty() {
-        return Some(String::new());
+        return Some((String::new(), true));
     }
 
     let mut is_absolute = false;
@@ -128,7 +128,11 @@ fn directory_list_to_string(dir: &EvalResult) -> Option<String> {
         path.push('/');
     }
     path.push_str(&parts.join("/"));
-    Some(path)
+    Some((path, !is_absolute))
+}
+
+fn directory_list_to_string(dir: &EvalResult) -> Option<String> {
+    directory_list_to_string_with_mode(dir).map(|(path, _is_relative)| path)
 }
 
 fn list_pathname_designator_to_string(arg: &EvalResult) -> Option<String> {
@@ -180,48 +184,73 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
         }
 
         "make-pathname" => {
-            // Extract keyword arguments
-            let mut name = String::new();
-            let mut type_ext = String::new();
-            let mut directory = String::new();
+            // Extract keyword arguments. Keep "not provided" distinct from
+            // "provided as empty/NIL" so we can inherit from :defaults.
+            let mut name: Option<String> = None;
+            let mut type_ext: Option<String> = None;
+            let mut directory: Option<String> = None;
             let mut defaults_path: Option<String> = None;
 
             let mut i = 0;
             while i < args.len() {
                 if let EvalResult::Symbol(key) = &args[i] {
                     if key.starts_with(':') && i + 1 < args.len() {
-                        match key.as_str() {
+                        let key_norm = {
+                            let base = key.rsplit(':').next().unwrap_or(key.as_str());
+                            if base.starts_with(':') {
+                                base.to_ascii_lowercase()
+                            } else {
+                                format!(":{}", base.to_ascii_lowercase())
+                            }
+                        };
+                        match key_norm.as_str() {
                             ":name" => {
-                                if let EvalResult::Symbol(s) | EvalResult::String(s) = &args[i + 1] {
-                                    name = if s.starts_with('"') && s.ends_with('"') {
-                                        s[1..s.len()-1].to_string()
-                                    } else {
-                                        s.clone()
-                                    };
+                                match &args[i + 1] {
+                                    EvalResult::Symbol(s) | EvalResult::String(s) => {
+                                        let value = if s.starts_with('"') && s.ends_with('"') {
+                                            s[1..s.len()-1].to_string()
+                                        } else {
+                                            s.clone()
+                                        };
+                                        name = Some(value);
+                                    }
+                                    EvalResult::Nil => name = Some(String::new()),
+                                    _ => {}
                                 }
                             }
                             ":type" => {
-                                if let EvalResult::Symbol(s) | EvalResult::String(s) = &args[i + 1] {
-                                    type_ext = if s.starts_with('"') && s.ends_with('"') {
-                                        s[1..s.len()-1].to_string()
-                                    } else {
-                                        s.clone()
-                                    };
+                                match &args[i + 1] {
+                                    EvalResult::Symbol(s) | EvalResult::String(s) => {
+                                        let value = if s.starts_with('"') && s.ends_with('"') {
+                                            s[1..s.len()-1].to_string()
+                                        } else {
+                                            s.clone()
+                                        };
+                                        type_ext = Some(value);
+                                    }
+                                    EvalResult::Nil => type_ext = Some(String::new()),
+                                    _ => {}
                                 }
                             }
                             ":directory" => {
                                 match &args[i + 1] {
                                     EvalResult::Symbol(s) | EvalResult::String(s) => {
-                                        directory = if s.starts_with('"') && s.ends_with('"') {
+                                        let value = if s.starts_with('"') && s.ends_with('"') {
                                             s[1..s.len()-1].to_string()
                                         } else {
                                             s.clone()
                                         };
+                                        directory = Some(value);
                                     }
                                     EvalResult::Cons(_, _) => {
-                                        if let Some(dir_str) = directory_list_to_string(&args[i + 1]) {
-                                            directory = dir_str;
+                                        if let Some((dir_str, _is_relative)) =
+                                            directory_list_to_string_with_mode(&args[i + 1])
+                                        {
+                                            directory = Some(dir_str);
                                         }
+                                    }
+                                    EvalResult::Nil => {
+                                        directory = Some(String::new());
                                     }
                                     _ => {}
                                 }
@@ -242,17 +271,32 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                 }
             }
 
-            if directory.is_empty() {
-                if let Some(defaults) = defaults_path {
-                    let mut dir = defaults.clone();
-                    if dir.ends_with('/') {
-                        dir = dir.trim_end_matches('/').to_string();
-                    } else if let Some(parent) = Path::new(&dir).parent().and_then(|p| p.to_str()) {
-                        dir = parent.to_string();
+            let mut default_dir = String::new();
+            let mut default_name = String::new();
+            let mut default_type = String::new();
+            if let Some(defaults) = defaults_path {
+                let defaults_path = Path::new(&defaults);
+                if defaults.ends_with('/') || defaults_path.is_dir() {
+                    default_dir = defaults.trim_end_matches('/').to_string();
+                } else {
+                    if let Some(parent) = defaults_path.parent().and_then(|p| p.to_str()) {
+                        default_dir = parent.to_string();
                     }
-                    directory = dir;
+                    if let Some(stem) = defaults_path.file_stem().and_then(|s| s.to_str()) {
+                        default_name = stem.to_string();
+                    }
+                    if let Some(ext) = defaults_path.extension().and_then(|s| s.to_str()) {
+                        default_type = ext.to_string();
+                    }
                 }
             }
+
+            // If :directory is explicitly provided, keep it as provided.
+            // CL make-pathname does not force merging explicit relative
+            // directory components with :defaults at construction time.
+            let directory = if let Some(dir) = directory { dir } else { default_dir };
+            let name = name.unwrap_or(default_name);
+            let type_ext = type_ext.unwrap_or(default_type);
 
             // Construct pathname
             let mut path = directory;
@@ -383,55 +427,41 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             match (path1, path2) {
                 (Some(p1), Some(p2)) => {
                     let has_filename = |p: &str| -> bool {
-                        !p.is_empty()
-                            && !p.ends_with('/')
-                            && !p.ends_with(';')
-                            && !p.ends_with(':')
-                    };
-
-                    let split_dir_file = |p: &str| -> (String, String) {
                         if p.is_empty() {
-                            return (String::new(), String::new());
+                            return false;
                         }
-
                         if p.ends_with('/') || p.ends_with(';') || p.ends_with(':') {
-                            return (p.to_string(), String::new());
+                            return false;
                         }
-
-                        if let Some(idx) = p.rfind(|c| c == '/' || c == ';') {
-                            let (dir, file) = p.split_at(idx + 1);
-                            (dir.to_string(), file.to_string())
-                        } else {
-                            (String::new(), p.to_string())
+                        // If the path currently exists as a directory, treat it as a directory
+                        // even without a trailing slash.
+                        if Path::new(p).is_dir() {
+                            return false;
                         }
+                        true
                     };
-
-                    let is_absolute_like = |p: &str| -> bool { p.starts_with('/') };
-
-                    if is_absolute_like(&p1) {
+                    if Path::new(&p1).is_absolute() {
                         return Ok(make_pathname_object_from_string(&p1));
                     }
 
-                    let (p1_dir, p1_file) = split_dir_file(&p1);
-                    let (p2_dir, p2_file) = split_dir_file(&p2);
-
-                    let merged = if has_filename(&p1) {
-                        if p1_dir.is_empty() {
-                            format!("{}{}", p2_dir, p1_file)
-                        } else {
-                            p1
-                        }
-                    } else if !p1_dir.is_empty() {
-                        if p2_file.is_empty() {
-                            p1_dir
-                        } else {
-                            format!("{}{}", p1_dir, p2_file)
-                        }
-                    } else if p2.is_empty() {
-                        p1
+                    let base_dir = if has_filename(&p2) {
+                        Path::new(&p2)
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_default()
                     } else {
-                        p2
+                        PathBuf::from(&p2)
                     };
+                    let mut merged_path = if p1.is_empty() {
+                        base_dir
+                    } else {
+                        base_dir.join(&p1)
+                    };
+
+                    let mut merged = merged_path.to_string_lossy().to_string();
+                    if !has_filename(&p1) && !merged.ends_with('/') {
+                        merged.push('/');
+                    }
 
                     Ok(make_pathname_object_from_string(&merged))
                 }

@@ -5,10 +5,13 @@ use super::eval::{eval_with_persistent_env, result_to_ast, result_to_data_ast, E
 use rlasp_runtime::{LispObject, RVector, header::{TypeHeader, ObjectType}};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 thread_local! {
     static READ_TIME_ENV_PTR: RefCell<Option<*mut HashMap<String, EvalResult>>> = RefCell::new(None);
 }
+
+static PSETQ_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub fn with_read_time_env<F, R>(env: &mut HashMap<String, EvalResult>, f: F) -> R
 where
@@ -110,15 +113,32 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                             return Ok(ASTNode::variable(name.to_string()));
                         }
+                        ObjectType::String => {
+                            // Strings are self-evaluating in code position.
+                            let str_ptr = ptr as *const rlasp_runtime::RString;
+                            let s = unsafe { (*str_ptr).as_str() };
+                            return Ok(ASTNode::Constant(ConstantValue::String(s.to_string())));
+                        }
                         ObjectType::Number => {
-                            // Try Float first
-                            if let Some(f) = obj.as_float() {
-                                return Ok(ASTNode::float(f));
-                            }
-                            // Try Bignum
                             let num = unsafe { &*(ptr as *const rlasp_runtime::Number) };
-                            if let Some(bignum) = num.as_bignum() {
-                                return Ok(ASTNode::Constant(ConstantValue::Bignum(bignum.to_string())));
+                            match &num.value {
+                                rlasp_runtime::NumberValue::Float(f) => {
+                                    return Ok(ASTNode::float(*f));
+                                }
+                                rlasp_runtime::NumberValue::Bignum(b) => {
+                                    return Ok(ASTNode::Constant(ConstantValue::Bignum(b.to_string())));
+                                }
+                                rlasp_runtime::NumberValue::Ratio(r) => {
+                                    let mut num_s = r.numerator_ref().to_string();
+                                    if *r < malachite::Rational::from(0) {
+                                        num_s = format!("-{}", num_s);
+                                    }
+                                    let den_s = r.denominator_ref().to_string();
+                                    return Ok(ASTNode::Constant(ConstantValue::Ratio(num_s, den_s)));
+                                }
+                                rlasp_runtime::NumberValue::Complex(c) => {
+                                    return Ok(ASTNode::Constant(ConstantValue::Complex(c.re, c.im)));
+                                }
                             }
                         }
                         _ => {
@@ -270,6 +290,34 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         return Err("read-time-eval requires one argument".to_string());
                     }
                     return eval_read_time_form(cdr_cons.car(), false);
+                }
+
+                if base.eq_ignore_ascii_case("psetq") {
+                    let args = cdr_to_vec(cdr)?;
+                    if args.len() % 2 != 0 {
+                        return Err("Odd number of args to PSETQ.".to_string());
+                    }
+                    if args.is_empty() {
+                        return Ok(ASTNode::nil());
+                    }
+
+                    // Parallel assignment expansion:
+                    // (psetq a v1 b v2) => (let ((tmp1 v1) (tmp2 v2)) (setq a tmp1) (setq b tmp2) nil)
+                    let stamp = PSETQ_TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+                    let mut bindings: Vec<(String, ASTNode)> = Vec::new();
+                    let mut body: Vec<ASTNode> = Vec::new();
+
+                    for i in (0..args.len()).step_by(2) {
+                        let var = match &args[i] {
+                            ASTNode::Variable(v) => v.clone(),
+                            _ => return Err("psetq requires symbol variables".to_string()),
+                        };
+                        let tmp_name = format!("%%PSETQ_TMP_{}_{}%%", stamp, i / 2);
+                        bindings.push((tmp_name.clone(), args[i + 1].clone()));
+                        body.push(ASTNode::setq(var, ASTNode::variable(tmp_name)));
+                    }
+                    body.push(ASTNode::nil());
+                    return Ok(ASTNode::let_bindings(bindings, body));
                 }
 
                 if std::env::var("RLASP_DEBUG_DEFUN").is_ok()
@@ -1484,10 +1532,14 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
 /// Used to defer evaluation when unquote is found in backquote contexts
 fn contains_unquote_raw(obj: &LispObject) -> bool {
     // Check if it's a symbol that is "unquote" or "unquote-splicing"
-    if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-        let sym = unsafe { &*sym_ptr };
-        let name = sym.name();
-        return name == "unquote" || name == "unquote-splicing";
+    if obj.is_general() {
+        if let Some(ptr) = obj.as_general_ptr::<u8>() {
+            if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+                let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                let name = sym.name();
+                return name == "unquote" || name == "unquote-splicing";
+            }
+        }
     }
 
     // Check if it's a cons cell
@@ -1497,11 +1549,15 @@ fn contains_unquote_raw(obj: &LispObject) -> bool {
             let car = cons.car();
 
             // Check if car is unquote or unquote-splicing symbol
-            if let Some(sym_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
-                let sym = unsafe { &*sym_ptr };
-                let name = sym.name();
-                if name == "unquote" || name == "unquote-splicing" {
-                    return true;
+            if car.is_general() {
+                if let Some(ptr) = car.as_general_ptr::<u8>() {
+                    if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
+                        let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                        let name = sym.name();
+                        if name == "unquote" || name == "unquote-splicing" {
+                            return true;
+                        }
+                    }
                 }
             }
 
@@ -1737,6 +1793,31 @@ fn try_parse_simple_loop(cdr_list: &[ASTNode]) -> Option<ASTNode> {
 /// Convert LispObject to AST treating it as DATA (not code)
 /// This is used for quoted forms where special forms should NOT be interpreted
 /// e.g., '(defun foo) should become a list, not a function definition
+fn build_data_list_ast(elements: Vec<ASTNode>, tail: Option<ASTNode>) -> ASTNode {
+    if elements.is_empty() {
+        return tail.unwrap_or_else(ASTNode::nil);
+    }
+
+    if let Some(tail_ast) = tail {
+        // Preserve improper-list structure: (a b . c) => (a . (b . c))
+        let mut result = tail_ast;
+        for elem in elements.into_iter().rev() {
+            result = ASTNode::DottedPair {
+                car: Box::new(elem),
+                cdr: Box::new(result),
+            };
+        }
+        return result;
+    }
+
+    let mut iter = elements.into_iter();
+    let function = iter.next().unwrap_or_else(ASTNode::nil);
+    ASTNode::Call {
+        function: Box::new(function),
+        args: iter.collect(),
+    }
+}
+
 fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
     if obj.is_nil() {
         return Ok(ASTNode::nil());
@@ -1779,8 +1860,25 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                             return Ok(ASTNode::Variable(name.to_string()));
                         }
                         rlasp_runtime::header::ObjectType::Number => {
-                            if let Some(f) = obj.as_float() {
-                                return Ok(ASTNode::float(f));
+                            let num = unsafe { &*(ptr as *const rlasp_runtime::Number) };
+                            match &num.value {
+                                rlasp_runtime::NumberValue::Float(f) => {
+                                    return Ok(ASTNode::float(*f));
+                                }
+                                rlasp_runtime::NumberValue::Bignum(b) => {
+                                    return Ok(ASTNode::Constant(ConstantValue::Bignum(b.to_string())));
+                                }
+                                rlasp_runtime::NumberValue::Ratio(r) => {
+                                    let mut num_s = r.numerator_ref().to_string();
+                                    if *r < malachite::Rational::from(0) {
+                                        num_s = format!("-{}", num_s);
+                                    }
+                                    let den_s = r.denominator_ref().to_string();
+                                    return Ok(ASTNode::Constant(ConstantValue::Ratio(num_s, den_s)));
+                                }
+                                rlasp_runtime::NumberValue::Complex(c) => {
+                                    return Ok(ASTNode::Constant(ConstantValue::Complex(c.re, c.im)));
+                                }
                             }
                         }
                         rlasp_runtime::header::ObjectType::String => {
@@ -1807,109 +1905,72 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
         let cdr = cons.cdr();
 
         // Handle read-time eval in quoted context: evaluate and insert as data
-        if car_obj.is_general() && !car_obj.is_number() {
-            if let Some(symbol_ptr) = car_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-                if !symbol_ptr.is_null() {
-                    let symbol = unsafe { &*symbol_ptr };
-                    let name = symbol.name();
-                    let base = name.rsplit(':').next().unwrap_or(name);
-                    if base.eq_ignore_ascii_case("read-time-eval") {
-                        if !cdr.is_cons() {
-                            return Err("read-time-eval requires one argument".to_string());
-                        }
-                        let cdr_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
-                        if cdr_ptr.is_null() {
-                            return Err("read-time-eval requires one argument".to_string());
-                        }
-                        let cdr_cons = unsafe { &*cdr_ptr };
-                        if !cdr_cons.cdr().is_nil() {
-                            return Err("read-time-eval requires one argument".to_string());
-                        }
-                        return eval_read_time_form(cdr_cons.car(), true);
-                    }
+        if let Some(name) = symbol_name_if_symbol(car_obj) {
+            let base = name.rsplit(':').next().unwrap_or(name.as_str());
+            if base.eq_ignore_ascii_case("read-time-eval") {
+                if !cdr.is_cons() {
+                    return Err("read-time-eval requires one argument".to_string());
                 }
+                let cdr_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
+                if cdr_ptr.is_null() {
+                    return Err("read-time-eval requires one argument".to_string());
+                }
+                let cdr_cons = unsafe { &*cdr_ptr };
+                if !cdr_cons.cdr().is_nil() {
+                    return Err("read-time-eval requires one argument".to_string());
+                }
+                return eval_read_time_form(cdr_cons.car(), true);
             }
         }
 
         // Check for unquote/unquote-splicing - these must be preserved even in quoted context
         // because they may be inside a backquote
-        if car_obj.is_general() && !car_obj.is_number() {
-            if let Some(symbol_ptr) = car_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-                if !symbol_ptr.is_null() {
-                    let symbol = unsafe { &*symbol_ptr };
-                    let name = symbol.name();
-
-                    if name == "unquote" {
-                        // (unquote x) -> Unquote(x)
-                        // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
-                        // the unquoted form is CODE that will be evaluated
-                        if cdr.is_cons() {
-                            if let Some(cdr_ptr) = cdr.as_cons_ptr() {
-                                if !cdr_ptr.is_null() {
-                                    let cdr_cons = unsafe { &*cdr_ptr };
-                                    let form = lisp_to_ast(cdr_cons.car())?;
-                                    return Ok(ASTNode::Unquote(Box::new(form)));
-                                }
-                            }
+        if let Some(name) = symbol_name_if_symbol(car_obj) {
+            if name == "unquote" {
+                // (unquote x) -> Unquote(x)
+                // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
+                // the unquoted form is CODE that will be evaluated
+                if cdr.is_cons() {
+                    if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                        if !cdr_ptr.is_null() {
+                            let cdr_cons = unsafe { &*cdr_ptr };
+                            let form = lisp_to_ast(cdr_cons.car())?;
+                            return Ok(ASTNode::Unquote(Box::new(form)));
                         }
                     }
+                }
+            }
 
-                    if name == "unquote-splicing" {
-                        // (unquote-splicing x) -> UnquoteSplicing(x)
-                        // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
-                        // the unquoted form is CODE that will be evaluated
-                        if cdr.is_cons() {
-                            if let Some(cdr_ptr) = cdr.as_cons_ptr() {
-                                if !cdr_ptr.is_null() {
-                                    let cdr_cons = unsafe { &*cdr_ptr };
-                                    let form = lisp_to_ast(cdr_cons.car())?;
-                                    return Ok(ASTNode::UnquoteSplicing(Box::new(form)));
-                                }
-                            }
+            if name == "unquote-splicing" {
+                // (unquote-splicing x) -> UnquoteSplicing(x)
+                // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
+                // the unquoted form is CODE that will be evaluated
+                if cdr.is_cons() {
+                    if let Some(cdr_ptr) = cdr.as_cons_ptr() {
+                        if !cdr_ptr.is_null() {
+                            let cdr_cons = unsafe { &*cdr_ptr };
+                            let form = lisp_to_ast(cdr_cons.car())?;
+                            return Ok(ASTNode::UnquoteSplicing(Box::new(form)));
                         }
                     }
                 }
             }
         }
 
-        // For quoted data, we represent lists as Call nodes where the first element
-        // is the function and rest are args. When ast_to_result processes this,
-        // it will create a proper cons list (a . (b . (c . nil))).
-        let car = lisp_to_ast_as_data(car_obj)?;
-
-        if cdr.is_nil() {
-            // Single-element list (a) -> Call { function: a, args: [] }
-            return Ok(ASTNode::Call {
-                function: Box::new(car),
-                args: vec![],
-            });
-        } else if cdr.is_cons() {
-            // Multi-element list (a b c) -> Call { function: a, args: [b, c] }
-            let mut args = Vec::new();
-            let mut current = cdr;
-            while current.is_cons() {
-                let cdr_ptr = current.as_cons_ptr().ok_or("Invalid cons")?;
-                let cdr_cons = unsafe { &*cdr_ptr };
-                args.push(lisp_to_ast_as_data(cdr_cons.car())?);
-                current = cdr_cons.cdr();
-            }
-            if !current.is_nil() {
-                // Dotted pair at end - use DottedPair representation
-                // Actually, we need to handle this differently for improper lists
-                // For now, just add the final element to args (this may need refinement)
-                args.push(lisp_to_ast_as_data(current)?);
-            }
-            return Ok(ASTNode::Call {
-                function: Box::new(car),
-                args,
-            });
-        } else {
-            // Dotted pair
-            return Ok(ASTNode::DottedPair {
-                car: Box::new(car),
-                cdr: Box::new(lisp_to_ast_as_data(cdr)?),
-            });
+        let mut elements = vec![lisp_to_ast_as_data(car_obj)?];
+        let mut current = cdr;
+        while current.is_cons() {
+            let cdr_ptr = current.as_cons_ptr().ok_or("Invalid cons")?;
+            let cdr_cons = unsafe { &*cdr_ptr };
+            elements.push(lisp_to_ast_as_data(cdr_cons.car())?);
+            current = cdr_cons.cdr();
         }
+        let tail = if current.is_nil() {
+            None
+        } else {
+            Some(lisp_to_ast_as_data(current)?)
+        };
+        return Ok(build_data_list_ast(elements, tail));
     }
 
     // Fallback - treat as nil
@@ -1957,6 +2018,21 @@ fn raw_cdr_to_vec(mut cdr: LispObject) -> Result<Vec<LispObject>, String> {
     Ok(result)
 }
 
+fn symbol_name_if_symbol(obj: LispObject) -> Option<String> {
+    if !obj.is_general() || obj.is_number() {
+        return None;
+    }
+    let ptr = obj.as_general_ptr::<u8>()?;
+    if ptr.is_null() {
+        return None;
+    }
+    if unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::Symbol) {
+        return None;
+    }
+    let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+    Some(sym.name().to_string())
+}
+
 /// Extract bindings from raw LispObject without interpreting special forms for variable names
 /// This handles cases like (let* ((block (gensym))) ...) where "block" is a variable, not a special form
 fn extract_bindings_raw(bindings_obj: LispObject) -> Result<Vec<(String, ASTNode)>, String> {
@@ -1980,9 +2056,8 @@ fn extract_bindings_raw(bindings_obj: LispObject) -> Result<Vec<(String, ASTNode
 
         if !binding_obj.is_cons() {
             // Plain symbol with no value - treat as (var nil)
-            if let Some(sym_ptr) = binding_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-                let sym = unsafe { &*sym_ptr };
-                bindings.push((sym.name().to_string(), ASTNode::Constant(ConstantValue::Nil)));
+            if let Some(sym_name) = symbol_name_if_symbol(binding_obj) {
+                bindings.push((sym_name, ASTNode::Constant(ConstantValue::Nil)));
                 continue;
             }
             return Err(format!("Invalid binding format: {:?}", binding_obj));
@@ -1994,10 +2069,7 @@ fn extract_bindings_raw(bindings_obj: LispObject) -> Result<Vec<(String, ASTNode
         let rest = binding_cons.cdr();
 
         // Get variable name
-        let var_name = if let Some(sym_ptr) = var_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-            let sym = unsafe { &*sym_ptr };
-            sym.name().to_string()
-        } else {
+        let Some(var_name) = symbol_name_if_symbol(var_obj) else {
             return Err("Binding variable must be a symbol".to_string());
         };
 
@@ -2039,9 +2111,8 @@ fn debug_key_obj(obj: &LispObject) -> String {
     if obj.is_nil() {
         return "NIL".to_string();
     }
-    if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-        let sym = unsafe { &*sym_ptr };
-        return sym.name().to_string();
+    if let Some(sym_name) = symbol_name_if_symbol(*obj) {
+        return sym_name;
     }
     if let Some(n) = obj.as_fixnum() {
         return n.to_string();
@@ -2084,9 +2155,8 @@ fn case_key_to_atom_test(key_obj: &LispObject, tmp_var: &str) -> Option<ASTNode>
         ));
     }
 
-    if let Some(sym_ptr) = key_obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-        let sym = unsafe { &*sym_ptr };
-        let name = sym.name().to_uppercase();
+    if let Some(sym_name) = symbol_name_if_symbol(*key_obj) {
+        let name = sym_name.to_uppercase();
         if name == "T" || name == "OTHERWISE" {
             return Some(ASTNode::t());
         }

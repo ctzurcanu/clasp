@@ -102,8 +102,13 @@ Successes: ~d"
           (t (%fail-test name form expected results description test)))))
 
 (defmacro test (name form expected &key description (test ''equalp))
-  `(%test ',name ',form (lambda () ,form) ',expected
-          :description ,description :test ,test))
+  (list '%test
+        (list 'quote name)
+        (list 'quote form)
+        (list 'lambda '() form)
+        (list 'quote expected)
+        :description description
+        :test test))
 
 (defmacro test-expect-error (name form &key (type 'error) description)
   `(test ,name

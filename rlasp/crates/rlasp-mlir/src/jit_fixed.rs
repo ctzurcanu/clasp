@@ -97,6 +97,21 @@ fn map_intrinsics(execution_engine: &ExecutionEngine, module: &Module) {
     map_if_exists(execution_engine, module, "cc_floor_2", cc_floor_2 as usize);
     map_if_exists(execution_engine, module, "cc_ceiling_2", cc_ceiling_2 as usize);
     map_if_exists(execution_engine, module, "cc_truncate_2", cc_truncate_2 as usize);
+    map_if_exists(execution_engine, module, "cc_makunbound", cc_makunbound as usize);
+    map_if_exists(execution_engine, module, "cc_progv_push", cc_progv_push as usize);
+    map_if_exists(execution_engine, module, "cc_progv_pop", cc_progv_pop as usize);
+    map_if_exists(
+        execution_engine,
+        module,
+        "cc_valid_function_name_p",
+        cc_valid_function_name_p as usize,
+    );
+    map_if_exists(
+        execution_engine,
+        module,
+        "cc_function_block_name",
+        cc_function_block_name as usize,
+    );
 }
 
 fn map_if_exists(execution_engine: &ExecutionEngine, module: &Module, name: &str, addr: usize) {

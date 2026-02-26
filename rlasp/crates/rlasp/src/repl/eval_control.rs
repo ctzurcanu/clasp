@@ -1,6 +1,8 @@
 /// Control flow operations: do, dolist, dotimes, return
 
-use super::eval_types::{EvalResult, RETURN_VALUE, primary_value};
+use super::eval_types::{
+    EvalResult, RETURN_VALUE, ACTIVE_BLOCK_STACK, NEXT_BLOCK_ID, primary_value,
+};
 use super::eval_core::eval_with_env;
 use crate::ir::{ASTNode, ConstantValue};
 use std::collections::HashMap;
@@ -16,12 +18,91 @@ fn canonical_block_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-fn extract_return_from_payload<'a>(err: &'a str, expected_block: &str) -> Option<&'a str> {
+struct BlockFrameGuard {
+    id: u64,
+}
+
+impl BlockFrameGuard {
+    fn push(block_name: &str) -> Self {
+        Self { id: push_block_frame(block_name) }
+    }
+
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for BlockFrameGuard {
+    fn drop(&mut self) {
+        pop_block_frame(self.id);
+    }
+}
+
+pub(super) const BLOCK_CAPTURE_DEPTH_KEY: &str = "%__RLASP_BLOCK_CAPTURE_DEPTH__%";
+pub(super) const BLOCK_CALL_ENTRY_DEPTH_KEY: &str = "%__RLASP_BLOCK_CALL_ENTRY_DEPTH__%";
+
+fn depth_from_env(env: &HashMap<String, EvalResult>, key: &str) -> Option<usize> {
+    match env.get(key) {
+        Some(EvalResult::Fixnum(n)) if *n >= 0 => Some(*n as usize),
+        _ => None,
+    }
+}
+
+pub(super) fn current_block_depth() -> usize {
+    ACTIVE_BLOCK_STACK.with(|stack| stack.borrow().len())
+}
+
+pub(super) fn push_block_frame(block_name: &str) -> u64 {
+    let canonical = canonical_block_name(block_name);
+    let id = NEXT_BLOCK_ID.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    ACTIVE_BLOCK_STACK.with(|stack| stack.borrow_mut().push((canonical, id)));
+    id
+}
+
+pub(super) fn pop_block_frame(block_id: u64) {
+    ACTIVE_BLOCK_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if matches!(stack.last(), Some((_, id)) if *id == block_id) {
+            let _ = stack.pop();
+            return;
+        }
+        if let Some(pos) = stack.iter().rposition(|(_, id)| *id == block_id) {
+            stack.remove(pos);
+        }
+    });
+}
+
+pub(super) fn find_visible_block_id(block_name: &str, env: &HashMap<String, EvalResult>) -> Option<u64> {
+    let capture_depth = depth_from_env(env, BLOCK_CAPTURE_DEPTH_KEY)?;
+    let call_entry_depth = depth_from_env(env, BLOCK_CALL_ENTRY_DEPTH_KEY).unwrap_or(usize::MAX);
+    let canonical = canonical_block_name(block_name);
+
+    ACTIVE_BLOCK_STACK.with(|stack| {
+        let stack = stack.borrow();
+        for (idx, (active_name, id)) in stack.iter().enumerate().rev() {
+            let depth = idx + 1;
+            let visible = depth <= capture_depth || depth > call_entry_depth;
+            if visible && active_name.eq_ignore_ascii_case(&canonical) {
+                return Some(*id);
+            }
+        }
+        None
+    })
+}
+
+pub(super) fn extract_return_from_payload<'a>(err: &'a str, expected_block: &str) -> Option<&'a str> {
     let trimmed = err
         .split(" (callee ast:")
         .next()
         .unwrap_or(err)
         .trim();
+    if trimmed.starts_with("RETURN-FROM-ID:") {
+        return None;
+    }
     let rest = trimmed.strip_prefix("RETURN-FROM:")?;
     let (block_name, payload) = rest.split_once(':')?;
     if block_name.eq_ignore_ascii_case(expected_block) {
@@ -29,6 +110,29 @@ fn extract_return_from_payload<'a>(err: &'a str, expected_block: &str) -> Option
     } else {
         None
     }
+}
+
+pub(super) fn extract_return_from_payload_for_block<'a>(
+    err: &'a str,
+    expected_block: &str,
+    expected_block_id: u64,
+) -> Option<&'a str> {
+    let trimmed = err
+        .split(" (callee ast:")
+        .next()
+        .unwrap_or(err)
+        .trim();
+    if let Some(rest) = trimmed.strip_prefix("RETURN-FROM-ID:") {
+        let mut parts = rest.splitn(3, ':');
+        let id = parts.next()?.parse::<u64>().ok()?;
+        let _block = parts.next()?;
+        let payload = parts.next()?;
+        if id == expected_block_id {
+            return Some(payload);
+        }
+        return None;
+    }
+    extract_return_from_payload(trimmed, expected_block)
 }
 
 /// Setf expander entry - stores either a simple updater function name
@@ -165,8 +269,18 @@ pub(super) fn eval_return(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         eval_with_env(&args[0], env)?
     };
 
-    // Use return-from nil to properly match block handling
     let encoded = encode_return_value(&return_val);
+    if env.contains_key(BLOCK_CAPTURE_DEPTH_KEY) {
+        if let Some(target_id) = find_visible_block_id("nil", env) {
+            if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
+                eprintln!("[return-raise] block=nil target={} value={:?}", target_id, return_val);
+            }
+            return Err(format!("RETURN-FROM-ID:{}:nil:{}", target_id, encoded));
+        }
+    }
+    if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
+        eprintln!("[return-raise] block=nil target=<name-only> value={:?}", return_val);
+    }
     Err(format!("RETURN-FROM:nil:{}", encoded))
 }
 
@@ -183,22 +297,28 @@ pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     });
 
     let body_forms = &args[1..];
+    let block_id = push_block_frame(&block_name);
 
-    // Execute body forms
-    let mut result = EvalResult::Nil;
-    for form in body_forms {
-        match eval_with_env(form, env) {
-            Ok(val) => result = val,
-            Err(e) if extract_return_from_payload(&e, &block_name).is_some() => {
-                // Return from this block
-                let value_part = extract_return_from_payload(&e, &block_name).unwrap_or("NIL");
-                return decode_return_value(value_part.to_string());
+    let result = (|| -> Result<EvalResult, String> {
+        let mut result = EvalResult::Nil;
+        for form in body_forms {
+            match eval_with_env(form, env) {
+                Ok(val) => result = val,
+                Err(e) => {
+                    if let Some(value_part) =
+                        extract_return_from_payload_for_block(&e, &block_name, block_id)
+                    {
+                        return decode_return_value(value_part.to_string());
+                    }
+                    return Err(e);
+                }
             }
-            Err(e) => return Err(e),
         }
-    }
+        Ok(result)
+    })();
 
-    Ok(result)
+    pop_block_frame(block_id);
+    result
 }
 
 pub(super) fn eval_return_from(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -219,8 +339,24 @@ pub(super) fn eval_return_from(args: &[ASTNode], env: &mut HashMap<String, EvalR
         EvalResult::Nil
     };
 
-    // Encode the return value
     let encoded = encode_return_value(&return_val);
+    if env.contains_key(BLOCK_CAPTURE_DEPTH_KEY) {
+        if let Some(target_id) = find_visible_block_id(&block_name, env) {
+            if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
+                eprintln!(
+                    "[return-raise] block={} target={} value={:?}",
+                    block_name, target_id, return_val
+                );
+            }
+            return Err(format!("RETURN-FROM-ID:{}:{}:{}", target_id, block_name, encoded));
+        }
+    }
+    if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
+        eprintln!(
+            "[return-raise] block={} target=<name-only> value={:?}",
+            block_name, return_val
+        );
+    }
     Err(format!("RETURN-FROM:{}:{}", block_name, encoded))
 }
 
@@ -274,7 +410,7 @@ fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
     }
 }
 
-fn decode_return_value(encoded: String) -> Result<EvalResult, String> {
+pub(super) fn decode_return_value(encoded: String) -> Result<EvalResult, String> {
     let encoded = encoded
         .split(" (callee ast:")
         .next()
@@ -315,6 +451,7 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
     if args.len() < 2 {
         return Err("do requires at least 2 arguments".to_string());
     }
+    let block_guard = BlockFrameGuard::push("nil");
 
     // Parse variable bindings
     let var_specs = &args[0];
@@ -415,6 +552,11 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
         for form in body_forms {
             match eval_with_env(form, &mut loop_env) {
                 Ok(_) => {},
+                Err(e) if extract_return_from_payload_for_block(&e, "nil", block_guard.id()).is_some() => {
+                    let payload =
+                        extract_return_from_payload_for_block(&e, "nil", block_guard.id()).unwrap_or("NIL");
+                    return decode_return_value(payload.to_string());
+                }
                 Err(e) if e.starts_with("RETURN:") => {
                     // Return signaled from body - decode the value
                     if e == "RETURN:NIL" {
@@ -487,6 +629,7 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     if args.is_empty() {
         return Err("dolist requires at least 1 argument".to_string());
     }
+    let block_guard = BlockFrameGuard::push("nil");
 
     // Parse the iteration spec: (var list-form result-form?)
     let spec = &args[0];
@@ -543,9 +686,20 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         for form in body_forms {
             match eval_with_env(form, env) {
                 Ok(_) => {},
+                Err(e) if extract_return_from_payload_for_block(&e, "nil", block_guard.id()).is_some() => {
+                    // Restore old value and return
+                    if let Some(val) = old_val.clone() {
+                        env.insert(var_name.clone(), val);
+                    } else {
+                        env.remove(&var_name);
+                    }
+                    let payload =
+                        extract_return_from_payload_for_block(&e, "nil", block_guard.id()).unwrap_or("NIL");
+                    return decode_return_value(payload.to_string());
+                }
                 Err(e) if e.starts_with("RETURN:") => {
                     // Restore old value and return
-                    if let Some(val) = old_val {
+                    if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
                     } else {
                         env.remove(&var_name);
@@ -593,6 +747,7 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     if args.is_empty() {
         return Err("dotimes requires at least 1 argument".to_string());
     }
+    let block_guard = BlockFrameGuard::push("nil");
 
     // Parse the iteration spec: (var count-form result-form?)
     let spec = &args[0];
@@ -639,14 +794,15 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
             match eval_with_env(form, env) {
                 Ok(_) => {},
                 // Check RETURN-FROM NIL FIRST (more specific pattern)
-                Err(e) if extract_return_from_payload(&e, "nil").is_some() => {
+                Err(e) if extract_return_from_payload_for_block(&e, "nil", block_guard.id()).is_some() => {
                     // Handle return-from nil format (from (return ...) which converts to (return-from nil ...))
                     if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
                     } else {
                         env.remove(&var_name);
                     }
-                    let value_part = extract_return_from_payload(&e, "nil").unwrap_or("NIL");
+                    let value_part =
+                        extract_return_from_payload_for_block(&e, "nil", block_guard.id()).unwrap_or("NIL");
                     return decode_return_value(value_part.to_string());
                 }
                 // Then check RETURN: (less specific pattern)
@@ -1153,12 +1309,7 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                     "gethash" if place_args.len() >= 2 => {
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
-                        let key_str = match key {
-                            EvalResult::String(s) => s,
-                            EvalResult::Symbol(s) => s,
-                            EvalResult::Fixnum(n) => n.to_string(),
-                            _ => return Err("gethash key must be a string, symbol, or number".to_string()),
-                        };
+                        let key_str = super::eval_system::key_to_typed_string(&key)?;
                         match ht {
                             EvalResult::HashTable(ref table) => {
                                 table.borrow().get(&key_str).cloned().unwrap_or(EvalResult::Fixnum(0))
@@ -1214,12 +1365,7 @@ pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                     "gethash" if place_args.len() >= 2 => {
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
-                        let key_str = match key {
-                            EvalResult::String(s) => s,
-                            EvalResult::Symbol(s) => s,
-                            EvalResult::Fixnum(n) => n.to_string(),
-                            _ => return Err("gethash key must be a string, symbol, or number".to_string()),
-                        };
+                        let key_str = super::eval_system::key_to_typed_string(&key)?;
                         match ht {
                             EvalResult::HashTable(ref table) => {
                                 table.borrow().get(&key_str).cloned().unwrap_or(EvalResult::Fixnum(0))
@@ -1392,12 +1538,7 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
 
-                        let key_str = match key {
-                            EvalResult::String(s) => s,
-                            EvalResult::Symbol(s) => s,
-                            EvalResult::Fixnum(n) => n.to_string(),
-                            _ => return Err("gethash key must be a string, symbol, or number".to_string()),
-                        };
+                        let key_str = super::eval_system::key_to_typed_string(&key)?;
 
                         match ht {
                             EvalResult::HashTable(ref table) => {
@@ -1935,6 +2076,11 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
     match eval_with_env(protected_form, env) {
         Ok(result) => Ok(result),
         Err(error_msg) => {
+            let mut pending_condition = if error_msg == "__SIGNAL_CONDITION__" {
+                super::eval_conditions::take_pending_signaled_condition()
+            } else {
+                None
+            };
             // Try each handler
             for handler in handlers {
                 if let ASTNode::Call { function: _condition_type, args: handler_args } = handler {
@@ -1951,12 +2097,20 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
                             // (var) form where var is called as function
                             ASTNode::Call { function, args: _ } => {
                                 if let ASTNode::Variable(var_name) = &**function {
-                                    handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                    if let Some(cond) = &pending_condition {
+                                        handler_env.insert(var_name.clone(), cond.clone());
+                                    } else {
+                                        handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                    }
                                 }
                             }
                             // Single variable (no parens, rare)
                             ASTNode::Variable(var_name) => {
-                                handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                if let Some(cond) = &pending_condition {
+                                    handler_env.insert(var_name.clone(), cond.clone());
+                                } else {
+                                    handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                }
                             }
                             // nil or empty list means no binding
                             ASTNode::Constant(ConstantValue::Nil) => {}
@@ -1973,6 +2127,11 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
                 }
             }
             // No handler matched, re-raise the error
+            if error_msg == "__SIGNAL_CONDITION__" {
+                if let Some(cond) = pending_condition.take() {
+                    super::eval_conditions::set_pending_signaled_condition(cond);
+                }
+            }
             Err(error_msg)
         }
     }

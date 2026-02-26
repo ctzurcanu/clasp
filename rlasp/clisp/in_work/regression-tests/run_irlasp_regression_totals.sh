@@ -12,10 +12,65 @@ RUNNER_FILE="$BASE_DIR/regression-tests/run-all-irlasp.lisp"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
+MLIR_SELECTIVE_EVAL="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
   exit 2
 fi
+MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-0}"
+
+# Canonical suite test inventory for run-all-irlasp (47 suites, TOTAL 1953).
+# This keeps totals stable even if a suite crashes before printing all test lines.
+typeset -A EXPECTED_SUITE_TOTALS
+EXPECTED_SUITE_TOTALS=(
+  [defcallback-native]=1
+  [lowlevel]=1
+  [fastgf]=4
+  [array0]=35
+  [tests01]=9
+  [finalizers]=4
+  [strings01]=34
+  [cons01]=45
+  [sequences01]=122
+  [clos]=22
+  [mop]=3
+  [update-instance-abort]=9
+  [numbers]=259
+  [ehkiller]=3
+  [package]=106
+  [structures]=30
+  [symbol0]=20
+  [string-comparison0]=448
+  [bit-array0]=108
+  [bit-array1]=18
+  [character0]=37
+  [unicode]=6
+  [hash-tables0]=42
+  [misc]=54
+  [read01]=103
+  [printer01]=101
+  [streams01]=54
+  [environment01]=5
+  [types01]=25
+  [control01]=46
+  [iteration]=2
+  [loop]=21
+  [numbers-core]=12
+  [unwind]=1
+  [encodings]=11
+  [environment]=28
+  [conditions]=2
+  [float-features]=8
+  [debug]=19
+  [mp]=44
+  [interrupt]=6
+  [posix]=11
+  [btb]=12
+  [system-construction]=5
+  [extensions]=10
+  [run-program]=7
+  [snapshot]=0
+)
 
 mkdir -p "$LOG_DIR"
 cd "$BASE_DIR"
@@ -31,6 +86,12 @@ float_add() {
 
 float_sub() {
   awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", (a - b) }'
+}
+
+bool_enabled() {
+  local raw="${1:-}"
+  local v="${raw:l}"
+  [[ -n "$v" && "$v" != "0" && "$v" != "false" && "$v" != "no" && "$v" != "off" ]]
 }
 
 RUN_STATUS=127
@@ -63,22 +124,77 @@ extract_suites() {
 parse_suite_metrics() {
   local log_file="$1"
   awk '
-    BEGIN { tp=0; tf=0; ce=0; re=0; }
-    {
-      line=$0;
-      while (match(line, /Passed /)) {
-        tp++;
-        line=substr(line, RSTART + RLENGTH);
+    BEGIN { ce=0; re=0; succ=0; failsum=0; }
+    function note_test_status(kind, token, name) {
+      sub(/Wanted values.*/, "", token);
+      sub(/Unexpected error.*/, "", token);
+      sub(/while evaluating.*/, "", token);
+      sub(/^[[:space:]]+/, "", token);
+      sub(/[[:space:]]+$/, "", token);
+      if (match(token, /^[A-Za-z0-9._:+*\/<>=!?%&|-]+/)) {
+        name=toupper(substr(token, RSTART, RLENGTH));
+        # Corrupted MLIR traces can emit fake test labels like NIL.
+        if (name != "" && name != "NIL" && name != "T" && name !~ /^~/) {
+          status[name]=kind;
+        }
       }
-      line=$0;
-      while (match(line, /Failed /)) {
-        tf++;
-        line=substr(line, RSTART + RLENGTH);
+    }
+    {
+      rest=$0;
+      while (1) {
+        p=index(rest, "Passed ");
+        f=index(rest, "Failed ");
+        if (p==0 && f==0) break;
+        if (p>0 && (f==0 || p<f)) {
+          kind="P";
+          chunk=substr(rest, p+7);
+        } else {
+          kind="F";
+          chunk=substr(rest, f+7);
+        }
+
+        np=index(chunk, "Passed ");
+        nf=index(chunk, "Failed ");
+        nxt=0;
+        if (np>0 && nf>0) nxt=(np<nf ? np : nf);
+        else if (np>0) nxt=np;
+        else if (nf>0) nxt=nf;
+
+        token=(nxt>0 ? substr(chunk, 1, nxt-1) : chunk);
+        note_test_status(kind, token);
+
+        if (nxt>0) rest=substr(chunk, nxt);
+        else break;
+      }
+
+      if (match($0, /Successes:[[:space:]]*[0-9]+/)) {
+        token = substr($0, RSTART, RLENGTH);
+        gsub(/[^0-9]/, "", token);
+        if (token != "") {
+          val = token + 0;
+          if (val > succ) succ = val;
+        }
+      }
+      if (match($0, /Failures:[[:space:]]*[0-9]+/)) {
+        token = substr($0, RSTART, RLENGTH);
+        gsub(/[^0-9]/, "", token);
+        if (token != "") {
+          val = token + 0;
+          if (val > failsum) failsum = val;
+        }
       }
     }
     /Regression: compile-file/ { ce++; next; }
     /^Error:/ { re++; next; }
     END {
+      tp=0;
+      tf=0;
+      for (name in status) {
+        if (status[name] == "P") tp++;
+        else if (status[name] == "F") tf++;
+      }
+      if (tp == 0 && succ > 0) tp = succ;
+      if (tf == 0 && failsum > 0) tf = failsum;
       total = tp + tf;
       nonpassing = tf + ce + re;
       printf("%d %d %d %d %d\n", total, tf, ce, re, nonpassing);
@@ -98,7 +214,8 @@ build_single_suite_runner() {
   else
     suite_load_form="(load-if-compiled-correctly \"$BASE_DIR/regression-tests/$suite.lisp\")"
   fi
-  runner_file="$(mktemp "${TMPDIR:-/tmp}/irlasp-suite-runner-${suite}.XXXXXX.lisp")"
+  runner_file="$(mktemp -t "irlasp-suite-runner-${suite}")"
+  runner_file="${runner_file}.lisp"
   cat > "$runner_file" <<EOF
 (in-package :cl-user)
 (load "$BASE_DIR/regression-tests/framework.lisp")
@@ -121,18 +238,86 @@ run_jit_suite_with_phase_timing() {
   local start end rc exec_mark
   local fifo_path
   local -a extra_env
+  local compile_start compile_end compile_rc
+  local exec_start exec_end exec_rc
+  local module_name artifact_path
+  local compile_log
   start="$(now_mono_ts)"
   exec_mark=""
   rc=127
-  fifo_path="$(mktemp "${TMPDIR:-/tmp}/irlasp-${mode}-suite-stream.XXXXXX")"
-  rm -f "$fifo_path"
-  mkfifo "$fifo_path"
   : > "$suite_log"
 
   extra_env=()
   if [[ "$mode" == "mlir" ]]; then
-    extra_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR")
+    extra_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR" "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL")
   fi
+
+  if [[ "$mode" == "mlir" ]] && bool_enabled "$MLIR_EXEC_ARTIFACT"; then
+    module_name="${runner_file:t:r}"
+    artifact_path="/tmp/${module_name}.mlirbc"
+    compile_log="${suite_log}.compile"
+    rm -f "$artifact_path"
+    : > "$compile_log"
+
+    compile_start="$(now_mono_ts)"
+    set +e
+    if [[ -n "$TIMEOUT_BIN" ]]; then
+      env TEST_SUITES="$suite" "${extra_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+        "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
+      compile_rc=$?
+    else
+      env TEST_SUITES="$suite" "${extra_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+        "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
+      compile_rc=$?
+    fi
+    set -e
+    compile_end="$(now_mono_ts)"
+    RUN_PHASE_COMPILE="$(float_sub "$compile_end" "$compile_start")"
+
+    if [[ "$compile_rc" -ne 0 ]]; then
+      cat "$compile_log" >> "$suite_log"
+      RUN_STATUS="$compile_rc"
+      RUN_PHASE_EXEC="0.000000"
+      RUN_ELAPSED="$RUN_PHASE_COMPILE"
+      return
+    fi
+
+    if [[ ! -f "$artifact_path" ]]; then
+      cat "$compile_log" >> "$suite_log"
+      echo "SUITE_RUN_ERROR $suite missing_mlirbc_artifact $artifact_path" >> "$suite_log"
+      RUN_STATUS=1
+      RUN_PHASE_EXEC="0.000000"
+      RUN_ELAPSED="$RUN_PHASE_COMPILE"
+      return
+    fi
+
+    printf '[HARNESS-COMPILE] mode=%s suite=%s artifact=%s compile_log=%s\n' \
+      "$mode" "$suite" "$artifact_path" "$compile_log" >> "$suite_log"
+
+    exec_start="$(now_mono_ts)"
+    set +e
+    if [[ -n "$TIMEOUT_BIN" ]]; then
+      env TEST_SUITES="$suite" "${extra_env[@]}" \
+        "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
+      exec_rc=$?
+    else
+      env TEST_SUITES="$suite" "${extra_env[@]}" \
+        "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
+      exec_rc=$?
+    fi
+    set -e
+    exec_end="$(now_mono_ts)"
+    RUN_PHASE_EXEC="$(float_sub "$exec_end" "$exec_start")"
+    RUN_ELAPSED="$(float_add "$RUN_PHASE_COMPILE" "$RUN_PHASE_EXEC")"
+    RUN_STATUS="$exec_rc"
+    printf '[HARNESS-TIMING] mode=%s suite=%s status=%s elapsed_s=%s compile_s=%s exec_s=%s artifact=%s\n' \
+      "$mode" "$suite" "$RUN_STATUS" "$RUN_ELAPSED" "$RUN_PHASE_COMPILE" "$RUN_PHASE_EXEC" "$artifact_path" >> "$suite_log"
+    return
+  fi
+
+  fifo_path="$(mktemp -t "irlasp-${mode}-suite-stream")"
+  rm -f "$fifo_path"
+  mkfifo "$fifo_path"
 
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
@@ -141,7 +326,7 @@ run_jit_suite_with_phase_timing() {
     (env TEST_SUITES="$suite" "${extra_env[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ -z "$exec_mark" ]]; then
       case "$line" in
         *"Passed "*|*"Failed "*|"Error:"*|"[Executing __main]"|"[Executing __main_batch_"*)
@@ -230,6 +415,8 @@ run_mode() {
   echo "TIMEOUT_BIN ${TIMEOUT_BIN:-none}" | tee -a "$summary_file"
   if [[ "$mode" == "mlir" ]]; then
     echo "MLIR_BEHAVIOR $MLIR_BEHAVIOR" | tee -a "$summary_file"
+    echo "MLIR_SELECTIVE_EVAL $MLIR_SELECTIVE_EVAL" | tee -a "$summary_file"
+    echo "MLIR_EXEC_ARTIFACT $MLIR_EXEC_ARTIFACT" | tee -a "$summary_file"
   fi
 
   local tp=0
@@ -270,6 +457,22 @@ run_mode() {
 
     local m_total m_failed m_ce m_re m_non
     read -r m_total m_failed m_ce m_re m_non <<< "$(parse_suite_metrics "$suite_log")"
+    local observed_total="$m_total"
+    local observed_failed="$m_failed"
+    local expected_total="${EXPECTED_SUITE_TOTALS[$suite]:-}"
+    if [[ -n "$expected_total" ]] && (( observed_total < expected_total )); then
+      local observed_passed=$(( observed_total - observed_failed ))
+      if (( observed_passed < 0 )); then
+        observed_passed=0
+      fi
+      m_total="$expected_total"
+      m_failed=$(( expected_total - observed_passed ))
+      if (( m_failed < 0 )); then
+        m_failed=0
+      fi
+      # Unreached tests are counted as non-passing when execution aborts early.
+      m_non=$(( m_non + (expected_total - observed_total) ))
+    fi
     if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
       timed_out=$((timed_out+1))
       m_re=$((m_re+1))

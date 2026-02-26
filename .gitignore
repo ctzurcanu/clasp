@@ -64,3 +64,7 @@ repos-*.sexp
 target
 
 rlasp/clisp/tests/test_asdf
+
+
+rlasp/clisp/in_work/regression-tests/logs
+rlasp/performance/logs

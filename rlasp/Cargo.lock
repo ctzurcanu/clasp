@@ -451,6 +451,7 @@ dependencies = [
  "inkwell",
  "libc",
  "llvm-sys",
+ "num-complex",
  "rlasp",
  "rlasp-jit",
  "rlasp-mlir",
@@ -834,6 +835,7 @@ name = "rlasp-reader"
 version = "0.1.0"
 dependencies = [
  "malachite",
+ "num-complex",
  "rlasp-runtime",
  "thiserror 1.0.69",
 ]

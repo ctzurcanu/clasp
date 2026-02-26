@@ -471,6 +471,12 @@ impl Reader {
             "newline" => '\n',
             "space" => ' ',
             "tab" => '\t',
+            "return" => '\r',
+            "linefeed" => '\n',
+            "page" => '\x0C',
+            "backspace" => '\x08',
+            "rubout" | "delete" | "del" => '\x7F',
+            "null" | "nul" => '\0',
             _ if name.chars().count() == 1 => name.chars().next().unwrap(),
             _ => return Err(ReadError::InvalidNumber(format!("Unknown character: {}", name))),
         };
