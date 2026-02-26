@@ -14524,8 +14524,29 @@ fn eval_tail_position(
                         }
                     }
                 }
-                match eval_with_env(&body[body.len() - 1], env) {
-                    Ok(v) => Ok(TailEvalResult::Value(v)),
+                match eval_tail_position(&body[body.len() - 1], env) {
+                    Ok(TailEvalResult::Value(v)) => Ok(TailEvalResult::Value(v)),
+                    Ok(TailEvalResult::TailCall(request)) => Ok(TailEvalResult::TailCall(request)),
+                    Ok(TailEvalResult::ReturnFromValue { block_name: target_block, value }) => {
+                        if canonical_block_name(&target_block) == block_name {
+                            Ok(TailEvalResult::Value(value))
+                        } else {
+                            Ok(TailEvalResult::ReturnFromValue {
+                                block_name: target_block,
+                                value,
+                            })
+                        }
+                    }
+                    Ok(TailEvalResult::ReturnFromTailCall { block_name: target_block, request }) => {
+                        if canonical_block_name(&target_block) == block_name {
+                            Ok(TailEvalResult::TailCall(request))
+                        } else {
+                            Ok(TailEvalResult::ReturnFromTailCall {
+                                block_name: target_block,
+                                request,
+                            })
+                        }
+                    }
                     Err(e) => {
                         if let Some(value_part) =
                             extract_return_from_payload_for_block(&e, &block_name, block_id)
@@ -14744,8 +14765,29 @@ fn eval_tail_position(
                                 }
                             }
                         }
-                        match eval_with_env(&body[body.len() - 1], env) {
-                            Ok(v) => Ok(TailEvalResult::Value(v)),
+                        match eval_tail_position(&body[body.len() - 1], env) {
+                            Ok(TailEvalResult::Value(v)) => Ok(TailEvalResult::Value(v)),
+                            Ok(TailEvalResult::TailCall(request)) => Ok(TailEvalResult::TailCall(request)),
+                            Ok(TailEvalResult::ReturnFromValue { block_name: target_block, value }) => {
+                                if canonical_block_name(&target_block) == block_name {
+                                    Ok(TailEvalResult::Value(value))
+                                } else {
+                                    Ok(TailEvalResult::ReturnFromValue {
+                                        block_name: target_block,
+                                        value,
+                                    })
+                                }
+                            }
+                            Ok(TailEvalResult::ReturnFromTailCall { block_name: target_block, request }) => {
+                                if canonical_block_name(&target_block) == block_name {
+                                    Ok(TailEvalResult::TailCall(request))
+                                } else {
+                                    Ok(TailEvalResult::ReturnFromTailCall {
+                                        block_name: target_block,
+                                        request,
+                                    })
+                                }
+                            }
                             Err(e) => {
                                 if let Some(value_part) =
                                     extract_return_from_payload_for_block(&e, &block_name, block_id)

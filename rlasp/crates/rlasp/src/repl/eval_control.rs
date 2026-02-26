@@ -530,13 +530,7 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
     }
 
     // Loop until end test is true
-    let mut iteration_count = 0;
     loop {
-        iteration_count += 1;
-        if iteration_count > 10000 {
-            return Err("do: exceeded maximum iterations (possible infinite loop)".to_string());
-        }
-
         // Check end test
         let test_result = eval_with_env(&end_test, &mut loop_env)?;
         if condition_true(&test_result) {
@@ -663,13 +657,7 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
 
     // Iterate over the list
     let mut current = list_val;
-    let mut iteration_count = 0;
     loop {
-        iteration_count += 1;
-        if iteration_count > 10000 {
-            return Err("dolist: exceeded maximum iterations (possible infinite loop)".to_string());
-        }
-
         // Extract current element and next before match
         let (elem, next) = match &current {
             EvalResult::Nil => break,
@@ -897,15 +885,7 @@ pub(super) fn eval_while(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     let test = &args[0];
     let body_forms = &args[1..];
 
-    let mut iteration_count = 0;
-    const MAX_ITERATIONS: usize = 1000000;
-
     loop {
-        iteration_count += 1;
-        if iteration_count > MAX_ITERATIONS {
-            return Err("while: exceeded maximum iterations (possible infinite loop)".to_string());
-        }
-
         // Evaluate test condition
         let test_result = eval_with_env(test, env)?;
 

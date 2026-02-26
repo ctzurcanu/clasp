@@ -118,12 +118,12 @@ while IFS='|' read -r bench_file bench_args_raw; do
   interp_s="$RUN_TIME_S"
 
   run_timed "$mlir_compile_out" "$mlir_compile_time" \
-    env RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SKIP_SIDE_EFFECT_FORMS=1 RLASP_MLIR_SELECTIVE_EVAL=1 "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
+    env RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
   mlir_compile_rc="$RUN_RC"
   mlir_compile_s="$RUN_TIME_S"
 
   run_timed "$mlir_total_out" "$mlir_total_time" \
-    env RLASP_MLIR_SELECTIVE_EVAL=1 "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
+    "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
   mlir_total_rc="$RUN_RC"
   mlir_total_s="$RUN_TIME_S"
   if [[ "$mlir_compile_rc" -eq 0 && "$mlir_total_rc" -eq 0 ]]; then
@@ -151,9 +151,9 @@ while IFS='|' read -r bench_file bench_args_raw; do
     "$bench_name" "$sbcl_s" "$clasp_s" "$interp_s" "$mlir_compile_s" "$mlir_exec_s" "$mlir_total_s" "$result_match"
 done <<'EOF'
 fibonacci_recursive.lisp|28
-fibonacci_iterative.lisp|700000
-tco_sum.lisp|60000000
-sieve_primes.lisp|1400000
+fibonacci_iterative.lisp|900000
+tco_sum.lisp|5000
+sieve_primes.lisp|900000
 gcd_loop.lisp|140000 832040 514229
 EOF
 
