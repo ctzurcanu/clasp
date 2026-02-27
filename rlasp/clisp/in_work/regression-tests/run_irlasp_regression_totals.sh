@@ -19,11 +19,16 @@ CL_BASELINE_ENGINE="${CL_BASELINE_ENGINE:-auto}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
 MLIR_SELECTIVE_EVAL="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
 MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-0}"
+IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-100000}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
   exit 2
 fi
 MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-1}"
+typeset -a IRLASP_ENV=()
+if [[ -n "$IRLASP_GC_FREE_SPACE_DIVISOR" ]]; then
+  IRLASP_ENV+=("GC_FREE_SPACE_DIVISOR=$IRLASP_GC_FREE_SPACE_DIVISOR")
+fi
 
 # Canonical suite test inventory for run-all-irlasp (47 suites, TOTAL 1953).
 # This keeps totals stable even if a suite crashes before printing all test lines.
@@ -552,11 +557,11 @@ run_jit_suite_with_phase_timing() {
     compile_start="$(now_mono_ts)"
     set +e
     if [[ -n "$TIMEOUT_BIN" ]]; then
-      env TEST_SUITES="$suite" "${compile_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      env TEST_SUITES="$suite" "${compile_env[@]}" "${IRLASP_ENV[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
         "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
       compile_rc=$?
     else
-      env TEST_SUITES="$suite" "${compile_env[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      env TEST_SUITES="$suite" "${compile_env[@]}" "${IRLASP_ENV[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
         "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
       compile_rc=$?
     fi
@@ -583,11 +588,11 @@ run_jit_suite_with_phase_timing() {
     exec_start="$(now_mono_ts)"
     set +e
     if [[ -n "$TIMEOUT_BIN" ]]; then
-      env TEST_SUITES="$suite" "${exec_env[@]}" \
+      env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" \
         "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
       exec_rc=$?
     else
-      env TEST_SUITES="$suite" "${exec_env[@]}" \
+      env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" \
         "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
       exec_rc=$?
     fi
@@ -607,9 +612,9 @@ run_jit_suite_with_phase_timing() {
 
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    (env TEST_SUITES="$suite" "${exec_env[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   else
-    (env TEST_SUITES="$suite" "${exec_env[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -659,10 +664,10 @@ run_one_suite() {
   start="$(now_mono_ts)"
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    TEST_SUITES="$suite" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" "$RUNNER" > "$suite_log" 2>&1
+    env TEST_SUITES="$suite" "${IRLASP_ENV[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" "$RUNNER" > "$suite_log" 2>&1
     rc=$?
   else
-    TEST_SUITES="$suite" "$IRLASP_BIN" "$RUNNER" > "$suite_log" 2>&1
+    env TEST_SUITES="$suite" "${IRLASP_ENV[@]}" "$IRLASP_BIN" "$RUNNER" > "$suite_log" 2>&1
     rc=$?
   fi
   set -e
@@ -705,6 +710,7 @@ run_mode() {
     echo "MLIR_SELECTIVE_EVAL $MLIR_SELECTIVE_EVAL" | tee -a "$summary_file"
     echo "MLIR_EXEC_ARTIFACT $MLIR_EXEC_ARTIFACT" | tee -a "$summary_file"
     echo "MLIR_SPLIT_PROCESS $MLIR_SPLIT_PROCESS" | tee -a "$summary_file"
+    echo "IRLASP_GC_FREE_SPACE_DIVISOR $IRLASP_GC_FREE_SPACE_DIVISOR" | tee -a "$summary_file"
   fi
 
   local tp=0

@@ -37,6 +37,7 @@ pub struct StackMLIRCodegen {
     special_param_functions: HashSet<String>,  // Functions that use &optional, &key, or supplied-p
     generic_functions: HashSet<String>,  // Generic function names for runtime dispatch
     compiled_functions: HashSet<String>,  // Functions compiled via defun in this module
+    tailcall_trampoline_functions: HashSet<String>,  // Functions that must be invoked via cc_funcall_stack
     function_counter: usize,
     loop_carried_vars: Option<Vec<String>>,  // Variables that must be threaded through loops (None when not in loop)
     scf_region_depth: usize,  // Depth of nested SCF regions (0 = not in region)
@@ -44,6 +45,12 @@ pub struct StackMLIRCodegen {
 }
 
 impl StackMLIRCodegen {
+    const FIXNUM_SHIFT: i64 = 2;
+    const FIXNUM_TAG_MASK: i64 = 0b11;
+    const MIN_FIXNUM: i64 = -(1i64 << 61);
+    const MAX_FIXNUM: i64 = (1i64 << 61) - 1;
+    const MAX_FAST_MUL_ABS_INPUT: i64 = 1_518_500_249;
+
     pub fn new(module_name: &str) -> Self {
         debug_println!("[DEBUG] Using StackMLIRCodegen for module: {}", module_name);
         let mut codegen = Self {
@@ -59,6 +66,7 @@ impl StackMLIRCodegen {
             special_param_functions: HashSet::new(),
             generic_functions: HashSet::new(),
             compiled_functions: HashSet::new(),
+            tailcall_trampoline_functions: HashSet::new(),
             function_counter: 0,
             loop_carried_vars: None,
             scf_region_depth: 0,
@@ -189,6 +197,319 @@ impl StackMLIRCodegen {
         let id = self.function_counter;
         self.function_counter += 1;
         id
+    }
+
+    fn emit_is_fixnum_i1(&mut self, boxed_obj: &str) -> String {
+        let mask = self.fresh_ssa();
+        let mask_const = self.fresh_ssa();
+        let zero = self.fresh_ssa();
+        let is_fix = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.constant {} : i64",
+            mask_const,
+            Self::FIXNUM_TAG_MASK
+        ));
+        self.writeln(&format!("{} = arith.andi {}, {} : i64", mask, boxed_obj, mask_const));
+        self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+        self.writeln(&format!("{} = arith.cmpi eq, {}, {} : i64", is_fix, mask, zero));
+        is_fix
+    }
+
+    fn emit_unbox_fixnum_raw(&mut self, boxed_obj: &str) -> String {
+        let shift = self.fresh_ssa();
+        let raw = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.constant {} : i64",
+            shift,
+            Self::FIXNUM_SHIFT
+        ));
+        self.writeln(&format!("{} = arith.shrsi {}, {} : i64", raw, boxed_obj, shift));
+        raw
+    }
+
+    fn emit_box_fixnum_raw(&mut self, raw_value: &str) -> String {
+        let shift = self.fresh_ssa();
+        let boxed = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.constant {} : i64",
+            shift,
+            Self::FIXNUM_SHIFT
+        ));
+        self.writeln(&format!("{} = arith.shli {}, {} : i64", boxed, raw_value, shift));
+        boxed
+    }
+
+    fn emit_fixnum_range_check_i1(&mut self, raw_value: &str) -> String {
+        let min = self.fresh_ssa();
+        let max = self.fresh_ssa();
+        let ge_min = self.fresh_ssa();
+        let le_max = self.fresh_ssa();
+        let in_range = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant {} : i64", min, Self::MIN_FIXNUM));
+        self.writeln(&format!("{} = arith.constant {} : i64", max, Self::MAX_FIXNUM));
+        self.writeln(&format!(
+            "{} = arith.cmpi sge, {}, {} : i64",
+            ge_min, raw_value, min
+        ));
+        self.writeln(&format!(
+            "{} = arith.cmpi sle, {}, {} : i64",
+            le_max, raw_value, max
+        ));
+        self.writeln(&format!("{} = arith.andi {}, {} : i1", in_range, ge_min, le_max));
+        in_range
+    }
+
+    fn emit_abs_i64(&mut self, raw_value: &str) -> String {
+        let zero = self.fresh_ssa();
+        let is_neg = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+        self.writeln(&format!("{} = arith.cmpi slt, {}, {} : i64", is_neg, raw_value, zero));
+        let abs_value = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", abs_value, is_neg));
+        self.indent();
+        let negated = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.subi {}, {} : i64", negated, zero, raw_value));
+        self.writeln(&format!("scf.yield {} : i64", negated));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        self.writeln(&format!("scf.yield {} : i64", raw_value));
+        self.dedent();
+        self.writeln("}");
+        abs_value
+    }
+
+    fn emit_fast_fixnum_add_sub(
+        &mut self,
+        lhs_obj: &str,
+        rhs_obj: &str,
+        runtime_callee: &str,
+        is_add: bool,
+    ) -> String {
+        let lhs_fix = self.emit_is_fixnum_i1(lhs_obj);
+        let rhs_fix = self.emit_is_fixnum_i1(rhs_obj);
+        let both_fix = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.andi {}, {} : i1", both_fix, lhs_fix, rhs_fix));
+
+        let result = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", result, both_fix));
+        self.indent();
+        let lhs_raw = self.emit_unbox_fixnum_raw(lhs_obj);
+        let rhs_raw = self.emit_unbox_fixnum_raw(rhs_obj);
+        let arith_raw = self.fresh_ssa();
+        if is_add {
+            self.writeln(&format!("{} = arith.addi {}, {} : i64", arith_raw, lhs_raw, rhs_raw));
+        } else {
+            self.writeln(&format!("{} = arith.subi {}, {} : i64", arith_raw, lhs_raw, rhs_raw));
+        }
+        let in_range = self.emit_fixnum_range_check_i1(&arith_raw);
+        let fast_or_fallback = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", fast_or_fallback, in_range));
+        self.indent();
+        let boxed = self.emit_box_fixnum_raw(&arith_raw);
+        self.writeln(&format!("scf.yield {} : i64", boxed));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let fallback = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+            fallback, runtime_callee, lhs_obj, rhs_obj
+        ));
+        self.writeln(&format!("scf.yield {} : i64", fallback));
+        self.dedent();
+        self.writeln("}");
+        self.writeln(&format!("scf.yield {} : i64", fast_or_fallback));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let fallback = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+            fallback, runtime_callee, lhs_obj, rhs_obj
+        ));
+        self.writeln(&format!("scf.yield {} : i64", fallback));
+        self.dedent();
+        self.writeln("}");
+        result
+    }
+
+    fn emit_fast_fixnum_mul(&mut self, lhs_obj: &str, rhs_obj: &str) -> String {
+        let lhs_fix = self.emit_is_fixnum_i1(lhs_obj);
+        let rhs_fix = self.emit_is_fixnum_i1(rhs_obj);
+        let both_fix = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.andi {}, {} : i1", both_fix, lhs_fix, rhs_fix));
+
+        let result = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", result, both_fix));
+        self.indent();
+        let lhs_raw = self.emit_unbox_fixnum_raw(lhs_obj);
+        let rhs_raw = self.emit_unbox_fixnum_raw(rhs_obj);
+
+        // Conservative guard: when both operands are small enough, the i64 multiply is
+        // guaranteed to stay in fixnum range, so we can return a tagged fixnum directly.
+        let abs_lhs = self.emit_abs_i64(&lhs_raw);
+        let abs_rhs = self.emit_abs_i64(&rhs_raw);
+        let limit = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.constant {} : i64",
+            limit,
+            Self::MAX_FAST_MUL_ABS_INPUT
+        ));
+        let lhs_small = self.fresh_ssa();
+        let rhs_small = self.fresh_ssa();
+        let both_small = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi sle, {}, {} : i64",
+            lhs_small, abs_lhs, limit
+        ));
+        self.writeln(&format!(
+            "{} = arith.cmpi sle, {}, {} : i64",
+            rhs_small, abs_rhs, limit
+        ));
+        self.writeln(&format!("{} = arith.andi {}, {} : i1", both_small, lhs_small, rhs_small));
+
+        let fast_or_fallback = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", fast_or_fallback, both_small));
+        self.indent();
+        let prod = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.muli {}, {} : i64", prod, lhs_raw, rhs_raw));
+        let boxed = self.emit_box_fixnum_raw(&prod);
+        self.writeln(&format!("scf.yield {} : i64", boxed));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let fallback = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_mul({}, {}) : (i64, i64) -> i64",
+            fallback, lhs_obj, rhs_obj
+        ));
+        self.writeln(&format!("scf.yield {} : i64", fallback));
+        self.dedent();
+        self.writeln("}");
+        self.writeln(&format!("scf.yield {} : i64", fast_or_fallback));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let fallback = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_mul({}, {}) : (i64, i64) -> i64",
+            fallback, lhs_obj, rhs_obj
+        ));
+        self.writeln(&format!("scf.yield {} : i64", fallback));
+        self.dedent();
+        self.writeln("}");
+        result
+    }
+
+    fn emit_fast_fixnum_mod(&mut self, dividend_obj: &str, divisor_obj: &str) -> String {
+        let lhs_fix = self.emit_is_fixnum_i1(dividend_obj);
+        let rhs_fix = self.emit_is_fixnum_i1(divisor_obj);
+        let both_fix = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.andi {}, {} : i1", both_fix, lhs_fix, rhs_fix));
+
+        let result = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", result, both_fix));
+        self.indent();
+        let dividend_raw = self.emit_unbox_fixnum_raw(dividend_obj);
+        let divisor_raw = self.emit_unbox_fixnum_raw(divisor_obj);
+        let zero = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+        let divisor_nonzero = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi ne, {}, {} : i64",
+            divisor_nonzero, divisor_raw, zero
+        ));
+
+        let fast_or_fallback = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", fast_or_fallback, divisor_nonzero));
+        self.indent();
+        let rem = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.remsi {}, {} : i64", rem, dividend_raw, divisor_raw));
+        let rem_is_zero = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.cmpi eq, {}, {} : i64", rem_is_zero, rem, zero));
+
+        let adjusted = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", adjusted, rem_is_zero));
+        self.indent();
+        self.writeln(&format!("scf.yield {} : i64", rem));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let rem_neg = self.fresh_ssa();
+        let rem_pos = self.fresh_ssa();
+        let div_neg = self.fresh_ssa();
+        let div_pos = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.cmpi slt, {}, {} : i64", rem_neg, rem, zero));
+        self.writeln(&format!("{} = arith.cmpi sgt, {}, {} : i64", rem_pos, rem, zero));
+        self.writeln(&format!(
+            "{} = arith.cmpi slt, {}, {} : i64",
+            div_neg, divisor_raw, zero
+        ));
+        self.writeln(&format!(
+            "{} = arith.cmpi sgt, {}, {} : i64",
+            div_pos, divisor_raw, zero
+        ));
+        let rem_neg_div_pos = self.fresh_ssa();
+        let rem_pos_div_neg = self.fresh_ssa();
+        let needs_adjust = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.andi {}, {} : i1",
+            rem_neg_div_pos, rem_neg, div_pos
+        ));
+        self.writeln(&format!(
+            "{} = arith.andi {}, {} : i1",
+            rem_pos_div_neg, rem_pos, div_neg
+        ));
+        self.writeln(&format!(
+            "{} = arith.ori {}, {} : i1",
+            needs_adjust, rem_neg_div_pos, rem_pos_div_neg
+        ));
+        let adjusted_rem = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", adjusted_rem, needs_adjust));
+        self.indent();
+        let plus_divisor = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.addi {}, {} : i64",
+            plus_divisor, rem, divisor_raw
+        ));
+        self.writeln(&format!("scf.yield {} : i64", plus_divisor));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        self.writeln(&format!("scf.yield {} : i64", rem));
+        self.dedent();
+        self.writeln("}");
+        self.writeln(&format!("scf.yield {} : i64", adjusted_rem));
+        self.dedent();
+        self.writeln("}");
+
+        let boxed = self.emit_box_fixnum_raw(&adjusted);
+        self.writeln(&format!("scf.yield {} : i64", boxed));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let fallback = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_mod({}, {}) : (i64, i64) -> i64",
+            fallback, dividend_obj, divisor_obj
+        ));
+        self.writeln(&format!("scf.yield {} : i64", fallback));
+        self.dedent();
+        self.writeln("}");
+        self.writeln(&format!("scf.yield {} : i64", fast_or_fallback));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let fallback = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_mod({}, {}) : (i64, i64) -> i64",
+            fallback, dividend_obj, divisor_obj
+        ));
+        self.writeln(&format!("scf.yield {} : i64", fallback));
+        self.dedent();
+        self.writeln("}");
+        result
     }
 
     /// Extract parameter name and specializer from a method parameter specification
@@ -2048,8 +2369,13 @@ impl StackMLIRCodegen {
                         if let Err(e) = self.compile_expr(expr) {
                             body_error = Some(e);
                         } else {
-                            // Pop intermediate results
-                            self.emit_safe_discard();
+                            // Dotimes body expressions are statement-position here.
+                            // Pop directly to avoid per-iteration stack-depth probes.
+                            let _discard = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @stack_pop_pointer() : () -> i64",
+                                _discard
+                            ));
                         }
                     }
                 }
@@ -5442,41 +5768,11 @@ impl StackMLIRCodegen {
                     let one_obj = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", one_obj, one_fix));
 
-                    let result = self.fresh_ssa();
-                    let callee = if base_name == "1+" { "@cc_add" } else { "@cc_sub" };
-                    self.writeln(&format!(
-                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
-                        result, callee, value, one_obj
-                    ));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
-                    Ok(())
-                } else {
-                    self.compile_user_function_call(base_name, args)
-                }
-            }
-
-            // Arithmetic operators: fast-path the dominant binary case directly to
-            // numeric intrinsics, fallback to full runtime dispatch for all other arities.
-            "+" | "-" | "*" | "/" => {
-                if args.len() == 2 {
-                    self.compile_expr(&args[0])?;
-                    self.compile_expr(&args[1])?;
-                    let rhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
-                    let lhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", lhs));
-                    let result = self.fresh_ssa();
-                    let callee = match base_name {
-                        "+" => "@cc_add",
-                        "-" => "@cc_sub",
-                        "*" => "@cc_mul",
-                        "/" => "@cc_div",
-                        _ => unreachable!(),
+                    let result = if base_name_lower == "1+" {
+                        self.emit_fast_fixnum_add_sub(&value, &one_obj, "@cc_add", true)
+                    } else {
+                        self.emit_fast_fixnum_add_sub(&value, &one_obj, "@cc_sub", false)
                     };
-                    self.writeln(&format!(
-                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
-                        result, callee, lhs, rhs
-                    ));
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                     Ok(())
                 } else {
@@ -5484,21 +5780,196 @@ impl StackMLIRCodegen {
                 }
             }
 
-            // Comparison operators: fast-path binary comparisons, fallback to runtime
-            // dispatch for multi-arg/error semantics.
-            "<" | ">" | "=" | "/=" | "<=" | ">=" => {
-                if args.len() == 2 {
-                    if base_name == "/=" {
-                        return self.compile_user_function_call(base_name, args);
-                    }
-                    self.compile_expr(&args[0])?;
-                    self.compile_expr(&args[1])?;
+            // Arithmetic operators lowered to intrinsics for all supported CL arities.
+            "+" => {
+                if args.is_empty() {
+                    let ident_raw = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant 0 : i64", ident_raw));
+                    let ident_obj = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        ident_obj, ident_raw
+                    ));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", ident_obj));
+                    return Ok(());
+                }
+
+                self.compile_expr(&args[0])?;
+                let mut acc = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+
+                for arg in &args[1..] {
+                    self.compile_expr(arg)?;
                     let rhs = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
-                    let lhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", lhs));
-                    let result = self.fresh_ssa();
-                    let callee = match base_name {
+                    let next = self.emit_fast_fixnum_add_sub(&acc, &rhs, "@cc_add", true);
+                    acc = next;
+                }
+
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", acc));
+                Ok(())
+            }
+
+            "*" => {
+                if args.is_empty() {
+                    let ident_raw = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant 1 : i64", ident_raw));
+                    let ident_obj = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        ident_obj, ident_raw
+                    ));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", ident_obj));
+                    return Ok(());
+                }
+
+                self.compile_expr(&args[0])?;
+                let mut acc = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+
+                for arg in &args[1..] {
+                    self.compile_expr(arg)?;
+                    let rhs = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let next = self.emit_fast_fixnum_mul(&acc, &rhs);
+                    acc = next;
+                }
+
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", acc));
+                Ok(())
+            }
+
+            "-" => {
+                if args.is_empty() {
+                    // Preserve runtime error construction for invalid zero-arg forms.
+                    return self.compile_user_function_call(base_name, args);
+                }
+
+                self.compile_expr(&args[0])?;
+                let mut acc = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+
+                if args.len() == 1 {
+                    let seed_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant 0 : i64", seed_val));
+                    let seed_obj = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        seed_obj, seed_val
+                    ));
+                    let unary_result = self.emit_fast_fixnum_add_sub(&seed_obj, &acc, "@cc_sub", false);
+                    self.writeln(&format!(
+                        "func.call @stack_push_pointer({}) : (i64) -> ()",
+                        unary_result
+                    ));
+                    return Ok(());
+                }
+
+                for arg in &args[1..] {
+                    self.compile_expr(arg)?;
+                    let rhs = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let next = self.emit_fast_fixnum_add_sub(&acc, &rhs, "@cc_sub", false);
+                    acc = next;
+                }
+
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", acc));
+                Ok(())
+            }
+
+            "/" => {
+                if args.is_empty() {
+                    // Preserve runtime error construction for invalid zero-arg forms.
+                    return self.compile_user_function_call(base_name, args);
+                }
+
+                let seed_raw = 1i64;
+                let callee = "@cc_div";
+
+                self.compile_expr(&args[0])?;
+                let mut acc = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+
+                if args.len() == 1 {
+                    let seed_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant {} : i64", seed_val, seed_raw));
+                    let seed_obj = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        seed_obj, seed_val
+                    ));
+                    let unary_result = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                        unary_result, callee, seed_obj, acc
+                    ));
+                    self.writeln(&format!(
+                        "func.call @stack_push_pointer({}) : (i64) -> ()",
+                        unary_result
+                    ));
+                    return Ok(());
+                }
+
+                for arg in &args[1..] {
+                    self.compile_expr(arg)?;
+                    let rhs = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let next = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                        next, callee, acc, rhs
+                    ));
+                    acc = next;
+                }
+
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", acc));
+                Ok(())
+            }
+
+            // Comparison operators lowered intrinsics for n-ary CL forms.
+            "<" | ">" | "=" | "/=" | "<=" | ">=" => {
+                if args.len() <= 1 {
+                    let t_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", t_val));
+                    return Ok(());
+                }
+
+                let mut values: Vec<String> = Vec::with_capacity(args.len());
+                for arg in args {
+                    self.compile_expr(arg)?;
+                    let val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
+                    values.push(val);
+                }
+
+                let nil_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+
+                let mut all_true = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant 1 : i1", all_true));
+
+                if base_name_lower == "/=" {
+                    for i in 0..values.len() {
+                        for j in (i + 1)..values.len() {
+                            let eq_obj = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_eq({}, {}) : (i64, i64) -> i64",
+                                eq_obj, values[i], values[j]
+                            ));
+                            // /='s condition is "equal result is NIL".
+                            let neq = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = arith.cmpi eq, {}, {} : i64",
+                                neq, eq_obj, nil_val
+                            ));
+                            let next_all = self.fresh_ssa();
+                            self.writeln(&format!("{} = arith.andi {}, {} : i1", next_all, all_true, neq));
+                            all_true = next_all;
+                        }
+                    }
+                } else {
+                    let callee = match base_name_lower.as_str() {
                         "<" => "@cc_lt",
                         ">" => "@cc_gt",
                         "=" => "@cc_eq",
@@ -5506,15 +5977,37 @@ impl StackMLIRCodegen {
                         ">=" => "@cc_ge",
                         _ => unreachable!(),
                     };
-                    self.writeln(&format!(
-                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
-                        result, callee, lhs, rhs
-                    ));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
-                    Ok(())
-                } else {
-                    self.compile_user_function_call(base_name, args)
+                    for pair in values.windows(2) {
+                        let cmp_obj = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                            cmp_obj, callee, pair[0], pair[1]
+                        ));
+                        let cmp_true = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = arith.cmpi ne, {}, {} : i64",
+                            cmp_true, cmp_obj, nil_val
+                        ));
+                        let next_all = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.andi {}, {} : i1", next_all, all_true, cmp_true));
+                        all_true = next_all;
+                    }
                 }
+
+                let t_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = scf.if {} -> (i64) {{", result, all_true));
+                self.indent();
+                self.writeln(&format!("scf.yield {} : i64", t_val));
+                self.dedent();
+                self.writeln("} else {");
+                self.indent();
+                self.writeln(&format!("scf.yield {} : i64", nil_val));
+                self.dedent();
+                self.writeln("}");
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
             }
 
             // List operations
@@ -5893,12 +6386,11 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", delta_val));
 
                 // Compute new value: current + delta or current - delta
-                let result = self.fresh_ssa();
-                if func_name == "incf" {
-                    self.writeln(&format!("{} = func.call @cc_add({}, {}) : (i64, i64) -> i64", result, current, delta_val));
+                let result = if func_name == "incf" {
+                    self.emit_fast_fixnum_add_sub(&current, &delta_val, "@cc_add", true)
                 } else {
-                    self.writeln(&format!("{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64", result, current, delta_val));
-                }
+                    self.emit_fast_fixnum_add_sub(&current, &delta_val, "@cc_sub", false)
+                };
 
                 // Now we need to do (setf place result)
                 // We'll build a setf call node
@@ -6800,7 +7292,13 @@ impl StackMLIRCodegen {
                     }
 
                     if pair_idx + 1 < total_pairs {
-                        self.emit_safe_discard();
+                        // setf/setq pair always leaves one value on stack.
+                        // Discard directly to avoid hot-path depth probes.
+                        let _discard = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @stack_pop_pointer() : () -> i64",
+                            _discard
+                        ));
                     }
                 }
 
@@ -7384,9 +7882,26 @@ impl StackMLIRCodegen {
             }
 
             "aref" => {
-                // Use runtime stack builtin so out-of-bounds and multi-index semantics
-                // follow CL runtime behavior consistently.
-                self.compile_user_function_call(base_name, args)
+                if args.len() == 2 {
+                    // Fast path for the common rank-1 form (aref array index).
+                    // cc_aref preserves CL bounds/type error behavior for vectors/strings.
+                    self.compile_expr(&args[0])?;
+                    self.compile_expr(&args[1])?;
+                    let index = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", index));
+                    let array = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", array));
+                    let result = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64",
+                        result, array, index
+                    ));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                    Ok(())
+                } else {
+                    // Keep generic runtime dispatch for multi-index arrays.
+                    self.compile_user_function_call(base_name, args)
+                }
             }
 
             "copy-seq" => {
@@ -7834,7 +8349,32 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
-            "min" | "max" => self.compile_user_function_call(base_name, args),
+            "min" | "max" => {
+                if args.is_empty() {
+                    return self.compile_user_function_call(base_name, args);
+                }
+                self.compile_expr(&args[0])?;
+                let mut acc = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+                let callee = if base_name_lower == "min" {
+                    "@cc_min"
+                } else {
+                    "@cc_max"
+                };
+                for arg in &args[1..] {
+                    self.compile_expr(arg)?;
+                    let rhs = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let next = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                        next, callee, acc, rhs
+                    ));
+                    acc = next;
+                }
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", acc));
+                Ok(())
+            }
 
             "abs" => {
                 if args.len() != 1 {
@@ -9136,8 +9676,7 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", divisor));
                 let dividend = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", dividend));
-                let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_mod({}, {}) : (i64, i64) -> i64", result, dividend, divisor));
+                let result = self.emit_fast_fixnum_mod(&dividend, &divisor);
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -10677,6 +11216,27 @@ impl StackMLIRCodegen {
         let is_direct_local_call = self.local_function_map.contains_key(base_name)
             && !is_generic_function
             && self.local_function_fixed_arity_map.get(&actual_func_name).copied() == Some(args.len());
+        let prefixed_func_name = format!("%FN%{}", actual_func_name);
+        let direct_compiled_target = if self.compiled_functions.contains(&actual_func_name) {
+            Some(actual_func_name.clone())
+        } else if self.compiled_functions.contains(&prefixed_func_name) {
+            Some(prefixed_func_name.clone())
+        } else {
+            None
+        };
+        let trampoline_target = direct_compiled_target
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| actual_func_name.clone());
+        let requires_trampoline = self.tailcall_trampoline_functions.contains(&actual_func_name)
+            || self.tailcall_trampoline_functions.contains(&prefixed_func_name)
+            || self.tailcall_trampoline_functions.contains(&trampoline_target);
+        let can_direct_compiled_call = direct_compiled_target.is_some()
+            && !is_generic_function
+            && !requires_trampoline
+            && !self.special_param_functions.contains(&actual_func_name)
+            && !self.special_param_functions.contains(&prefixed_func_name);
+        let can_direct_local_call = is_direct_local_call && !requires_trampoline;
         let func_name_lc = actual_func_name.to_ascii_lowercase();
         let propagate_arg_errors_env = std::env::var("RLASP_MLIR_PROPAGATE_ARG_ERRORS")
             .map(|v| {
@@ -10686,7 +11246,8 @@ impl StackMLIRCodegen {
             .unwrap_or(true);
         // Direct fixed-arity local calls stay on the compiled fast path and should not
         // pay the dynamic error-object propagation tax used for fallback dispatch.
-        let propagate_arg_errors = !is_direct_local_call
+        let propagate_arg_errors = !can_direct_local_call
+            && !can_direct_compiled_call
             && propagate_arg_errors_env
             && !matches!(
                 func_name_lc.as_str(),
@@ -10709,6 +11270,25 @@ impl StackMLIRCodegen {
                     | "%fail-test-with-error"
                     | "%fail-test"
             );
+        let mut emit_call = |this: &mut Self, effective_num_args: usize| {
+            if can_direct_local_call {
+                this.writeln(&format!("func.call @\"{}\"() : () -> ()", actual_func_name));
+            } else if can_direct_compiled_call {
+                if let Some(target) = &direct_compiled_target {
+                    this.writeln(&format!("func.call @\"{}\"() : () -> ()", target));
+                }
+            } else if is_generic_function {
+                let gf_name_sym = this.create_function_ref_constant(&actual_func_name);
+                let num_args_ssa = this.fresh_ssa();
+                this.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
+                this.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", gf_name_sym, num_args_ssa));
+            } else {
+                let func_sym = this.create_function_ref_constant(&trampoline_target);
+                let num_args_ssa = this.fresh_ssa();
+                this.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
+                this.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", func_sym, num_args_ssa));
+            }
+        };
 
         // Evaluate arguments left-to-right and materialize them as SSA values first.
         // If any argument is an error object, propagate it instead of invoking callee.
@@ -10759,19 +11339,7 @@ impl StackMLIRCodegen {
             for arg_ssa in &arg_vals {
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", arg_ssa));
             }
-            if is_direct_local_call {
-                self.writeln(&format!("func.call @\"{}\"() : () -> ()", actual_func_name));
-            } else if is_generic_function {
-                let gf_name_sym = self.create_function_ref_constant(&actual_func_name);
-                let num_args_ssa = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
-                self.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", gf_name_sym, num_args_ssa));
-            } else {
-                let func_sym = self.create_function_ref_constant(&actual_func_name);
-                let num_args_ssa = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
-                self.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", func_sym, num_args_ssa));
-            }
+            emit_call(self, effective_num_args);
 
             self.dedent();
             self.writeln("}");
@@ -10780,19 +11348,7 @@ impl StackMLIRCodegen {
             for arg_ssa in &arg_vals {
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", arg_ssa));
             }
-            if is_direct_local_call {
-                self.writeln(&format!("func.call @\"{}\"() : () -> ()", actual_func_name));
-            } else if is_generic_function {
-                let gf_name_sym = self.create_function_ref_constant(&actual_func_name);
-                let num_args_ssa = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
-                self.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", gf_name_sym, num_args_ssa));
-            } else {
-                let func_sym = self.create_function_ref_constant(&actual_func_name);
-                let num_args_ssa = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
-                self.writeln(&format!("func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()", func_sym, num_args_ssa));
-            }
+            emit_call(self, effective_num_args);
         }
         Ok(())
     }
@@ -10802,13 +11358,27 @@ impl StackMLIRCodegen {
             .get(base_name)
             .cloned()
             .unwrap_or_else(|| base_name.to_string());
+        let prefixed_func_name = format!("%FN%{}", actual_func_name);
+        let tailcall_target = if self.compiled_functions.contains(&actual_func_name) {
+            actual_func_name.clone()
+        } else if self.compiled_functions.contains(&prefixed_func_name) {
+            prefixed_func_name
+        } else {
+            actual_func_name.clone()
+        };
+        self.tailcall_trampoline_functions
+            .insert(actual_func_name.clone());
+        self.tailcall_trampoline_functions
+            .insert(tailcall_target.clone());
 
         for arg in args {
             self.compile_expr(arg)?;
         }
-        let effective_num_args = args.len();
 
-        let func_sym = self.create_function_ref_constant(&actual_func_name);
+        // Always use the trampoline in tail position so recursive calls do not
+        // consume native stack frames.
+        let effective_num_args = args.len();
+        let func_sym = self.create_function_ref_constant(&tailcall_target);
         let num_args_ssa = self.fresh_ssa();
         self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, effective_num_args));
         self.writeln(&format!("func.call @cc_tailcall_stack({}, {}) : (i64, i64) -> ()", func_sym, num_args_ssa));
@@ -11470,9 +12040,13 @@ impl StackMLIRCodegen {
         self.writeln("func.func @\"__main\"() {");
         self.indent();
 
-        // Simple __main without tracing - just call batches
+        // Keep top-level batch execution stack-neutral. Each batch may leave a
+        // primary value on the eval stack; clear around calls so long suites do
+        // not accumulate residual values across hundreds of toplevel forms.
         for name in batch_names.iter() {
+            self.writeln("func.call @stack_clear() : () -> ()");
             self.emit_internal_call(name);
+            self.writeln("func.call @stack_clear() : () -> ()");
         }
 
         // Push nil as the final result (standard for void-returning functions)
@@ -11500,7 +12074,9 @@ impl StackMLIRCodegen {
         if self.compiled_functions.contains(name) {
             return Ok(());
         }
-        // Note: We add to compiled_functions at the END of this function, only on success
+        // Mark eagerly so self-recursive calls inside this body can resolve direct
+        // compiled targets (%FN%...) during lowering.
+        self.compiled_functions.insert(name.to_string());
 
         // Check if this function has special parameters (&optional, &key, &rest)
         // Only lambda-list keywords starting with & trigger the cc_arg calling convention
@@ -11712,6 +12288,7 @@ impl StackMLIRCodegen {
 
         // If compilation failed, write a stub body
         if compile_result.is_err() {
+            self.compiled_functions.remove(name);
             self.writeln("func.call @stack_push_nil() : () -> ()");
         }
 
@@ -11724,8 +12301,6 @@ impl StackMLIRCodegen {
         // Return the original error if there was one
         compile_result?;
 
-        // Only mark as compiled if successful
-        self.compiled_functions.insert(name.to_string());
         Ok(())
     }
 

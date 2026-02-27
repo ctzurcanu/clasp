@@ -76,8 +76,8 @@ impl RVector {
     }
 
     pub fn allocate(elements: Vec<LispObject>) -> LispObject {
-        let vector = Box::new(RVector::new(elements));
-        LispObject::from_general_ptr(Box::into_raw(vector))
+        let ptr = unsafe { crate::gc::gc_allocate_value(RVector::new(elements)).as_ptr() };
+        LispObject::from_general_ptr(ptr)
     }
 }
 

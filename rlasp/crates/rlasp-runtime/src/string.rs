@@ -65,8 +65,8 @@ impl RString {
     }
 
     pub fn allocate(s: String) -> LispObject {
-        let string = Box::new(RString::new(s));
-        LispObject::from_general_ptr(Box::into_raw(string))
+        let ptr = unsafe { crate::gc::gc_allocate_value(RString::new(s)).as_ptr() };
+        LispObject::from_general_ptr(ptr)
     }
 }
 

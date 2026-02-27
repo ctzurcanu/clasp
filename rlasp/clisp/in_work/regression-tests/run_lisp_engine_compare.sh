@@ -21,6 +21,11 @@ SBCL_TIMEOUT_S="${SBCL_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 CLASP_TIMEOUT_S="${CLASP_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 IRLASP_INTERP_TIMEOUT_S="${IRLASP_INTERP_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 IRLASP_MLIR_TIMEOUT_S="${IRLASP_MLIR_TIMEOUT_S:-$RUN_TIMEOUT_S}"
+IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-100000}"
+typeset -a IRLASP_ENV=()
+if [[ -n "$IRLASP_GC_FREE_SPACE_DIVISOR" ]]; then
+  IRLASP_ENV+=("GC_FREE_SPACE_DIVISOR=$IRLASP_GC_FREE_SPACE_DIVISOR")
+fi
 mkdir -p "$LOG_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -251,9 +256,9 @@ run_mlir_with_phase_timing() {
 
   set +e
   if [[ "$timeout_s" =~ '^[0-9]+$' && "$timeout_s" -gt 0 ]]; then
-    (perl -e 'my $t=shift @ARGV; alarm $t; exec @ARGV;' "$timeout_s" env RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
+    (perl -e 'my $t=shift @ARGV; alarm $t; exec @ARGV;' "$timeout_s" env "${IRLASP_ENV[@]}" RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
   else
-    (env RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
+    (env "${IRLASP_ENV[@]}" RLASP_MLIR_VERBOSE=1 RLASP_MLIR_SELECTIVE_EVAL="$selective_eval" "$IRLASP_BIN" -m mlir "$file_path" >"$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -388,6 +393,7 @@ CSV_FILE="$LOG_DIR/lisp-engine-compare-$STAMP.csv"
   echo "TIMEOUT_BIN: ${TIMEOUT_BIN:-<none>}"
   echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-0}"
   echo "TIMEOUTS_S: SBCL=$SBCL_TIMEOUT_S CLASP=$CLASP_TIMEOUT_S IRLASP_INTERP=$IRLASP_INTERP_TIMEOUT_S IRLASP_MLIR=$IRLASP_MLIR_TIMEOUT_S"
+  echo "IRLASP_GC_FREE_SPACE_DIVISOR: $IRLASP_GC_FREE_SPACE_DIVISOR"
   echo "IRLASP_BIN: $IRLASP_BIN"
   echo "SBCL_BIN: ${SBCL_BIN:-<missing>}"
   echo "CLASP_BIN: ${CLASP_BIN:-<missing>}"
@@ -532,7 +538,7 @@ for file_path in "${FILES[@]}"; do
   if [[ "$eligible" == "yes" ]]; then
     ELIGIBLE_COUNT=$(( ELIGIBLE_COUNT + 1 ))
     if [[ -x "$IRLASP_BIN" ]]; then
-      run_engine_generic "$interp_raw" "$IRLASP_INTERP_TIMEOUT_S" "$IRLASP_BIN" "$engine_input"
+      run_engine_generic "$interp_raw" "$IRLASP_INTERP_TIMEOUT_S" env "${IRLASP_ENV[@]}" "$IRLASP_BIN" "$engine_input"
       interp_status="$RUN_STATUS"
       interp_time="$RUN_ELAPSED"
     else

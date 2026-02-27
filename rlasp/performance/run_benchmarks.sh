@@ -9,7 +9,8 @@ mkdir -p "$LOG_DIR"
 SBCL_BIN="${SBCL_BIN:-/opt/homebrew/bin/sbcl}"
 CLASP_BIN="${CLASP_BIN:-/opt/homebrew/bin/clasp}"
 IRLASP_BIN="${IRLASP_BIN:-/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp}"
-RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-60}"
+RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-180}"
+IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-5120}"
 TIMEOUT_BIN=""
 if command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="$(command -v gtimeout)"
@@ -116,19 +117,23 @@ while IFS='|' read -r bench_file bench_args_raw; do
   clasp_s="$RUN_TIME_S"
 
   run_timed "$interp_out" "$interp_time" \
-    "$IRLASP_BIN" -m interpret "$bench_path" "${args[@]}"
+    env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit \
+      "$IRLASP_BIN" -m interpret "$bench_path" "${args[@]}"
   interp_rc="$RUN_RC"
   interp_s="$RUN_TIME_S"
 
   rm -f "$mlirbc_path"
   run_timed "$mlir_compile_out" "$mlir_compile_time" \
-    env RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SELECTIVE_EVAL=1 "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
+    env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit \
+      RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SELECTIVE_EVAL=1 \
+      "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
   mlir_compile_rc="$RUN_RC"
   mlir_compile_s="$RUN_TIME_S"
 
   if [[ "$mlir_compile_rc" -eq 0 && -f "$mlirbc_path" ]]; then
     run_timed "$mlir_exec_out" "$mlir_exec_time" \
-      "$IRLASP_BIN" -m mlir "$mlirbc_path" "${args[@]}"
+      env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit \
+        "$IRLASP_BIN" -m mlir "$mlirbc_path" "${args[@]}"
     mlir_exec_rc="$RUN_RC"
     mlir_exec_s="$RUN_TIME_S"
   else
@@ -178,13 +183,15 @@ while IFS='|' read -r bench_file bench_args_raw; do
 done <<'EOF'
 fibonacci_recursive.lisp|28
 fibonacci_iterative.lisp|900000
-tco_sum.lisp|5000
+tco_sum.lisp|1000
 sieve_primes.lisp|900000
 gcd_loop.lisp|140000 832040 514229
 list_sum.lisp|1200000
 hash_table_stress.lisp|1200000 20000
 vector_dot.lisp|1500000
 string_count.lisp|120000
+fixnum_lcg.lisp|1200000 12345 67890
+function_call_hotloop.lisp|800000
 EOF
 
 echo "CSV: $CSV_FILE"

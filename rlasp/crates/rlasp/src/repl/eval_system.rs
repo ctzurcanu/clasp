@@ -2305,15 +2305,25 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         return Ok(EvalResult::Boolean(true));
     }
 
-    let objects = rlasp_reader::read_all_from_string(&contents)
-        .map_err(|e| format!("Error parsing {}: {:?}", source_label, e))?;
-
     use crate::repl::lisp_to_ast::{lisp_to_ast, with_read_time_env};
+    use rlasp_reader::ReaderError;
 
     let mut _result = EvalResult::Nil;
-    for (idx, obj) in objects.into_iter().enumerate() {
+    let mut reader = rlasp_reader::Reader::from_string(&contents)
+        .map_err(|e| format!("Error parsing {}: {:?}", source_label, e))?;
+    let mut form_index = 0usize;
+    loop {
+        let obj = match reader.read() {
+            Ok(obj) => obj,
+            Err(ReaderError::UnexpectedEof) => break,
+            Err(e) => return Err(format!("Error parsing {}: {:?}", source_label, e)),
+        };
+        if rlasp_reader::is_skip_marker(&obj) {
+            continue;
+        }
+        form_index += 1;
         let ast = with_read_time_env(env, || lisp_to_ast(obj))
-            .map_err(|e| format!("{} [while reading form {} in {}]", e, idx + 1, source_label))?;
+            .map_err(|e| format!("{} [while reading form {} in {}]", e, form_index, source_label))?;
         _result = match eval_with_env(&ast, env) {
             Ok(v) => v,
             Err(e) => {
@@ -2324,14 +2334,14 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             eprintln!("[load-error-return-slot] {:?}", rv.borrow().as_ref());
                         });
                     }
-                    eprintln!("[load-error] form {} ast={:?}", idx + 1, ast);
+                    eprintln!("[load-error] form {} ast={:?}", form_index, ast);
                 }
                 if e == "__SIGNAL_CONDITION__" {
                     if let Some(cond) = super::eval_conditions::take_pending_signaled_condition() {
                         return Err(format!(
                             "{} [while evaluating form {} in {}]",
                             cond,
-                            idx + 1,
+                            form_index,
                             source_label
                         ));
                     }
@@ -2341,12 +2351,12 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         return Err(format!(
                             "{} [while evaluating form {} in {}]",
                             cond,
-                            idx + 1,
+                            form_index,
                             source_label
                         ));
                     }
                 }
-                return Err(format!("{} [while evaluating form {} in {}]", e, idx + 1, source_label));
+                return Err(format!("{} [while evaluating form {} in {}]", e, form_index, source_label));
             }
         };
         if print_values {

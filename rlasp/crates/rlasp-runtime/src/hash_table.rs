@@ -71,8 +71,7 @@ impl HashTable {
 
     /// Allocate a hash table and return a LispObject pointer to it
     pub fn allocate() -> LispObject {
-        let ht = Box::new(HashTable::new());
-        let ptr = Box::into_raw(ht);
+        let ptr = unsafe { crate::gc::gc_allocate_value(HashTable::new()).as_ptr() };
         LispObject::from_hash_table_ptr(ptr)
     }
 

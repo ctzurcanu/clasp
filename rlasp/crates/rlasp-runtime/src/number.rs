@@ -13,6 +13,34 @@ use crate::object::LispObject;
 use malachite::Integer;
 use malachite::Rational;
 use num_complex::Complex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+
+static BIGNUM_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static BIGNUM_COLLECT_EVERY: OnceLock<usize> = OnceLock::new();
+
+fn bignum_collect_every() -> usize {
+    *BIGNUM_COLLECT_EVERY.get_or_init(|| {
+        std::env::var("RLASP_GC_COLLECT_EVERY_BIGNUM")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(2048)
+    })
+}
+
+fn maybe_collect_after_bignum_alloc() {
+    let every = bignum_collect_every();
+    if every == 0 {
+        return;
+    }
+    let n = BIGNUM_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % every == 0 {
+        if crate::gc::is_gc_initialized() {
+            crate::gc::global_gc().collect();
+        }
+    }
+}
 
 /// Number variants (heap-allocated)
 #[derive(Debug, Clone)]
@@ -48,31 +76,38 @@ impl Number {
         }
     }
 
+    #[inline]
+    unsafe fn allocate_number(value: NumberValue) -> *mut Number {
+        let ptr = crate::gc::gc_allocate_value(Number::new(value)).as_ptr();
+        #[cfg(feature = "boehm-gc")]
+        {
+            crate::gc::gc_register_drop_finalizer(ptr);
+        }
+        ptr
+    }
+
     /// Allocate a bignum and return LispObject
     pub fn allocate_bignum(n: Integer) -> LispObject {
-        let num = Box::new(Number::new(NumberValue::Bignum(n)));
-        let ptr = Box::into_raw(num);
+        let ptr = unsafe { Self::allocate_number(NumberValue::Bignum(n)) };
+        maybe_collect_after_bignum_alloc();
         LispObject::from_general_ptr(ptr)
     }
 
     /// Allocate a ratio and return LispObject
     pub fn allocate_ratio(r: Rational) -> LispObject {
-        let num = Box::new(Number::new(NumberValue::Ratio(r)));
-        let ptr = Box::into_raw(num);
+        let ptr = unsafe { Self::allocate_number(NumberValue::Ratio(r)) };
         LispObject::from_general_ptr(ptr)
     }
 
     /// Allocate a float and return LispObject
     pub fn allocate_float(f: f64) -> LispObject {
-        let num = Box::new(Number::new(NumberValue::Float(f)));
-        let ptr = Box::into_raw(num);
+        let ptr = unsafe { Self::allocate_number(NumberValue::Float(f)) };
         LispObject::from_general_ptr(ptr)
     }
 
     /// Allocate a complex and return LispObject
     pub fn allocate_complex(c: Complex<f64>) -> LispObject {
-        let num = Box::new(Number::new(NumberValue::Complex(c)));
-        let ptr = Box::into_raw(num);
+        let ptr = unsafe { Self::allocate_number(NumberValue::Complex(c)) };
         LispObject::from_general_ptr(ptr)
     }
 

@@ -135,8 +135,7 @@ impl Class {
 
     /// Allocate a class without superclasses
     pub fn allocate(name: String, slots: Vec<String>) -> LispObject {
-        let class = Box::new(Class::new(name.clone(), slots));
-        let ptr = Box::into_raw(class);
+        let ptr = unsafe { crate::gc::gc_allocate_value(Class::new(name.clone(), slots)).as_ptr() };
         // Register in global table
         register_class(&name, ptr);
         LispObject::from_class_ptr(ptr)
@@ -148,8 +147,9 @@ impl Class {
         slots: Vec<String>,
         superclasses: Vec<String>,
     ) -> LispObject {
-        let class = Box::new(Class::new_with_superclasses(name.clone(), slots, superclasses));
-        let ptr = Box::into_raw(class);
+        let ptr = unsafe {
+            crate::gc::gc_allocate_value(Class::new_with_superclasses(name.clone(), slots, superclasses)).as_ptr()
+        };
         // Register in global table
         register_class(&name, ptr);
         LispObject::from_class_ptr(ptr)
@@ -305,8 +305,7 @@ impl Instance {
     }
 
     pub fn allocate(class: *const Class) -> LispObject {
-        let instance = Box::new(Instance::new(class));
-        let ptr = Box::into_raw(instance);
+        let ptr = unsafe { crate::gc::gc_allocate_value(Instance::new(class)).as_ptr() };
         get_instance_table().lock().unwrap().insert(ptr as usize);
         LispObject::from_instance_ptr(ptr)
     }

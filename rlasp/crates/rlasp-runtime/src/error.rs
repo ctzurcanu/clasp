@@ -1,7 +1,6 @@
 //! Lisp Error type for runtime errors
 
 use crate::{LispObject, TypeHeader, ObjectType};
-use std::alloc::{alloc, Layout};
 
 /// Error types that can occur at runtime
 #[repr(u8)]
@@ -26,17 +25,15 @@ pub struct LispError {
 impl LispError {
     /// Allocate a new error on the heap
     pub fn allocate(kind: ErrorKind, message: Option<String>) -> LispObject {
-        let layout = Layout::new::<LispError>();
-        unsafe {
-            let ptr = alloc(layout) as *mut LispError;
-            // Use ptr::write for proper initialization of uninitialized memory
-            std::ptr::write(ptr, LispError {
+        let ptr = unsafe {
+            crate::gc::gc_allocate_value(LispError {
                 header: TypeHeader::new(ObjectType::Error),
                 kind,
                 message,
-            });
-            LispObject::from_general_ptr(ptr)
-        }
+            })
+            .as_ptr()
+        };
+        LispObject::from_general_ptr(ptr)
     }
 
     /// Create a type error

@@ -172,7 +172,22 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         });
     }
 
-    Err(format!("Cannot convert LispObject to AST: {:?}", obj))
+    let mut details = String::new();
+    if obj.is_general() {
+        if let Some(ptr) = obj.as_general_ptr::<u8>() {
+            if ptr.is_null() {
+                details.push_str(" [general-ptr=null]");
+            } else if let Some(obj_type) = unsafe { TypeHeader::from_ptr(ptr) } {
+                details.push_str(&format!(" [general-type={:?} ptr={:p}]", obj_type, ptr));
+            } else {
+                details.push_str(&format!(" [general-type=<invalid-header> ptr={:p}]", ptr));
+            }
+        } else {
+            details.push_str(" [general-ptr=<none>]");
+        }
+    }
+
+    Err(format!("Cannot convert LispObject to AST: {:?}{}", obj, details))
 }
 
 fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {

@@ -380,6 +380,41 @@ pub unsafe fn gc_allocate<T: GCInfo>(value: T) -> NonNull<T> {
     allocate(global_gc(), value)
 }
 
+/// Allocate a value through the configured GC allocator without requiring
+/// a `GCInfo` implementation for `T`.
+pub unsafe fn gc_allocate_value<T>(value: T) -> NonNull<T> {
+    if !is_gc_initialized() {
+        init_gc();
+    }
+    let layout = Layout::new::<T>();
+    let ptr = global_gc().allocate_raw(layout);
+    let typed_ptr = ptr.as_ptr() as *mut T;
+    typed_ptr.write(value);
+    NonNull::new_unchecked(typed_ptr)
+}
+
+#[cfg(feature = "boehm-gc")]
+pub unsafe fn gc_register_drop_finalizer<T>(typed_ptr: *mut T) {
+    use std::os::raw::c_void;
+    if !std::mem::needs_drop::<T>() {
+        return;
+    }
+
+    unsafe extern "C" fn drop_value_finalizer<T>(obj: *mut c_void, _client_data: *mut c_void) {
+        if !obj.is_null() {
+            unsafe { std::ptr::drop_in_place(obj as *mut T) };
+        }
+    }
+
+    ffi::GC_register_finalizer(
+        typed_ptr as *mut c_void,
+        Some(drop_value_finalizer::<T>),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

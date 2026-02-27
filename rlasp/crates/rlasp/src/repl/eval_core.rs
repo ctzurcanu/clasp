@@ -153,13 +153,27 @@ fn lookup_env_binding(name: &str, env: &HashMap<String, EvalResult>) -> Option<E
             }
         }
 
-        // Fallback: lexical variables introduced by macro expansion may be package-qualified.
-        // Match by base symbol name to keep hygienic captures usable across packages.
+        // Fallback: lexical variables (and function-namespace symbols) introduced by macro
+        // expansion may be package-qualified. Match by base symbol name to keep hygienic
+        // captures usable across packages.
+        let (needs_fn_prefix, lookup_name) = if let Some(stripped) = name.strip_prefix(FUNCTION_NS_PREFIX) {
+            (true, stripped)
+        } else {
+            (false, name)
+        };
         if let Some((_, val)) = env.iter().find(|(k, _)| {
-            k.contains(':')
-                && k.rsplit(':')
+            let candidate = if needs_fn_prefix {
+                match k.strip_prefix(FUNCTION_NS_PREFIX) {
+                    Some(rest) => rest,
+                    None => return false,
+                }
+            } else {
+                k.as_str()
+            };
+            candidate.contains(':')
+                && candidate.rsplit(':')
                     .next()
-                    .map(|s| s.eq_ignore_ascii_case(name))
+                    .map(|s| s.eq_ignore_ascii_case(lookup_name))
                     .unwrap_or(false)
         }) {
             return Some(val.clone());
@@ -239,6 +253,12 @@ fn lookup_env_binding_fast(name: &str, env: &HashMap<String, EvalResult>) -> Opt
         }
     }
     None
+}
+
+#[inline]
+fn lookup_env_binding_for_call(name: &str, env: &HashMap<String, EvalResult>) -> Option<EvalResult> {
+    // Keep full CL lookup behavior for calls, including package/base-name fallbacks.
+    lookup_env_binding_fast(name, env).or_else(|| lookup_env_binding(name, env))
 }
 
 fn maybe_data_list_function_head(ast: &ASTNode) -> bool {
@@ -1895,7 +1915,8 @@ fn qualify_symbols_in_ast_with_exclusions(
         "string-trim", "string-left-trim", "string-right-trim",
         "string-upcase", "string-downcase", "string-capitalize",
         "string=", "string/=", "string<", "string>", "string<=", "string>=",
-        "string-equal", "string-lessp", "string-greaterp",
+        "string-equal", "string-not-equal", "string-lessp", "string-greaterp",
+        "string-not-greaterp", "string-not-lessp",
         "char", "schar", "subseq", "length", "concatenate",
         // Type functions
         "type-of", "typep", "subtypep",
@@ -2766,7 +2787,7 @@ fn eval_variable(name: &str, env: &HashMap<String, EvalResult>) -> Result<EvalRe
     }
 
     // Check environment for local bindings
-    if let Some(val) = lookup_env_binding(name, env) {
+    if let Some(val) = lookup_env_binding_fast(name, env).or_else(|| lookup_env_binding(name, env)) {
         return Ok(val);
     }
 
@@ -7324,12 +7345,9 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             } else {
                 fn_name.clone()  // For system packages, don't look up base name
             };
-            let func_val = lookup_env_binding_fast(&fn_name, env)
-                .or_else(|| if !is_system_prefix { lookup_env_binding_fast(&base_fn_name, env) } else { None })
-                .or_else(|| lookup_env_binding_fast(name, env))
-                .or_else(|| lookup_env_binding(&fn_name, env))
-                .or_else(|| if !is_system_prefix { lookup_env_binding(&base_fn_name, env) } else { None })
-                .or_else(|| lookup_env_binding(name, env));
+            let func_val = lookup_env_binding_for_call(&fn_name, env)
+                .or_else(|| if !is_system_prefix { lookup_env_binding_for_call(&base_fn_name, env) } else { None })
+                .or_else(|| lookup_env_binding_for_call(name, env));
             if let Some(func_val) = func_val {
                 if std::env::var("RLASP_DEBUG_WITH_UPGRADABILITY").is_ok()
                     && base_name.eq_ignore_ascii_case("with-upgradability")
@@ -14365,12 +14383,9 @@ fn maybe_prepare_tail_lambda_call(
         } else {
             fn_name.clone()
         };
-        let func_val = lookup_env_binding_fast(&fn_name, env)
-            .or_else(|| if !is_system_prefix { lookup_env_binding_fast(&base_fn_name, env) } else { None })
-            .or_else(|| lookup_env_binding_fast(name, env))
-            .or_else(|| lookup_env_binding(&fn_name, env))
-            .or_else(|| if !is_system_prefix { lookup_env_binding(&base_fn_name, env) } else { None })
-            .or_else(|| lookup_env_binding(name, env));
+        let func_val = lookup_env_binding_for_call(&fn_name, env)
+            .or_else(|| if !is_system_prefix { lookup_env_binding_for_call(&base_fn_name, env) } else { None })
+            .or_else(|| lookup_env_binding_for_call(name, env));
         if let Some(f) = func_val {
             resolved = Some((f, base_name.to_string()));
         }
@@ -14524,29 +14539,8 @@ fn eval_tail_position(
                         }
                     }
                 }
-                match eval_tail_position(&body[body.len() - 1], env) {
-                    Ok(TailEvalResult::Value(v)) => Ok(TailEvalResult::Value(v)),
-                    Ok(TailEvalResult::TailCall(request)) => Ok(TailEvalResult::TailCall(request)),
-                    Ok(TailEvalResult::ReturnFromValue { block_name: target_block, value }) => {
-                        if canonical_block_name(&target_block) == block_name {
-                            Ok(TailEvalResult::Value(value))
-                        } else {
-                            Ok(TailEvalResult::ReturnFromValue {
-                                block_name: target_block,
-                                value,
-                            })
-                        }
-                    }
-                    Ok(TailEvalResult::ReturnFromTailCall { block_name: target_block, request }) => {
-                        if canonical_block_name(&target_block) == block_name {
-                            Ok(TailEvalResult::TailCall(request))
-                        } else {
-                            Ok(TailEvalResult::ReturnFromTailCall {
-                                block_name: target_block,
-                                request,
-                            })
-                        }
-                    }
+                match eval_with_env(&body[body.len() - 1], env) {
+                    Ok(v) => Ok(TailEvalResult::Value(v)),
                     Err(e) => {
                         if let Some(value_part) =
                             extract_return_from_payload_for_block(&e, &block_name, block_id)
@@ -14765,29 +14759,8 @@ fn eval_tail_position(
                                 }
                             }
                         }
-                        match eval_tail_position(&body[body.len() - 1], env) {
-                            Ok(TailEvalResult::Value(v)) => Ok(TailEvalResult::Value(v)),
-                            Ok(TailEvalResult::TailCall(request)) => Ok(TailEvalResult::TailCall(request)),
-                            Ok(TailEvalResult::ReturnFromValue { block_name: target_block, value }) => {
-                                if canonical_block_name(&target_block) == block_name {
-                                    Ok(TailEvalResult::Value(value))
-                                } else {
-                                    Ok(TailEvalResult::ReturnFromValue {
-                                        block_name: target_block,
-                                        value,
-                                    })
-                                }
-                            }
-                            Ok(TailEvalResult::ReturnFromTailCall { block_name: target_block, request }) => {
-                                if canonical_block_name(&target_block) == block_name {
-                                    Ok(TailEvalResult::TailCall(request))
-                                } else {
-                                    Ok(TailEvalResult::ReturnFromTailCall {
-                                        block_name: target_block,
-                                        request,
-                                    })
-                                }
-                            }
+                        match eval_with_env(&body[body.len() - 1], env) {
+                            Ok(v) => Ok(TailEvalResult::Value(v)),
                             Err(e) => {
                                 if let Some(value_part) =
                                     extract_return_from_payload_for_block(&e, &block_name, block_id)
@@ -14886,6 +14859,188 @@ pub(super) fn eval_lambda_call(
             || name.contains("::")
             || name.contains(':')
     }
+    fn canonical_lookup_token(name: &str) -> String {
+        let mut n = name;
+        if let Some(stripped) = n.strip_prefix(FUNCTION_NS_PREFIX) {
+            n = stripped;
+        }
+        if let Some((_, tail)) = n.rsplit_once(':') {
+            n = tail;
+        }
+        n.to_ascii_lowercase()
+    }
+    fn collect_lookup_tokens(ast: &ASTNode, out: &mut HashSet<String>) {
+        match ast {
+            ASTNode::Variable(name) => {
+                out.insert(canonical_lookup_token(name));
+            }
+            ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                out.insert(canonical_lookup_token(name));
+            }
+            ASTNode::Call { function, args } => {
+                collect_lookup_tokens(function, out);
+                for arg in args {
+                    collect_lookup_tokens(arg, out);
+                }
+            }
+            ASTNode::Quote(inner)
+            | ASTNode::Backquote(inner)
+            | ASTNode::Unquote(inner)
+            | ASTNode::UnquoteSplicing(inner) => collect_lookup_tokens(inner, out),
+            ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => {
+                collect_lookup_tokens(test, out);
+                collect_lookup_tokens(then_branch, out);
+                collect_lookup_tokens(else_branch, out);
+            }
+            ASTNode::Progn { exprs } | ASTNode::Vector(exprs) => {
+                for expr in exprs {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                for (_, expr) in bindings {
+                    collect_lookup_tokens(expr, out);
+                }
+                for expr in body {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Dotimes { count, result, body, .. } => {
+                collect_lookup_tokens(count, out);
+                if let Some(result) = result {
+                    collect_lookup_tokens(result, out);
+                }
+                for expr in body {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Dolist { list, result, body, .. } => {
+                collect_lookup_tokens(list, out);
+                if let Some(result) = result {
+                    collect_lookup_tokens(result, out);
+                }
+                for expr in body {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Setq { var, value } => {
+                out.insert(canonical_lookup_token(var));
+                collect_lookup_tokens(value, out);
+            }
+            ASTNode::Cond { clauses } => {
+                for (test, result) in clauses {
+                    collect_lookup_tokens(test, out);
+                    collect_lookup_tokens(result, out);
+                }
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                collect_lookup_tokens(car, out);
+                collect_lookup_tokens(cdr, out);
+            }
+            ASTNode::Lambda { body, .. } | ASTNode::Macro { body, .. } => {
+                for expr in body {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Defmethod { body, .. } => {
+                for expr in body {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Loop {
+                start,
+                limit,
+                when_condition,
+                collect,
+                sum,
+                else_collect,
+                else_sum,
+                ..
+            } => {
+                if let Some(start) = start {
+                    collect_lookup_tokens(start, out);
+                }
+                collect_lookup_tokens(limit, out);
+                if let Some(w) = when_condition {
+                    collect_lookup_tokens(w, out);
+                }
+                if let Some(c) = collect {
+                    collect_lookup_tokens(c, out);
+                }
+                if let Some(s) = sum {
+                    collect_lookup_tokens(s, out);
+                }
+                if let Some(c) = else_collect {
+                    collect_lookup_tokens(c, out);
+                }
+                if let Some(s) = else_sum {
+                    collect_lookup_tokens(s, out);
+                }
+            }
+            ASTNode::Block { body, .. } => {
+                for expr in body {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::ReturnFrom { value, .. } => {
+                if let Some(value) = value {
+                    collect_lookup_tokens(value, out);
+                }
+            }
+            ASTNode::CCall { args, .. } => {
+                for expr in args {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::CppMethodCall { object, args, .. } => {
+                collect_lookup_tokens(object, out);
+                for expr in args {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::HashTable { entries } => {
+                for (k, v) in entries {
+                    collect_lookup_tokens(k, out);
+                    collect_lookup_tokens(v, out);
+                }
+            }
+            ASTNode::Vector(exprs) => {
+                for expr in exprs {
+                    collect_lookup_tokens(expr, out);
+                }
+            }
+            ASTNode::Defclass { .. } | ASTNode::Defgeneric { .. } | ASTNode::Constant(_) => {}
+            _ => {}
+        }
+    }
+    fn compute_global_sync_keys(
+        body: &[ASTNode],
+        defaults: &HashMap<String, ASTNode>,
+        params: &[String],
+        source_env: &HashMap<String, EvalResult>,
+    ) -> Vec<String> {
+        let mut referenced = HashSet::new();
+        for expr in body {
+            collect_lookup_tokens(expr, &mut referenced);
+        }
+        for expr in defaults.values() {
+            collect_lookup_tokens(expr, &mut referenced);
+        }
+        for p in params {
+            referenced.remove(&canonical_lookup_token(p));
+        }
+        let mut keys = Vec::new();
+        for key in source_env.keys() {
+            if is_global_binding_name(key) && referenced.contains(&canonical_lookup_token(key)) {
+                keys.push(key.clone());
+            }
+        }
+        keys
+    }
     fn keyword_from_ast(arg: &ASTNode) -> Option<String> {
         match arg {
             ASTNode::Variable(name) if name.starts_with(':') => Some(name[1..].to_string()),
@@ -14923,6 +15078,8 @@ pub(super) fn eval_lambda_call(
     let mut current_call_env_owned: Option<HashMap<String, EvalResult>> = None;
 
     loop {
+        let source_env_for_sync = current_call_env_owned.as_ref().unwrap_or(call_env);
+
         let mut closure_env = current_closure_env_rc.borrow().clone();
         closure_env.insert(
             BLOCK_CALL_ENTRY_DEPTH_KEY.to_string(),
@@ -15013,25 +15170,37 @@ pub(super) fn eval_lambda_call(
         if current_dynamic_env {
             if let Some(owned) = current_call_env_owned.as_ref() {
                 for (key, value) in owned.iter() {
+                    // Preserve the callee's control-flow capture metadata.
+                    if key == BLOCK_CALL_ENTRY_DEPTH_KEY {
+                        continue;
+                    }
+                    if key == BLOCK_CAPTURE_DEPTH_KEY
+                        && closure_env.contains_key(BLOCK_CAPTURE_DEPTH_KEY)
+                    {
+                        continue;
+                    }
                     closure_env.insert(key.clone(), value.clone());
                 }
             } else {
                 for (key, value) in call_env.iter() {
+                    // Preserve the callee's control-flow capture metadata.
+                    if key == BLOCK_CALL_ENTRY_DEPTH_KEY {
+                        continue;
+                    }
+                    if key == BLOCK_CAPTURE_DEPTH_KEY
+                        && closure_env.contains_key(BLOCK_CAPTURE_DEPTH_KEY)
+                    {
+                        continue;
+                    }
                     closure_env.insert(key.clone(), value.clone());
                 }
             }
         } else {
-            if let Some(owned) = current_call_env_owned.as_ref() {
-                for (key, value) in owned.iter() {
-                    if is_global_binding_name(key) {
-                        closure_env.insert(key.clone(), value.clone());
-                    }
-                }
-            } else {
-                for (key, value) in call_env.iter() {
-                    if is_global_binding_name(key) {
-                        closure_env.insert(key.clone(), value.clone());
-                    }
+            // Lexical closures still need visibility to globally defined functions/macros/specials
+            // (e.g. load/eval of arbitrary forms), so sync all global-like bindings.
+            for (key, value) in source_env_for_sync.iter() {
+                if is_global_binding_name(key) {
+                    closure_env.insert(key.clone(), value.clone());
                 }
             }
         }

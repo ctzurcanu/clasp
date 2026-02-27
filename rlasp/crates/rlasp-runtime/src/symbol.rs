@@ -120,15 +120,13 @@ impl Symbol {
 
     /// Allocate a symbol and return LispObject pointer
     pub fn allocate(name: impl Into<Arc<str>>) -> LispObject {
-        let symbol = Box::new(Symbol::new(name));
-        let ptr = Box::into_raw(symbol);
+        let ptr = unsafe { crate::gc::gc_allocate_value(Symbol::new(name)).as_ptr() };
         LispObject::from_general_ptr(ptr)
     }
 
     /// Allocate an uninterned symbol (not in any package's symbol table)
     pub fn allocate_uninterned(name: impl Into<Arc<str>>) -> LispObject {
-        let symbol = Box::new(Symbol::with_interned(name, false));
-        let ptr = Box::into_raw(symbol);
+        let ptr = unsafe { crate::gc::gc_allocate_value(Symbol::with_interned(name, false)).as_ptr() };
         LispObject::from_general_ptr(ptr)
     }
 }

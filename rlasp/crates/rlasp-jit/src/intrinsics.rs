@@ -12460,7 +12460,13 @@ fn resolve_non_fixnum_function_cached(
             }
         })
     }) {
-        return Some(hit);
+        // Raw object addresses can be reused by GC. Re-validate the function
+        // name for this pointer before trusting a cache hit.
+        if let Some(current_name) = function_name_from_func_obj(value) {
+            if current_name.eq_ignore_ascii_case(&hit.name) {
+                return Some(hit);
+            }
+        }
     }
 
     let name = function_name_from_func_obj(value)?;
@@ -15560,11 +15566,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
+                // Root args while we cons (cc_cons can allocate/GC).
+                for arg in &args {
+                    stack_push_pointer(*arg);
+                }
                 let mut args_list = cc_nil_value();
                 for arg in args.iter().rev() {
                     args_list = cc_cons(*arg, args_list);
                 }
+                for _ in 0..args.len() {
+                    let _ = stack_pop_pointer();
+                }
+                // Root the assembled args-list during keyword parsing/coercion.
+                stack_push_pointer(args_list);
                 let result = cc_string_not_lessp_full(args_list);
+                let _ = stack_pop_pointer();
                 stack_push_pointer(result);
             }
             "string-not-greaterp" | "STRING-NOT-GREATERP" => {
@@ -15573,11 +15589,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
+                // Root args while we cons (cc_cons can allocate/GC).
+                for arg in &args {
+                    stack_push_pointer(*arg);
+                }
                 let mut args_list = cc_nil_value();
                 for arg in args.iter().rev() {
                     args_list = cc_cons(*arg, args_list);
                 }
+                for _ in 0..args.len() {
+                    let _ = stack_pop_pointer();
+                }
+                // Root the assembled args-list during keyword parsing/coercion.
+                stack_push_pointer(args_list);
                 let result = cc_string_not_greaterp_full(args_list);
+                let _ = stack_pop_pointer();
                 stack_push_pointer(result);
             }
             "string<" | "STRING<" => {
@@ -15586,11 +15612,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
+                // Root args while we cons (cc_cons can allocate/GC).
+                for arg in &args {
+                    stack_push_pointer(*arg);
+                }
                 let mut args_list = cc_nil_value();
                 for arg in args.iter().rev() {
                     args_list = cc_cons(*arg, args_list);
                 }
+                for _ in 0..args.len() {
+                    let _ = stack_pop_pointer();
+                }
+                // Root the assembled args-list during keyword parsing/coercion.
+                stack_push_pointer(args_list);
                 let result = cc_string_lt_full(args_list);
+                let _ = stack_pop_pointer();
                 stack_push_pointer(result);
             }
             "string>" | "STRING>" => {
@@ -15599,11 +15635,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
+                // Root args while we cons (cc_cons can allocate/GC).
+                for arg in &args {
+                    stack_push_pointer(*arg);
+                }
                 let mut args_list = cc_nil_value();
                 for arg in args.iter().rev() {
                     args_list = cc_cons(*arg, args_list);
                 }
+                for _ in 0..args.len() {
+                    let _ = stack_pop_pointer();
+                }
+                // Root the assembled args-list during keyword parsing/coercion.
+                stack_push_pointer(args_list);
                 let result = cc_string_gt_full(args_list);
+                let _ = stack_pop_pointer();
                 stack_push_pointer(result);
             }
             "string<=" | "STRING<=" => {
@@ -15612,11 +15658,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
+                // Root args while we cons (cc_cons can allocate/GC).
+                for arg in &args {
+                    stack_push_pointer(*arg);
+                }
                 let mut args_list = cc_nil_value();
                 for arg in args.iter().rev() {
                     args_list = cc_cons(*arg, args_list);
                 }
+                for _ in 0..args.len() {
+                    let _ = stack_pop_pointer();
+                }
+                // Root the assembled args-list during keyword parsing/coercion.
+                stack_push_pointer(args_list);
                 let result = cc_string_le_full(args_list);
+                let _ = stack_pop_pointer();
                 stack_push_pointer(result);
             }
             "string>=" | "STRING>=" => {
@@ -15625,11 +15681,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
+                // Root args while we cons (cc_cons can allocate/GC).
+                for arg in &args {
+                    stack_push_pointer(*arg);
+                }
                 let mut args_list = cc_nil_value();
                 for arg in args.iter().rev() {
                     args_list = cc_cons(*arg, args_list);
                 }
+                for _ in 0..args.len() {
+                    let _ = stack_pop_pointer();
+                }
+                // Root the assembled args-list during keyword parsing/coercion.
+                stack_push_pointer(args_list);
                 let result = cc_string_ge_full(args_list);
+                let _ = stack_pop_pointer();
                 stack_push_pointer(result);
             }
             "string-lessp" | "STRING-LESSP" => {

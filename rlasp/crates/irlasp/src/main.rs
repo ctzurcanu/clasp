@@ -16,7 +16,11 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::os::raw::{c_char, c_int};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::thread::JoinHandle;
+use std::time::Duration;
 use inkwell::values::AnyValue;
 
 extern crate rlasp_reader;
@@ -28,6 +32,7 @@ thread_local! {
         RefCell::new(HashMap::new());
     static MLIR_RUNTIME_STREAM_HANDLES: RefCell<HashMap<usize, rlasp::repl::EvalResult>> =
         RefCell::new(HashMap::new());
+    static ACTIVE_LOAD_PATHS: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
 #[derive(Parser)]
@@ -48,7 +53,7 @@ struct Args {
 
 #[derive(Debug, Clone)]
 enum CompatCliOp {
-    Eval(String),
+    Eval { form: String, print_result: bool },
     Load(String),
 }
 
@@ -59,6 +64,7 @@ struct CompatCliArgs {
     file: Option<String>,
     script_args: Vec<String>,
     non_interactive: bool,
+    quiet: bool,
     used_compat_flags: bool,
 }
 
@@ -74,6 +80,200 @@ enum ExecutionMode {
 enum MlirBehavior {
     Compat,
     Strict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryCeilingAction {
+    Warn,
+    Exit,
+}
+
+impl MemoryCeilingAction {
+    fn from_env() -> Self {
+        match std::env::var("RLASP_MEMORY_CEILING_ACTION")
+            .unwrap_or_else(|_| "exit".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "warn" => Self::Warn,
+            _ => Self::Exit,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Exit => "exit",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MemoryCeilingConfig {
+    limit_bytes: u64,
+    check_every: Duration,
+    action: MemoryCeilingAction,
+    marker_file: Option<PathBuf>,
+}
+
+impl MemoryCeilingConfig {
+    fn from_env() -> Option<Self> {
+        let limit_bytes = if let Some(raw) = std::env::var_os("RLASP_MEMORY_CEILING_BYTES") {
+            let parsed = raw.to_string_lossy().trim().parse::<u64>().ok()?;
+            Some(parsed)
+        } else if let Some(raw) = std::env::var_os("RLASP_MEMORY_CEILING_MB") {
+            let parsed_mb = raw.to_string_lossy().trim().parse::<u64>().ok()?;
+            Some(parsed_mb.saturating_mul(1024 * 1024))
+        } else {
+            None
+        }?;
+
+        if limit_bytes == 0 {
+            return None;
+        }
+
+        let check_ms = std::env::var("RLASP_MEMORY_CEILING_CHECK_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(250);
+
+        let marker_file = std::env::var_os("RLASP_MEMORY_CEILING_MARKER_FILE")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty());
+
+        Some(Self {
+            limit_bytes,
+            check_every: Duration::from_millis(check_ms),
+            action: MemoryCeilingAction::from_env(),
+            marker_file,
+        })
+    }
+}
+
+struct MemoryWatchdog {
+    stop: Arc<AtomicBool>,
+    max_rss_bytes: Arc<AtomicU64>,
+    config: MemoryCeilingConfig,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl MemoryWatchdog {
+    fn start_from_env() -> Option<Self> {
+        let config = MemoryCeilingConfig::from_env()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let max_rss_bytes = Arc::new(AtomicU64::new(0));
+        let stop_for_thread = Arc::clone(&stop);
+        let max_for_thread = Arc::clone(&max_rss_bytes);
+        let config_for_thread = config.clone();
+
+        eprintln!(
+            "RLASP_MEMORY_CEILING_ACTIVE LIMIT_BYTES={} CHECK_MS={} ACTION={}",
+            config.limit_bytes,
+            config.check_every.as_millis(),
+            config.action.as_str()
+        );
+
+        let handle = std::thread::Builder::new()
+            .name("irlasp-memory-watchdog".to_string())
+            .spawn(move || memory_watchdog_loop(stop_for_thread, max_for_thread, config_for_thread))
+            .ok()?;
+
+        Some(Self {
+            stop,
+            max_rss_bytes,
+            config,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for MemoryWatchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        eprintln!(
+            "RLASP_MEMORY_CEILING_SUMMARY MAX_RSS_BYTES={} LIMIT_BYTES={} STATUS={}",
+            self.max_rss_bytes.load(Ordering::Relaxed),
+            self.config.limit_bytes,
+            if self.max_rss_bytes.load(Ordering::Relaxed) >= self.config.limit_bytes {
+                "reached"
+            } else {
+                "ok"
+            }
+        );
+    }
+}
+
+fn memory_watchdog_loop(
+    stop: Arc<AtomicBool>,
+    max_rss_bytes: Arc<AtomicU64>,
+    config: MemoryCeilingConfig,
+) {
+    let mut signaled = false;
+
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(rss_bytes) = current_process_rss_bytes() {
+            update_atomic_max(&max_rss_bytes, rss_bytes);
+            if rss_bytes >= config.limit_bytes {
+                if !signaled {
+                    signaled = true;
+                    let line = format!(
+                        "RLASP_MEMORY_CEILING_REACHED RSS_BYTES={} LIMIT_BYTES={} ACTION={}",
+                        rss_bytes,
+                        config.limit_bytes,
+                        config.action.as_str()
+                    );
+                    eprintln!("{}", line);
+                    if let Some(path) = &config.marker_file {
+                        let _ = fs::write(path, format!("{}\n", line));
+                    }
+                }
+                if config.action == MemoryCeilingAction::Exit {
+                    eprintln!(
+                        "Error: memory ceiling reached (rss={} bytes, limit={} bytes)",
+                        rss_bytes, config.limit_bytes
+                    );
+                    std::process::exit(99);
+                }
+            }
+        }
+        std::thread::sleep(config.check_every);
+    }
+}
+
+fn update_atomic_max(target: &AtomicU64, candidate: u64) {
+    let mut prev = target.load(Ordering::Relaxed);
+    while candidate > prev {
+        match target.compare_exchange_weak(prev, candidate, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return,
+            Err(actual) => prev = actual,
+        }
+    }
+}
+
+fn current_process_rss_bytes() -> Option<u64> {
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
+            return None;
+        }
+        if usage.ru_maxrss <= 0 {
+            return Some(0);
+        }
+        let raw = usage.ru_maxrss as u64;
+        #[cfg(target_os = "macos")]
+        {
+            Some(raw)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Some(raw.saturating_mul(1024))
+        }
+    }
 }
 
 fn lisp_string_literal(s: &str) -> String {
@@ -116,6 +316,7 @@ fn try_parse_clasp_compat_args(raw_args: &[String]) -> std::result::Result<Optio
         file: None,
         script_args: Vec::new(),
         non_interactive: false,
+        quiet: false,
         used_compat_flags: false,
     };
 
@@ -133,6 +334,11 @@ fn try_parse_clasp_compat_args(raw_args: &[String]) -> std::result::Result<Optio
             }
             "--norc" | "--base" => {
                 compat.used_compat_flags = true;
+                i += 1;
+            }
+            "-q" | "--quiet" => {
+                compat.used_compat_flags = true;
+                compat.quiet = true;
                 i += 1;
             }
             "--non-interactive" | "--quit" => {
@@ -153,7 +359,33 @@ fn try_parse_clasp_compat_args(raw_args: &[String]) -> std::result::Result<Optio
                 if i + 1 >= raw_args.len() {
                     return Err("missing form for --eval".to_string());
                 }
-                compat.ops.push(CompatCliOp::Eval(raw_args[i + 1].clone()));
+                compat.ops.push(CompatCliOp::Eval {
+                    form: raw_args[i + 1].clone(),
+                    print_result: false,
+                });
+                i += 2;
+            }
+            "-x" => {
+                compat.used_compat_flags = true;
+                compat.non_interactive = true;
+                if i + 1 >= raw_args.len() {
+                    return Err("missing form for -x".to_string());
+                }
+                compat.ops.push(CompatCliOp::Eval {
+                    form: raw_args[i + 1].clone(),
+                    print_result: true,
+                });
+                i += 2;
+            }
+            "-e" => {
+                compat.used_compat_flags = true;
+                if i + 1 >= raw_args.len() {
+                    return Err("missing form for -e".to_string());
+                }
+                compat.ops.push(CompatCliOp::Eval {
+                    form: raw_args[i + 1].clone(),
+                    print_result: false,
+                });
                 i += 2;
             }
             "--load" => {
@@ -1337,6 +1569,7 @@ fn main() -> Result<()> {
 }
 
 fn run_main() -> Result<()> {
+    let _memory_watchdog = MemoryWatchdog::start_from_env();
     let raw_args: Vec<String> = std::env::args().collect();
     if let Some(compat_args) = try_parse_clasp_compat_args(&raw_args)
         .map_err(|e| rustyline::error::ReadlineError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?
@@ -1359,7 +1592,7 @@ fn run_main() -> Result<()> {
         run_file(&file_path, mode)
     } else {
         // REPL mode
-        run_repl(mode)
+        run_repl(mode, false)
     }
 }
 
@@ -1401,7 +1634,21 @@ fn run_compat_cli(compat: CompatCliArgs) -> Result<()> {
 
                     for op in &compat.ops {
                         let res = match op {
-                            CompatCliOp::Eval(form) => eval_expression_interp_quiet(runtime, form),
+                            CompatCliOp::Eval { form, print_result } => {
+                                if *print_result {
+                                    match eval_expression_interp_capture(runtime, form) {
+                                        Ok(result) => {
+                                            if !result.trim().eq_ignore_ascii_case("NIL") {
+                                                println!("{}", result);
+                                            }
+                                            Ok(())
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                } else {
+                                    eval_expression_interp_quiet(runtime, form)
+                                }
+                            }
                             CompatCliOp::Load(path) => {
                                 let load_form = format!("(load {})", lisp_string_literal(path));
                                 eval_expression_interp_quiet(runtime, &load_form)
@@ -1419,8 +1666,64 @@ fn run_compat_cli(compat: CompatCliArgs) -> Result<()> {
                 return Ok(());
             }
             _ => {
-                // For now, compat sequencing is only implemented in interpreter mode.
-                // Fall back to the standard file/REPL behavior if a file was given.
+                // Evaluate/load sequencing for JIT modes by generating a temporary script
+                // that preserves operation order.
+                let has_load_ops = compat
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, CompatCliOp::Load(_)));
+                let mut script = String::new();
+                for op in &compat.ops {
+                    match op {
+                        CompatCliOp::Eval { form, print_result } => {
+                            if *print_result {
+                                script.push_str("(let ((__irlasp_x_val__ ");
+                                script.push_str(form);
+                                script.push_str(")) (unless (eq __irlasp_x_val__ nil) (prin1 __irlasp_x_val__) (terpri)) __irlasp_x_val__)\n");
+                                continue;
+                            }
+                            script.push_str(form);
+                            if !form.trim_end().ends_with('\n') {
+                                script.push('\n');
+                            }
+                        }
+                        CompatCliOp::Load(path) => {
+                            script.push_str(&format!("(load {})\n", lisp_string_literal(path)));
+                        }
+                    }
+                }
+                let tmp_name = format!(
+                    "irlasp-compat-{}-{}.lisp",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                );
+                let tmp_path = std::env::temp_dir().join(tmp_name);
+                std::fs::write(&tmp_path, script).map_err(|e| {
+                    rustyline::error::ReadlineError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("failed to write compat temp script {}: {}", tmp_path.display(), e),
+                    ))
+                })?;
+                // In MLIR mode, pure eval-op temp scripts should execute exactly once.
+                // Disable compile-time top-level eval for these scripts so -x doesn't
+                // duplicate side effects/results during compile+execute pipeline.
+                let prev_eval_load_for_compile = std::env::var_os("RLASP_MLIR_EVAL_LOAD_FOR_COMPILE");
+                let disable_compile_eval = mode == ExecutionMode::MlirJit && !has_load_ops;
+                if disable_compile_eval {
+                    std::env::set_var("RLASP_MLIR_EVAL_LOAD_FOR_COMPILE", "0");
+                }
+                let run_res = run_file(tmp_path.to_string_lossy().as_ref(), mode);
+                if disable_compile_eval {
+                    match prev_eval_load_for_compile {
+                        Some(v) => std::env::set_var("RLASP_MLIR_EVAL_LOAD_FOR_COMPILE", v),
+                        None => std::env::remove_var("RLASP_MLIR_EVAL_LOAD_FOR_COMPILE"),
+                    }
+                }
+                let _ = std::fs::remove_file(&tmp_path);
+                return run_res;
             }
         }
     }
@@ -1433,7 +1736,7 @@ fn run_compat_cli(compat: CompatCliArgs) -> Result<()> {
         return Ok(());
     }
 
-    run_repl(mode)
+    run_repl(mode, compat.quiet)
 }
 
 unsafe fn seed_command_line_arguments_interp(
@@ -1526,15 +1829,17 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
     Ok(())
 }
 
-fn run_repl(mode: ExecutionMode) -> Result<()> {
-    println!("rlasp REPL v0.1.0 (mode: {})", match mode {
-        ExecutionMode::Interpreter => "interpreter",
-        ExecutionMode::Fasl => "fasl",
-        ExecutionMode::LlirJit => "llir-jit",
-        ExecutionMode::MlirJit => "mlir-jit",
-    });
-    println!("Type expressions to evaluate, or :quit to exit");
-    println!();
+fn run_repl(mode: ExecutionMode, quiet: bool) -> Result<()> {
+    if !quiet {
+        println!("rlasp REPL v0.1.0 (mode: {})", match mode {
+            ExecutionMode::Interpreter => "interpreter",
+            ExecutionMode::Fasl => "fasl",
+            ExecutionMode::LlirJit => "llir-jit",
+            ExecutionMode::MlirJit => "mlir-jit",
+        });
+        println!("Type expressions to evaluate, or :quit to exit");
+        println!();
+    }
 
     match mode {
         ExecutionMode::Interpreter => run_repl_interpreter(),
@@ -1767,6 +2072,38 @@ unsafe fn eval_expression_interp_quiet(
             rlasp_free_string(result_ptr);
         }
         Ok(())
+    } else if !result_ptr.is_null() {
+        let c_str = std::ffi::CStr::from_ptr(result_ptr);
+        let msg = c_str
+            .to_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "Error evaluating expression".to_string());
+        rlasp_free_string(result_ptr);
+        Err(msg)
+    } else {
+        Err("Error evaluating expression (no details available)".to_string())
+    }
+}
+
+unsafe fn eval_expression_interp_capture(
+    runtime: *mut std::ffi::c_void,
+    expr: &str,
+) -> std::result::Result<String, String> {
+    let c_expr = CString::new(expr).map_err(|_| "Invalid string".to_string())?;
+    let mut result_ptr: *mut c_char = std::ptr::null_mut();
+    let ret = rlasp_eval(runtime, c_expr.as_ptr(), &mut result_ptr);
+
+    if ret == 0 {
+        if result_ptr.is_null() {
+            return Ok(String::new());
+        }
+        let c_str = std::ffi::CStr::from_ptr(result_ptr);
+        let msg = c_str
+            .to_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| String::new());
+        rlasp_free_string(result_ptr);
+        Ok(msg)
     } else if !result_ptr.is_null() {
         let c_str = std::ffi::CStr::from_ptr(result_ptr);
         let msg = c_str
@@ -2343,6 +2680,39 @@ fn eval_file_mlir_via_artifact(
     default_behavior: MlirBehavior,
     respect_compile_only: bool,
 ) -> std::result::Result<(), String> {
+    struct ActiveLoadGuard {
+        path: String,
+        armed: bool,
+    }
+    impl Drop for ActiveLoadGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            ACTIVE_LOAD_PATHS.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                if let Some(pos) = stack.iter().rposition(|active| active == &self.path) {
+                    stack.remove(pos);
+                }
+            });
+        }
+    }
+
+    let load_identity = active_load_identity(file_path);
+    let armed = ACTIVE_LOAD_PATHS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack.iter().any(|active| active == &load_identity) {
+            false
+        } else {
+            stack.push(load_identity.clone());
+            true
+        }
+    });
+    let _active_load_guard = ActiveLoadGuard {
+        path: load_identity,
+        armed,
+    };
+
     let compile_only_requested = respect_compile_only && env_var_truthy("RLASP_MLIR_COMPILE_ONLY");
     let artifact_path = mlir_artifact_path_for_source(file_path);
 
@@ -2352,11 +2722,6 @@ fn eval_file_mlir_via_artifact(
 
     std::env::set_var("RLASP_SAVE_ARTIFACTS", "1");
     std::env::set_var("RLASP_MLIR_COMPILE_ONLY", "1");
-    if compile_only_requested {
-        // Compile-only runs must not execute top-level runtime forms.
-        std::env::set_var("RLASP_MLIR_SELECTIVE_EVAL", "1");
-    }
-
     let compile_result = eval_file_mlir(source, file_path, init_runtime, default_behavior);
 
     match prev_save_artifacts {
@@ -2391,6 +2756,39 @@ fn eval_file_mlir(
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     let behavior = resolve_mlir_behavior(default_behavior);
+
+    struct ActiveLoadGuard {
+        path: String,
+        armed: bool,
+    }
+    impl Drop for ActiveLoadGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            ACTIVE_LOAD_PATHS.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                if let Some(pos) = stack.iter().rposition(|active| active == &self.path) {
+                    stack.remove(pos);
+                }
+            });
+        }
+    }
+
+    let load_path = active_load_identity(file_path);
+    let armed = ACTIVE_LOAD_PATHS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack.iter().any(|active| active == &load_path) {
+            false
+        } else {
+            stack.push(load_path.clone());
+            true
+        }
+    });
+    let _active_load_guard = ActiveLoadGuard {
+        path: load_path,
+        armed,
+    };
 
     // Bridge object handles are process-local implementation details and must
     // not leak across independent file loads.
@@ -2427,9 +2825,10 @@ fn eval_file_mlir(
         })
         .unwrap_or(false);
 
-    // Read all forms from the file
-    let lisp_objs = rlasp_reader::read_all_from_string(source)
-        .map_err(|e| format!("Read error: {}", e))?;
+    // Stream forms from the reader instead of storing all LispObjects up-front.
+    // This avoids stale/unrooted form handles across compile-time eval/GC.
+    let mut reader =
+        rlasp_reader::Reader::from_string(source).map_err(|e| format!("Read error: {}", e))?;
 
     let mut form_count = 0;
     let mut compiled_any = false;
@@ -2646,6 +3045,19 @@ fn eval_file_mlir(
         }
     }
 
+    fn is_compile_eval_skip_head(name: &str) -> bool {
+        let base = name
+            .trim_start_matches(':')
+            .rsplit(':')
+            .next()
+            .unwrap_or(name)
+            .to_ascii_lowercase();
+        matches!(
+            base.as_str(),
+            "load-if-compiled-correctly" | "no-handler-case-load-if-compiled-correctly"
+        )
+    }
+
     fn should_eval_for_compile_env(ast: &rlasp::ir::ASTNode, eval_load_for_compile: bool) -> bool {
         match ast {
             rlasp::ir::ASTNode::Setq { .. } => true,
@@ -2780,14 +3192,31 @@ fn eval_file_mlir(
     }
 
     // ===== INCREMENTAL: Expand forms with compile-time environment tracking =====
-    for lisp_obj in &lisp_objs {
+    loop {
+        let lisp_obj = match reader.read() {
+            Ok(obj) => {
+                if rlasp_reader::is_skip_marker(&obj) {
+                    continue;
+                }
+                obj
+            }
+            Err(rlasp_reader::ReaderError::UnexpectedEof) => break,
+            Err(e) => {
+                return Err(format!(
+                    "Read error near form {} in {}: {}",
+                    form_count + 1,
+                    file_path,
+                    e
+                ));
+            }
+        };
         form_count += 1;
         match lisp_to_ast::with_read_time_env(&mut interp_env, || {
             lisp_to_ast::lisp_to_ast(lisp_obj.clone())
         }) {
             Ok(ast) => {
                 let head = if trace_toplevel || trace_compile_eval {
-                    Some(head_of_lisp_form(*lisp_obj))
+                    Some(head_of_lisp_form(lisp_obj))
                 } else {
                     None
                 };
@@ -2802,7 +3231,12 @@ fn eval_file_mlir(
                     })
                     .unwrap_or(selective_eval_default);
                 let should_eval_compile = should_eval_for_compile_env(&ast, eval_load_for_compile);
-                let evaled_for_compile = !selective_eval || should_eval_compile;
+                let skip_compile_eval = head
+                    .as_deref()
+                    .map(is_compile_eval_skip_head)
+                    .unwrap_or(false);
+                let evaled_for_compile =
+                    !skip_compile_eval && (!selective_eval || should_eval_compile);
                 if trace_compile_eval {
                     let ast_tag = match &ast {
                         rlasp::ir::ASTNode::Setq { .. } => "Setq",
@@ -2814,12 +3248,13 @@ fn eval_file_mlir(
                         _ => "Other",
                     };
                     println!(
-                        "[MLIR-EVAL] form={} head={} ast={} selective_eval={} should_eval_compile={} evaled_for_compile={}",
+                        "[MLIR-EVAL] form={} head={} ast={} selective_eval={} should_eval_compile={} skip_compile_eval={} evaled_for_compile={}",
                         form_count,
                         head.clone().unwrap_or_else(|| "<unknown>".to_string()),
                         ast_tag,
                         selective_eval,
                         should_eval_compile,
+                        skip_compile_eval,
                         evaled_for_compile
                     );
                 }
@@ -3984,6 +4419,15 @@ fn read_all_from_stream_obj(
     }
 }
 
+fn active_load_identity(path_like: &str) -> String {
+    use std::path::Path;
+    let path = Path::new(path_like);
+    if path.extension().is_some() {
+        return path.with_extension("").to_string_lossy().to_string();
+    }
+    path_like.to_string()
+}
+
 fn load_object_with_options(
     load_obj: rlasp_runtime::LispObject,
     verbose: bool,
@@ -4038,9 +4482,21 @@ fn load_object_with_options(
         write_text_to_cl_output(&format!("; loading {}\n", source_label));
     }
 
-    // Nested MLIR load execution can leave transient arguments on the eval stack.
-    // Reset around load boundaries so subsequent calls observe a clean stack.
-    rlasp_runtime::eval_stack::stack_clear();
+    let load_identity = active_load_identity(&source_label);
+    let recursive_load = ACTIVE_LOAD_PATHS.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .any(|active| active == &load_identity)
+    });
+    if recursive_load {
+        if std::env::var("RLASP_DEBUG_LOAD_PATHS").is_ok() {
+            eprintln!("[cc_load] skipping recursive load of {}", source_label);
+        }
+        return unsafe { rlasp_jit::intrinsics::cc_t_value() };
+    }
+    ACTIVE_LOAD_PATHS.with(|stack| stack.borrow_mut().push(load_identity.clone()));
+
     let load_result = eval_file_mlir_via_artifact(
         &contents,
         &source_label,
@@ -4048,7 +4504,12 @@ fn load_object_with_options(
         MlirBehavior::Strict,
         true,
     );
-    rlasp_runtime::eval_stack::stack_clear();
+    ACTIVE_LOAD_PATHS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(pos) = stack.iter().rposition(|active| active == &load_identity) {
+            stack.remove(pos);
+        }
+    });
 
     match load_result {
         Ok(_) => {
@@ -10172,4 +10633,10 @@ fn print_help() {
     println!("  fasl         - Use FASL compatibility evaluator");
     println!("  llvm         - Use LLVM ORC JIT compiler");
     println!("  mlir         - Use strict MLIR -> LLVM ORC JIT compiler");
+    println!();
+    println!("Memory ceiling env vars:");
+    println!("  RLASP_MEMORY_CEILING_MB|BYTES        - Enable memory ceiling watchdog");
+    println!("  RLASP_MEMORY_CEILING_ACTION=warn|exit - Warn only or terminate (default: exit)");
+    println!("  RLASP_MEMORY_CEILING_CHECK_MS        - RSS polling interval in ms (default: 250)");
+    println!("  RLASP_MEMORY_CEILING_MARKER_FILE     - Optional file for machine-readable reached marker");
 }

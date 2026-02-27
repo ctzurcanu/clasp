@@ -53,8 +53,7 @@ impl Cons {
 
     /// Create a boxed cons cell and return a LispObject pointer to it
     pub fn allocate(car: LispObject, cdr: LispObject) -> LispObject {
-        let cons = Box::new(Cons::new(car, cdr));
-        let ptr = Box::into_raw(cons);
+        let ptr = unsafe { crate::gc::gc_allocate_value(Cons::new(car, cdr)).as_ptr() };
         LispObject::from_cons_ptr(ptr)
     }
 

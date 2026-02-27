@@ -1,0 +1,35 @@
+(in-package #:cl-user)
+
+(defun bench-int-arg-from-end (from-end default)
+  (let* ((count (handler-case (si:argc) (error () 0)))
+         (idx (- count from-end)))
+    (if (< idx 0)
+        default
+        (let ((raw (handler-case (si:argv idx) (error () nil))))
+          (if (stringp raw)
+              (handler-case (parse-integer raw :junk-allowed nil)
+                (error () default))
+              default)))))
+
+(defun bench-report (algo args result)
+  (format t "~&ALGO=~A ARGS=~S RESULT=~S~%" algo args result)
+  (finish-output))
+
+(defun lcg-next (x)
+  (mod (+ (* x 1103515245) 12345) 2147483647))
+
+(defun fixnum-lcg (iterations seed-x seed-y)
+  (let ((x seed-x)
+        (y seed-y)
+        (acc 0))
+    (dotimes (i iterations acc)
+      (declare (ignore i))
+      (setf x (lcg-next x))
+      (setf y (lcg-next y))
+      (setf acc (mod (+ acc x y) 2147483647)))))
+
+(let* ((iterations (bench-int-arg-from-end 3 1200000))
+       (seed-x (bench-int-arg-from-end 2 12345))
+       (seed-y (bench-int-arg-from-end 1 67890))
+       (result (fixnum-lcg iterations seed-x seed-y)))
+  (bench-report "fixnum_lcg" (list iterations seed-x seed-y) result))
