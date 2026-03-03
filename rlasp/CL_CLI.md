@@ -565,6 +565,22 @@ Latest OS coverage snapshot:
 
 ---
 
+# Compiler
+
+This gives the native artifact flexibility you asked for (static, dynamic, exe) with explicit timing columns.
+
+```
+/Users/christiantzurcanu/Documents/dev/clasp/rlasp/scripts/mlirbc_aot.sh \
+  /tmp/your_module.mlirbc \
+  --kinds all \
+  --out-dir /tmp/mlir-aot-your_module \
+  --csv /tmp/mlir-aot-tests.csv
+```
+
+
+
+---
+
 ## Summary Table (Tested Results)
 
 | Capability                       | Bash | Python | rlasp CL         |

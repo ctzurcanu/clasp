@@ -2,6 +2,7 @@
 
 use crate::error::{ReaderError, ReaderResult};
 use crate::token::{Token, TokenKind};
+use rlasp_runtime::FloatFormat;
 
 /// Lexer for tokenizing Common Lisp source
 pub struct Lexer {
@@ -628,7 +629,7 @@ impl Lexer {
             }
         };
 
-        let mut parsed_float: Option<f64> = None;
+        let mut parsed_float: Option<(f64, FloatFormat)> = None;
         if let Some((idx, marker)) = text
             .char_indices()
             .skip(1)
@@ -640,20 +641,23 @@ impl Lexer {
                 let normalized = format!("{}e{}", mantissa, exp_part);
                 parsed_float = match marker.to_ascii_lowercase() {
                     // CL defaults E/F/S to single-float semantics.
-                    'e' | 'f' | 's' => normalized.parse::<f32>().ok().map(|v| v as f64),
+                    'e' | 'f' | 's' => normalized
+                        .parse::<f32>()
+                        .ok()
+                        .map(|v| (v as f64, FloatFormat::Single)),
                     // D/L are double-float semantics.
-                    'd' | 'l' => normalized.parse::<f64>().ok(),
+                    'd' | 'l' => normalized.parse::<f64>().ok().map(|v| (v, FloatFormat::Double)),
                     _ => None,
                 };
             }
         }
 
         if parsed_float.is_none() && text.contains('.') {
-            parsed_float = text.parse::<f64>().ok();
+            parsed_float = text.parse::<f64>().ok().map(|v| (v, FloatFormat::Double));
         }
 
-        if let Some(f) = parsed_float {
-            return Ok(Token::new(TokenKind::Float(f), start_pos));
+        if let Some((f, format)) = parsed_float {
+            return Ok(Token::new(TokenKind::Float(f, format), start_pos));
         }
 
         // Check for ratio (e.g., 3/4)
@@ -816,8 +820,14 @@ mod tests {
         let mut lexer = Lexer::new("42 -17 3.14 -2.5 3/4");
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Integer(42));
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Integer(-17));
-        assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Float(3.14));
-        assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Float(-2.5));
+        assert_eq!(
+            lexer.next_token().unwrap().kind,
+            TokenKind::Float(3.14, FloatFormat::Double)
+        );
+        assert_eq!(
+            lexer.next_token().unwrap().kind,
+            TokenKind::Float(-2.5, FloatFormat::Double)
+        );
         assert_eq!(
             lexer.next_token().unwrap().kind,
             TokenKind::Ratio("3".to_string(), "4".to_string())

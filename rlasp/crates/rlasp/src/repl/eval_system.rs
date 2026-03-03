@@ -810,6 +810,7 @@ pub(crate) fn result_to_ast(result: &EvalResult) -> Result<ASTNode, String> {
     match result {
         EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
         EvalResult::Float(f) => Ok(ASTNode::float(*f)),
+        EvalResult::FloatSingle(f) => Ok(ASTNode::single_float(*f)),
         EvalResult::Bool(true) => Ok(ASTNode::t()),
         EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
         EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
@@ -1149,6 +1150,7 @@ fn eval_result_variant(result: &EvalResult) -> &'static str {
         EvalResult::Bignum(_) => "Bignum",
         EvalResult::Ratio(_) => "Ratio",
         EvalResult::Float(_) => "Float",
+        EvalResult::FloatSingle(_) => "FloatSingle",
         EvalResult::Complex(_, _) => "Complex",
         EvalResult::Bool(_) => "Bool",
         EvalResult::Boolean(_) => "Boolean",
@@ -1195,6 +1197,7 @@ pub(crate) fn result_to_data_ast(result: &EvalResult) -> Result<ASTNode, String>
     match result {
         EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
         EvalResult::Float(f) => Ok(ASTNode::float(*f)),
+        EvalResult::FloatSingle(f) => Ok(ASTNode::single_float(*f)),
         EvalResult::Bool(true) => Ok(ASTNode::t()),
         EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
         EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),
@@ -4398,6 +4401,7 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::Bignum(_) => "BIGNUM",
         EvalResult::Ratio(_) => "RATIO",
         EvalResult::Float(_) => "FLOAT",
+        EvalResult::FloatSingle(_) => "SINGLE-FLOAT",
         EvalResult::Complex(_, _) => "COMPLEX",
         EvalResult::Character(_) => "CHARACTER",
         EvalResult::String(_) => "STRING",
@@ -4723,6 +4727,7 @@ pub(super) fn result_to_ast_quoted(result: &EvalResult) -> Result<ASTNode, Strin
     match result {
         EvalResult::Fixnum(n) => Ok(ASTNode::fixnum(*n)),
         EvalResult::Float(f) => Ok(ASTNode::float(*f)),
+        EvalResult::FloatSingle(f) => Ok(ASTNode::single_float(*f)),
         EvalResult::Bool(true) => Ok(ASTNode::t()),
         EvalResult::Bool(false) | EvalResult::Nil => Ok(ASTNode::nil()),
         EvalResult::String(s) => Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.clone()))),

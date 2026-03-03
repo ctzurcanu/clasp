@@ -68,6 +68,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // cc_box_float(f64) -> i64
         let box_float_type = i64_type.fn_type(&[f64_type.into()], false);
         self.module.add_function("cc_box_float", box_float_type, None);
+        self.module.add_function("cc_box_single_float", box_float_type, None);
 
         // cc_unbox_float(i64) -> f64
         let unbox_float_type = f64_type.fn_type(&[i64_type.into()], false);

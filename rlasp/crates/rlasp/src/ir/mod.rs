@@ -18,6 +18,7 @@ pub mod codegen;
 pub mod wasm_codegen;
 pub mod interpreter;
 
+pub use rlasp_runtime::FloatFormat;
 pub use datum::*;
 pub use instruction::*;
 pub use iblock::*;

@@ -2776,6 +2776,7 @@ fn eval_file_mlir_via_artifact(
         return Ok(());
     }
 
+    println!("[MLIR_EXEC_BEGIN] artifact {}", artifact_path);
     execute_mlir_artifact_path(&artifact_path, "mlir", init_runtime)
 }
 
@@ -3814,6 +3815,9 @@ fn eval_file_mlir(
             cc_pushnew as *const (),
             cc_box_fixnum as *const (),
             cc_unbox_fixnum as *const (),
+            cc_box_float as *const (),
+            cc_box_single_float as *const (),
+            cc_unbox_float as *const (),
             cc_box_character as *const (),
             // Additional intrinsics for ASDF
             cc_and as *const (),
@@ -4212,6 +4216,7 @@ fn eval_file_mlir(
             }
 
             if batch_count > 0 {
+                println!("[MLIR_EXEC_BEGIN] __main_batches");
                 for i in 0..batch_count {
                     if let Some(target_idx) = trace_batch_index {
                         if i != target_idx {
@@ -4245,6 +4250,7 @@ fn eval_file_mlir(
                 // Cast address to function pointer and call directly
                 let jit_fn: extern "C" fn() = std::mem::transmute(__main_addr);
 
+                println!("[MLIR_EXEC_BEGIN] __main");
                 if mlir_verbose {
                     println!("[Executing __main]");
                 }
@@ -5203,6 +5209,7 @@ fn jit_execute_llvm_ir(
             }
 
             if batch_count > 0 {
+                println!("[MLIR_EXEC_BEGIN] __main_batches");
                 for i in 0..batch_count {
                     if let Some(target_idx) = trace_batch_index {
                         if i != target_idx {
@@ -5245,6 +5252,7 @@ fn jit_execute_llvm_ir(
                 // run __main once (which invokes batches in-order) unless explicit batch tracing.
                 stack_clear();
                 let jit_fn: extern "C" fn() = std::mem::transmute(__main_addr);
+                println!("[MLIR_EXEC_BEGIN] __main");
                 jit_fn();
                 let depth = stack_depth();
                 if depth > 0 {
@@ -5815,11 +5823,17 @@ fn compile_ast_to_llvm<'ctx>(
             Ok(result.into())
         }
 
-        ASTNode::Constant(ConstantValue::Float(f)) => {
+        ASTNode::Constant(ConstantValue::Float(f, format)) => {
             // Box the float
             let f64_type = context.f64_type();
-            let box_float_fn = codegen.module().get_function("cc_box_float")
-                .ok_or("cc_box_float not found")?;
+            let box_name = match format {
+                rlasp_runtime::FloatFormat::Single => "cc_box_single_float",
+                rlasp_runtime::FloatFormat::Double => "cc_box_float",
+            };
+            let box_float_fn = codegen
+                .module()
+                .get_function(box_name)
+                .ok_or(format!("{box_name} not found"))?;
 
             let val = f64_type.const_float(*f);
             let call_site = codegen.builder().build_call(box_float_fn, &[val.into()], "boxed")

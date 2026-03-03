@@ -499,8 +499,9 @@ build_single_suite_runner() {
   local suite="$2"
   local runner_file
   local suite_load_form
-  if [[ "$mode" == "mlir" && "$MLIR_SPLIT_PROCESS" == "1" ]]; then
-    # Keep suite load on runtime path in MLIR mode (not compile-time pre-eval).
+  if [[ "$mode" == "mlir" ]]; then
+    # Keep suite load on runtime path in MLIR mode (not compile-time pre-eval
+    # through load-if-compiled-correctly/FASL path).
     suite_load_form="(defun irlasp-runtime-suite-load () (load \"$BASE_DIR/regression-tests/$suite.lisp\"))
 (irlasp-runtime-suite-load)"
   else
@@ -517,7 +518,6 @@ build_single_suite_runner() {
 (message :emph "~%Running $suite suite...")
 $suite_load_form
 (show-test-summary)
-(sys:quit 0)
 EOF
   echo "$runner_file"
 }
@@ -534,6 +534,7 @@ run_jit_suite_with_phase_timing() {
   local compile_start compile_end compile_rc
   local exec_start exec_end exec_rc
   local module_name artifact_path
+  local suite_artifact_path_lower suite_artifact_path_upper
   local compile_log
   start="$(now_mono_ts)"
   exec_mark=""
@@ -542,15 +543,27 @@ run_jit_suite_with_phase_timing() {
 
   exec_env=()
   compile_env=()
+  if [[ "$mode" == "mlir" ]]; then
+    exec_env=(
+      "RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR"
+      "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL"
+      "RLASP_MLIR_EXEC_ARTIFACT=$MLIR_EXEC_ARTIFACT"
+    )
+  fi
   if [[ "$mode" == "mlir" && "$MLIR_SPLIT_PROCESS" == "1" ]]; then
-    exec_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR" "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL")
     # Keep compile and execute in the same semantic mode.
-    compile_env=("RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR" "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL")
+    compile_env=(
+      "RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR"
+      "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL"
+      "RLASP_MLIR_EXEC_ARTIFACT=$MLIR_EXEC_ARTIFACT"
+    )
   fi
 
   if [[ "$mode" == "mlir" && "$MLIR_SPLIT_PROCESS" == "1" ]]; then
     module_name="${runner_file:t:r}"
     artifact_path="/tmp/${module_name}.mlirbc"
+    suite_artifact_path_lower="/tmp/${suite:l}.mlirbc"
+    suite_artifact_path_upper="/tmp/${suite:u}.mlirbc"
     compile_log="${suite_log}.compile"
     rm -f "$artifact_path"
     : > "$compile_log"
@@ -571,8 +584,18 @@ run_jit_suite_with_phase_timing() {
     RUN_PHASE_COMPILE="$(float_sub "$compile_end" "$compile_start")"
 
     if [[ ! -f "$artifact_path" ]]; then
+      # In compile-only suite runners, irlasp often emits suite-named artifacts
+      # (e.g. /tmp/numbers.mlirbc) rather than runner-named artifacts.
+      if [[ -f "$suite_artifact_path_lower" ]]; then
+        artifact_path="$suite_artifact_path_lower"
+      elif [[ -f "$suite_artifact_path_upper" ]]; then
+        artifact_path="$suite_artifact_path_upper"
+      fi
+    fi
+
+    if [[ ! -f "$artifact_path" ]]; then
       cat "$compile_log" >> "$suite_log"
-      echo "SUITE_RUN_ERROR $suite missing_mlirbc_artifact $artifact_path" >> "$suite_log"
+      echo "SUITE_RUN_ERROR $suite missing_mlirbc_artifact runner_path=/tmp/${module_name}.mlirbc suite_path_lower=$suite_artifact_path_lower suite_path_upper=$suite_artifact_path_upper" >> "$suite_log"
       RUN_STATUS=1
       RUN_PHASE_EXEC="0.000000"
       RUN_ELAPSED="$RUN_PHASE_COMPILE"
@@ -620,11 +643,19 @@ run_jit_suite_with_phase_timing() {
   local cmd_pid=$!
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ -z "$exec_mark" ]]; then
-      case "$line" in
-        *"Passed "*|*"Failed "*|"Error:"*|"[Executing __main]"|"[Executing __main_batch_"*)
-          exec_mark="$(now_mono_ts)"
-          ;;
-      esac
+      if [[ "$mode" == "mlir" ]]; then
+        case "$line" in
+          *"[MLIR_EXEC_BEGIN]"*)
+            exec_mark="$(now_mono_ts)"
+            ;;
+        esac
+      else
+        case "$line" in
+          *"Passed "*|*"Failed "*|"Error:"*|"[Executing __main]"|"[Executing __main_batch_"*)
+            exec_mark="$(now_mono_ts)"
+            ;;
+        esac
+      fi
     fi
     print -r -- "$line"
   done < "$fifo_path" >> "$suite_log"
@@ -650,6 +681,7 @@ run_one_suite() {
   local suite="$2"
   local suite_log="$3"
   local runner_file="$RUNNER"
+  local cleanup_runner=0
   local rc=0
   local start end
   RUN_STATUS=127
@@ -658,7 +690,12 @@ run_one_suite() {
   RUN_PHASE_EXEC="0.000000"
 
   if [[ "$mode" == "mlir" || "$mode" == "fasl" ]]; then
+    runner_file="$(build_single_suite_runner "$mode" "$suite")"
+    cleanup_runner=1
     run_jit_suite_with_phase_timing "$mode" "$suite" "$suite_log" "$runner_file"
+    if (( cleanup_runner )); then
+      rm -f "$runner_file"
+    fi
     return 0
   fi
 

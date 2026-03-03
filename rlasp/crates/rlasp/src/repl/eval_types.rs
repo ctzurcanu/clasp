@@ -196,6 +196,8 @@ pub enum EvalResult {
     Bignum(Integer),
     Ratio(Rational),
     Float(f64),
+    /// Preserves explicit `single-float` literals during macro data conversion.
+    FloatSingle(f64),
     Complex(f64, f64),  // Complex number (real, imaginary)
     Bool(bool),
     Boolean(bool),  // CL boolean type
@@ -251,6 +253,7 @@ impl std::fmt::Display for EvalResult {
             EvalResult::Bignum(n) => write!(f, "{}", n),
             EvalResult::Ratio(r) => write!(f, "{}/{}", r.numerator_ref(), r.denominator_ref()),
             EvalResult::Float(fl) => write!(f, "{}", fl),
+            EvalResult::FloatSingle(fl) => write!(f, "{}", fl),
             EvalResult::Complex(re, im) => write!(f, "#C({} {})", re, im),
             EvalResult::Bool(true) | EvalResult::Boolean(true) => write!(f, "T"),
             EvalResult::Bool(false) | EvalResult::Boolean(false) => write!(f, "NIL"),
@@ -327,6 +330,9 @@ pub(super) fn structural_equal(a: &EvalResult, b: &EvalResult) -> bool {
     match (a, b) {
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
         (EvalResult::Float(a), EvalResult::Float(b)) => a == b,
+        (EvalResult::FloatSingle(a), EvalResult::FloatSingle(b)) => a == b,
+        (EvalResult::Float(a), EvalResult::FloatSingle(b))
+        | (EvalResult::FloatSingle(a), EvalResult::Float(b)) => a == b,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Character(a), EvalResult::Character(b)) => a == b,
@@ -366,6 +372,7 @@ pub fn class_of(val: &EvalResult) -> String {
         EvalResult::Bignum(_) => "BIGNUM".to_string(),
         EvalResult::Ratio(_) => "RATIO".to_string(),
         EvalResult::Float(_) => "FLOAT".to_string(),
+        EvalResult::FloatSingle(_) => "FLOAT".to_string(),
         EvalResult::Complex(_, _) => "COMPLEX".to_string(),
         EvalResult::Nil => "NULL".to_string(),
         EvalResult::Bool(_) | EvalResult::Boolean(_) => "BOOLEAN".to_string(),

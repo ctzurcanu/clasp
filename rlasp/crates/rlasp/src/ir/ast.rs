@@ -3,6 +3,7 @@
 /// Simple AST that will be lowered to BIR
 
 use super::datum::ConstantValue;
+use rlasp_runtime::FloatFormat;
 
 /// AST node
 #[derive(Debug, Clone)]
@@ -215,7 +216,15 @@ impl ASTNode {
     }
 
     pub fn float(f: f64) -> Self {
-        ASTNode::Constant(ConstantValue::Float(f))
+        ASTNode::Constant(ConstantValue::Float(f, FloatFormat::Double))
+    }
+
+    pub fn single_float(f: f64) -> Self {
+        ASTNode::Constant(ConstantValue::Float(f, FloatFormat::Single))
+    }
+
+    pub fn double_float(f: f64) -> Self {
+        ASTNode::Constant(ConstantValue::Float(f, FloatFormat::Double))
     }
 
     pub fn character(c: char) -> Self {

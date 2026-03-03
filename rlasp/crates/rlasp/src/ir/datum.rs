@@ -7,6 +7,7 @@
 /// - Phi: SSA merge points
 
 use std::fmt;
+use rlasp_runtime::FloatFormat;
 
 /// Unique ID for a datum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,7 +75,7 @@ pub enum ConstantValue {
     Fixnum(i64),
     Bignum(String), // String representation of large integer
     Ratio(String, String), // Signed numerator, positive denominator
-    Float(f64),
+    Float(f64, FloatFormat),
     Complex(f64, f64), // Complex literal components
     Character(char),
     String(String),

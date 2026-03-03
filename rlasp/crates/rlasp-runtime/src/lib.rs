@@ -28,7 +28,7 @@ pub use header::{TypeHeader, ObjectType};
 pub use object::{LispObject, Tag};
 pub use cons::Cons;
 pub use symbol::{Symbol, NIL_SYMBOL, T_SYMBOL};
-pub use number::{Number, NumberValue};
+pub use number::{FloatFormat, Number, NumberValue};
 pub use package::{Package, PackageManager, PACKAGE_MANAGER};
 pub use string::RString;
 pub use vector::RVector;
@@ -53,6 +53,14 @@ pub use gc::BoehmGC;
 pub fn init_runtime() {
     if !gc::is_gc_initialized() {
         gc::init_gc();
+    }
+    // Optional escape hatch for AOT/debug stability when host-side roots are
+    // incomplete for some runtime maps.
+    if let Ok(v) = std::env::var("RLASP_DISABLE_GC") {
+        let t = v.trim().to_ascii_lowercase();
+        if matches!(t.as_str(), "1" | "true" | "yes" | "on") {
+            gc::gc_disable();
+        }
     }
 }
 

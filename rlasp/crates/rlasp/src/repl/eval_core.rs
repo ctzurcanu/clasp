@@ -5836,7 +5836,13 @@ fn preserve_ast_structure(ast: &ASTNode) -> Result<EvalResult, String> {
 
 pub fn ast_to_result(ast: &ASTNode) -> Result<EvalResult, String> {
     match ast {
-        ASTNode::Constant(c) => eval_constant(c),
+        ASTNode::Constant(c) => match c {
+            // Preserve explicit single-float literals through macro argument
+            // conversion so macro expansion can round-trip 1f0 vs 1d0 correctly.
+            ConstantValue::Float(f, rlasp_runtime::FloatFormat::Single) => Ok(EvalResult::FloatSingle(*f)),
+            ConstantValue::Float(f, rlasp_runtime::FloatFormat::Double) => Ok(EvalResult::Float(*f)),
+            _ => eval_constant(c),
+        },
         ASTNode::Variable(name) => {
             // Quoted symbols - handle NIL specially (NIL is the empty list, not a symbol)
             let upper = name.to_uppercase();
@@ -6350,7 +6356,7 @@ fn eval_constant(c: &ConstantValue) -> Result<EvalResult, String> {
             }
             Ok(EvalResult::Ratio(malachite::Rational::from_integers(num, den)))
         }
-        ConstantValue::Float(f) => Ok(EvalResult::Float(*f)),
+        ConstantValue::Float(f, _) => Ok(EvalResult::Float(*f)),
         ConstantValue::Complex(re, im) => Ok(EvalResult::Complex(*re, *im)),
         ConstantValue::Nil => Ok(EvalResult::Nil),
         ConstantValue::T => Ok(EvalResult::Bool(true)),
@@ -8367,6 +8373,7 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
                 | "unsetenv"
                 | "argc"
                 | "argv"
+                | "quit"
                 | "getenv"
                 | "float-infinity-p"
                 | "float-nan-p"
@@ -8427,7 +8434,7 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
     } else if name_lower.starts_with("sys:") {
         matches!(base, "quit")
     } else if name_lower.starts_with("ext:") {
-        matches!(base, "getenv" | "argc" | "argv" | "float-infinity-p" | "float-nan-p" |
+        matches!(base, "getenv" | "argc" | "argv" | "quit" | "float-infinity-p" | "float-nan-p" |
             "single-float-to-bits" | "double-float-to-bits" |
             "bits-to-single-float" | "bits-to-double-float" |
             "with-float-traps-masked" | "hash-table-weakness" |

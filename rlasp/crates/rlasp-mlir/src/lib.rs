@@ -54,6 +54,7 @@ impl MLIRCodegen {
         self.writeln("func.func private @cc_nil() -> i64");
         self.writeln("func.func private @cc_t() -> i64");
         self.writeln("func.func private @cc_box_float(f64) -> i64");
+        self.writeln("func.func private @cc_box_single_float(f64) -> i64");
         self.writeln("func.func private @cc_cons(i64, i64) -> i64");
         self.writeln("func.func private @cc_car(i64) -> i64");
         self.writeln("func.func private @cc_cdr(i64) -> i64");
@@ -340,7 +341,7 @@ impl MLIRCodegen {
                 Ok(ssa)
             }
 
-            rlasp::ir::ASTNode::Constant(ConstantValue::Float(f)) => {
+            rlasp::ir::ASTNode::Constant(ConstantValue::Float(f, format)) => {
                 // Box the float value immediately
                 let float_val = self.fresh_ssa();
                 // Format float to always have a decimal point
@@ -351,7 +352,11 @@ impl MLIRCodegen {
                 };
                 self.writeln(&format!("{} = arith.constant {} : f64", float_val, float_str));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_box_float({}) : (f64) -> i64", result, float_val));
+                let box_name = match format {
+                    rlasp::ir::FloatFormat::Single => "cc_box_single_float",
+                    rlasp::ir::FloatFormat::Double => "cc_box_float",
+                };
+                self.writeln(&format!("{} = func.call @{}({}) : (f64) -> i64", result, box_name, float_val));
                 Ok(result)
             }
 

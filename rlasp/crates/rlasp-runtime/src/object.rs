@@ -42,6 +42,18 @@ pub struct LispObject {
 }
 
 impl LispObject {
+    #[inline]
+    fn plausible_heap_addr(addr: usize) -> bool {
+        if addr < 4096 {
+            return false;
+        }
+        #[cfg(target_pointer_width = "64")]
+        if (addr >> 48) != 0 {
+            return false;
+        }
+        true
+    }
+
     // === Constructors ===
 
     /// Create a fixnum (immediate integer)
@@ -186,7 +198,12 @@ impl LispObject {
     #[inline]
     pub fn as_cons_ptr(self) -> Option<*const super::cons::Cons> {
         if self.is_cons() {
-            Some(self.as_cons_ptr_unchecked())
+            let ptr = self.as_cons_ptr_unchecked();
+            if Self::plausible_heap_addr(ptr as usize) {
+                Some(ptr)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -202,7 +219,12 @@ impl LispObject {
     #[inline]
     pub fn as_general_ptr<T>(self) -> Option<*const T> {
         if self.is_general() {
-            Some(self.as_general_ptr_unchecked())
+            let ptr = self.as_general_ptr_unchecked();
+            if Self::plausible_heap_addr(ptr as usize) {
+                Some(ptr)
+            } else {
+                None
+            }
         } else {
             None
         }

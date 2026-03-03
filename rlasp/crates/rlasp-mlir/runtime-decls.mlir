@@ -18,6 +18,7 @@ func.func private @stack_clear()
 func.func private @cc_box_fixnum(i64) -> i64
 func.func private @cc_unbox_fixnum(i64) -> i64
 func.func private @cc_box_float(f64) -> i64
+func.func private @cc_box_single_float(f64) -> i64
 func.func private @cc_unbox_float(i64) -> f64
 func.func private @cc_box_character(i64) -> i64
 func.func private @cc_unbox_character(i64) -> i64
@@ -186,6 +187,18 @@ func.func private @cc_make_string_repeat(i64, i64) -> i64
 func.func private @cc_string_equal(i64, i64) -> i64
 func.func private @cc_string_equal_full(i64) -> i64
 func.func private @cc_set_char(i64, i64, i64) -> i64
+func.func private @cc_char_eq(i64, i64) -> i64
+func.func private @cc_char_ne(i64, i64) -> i64
+func.func private @cc_char_lt(i64, i64) -> i64
+func.func private @cc_char_gt(i64, i64) -> i64
+func.func private @cc_char_le(i64, i64) -> i64
+func.func private @cc_char_ge(i64, i64) -> i64
+func.func private @cc_char_equal(i64, i64) -> i64
+func.func private @cc_char_not_equal(i64, i64) -> i64
+func.func private @cc_char_lessp(i64, i64) -> i64
+func.func private @cc_char_greaterp(i64, i64) -> i64
+func.func private @cc_char_not_lessp(i64, i64) -> i64
+func.func private @cc_char_not_greaterp(i64, i64) -> i64
 func.func private @cc_string_upcase(i64) -> i64
 func.func private @cc_string_downcase(i64) -> i64
 func.func private @cc_string_capitalize(i64) -> i64

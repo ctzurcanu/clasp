@@ -157,6 +157,9 @@ impl LispObject {
     /// Extract hash table pointer if this is a hash table
     pub fn as_hash_table_ptr(&self) -> Option<*const HashTable> {
         let ptr = self.as_general_ptr::<HashTable>()?;
+        if !crate::gc::gc_is_managed_ptr(ptr as *const u8) {
+            return None;
+        }
         if unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::HashTable) {
             Some(ptr)
         } else {
@@ -171,10 +174,10 @@ impl LispObject {
 }
 
 fn object_type(obj: LispObject) -> Option<ObjectType> {
-    if !obj.is_general() {
+    let ptr = obj.as_general_ptr::<u8>()?;
+    if !crate::gc::gc_is_managed_ptr(ptr as *const u8) {
         return None;
     }
-    let ptr = obj.as_general_ptr_unchecked::<u8>();
     unsafe { TypeHeader::from_ptr(ptr) }
 }
 

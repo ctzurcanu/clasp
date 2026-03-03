@@ -1,6 +1,7 @@
 //! Lexical tokens for the reader
 
 use std::fmt;
+use rlasp_runtime::FloatFormat;
 
 /// A token in the input stream
 #[derive(Debug, Clone, PartialEq)]
@@ -23,7 +24,7 @@ pub enum TokenKind {
     // Atoms
     Integer(i64),
     Bignum(String),  // String representation of large integer
-    Float(f64),
+    Float(f64, FloatFormat),
     Ratio(String, String),
     String(String),
     Character(char),
@@ -83,7 +84,7 @@ impl fmt::Display for TokenKind {
             TokenKind::RightBrace => write!(f, "}}"),
             TokenKind::Integer(n) => write!(f, "{}", n),
             TokenKind::Bignum(s) => write!(f, "{}", s),
-            TokenKind::Float(n) => write!(f, "{}", n),
+            TokenKind::Float(n, _) => write!(f, "{}", n),
             TokenKind::Ratio(n, d) => write!(f, "{}/{}", n, d),
             TokenKind::String(s) => write!(f, "\"{}\"", s),
             TokenKind::Character(c) => write!(f, "#\\{}", c),

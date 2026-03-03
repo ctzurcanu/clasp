@@ -67,6 +67,10 @@ mod ffi {
             old_fn: *mut Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
             old_data: *mut *mut c_void,
         );
+
+        /// Return the base pointer of a GC-managed object containing `ptr`,
+        /// or null if `ptr` is not within the GC heap.
+        pub fn GC_base(ptr: *mut c_void) -> *mut c_void;
     }
 }
 
@@ -389,6 +393,56 @@ pub fn gc_enable() {
     unsafe {
         ffi::GC_enable();
     }
+}
+
+/// Conservative managed-pointer check used before reading object headers from
+/// raw tagged pointers that may be malformed.
+#[cfg(feature = "boehm-gc")]
+pub fn gc_is_managed_ptr(ptr: *const u8) -> bool {
+    use std::os::raw::c_void;
+    if ptr.is_null() {
+        return false;
+    }
+    unsafe { !ffi::GC_base(ptr as *mut c_void).is_null() }
+}
+
+/// Fallback for non-Boehm builds: only null is considered invalid.
+#[cfg(not(feature = "boehm-gc"))]
+pub fn gc_is_managed_ptr(ptr: *const u8) -> bool {
+    !ptr.is_null()
+}
+
+/// Check whether a pointer belongs to a loaded image (text/data/rodata).
+/// This complements GC heap checks for static objects not allocated by Boehm.
+#[cfg(unix)]
+pub fn ptr_in_loaded_image(ptr: *const u8) -> bool {
+    use std::ffi::{c_char, c_int, c_void};
+    #[repr(C)]
+    struct DlInfo {
+        dli_fname: *const c_char,
+        dli_fbase: *mut c_void,
+        dli_sname: *const c_char,
+        dli_saddr: *mut c_void,
+    }
+    unsafe extern "C" {
+        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+    }
+
+    if ptr.is_null() {
+        return false;
+    }
+    let mut info = DlInfo {
+        dli_fname: std::ptr::null(),
+        dli_fbase: std::ptr::null_mut(),
+        dli_sname: std::ptr::null(),
+        dli_saddr: std::ptr::null_mut(),
+    };
+    unsafe { dladdr(ptr as *const c_void, &mut info as *mut DlInfo) != 0 }
+}
+
+#[cfg(not(unix))]
+pub fn ptr_in_loaded_image(_ptr: *const u8) -> bool {
+    false
 }
 
 /// RAII guard to pause GC during fragile pointer-construction sequences.

@@ -58,6 +58,13 @@ pub enum NumberValue {
     Complex(Complex<f64>),
 }
 
+/// Floating-point format metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatFormat {
+    Single,
+    Double,
+}
+
 /// Number with type header
 #[repr(C)]
 pub struct Number {
@@ -66,19 +73,23 @@ pub struct Number {
 
     /// The actual number value
     pub value: NumberValue,
+
+    /// Floating-point format metadata for `NumberValue::Float`.
+    pub float_format: FloatFormat,
 }
 
 impl Number {
-    fn new(value: NumberValue) -> Self {
+    fn new(value: NumberValue, float_format: FloatFormat) -> Self {
         Number {
             header: crate::header::TypeHeader::new(crate::header::ObjectType::Number),
             value,
+            float_format,
         }
     }
 
     #[inline]
-    unsafe fn allocate_number(value: NumberValue) -> *mut Number {
-        let ptr = crate::gc::gc_allocate_value(Number::new(value)).as_ptr();
+    unsafe fn allocate_number(value: NumberValue, float_format: FloatFormat) -> *mut Number {
+        let ptr = crate::gc::gc_allocate_value(Number::new(value, float_format)).as_ptr();
         #[cfg(feature = "boehm-gc")]
         {
             crate::gc::gc_register_drop_finalizer(ptr);
@@ -88,26 +99,59 @@ impl Number {
 
     /// Allocate a bignum and return LispObject
     pub fn allocate_bignum(n: Integer) -> LispObject {
-        let ptr = unsafe { Self::allocate_number(NumberValue::Bignum(n)) };
+        let ptr = unsafe { Self::allocate_number(NumberValue::Bignum(n), FloatFormat::Double) };
         maybe_collect_after_bignum_alloc();
         LispObject::from_general_ptr(ptr)
     }
 
     /// Allocate a ratio and return LispObject
     pub fn allocate_ratio(r: Rational) -> LispObject {
-        let ptr = unsafe { Self::allocate_number(NumberValue::Ratio(r)) };
+        let ptr = unsafe { Self::allocate_number(NumberValue::Ratio(r), FloatFormat::Double) };
         LispObject::from_general_ptr(ptr)
     }
 
-    /// Allocate a float and return LispObject
+    /// Allocate a double-float and return LispObject.
     pub fn allocate_float(f: f64) -> LispObject {
-        let ptr = unsafe { Self::allocate_number(NumberValue::Float(f)) };
+        let ptr = unsafe { Self::allocate_number(NumberValue::Float(f), FloatFormat::Double) };
         LispObject::from_general_ptr(ptr)
+    }
+
+    /// Allocate a single-float (stored as f64 value with single precision rounding).
+    pub fn allocate_single_float(f: f64) -> LispObject {
+        let rounded = (f as f32) as f64;
+        let ptr = unsafe { Self::allocate_number(NumberValue::Float(rounded), FloatFormat::Single) };
+        LispObject::from_general_ptr(ptr)
+    }
+
+    /// Allocate a float with an explicit format.
+    pub fn allocate_float_with_format(f: f64, format: FloatFormat) -> LispObject {
+        match format {
+            FloatFormat::Single => Self::allocate_single_float(f),
+            FloatFormat::Double => Self::allocate_float(f),
+        }
+    }
+
+    /// Return float format for float values.
+    pub fn float_format(&self) -> Option<FloatFormat> {
+        match self.value {
+            NumberValue::Float(_) => Some(self.float_format),
+            _ => None,
+        }
+    }
+
+    /// True if this number is a single-float.
+    pub fn is_single_float(&self) -> bool {
+        matches!(self.value, NumberValue::Float(_)) && self.float_format == FloatFormat::Single
+    }
+
+    /// True if this number is a double-float.
+    pub fn is_double_float(&self) -> bool {
+        matches!(self.value, NumberValue::Float(_)) && self.float_format == FloatFormat::Double
     }
 
     /// Allocate a complex and return LispObject
     pub fn allocate_complex(c: Complex<f64>) -> LispObject {
-        let ptr = unsafe { Self::allocate_number(NumberValue::Complex(c)) };
+        let ptr = unsafe { Self::allocate_number(NumberValue::Complex(c), FloatFormat::Double) };
         LispObject::from_general_ptr(ptr)
     }
 
@@ -129,7 +173,6 @@ impl std::fmt::Display for Number {
         match &self.value {
             NumberValue::Bignum(n) => write!(f, "{}", n),
             NumberValue::Ratio(r) => {
-                use malachite::num::arithmetic::traits::Reciprocal;
                 write!(f, "{}/{}", r.numerator_ref(), r.denominator_ref())
             }
             NumberValue::Float(fl) => write!(f, "{}", fl),
@@ -140,6 +183,25 @@ impl std::fmt::Display for Number {
 
 /// Type checking and conversion utilities
 impl LispObject {
+    #[inline]
+    fn plausible_general_ptr<T>(ptr: *const T) -> bool {
+        if ptr.is_null() {
+            return false;
+        }
+        let addr = ptr as usize;
+        if addr < 4096 {
+            return false;
+        }
+        // Reject obvious malformed values (e.g. sign-extended immediates
+        // interpreted as pointers). Valid user-space object pointers in this
+        // runtime live in the low canonical range.
+        #[cfg(target_pointer_width = "64")]
+        if (addr >> 48) != 0 {
+            return false;
+        }
+        true
+    }
+
     /// Is this any kind of number?
     pub fn is_number(self) -> bool {
         if self.is_fixnum() {
@@ -152,7 +214,7 @@ impl LispObject {
 
         // Use type header to reliably distinguish Numbers from other General objects
         if let Some(ptr) = self.as_general_ptr::<Number>() {
-            if ptr.is_null() {
+            if !Self::plausible_general_ptr(ptr) {
                 return false;
             }
             unsafe {
@@ -177,6 +239,9 @@ impl LispObject {
         }
 
         if let Some(ptr) = self.as_general_ptr::<Number>() {
+            if !Self::plausible_general_ptr(ptr) {
+                return None;
+            }
             let num = unsafe { &*ptr };
             // Double-check the header
             if num.header.object_type() != Some(crate::header::ObjectType::Number) {
@@ -190,6 +255,22 @@ impl LispObject {
         } else {
             None
         }
+    }
+
+    /// Return the float format for float objects.
+    pub fn as_float_format(self) -> Option<FloatFormat> {
+        if !self.is_number() {
+            return None;
+        }
+        let ptr = self.as_general_ptr::<Number>()?;
+        if !Self::plausible_general_ptr(ptr) {
+            return None;
+        }
+        let num = unsafe { &*ptr };
+        if num.header.object_type() != Some(crate::header::ObjectType::Number) {
+            return None;
+        }
+        num.float_format()
     }
 }
 

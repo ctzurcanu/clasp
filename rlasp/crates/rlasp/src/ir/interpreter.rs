@@ -290,7 +290,7 @@ impl Interpreter {
                             Value::Int(0) // Parse error, default to 0
                         }
                     }
-                    ConstantValue::Float(f) => Value::Float(*f),
+                    ConstantValue::Float(f, _) => Value::Float(*f),
                     ConstantValue::Ratio(num_s, den_s) => {
                         let num = num_s.parse::<f64>().ok();
                         let den = den_s.parse::<f64>().ok();

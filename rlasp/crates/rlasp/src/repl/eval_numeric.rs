@@ -761,13 +761,31 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "integer-length" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => {
-                let bits = if *n == 0 { 0 } else if *n == i64::MIN { 63 } else { 64 - n.abs().leading_zeros() as i64 };
+                let bits = if *n >= 0 {
+                    if *n == 0 {
+                        0
+                    } else {
+                        64 - n.leading_zeros() as i64
+                    }
+                } else {
+                    // CL: integer-length for negative integers is integer-length of (lognot n).
+                    let ln = !*n;
+                    if ln == 0 {
+                        0
+                    } else {
+                        64 - ln.leading_zeros() as i64
+                    }
+                };
                 Ok(EvalResult::Fixnum(bits))
             }
             Some(EvalResult::Bignum(b)) => {
                 use malachite::num::logic::traits::SignificantBits;
-                let abs_b = b.unsigned_abs_ref();
-                let bits = abs_b.significant_bits();
+                let bits = if *b >= malachite::Integer::from(0) {
+                    b.unsigned_abs_ref().significant_bits()
+                } else {
+                    let lognot_b = (-b.clone()) - malachite::Integer::from(1);
+                    lognot_b.unsigned_abs_ref().significant_bits()
+                };
                 Ok(EvalResult::Fixnum(bits as i64))
             }
             _ => Err("integer-length requires an integer".to_string()),

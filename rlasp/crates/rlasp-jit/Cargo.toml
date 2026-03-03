@@ -17,3 +17,4 @@ num-complex = { workspace = true }
 [lib]
 name = "rlasp_jit"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]

@@ -402,6 +402,50 @@ impl StackMLIRCodegen {
         result
     }
 
+    fn emit_fast_numeric_compare_i1(
+        &mut self,
+        lhs_obj: &str,
+        rhs_obj: &str,
+        runtime_callee: &str,
+        fixnum_pred: &str,
+    ) -> String {
+        let lhs_fix = self.emit_is_fixnum_i1(lhs_obj);
+        let rhs_fix = self.emit_is_fixnum_i1(rhs_obj);
+        let both_fix = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.andi {}, {} : i1", both_fix, lhs_fix, rhs_fix));
+
+        let cmp_true = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i1) {{", cmp_true, both_fix));
+        self.indent();
+        let lhs_raw = self.emit_unbox_fixnum_raw(lhs_obj);
+        let rhs_raw = self.emit_unbox_fixnum_raw(rhs_obj);
+        let fast_cmp = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi {}, {}, {} : i64",
+            fast_cmp, fixnum_pred, lhs_raw, rhs_raw
+        ));
+        self.writeln(&format!("scf.yield {} : i1", fast_cmp));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let cmp_obj = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+            cmp_obj, runtime_callee, lhs_obj, rhs_obj
+        ));
+        let nil_val = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+        let truth = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi ne, {}, {} : i64",
+            truth, cmp_obj, nil_val
+        ));
+        self.writeln(&format!("scf.yield {} : i1", truth));
+        self.dedent();
+        self.writeln("}");
+        cmp_true
+    }
+
     fn emit_fast_fixnum_mod(&mut self, dividend_obj: &str, divisor_obj: &str) -> String {
         let lhs_fix = self.emit_is_fixnum_i1(dividend_obj);
         let rhs_fix = self.emit_is_fixnum_i1(divisor_obj);
@@ -1271,7 +1315,7 @@ impl StackMLIRCodegen {
                         self.writeln(&format!("{} = func.call @cc_box_character({}) : (i64) -> i64", boxed_ssa, code_ssa));
                         self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_ssa));
                     }
-                    rlasp::ir::ConstantValue::Float(f) => {
+                    rlasp::ir::ConstantValue::Float(f, format) => {
                         // Box float and push
                         let float_ssa = self.fresh_ssa();
                         // Ensure float literal has decimal point for MLIR
@@ -1282,7 +1326,11 @@ impl StackMLIRCodegen {
                         };
                         self.writeln(&format!("{} = arith.constant {} : f64", float_ssa, float_str));
                         let boxed_ssa = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_box_float({}) : (f64) -> i64", boxed_ssa, float_ssa));
+                        let box_name = match format {
+                            rlasp::ir::FloatFormat::Single => "cc_box_single_float",
+                            rlasp::ir::FloatFormat::Double => "cc_box_float",
+                        };
+                        self.writeln(&format!("{} = func.call @{}({}) : (f64) -> i64", boxed_ssa, box_name, float_ssa));
                         self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", boxed_ssa));
                     }
                     rlasp::ir::ConstantValue::Complex(re, im) => {
@@ -5800,6 +5848,10 @@ impl StackMLIRCodegen {
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", ident_obj));
                     return Ok(());
                 }
+                if args.len() == 1 {
+                    // Preserve CL type-error semantics for unary + on non-numbers.
+                    return self.compile_user_function_call(base_name, args);
+                }
 
                 self.compile_expr(&args[0])?;
                 let mut acc = self.fresh_ssa();
@@ -5889,6 +5941,11 @@ impl StackMLIRCodegen {
                     // Preserve runtime error construction for invalid zero-arg forms.
                     return self.compile_user_function_call(base_name, args);
                 }
+                if args.len() > 2 {
+                    // Preserve CL left-to-right division error propagation semantics
+                    // (notably divide-by-zero in intermediate operands).
+                    return self.compile_user_function_call(base_name, args);
+                }
 
                 let seed_raw = 1i64;
                 let callee = "@cc_div";
@@ -5936,10 +5993,8 @@ impl StackMLIRCodegen {
             // Comparison operators lowered intrinsics for n-ary CL forms.
             "<" | ">" | "=" | "/=" | "<=" | ">=" => {
                 if args.len() <= 1 {
-                    let t_val = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", t_val));
-                    return Ok(());
+                    // Runtime dispatch enforces CL arity and numeric type checks.
+                    return self.compile_user_function_call(base_name, args);
                 }
 
                 let mut values: Vec<String> = Vec::with_capacity(args.len());
@@ -5950,25 +6005,24 @@ impl StackMLIRCodegen {
                     values.push(val);
                 }
 
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-
                 let mut all_true = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant 1 : i1", all_true));
 
                 if base_name_lower == "/=" {
+                    let false_i1 = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant 0 : i1", false_i1));
                     for i in 0..values.len() {
                         for j in (i + 1)..values.len() {
-                            let eq_obj = self.fresh_ssa();
-                            self.writeln(&format!(
-                                "{} = func.call @cc_eq({}, {}) : (i64, i64) -> i64",
-                                eq_obj, values[i], values[j]
-                            ));
-                            // /='s condition is "equal result is NIL".
+                            let eq_true = self.emit_fast_numeric_compare_i1(
+                                &values[i],
+                                &values[j],
+                                "@cc_eq",
+                                "eq",
+                            );
                             let neq = self.fresh_ssa();
                             self.writeln(&format!(
-                                "{} = arith.cmpi eq, {}, {} : i64",
-                                neq, eq_obj, nil_val
+                                "{} = arith.cmpi eq, {}, {} : i1",
+                                neq, eq_true, false_i1
                             ));
                             let next_all = self.fresh_ssa();
                             self.writeln(&format!("{} = arith.andi {}, {} : i1", next_all, all_true, neq));
@@ -5976,31 +6030,29 @@ impl StackMLIRCodegen {
                         }
                     }
                 } else {
-                    let callee = match base_name_lower.as_str() {
-                        "<" => "@cc_lt",
-                        ">" => "@cc_gt",
-                        "=" => "@cc_eq",
-                        "<=" => "@cc_le",
-                        ">=" => "@cc_ge",
+                    let (callee, pred) = match base_name_lower.as_str() {
+                        "<" => ("@cc_lt", "slt"),
+                        ">" => ("@cc_gt", "sgt"),
+                        "=" => ("@cc_eq", "eq"),
+                        "<=" => ("@cc_le", "sle"),
+                        ">=" => ("@cc_ge", "sge"),
                         _ => unreachable!(),
                     };
                     for pair in values.windows(2) {
-                        let cmp_obj = self.fresh_ssa();
-                        self.writeln(&format!(
-                            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
-                            cmp_obj, callee, pair[0], pair[1]
-                        ));
-                        let cmp_true = self.fresh_ssa();
-                        self.writeln(&format!(
-                            "{} = arith.cmpi ne, {}, {} : i64",
-                            cmp_true, cmp_obj, nil_val
-                        ));
+                        let cmp_true = self.emit_fast_numeric_compare_i1(
+                            &pair[0],
+                            &pair[1],
+                            callee,
+                            pred,
+                        );
                         let next_all = self.fresh_ssa();
                         self.writeln(&format!("{} = arith.andi {}, {} : i1", next_all, all_true, cmp_true));
                         all_true = next_all;
                     }
                 }
 
+                let nil_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
                 let t_val = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
                 let result = self.fresh_ssa();
@@ -8000,6 +8052,47 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            "char=" | "char/=" | "char<" | "char>" | "char<=" | "char>="
+            | "char-equal" | "char-not-equal" | "char-lessp" | "char-greaterp"
+            | "char-not-lessp" | "char-not-greaterp" => {
+                // Fast 2-arg path for hot character comparisons (e.g. string scans).
+                // Keep generic dispatch for n-ary forms to preserve full CL semantics.
+                if args.len() != 2 {
+                    return self.compile_user_function_call(base_name, args);
+                }
+
+                self.compile_expr(&args[0])?;
+                self.compile_expr(&args[1])?;
+
+                let rhs = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                let lhs = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", lhs));
+
+                let intrinsic = match base_name_lower.as_str() {
+                    "char=" => "@cc_char_eq",
+                    "char/=" => "@cc_char_ne",
+                    "char<" => "@cc_char_lt",
+                    "char>" => "@cc_char_gt",
+                    "char<=" => "@cc_char_le",
+                    "char>=" => "@cc_char_ge",
+                    "char-equal" => "@cc_char_equal",
+                    "char-not-equal" => "@cc_char_not_equal",
+                    "char-lessp" => "@cc_char_lessp",
+                    "char-greaterp" => "@cc_char_greaterp",
+                    "char-not-lessp" => "@cc_char_not_lessp",
+                    "char-not-greaterp" => "@cc_char_not_greaterp",
+                    _ => unreachable!(),
+                };
+                let result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                    result, intrinsic, lhs, rhs
+                ));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
             "code-char" => {
                 // (code-char code) -> character or NIL
                 if args.len() != 1 {
@@ -8357,30 +8450,8 @@ impl StackMLIRCodegen {
             }
 
             "min" | "max" => {
-                if args.is_empty() {
-                    return self.compile_user_function_call(base_name, args);
-                }
-                self.compile_expr(&args[0])?;
-                let mut acc = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
-                let callee = if base_name_lower == "min" {
-                    "@cc_min"
-                } else {
-                    "@cc_max"
-                };
-                for arg in &args[1..] {
-                    self.compile_expr(arg)?;
-                    let rhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
-                    let next = self.fresh_ssa();
-                    self.writeln(&format!(
-                        "{} = func.call {}({}, {}) : (i64, i64) -> i64",
-                        next, callee, acc, rhs
-                    ));
-                    acc = next;
-                }
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", acc));
-                Ok(())
+                // Runtime path preserves CL real-only constraints and error signaling.
+                self.compile_user_function_call(base_name, args)
             }
 
             "abs" => {
@@ -11243,6 +11314,16 @@ impl StackMLIRCodegen {
             && !requires_trampoline
             && !self.special_param_functions.contains(&actual_func_name)
             && !self.special_param_functions.contains(&prefixed_func_name);
+        // In selective MLIR mode, direct-calling precompiled global Lisp functions can bypass
+        // CL-correct runtime bridge behavior for package/stream/pathname and related operations.
+        // Keep local direct calls, but force dynamic dispatch for non-local compiled targets.
+        let selective_eval_enabled = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+            })
+            .unwrap_or(false);
+        let can_direct_compiled_call = can_direct_compiled_call && !selective_eval_enabled;
         let can_direct_local_call = is_direct_local_call && !requires_trampoline;
         let func_name_lc = actual_func_name.to_ascii_lowercase();
         let propagate_arg_errors_env = std::env::var("RLASP_MLIR_PROPAGATE_ARG_ERRORS")

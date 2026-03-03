@@ -1317,6 +1317,38 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
         };
     }
 
+    // Numeric hierarchy checks (CL): FIXNUM/BIGNUM < INTEGER < RATIONAL < REAL < NUMBER.
+    // Our runtime reports bignums as obj_class "INTEGER", fixnums as "FIXNUM".
+    let numeric_match = match (obj_class.as_str(), name_str.as_str()) {
+        ("FIXNUM", "FIXNUM")
+        | ("FIXNUM", "INTEGER")
+        | ("FIXNUM", "RATIONAL")
+        | ("FIXNUM", "REAL")
+        | ("FIXNUM", "NUMBER")
+        | ("INTEGER", "BIGNUM")
+        | ("INTEGER", "INTEGER")
+        | ("INTEGER", "RATIONAL")
+        | ("INTEGER", "REAL")
+        | ("INTEGER", "NUMBER")
+        | ("RATIO", "RATIO")
+        | ("RATIO", "RATIONAL")
+        | ("RATIO", "REAL")
+        | ("RATIO", "NUMBER")
+        | ("FLOAT", "FLOAT")
+        | ("FLOAT", "SHORT-FLOAT")
+        | ("FLOAT", "SINGLE-FLOAT")
+        | ("FLOAT", "DOUBLE-FLOAT")
+        | ("FLOAT", "LONG-FLOAT")
+        | ("FLOAT", "REAL")
+        | ("FLOAT", "NUMBER")
+        | ("COMPLEX", "COMPLEX")
+        | ("COMPLEX", "NUMBER") => true,
+        _ => false,
+    };
+    if numeric_match {
+        return LispObject::t().raw();
+    }
+
     // Built-in and runtime object types.
     if obj_class == name_str {
         return LispObject::t().raw();

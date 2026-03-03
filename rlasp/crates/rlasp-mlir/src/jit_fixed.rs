@@ -30,6 +30,7 @@ fn map_intrinsics(execution_engine: &ExecutionEngine, module: &Module) {
     map_if_exists(execution_engine, module, "cc_box_fixnum", cc_box_fixnum as usize);
     map_if_exists(execution_engine, module, "cc_unbox_fixnum", cc_unbox_fixnum as usize);
     map_if_exists(execution_engine, module, "cc_box_float", cc_box_float as usize);
+    map_if_exists(execution_engine, module, "cc_box_single_float", cc_box_single_float as usize);
     map_if_exists(execution_engine, module, "cc_unbox_float", cc_unbox_float as usize);
     map_if_exists(execution_engine, module, "cc_cons", cc_cons as usize);
     map_if_exists(execution_engine, module, "cc_car", cc_car as usize);

@@ -15,7 +15,7 @@ impl<'ctx> JitEngine<'ctx> {
     pub fn new(mut module: Module<'ctx>) -> Result<Self, String> {
         // Get intrinsic function values before the module is consumed
         let intrinsic_names = [
-            "cc_box_fixnum", "cc_unbox_fixnum", "cc_box_float", "cc_unbox_float",
+            "cc_box_fixnum", "cc_unbox_fixnum", "cc_box_float", "cc_box_single_float", "cc_unbox_float",
             "cc_cons", "cc_car", "cc_cdr", "cc_nil", "cc_t",
             "cc_is_nil", "cc_is_fixnum", "cc_is_cons",
             "cc_add", "cc_sub", "cc_mul", "cc_div", "cc_mod", "cc_expt", "cc_sqrt",
@@ -56,7 +56,7 @@ impl<'ctx> JitEngine<'ctx> {
         };
         let addrs: &[usize] = &[
             cc_box_fixnum as usize, cc_unbox_fixnum as usize,
-            cc_box_float as usize, cc_unbox_float as usize,
+            cc_box_float as usize, cc_box_single_float as usize, cc_unbox_float as usize,
             cc_cons as usize, cc_car as usize, cc_cdr as usize,
             cc_nil as usize, cc_t as usize,
             cc_is_nil as usize, cc_is_fixnum as usize, cc_is_cons as usize,

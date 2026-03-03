@@ -5,7 +5,7 @@
 use crate::error::{ReaderError, ReaderResult};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
-use rlasp_runtime::{LispObject, RString, RVector, Symbol};
+use rlasp_runtime::{LispObject, RVector, Symbol};
 use std::collections::HashMap;
 use malachite::Integer;
 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
@@ -191,11 +191,12 @@ impl Parser {
                 }
             }
 
-            TokenKind::Float(f) => {
+            TokenKind::Float(f, format) => {
                 let val = *f;
+                let fmt = *format;
                 self.advance()?;
-                // Create Float as a general object
-                Ok(rlasp_runtime::Number::allocate_float(val))
+                // Create float with preserved reader format.
+                Ok(rlasp_runtime::Number::allocate_float_with_format(val, fmt))
             }
 
             TokenKind::Ratio(numerator, denominator) => {

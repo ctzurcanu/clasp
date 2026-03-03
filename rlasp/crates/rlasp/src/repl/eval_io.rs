@@ -4,7 +4,7 @@ use super::eval_types::EvalResult;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{BufRead, Write};
 
 thread_local! {
     static PPRINT_DISPATCH: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
@@ -732,6 +732,17 @@ pub(super) fn get_output_stream_string(stream: &EvalResult) -> Result<String, St
 fn write_to_destination(dest: Option<&EvalResult>, text: &str) -> Result<(), String> {
     match dest {
         Some(target) if is_stream(target) => stream_write_text(target, text),
+        Some(EvalResult::Symbol(name))
+            if name
+                .rsplit(':')
+                .next()
+                .map(|s| s.eq_ignore_ascii_case("*error-output*"))
+                .unwrap_or(false) =>
+        {
+            eprint!("{}", text);
+            std::io::stderr().flush().ok();
+            Ok(())
+        }
         Some(EvalResult::Boolean(true) | EvalResult::Bool(true)) | Some(EvalResult::Nil) | None => {
             print!("{}", text);
             std::io::stdout().flush().ok();
@@ -1218,7 +1229,22 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             let stream = args.get(0).ok_or_else(|| "read requires a stream".to_string())?;
             let eof_error_p = args.get(1).map(truthy).unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
-            let input = stream_remaining_input(stream).unwrap_or_default();
+            let standard_input_symbol = matches!(
+                stream,
+                EvalResult::Symbol(name)
+                    if name
+                        .rsplit(':')
+                        .next()
+                        .map(|s| s.eq_ignore_ascii_case("*standard-input*"))
+                        .unwrap_or(false)
+            );
+            let input = if standard_input_symbol {
+                let mut line = String::new();
+                let read_n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+                if read_n == 0 { String::new() } else { line }
+            } else {
+                stream_remaining_input(stream).unwrap_or_default()
+            };
             let chars: Vec<char> = input.chars().collect();
             let mut idx = 0usize;
             while idx < chars.len() && chars[idx].is_whitespace() {

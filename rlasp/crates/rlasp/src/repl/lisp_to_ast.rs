@@ -2,7 +2,7 @@
 
 use crate::ir::{ASTNode, ConstantValue, SlotSpec};
 use super::eval::{eval_with_persistent_env, result_to_ast, result_to_data_ast, EvalResult};
-use rlasp_runtime::{LispObject, RVector, header::{TypeHeader, ObjectType}};
+use rlasp_runtime::{FloatFormat, LispObject, RVector, header::{TypeHeader, ObjectType}};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -123,7 +123,8 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             let num = unsafe { &*(ptr as *const rlasp_runtime::Number) };
                             match &num.value {
                                 rlasp_runtime::NumberValue::Float(f) => {
-                                    return Ok(ASTNode::float(*f));
+                                    let format = num.float_format().unwrap_or(FloatFormat::Double);
+                                    return Ok(ASTNode::Constant(ConstantValue::Float(*f, format)));
                                 }
                                 rlasp_runtime::NumberValue::Bignum(b) => {
                                     return Ok(ASTNode::Constant(ConstantValue::Bignum(b.to_string())));
@@ -1906,7 +1907,8 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                             let num = unsafe { &*(ptr as *const rlasp_runtime::Number) };
                             match &num.value {
                                 rlasp_runtime::NumberValue::Float(f) => {
-                                    return Ok(ASTNode::float(*f));
+                                    let format = num.float_format().unwrap_or(FloatFormat::Double);
+                                    return Ok(ASTNode::Constant(ConstantValue::Float(*f, format)));
                                 }
                                 rlasp_runtime::NumberValue::Bignum(b) => {
                                     return Ok(ASTNode::Constant(ConstantValue::Bignum(b.to_string())));
@@ -2257,7 +2259,7 @@ fn case_key_to_atom_test(key_obj: &LispObject, tmp_var: &str) -> Option<ASTNode>
             ASTNode::variable("eql"),
             vec![
                 ASTNode::variable(tmp_var),
-                ASTNode::Constant(ConstantValue::Float(f)),
+                ASTNode::Constant(ConstantValue::Float(f, FloatFormat::Double)),
             ],
         ));
     }
