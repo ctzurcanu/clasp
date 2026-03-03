@@ -12,24 +12,38 @@ use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
 /// Thread-local recursion depth counter to prevent stack overflow
 thread_local! {
     static EVAL_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static MACROEXPAND_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
     static FINALIZER_REGISTRY: RefCell<HashMap<String, Vec<(EvalResult, EvalResult)>>> = RefCell::new(HashMap::new());
     static WEAK_POINTER_IDS: RefCell<HashSet<i64>> = RefCell::new(HashSet::new());
     static NEXT_WEAK_POINTER_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
     static CALLBACK_REGISTRY: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
     static MP_PROCESS_REGISTRY: RefCell<HashMap<String, MpProcessState>> = RefCell::new(HashMap::new());
     static MP_MUTEX_REGISTRY: RefCell<HashMap<String, MpMutexState>> = RefCell::new(HashMap::new());
+    static MP_CONDITION_VARIABLE_REGISTRY: RefCell<HashMap<String, MpConditionVariableState>> = RefCell::new(HashMap::new());
+    static MP_SEMAPHORE_REGISTRY: RefCell<HashMap<String, MpSemaphoreState>> = RefCell::new(HashMap::new());
     static MP_NEXT_PROCESS_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
     static MP_NEXT_MUTEX_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
+    static MP_NEXT_CONDITION_VARIABLE_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
+    static MP_NEXT_SEMAPHORE_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
     static MP_CURRENT_PROCESS: RefCell<String> = RefCell::new("%PROCESS-MAIN".to_string());
     static MP_PENDING_SIGNAL_CONDITION: RefCell<Option<EvalResult>> = RefCell::new(None);
     static MP_PENDING_EXIT_VALUES: RefCell<Option<EvalResult>> = RefCell::new(None);
     static MP_PENDING_ABORT_CONDITION: RefCell<Option<EvalResult>> = RefCell::new(None);
+    static ASYNC_TCP_REGISTRY: RefCell<HashMap<String, TcpStream>> = RefCell::new(HashMap::new());
+    static ASYNC_TCP_LISTENER_REGISTRY: RefCell<HashMap<String, TcpListener>> = RefCell::new(HashMap::new());
+    static ASYNC_NEXT_SOCKET_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
+    static ASYNC_NEXT_LISTENER_ID: std::cell::Cell<i64> = std::cell::Cell::new(1);
+    static SERVE_EVENT_REGISTRY: RefCell<HashMap<String, Vec<EvalResult>>> = RefCell::new(HashMap::new());
+    static ASDF_SYSTEM_REGISTRY: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
     static NEXT_FAKE_FILE_DESCRIPTOR: std::cell::Cell<i64> = std::cell::Cell::new(100);
     static FILE_DESCRIPTOR_PATHS: RefCell<HashMap<i64, String>> = RefCell::new(HashMap::new());
     static DEBUG_CALL_STACK: RefCell<Vec<DebugFrame>> = RefCell::new(Vec::new());
@@ -39,6 +53,7 @@ thread_local! {
     static DEBUG_IN_HOOK: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static DEBUG_FUNCTION_LAMBDA_LISTS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
     static STRUCT_DEFINITIONS: RefCell<HashMap<String, StructDefinition>> = RefCell::new(HashMap::new());
+    static MOP_DEPENDENTS: RefCell<HashMap<String, Vec<EvalResult>>> = RefCell::new(HashMap::new());
 }
 
 pub(super) fn debug_call_stack_summary() -> String {
@@ -63,6 +78,47 @@ pub const COMPILER_MACRO_NS_PREFIX: &str = "%CMACRO%";
 /// Debug flag to trace deep recursion
 const DEBUG_RECURSION: bool = false;
 
+fn macroexpand_depth_limit() -> usize {
+    std::env::var("RLASP_MACROEXPAND_DEPTH_LIMIT")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2048)
+}
+
+struct MacroexpandDepthGuard;
+
+impl MacroexpandDepthGuard {
+    fn enter() -> Result<Self, String> {
+        let limit = macroexpand_depth_limit();
+        let exceeded = MACROEXPAND_DEPTH.with(|depth| {
+            let cur = depth.get();
+            if cur >= limit {
+                true
+            } else {
+                depth.set(cur + 1);
+                false
+            }
+        });
+        if exceeded {
+            Err(format!(
+                "macroexpand recursion exceeded depth limit {}",
+                limit
+            ))
+        } else {
+            Ok(Self)
+        }
+    }
+}
+
+impl Drop for MacroexpandDepthGuard {
+    fn drop(&mut self) {
+        MACROEXPAND_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
 #[derive(Clone)]
 struct MpProcessState {
     name: EvalResult,
@@ -83,6 +139,19 @@ struct MpMutexState {
     recursive: bool,
     owner: Option<String>,
     recursion_depth: usize,
+}
+
+#[derive(Clone)]
+struct MpConditionVariableState {
+    name: Option<String>,
+    pending_signals: usize,
+    waiters: usize,
+}
+
+#[derive(Clone)]
+struct MpSemaphoreState {
+    name: Option<String>,
+    count: i64,
 }
 
 #[derive(Clone)]
@@ -253,6 +322,52 @@ fn lookup_env_binding_fast(name: &str, env: &HashMap<String, EvalResult>) -> Opt
         }
     }
     None
+}
+
+#[inline]
+fn is_global_binding_name_for_sync(name: &str) -> bool {
+    name.starts_with(FUNCTION_NS_PREFIX)
+        || super::eval_types::is_special_variable(name)
+        || name.contains("::")
+        || name.contains(':')
+}
+
+#[inline]
+fn should_capture_lexical_binding(name: &str, value: &EvalResult) -> bool {
+    if name == BLOCK_CAPTURE_DEPTH_KEY || name == BLOCK_CALL_ENTRY_DEPTH_KEY {
+        return true;
+    }
+    if super::eval_types::is_special_variable(name) || name.contains(':') {
+        return false;
+    }
+    if let Some(rest) = name.strip_prefix(FUNCTION_NS_PREFIX) {
+        if rest.contains(':') {
+            return false;
+        }
+        return matches!(
+            value,
+            EvalResult::Lambda { dynamic_env: true, .. }
+                | EvalResult::Macro { .. }
+                | EvalResult::ModifyMacro { .. }
+        );
+    }
+    true
+}
+
+#[inline]
+fn capture_lexical_env(env: &HashMap<String, EvalResult>) -> HashMap<String, EvalResult> {
+    let mut captured = HashMap::new();
+    for (key, value) in env.iter() {
+        if should_capture_lexical_binding(key, value) {
+            captured.insert(key.clone(), value.clone());
+        }
+    }
+    captured
+}
+
+#[inline]
+fn compact_captured_env_in_place(env: &mut HashMap<String, EvalResult>) {
+    env.retain(|key, value| should_capture_lexical_binding(key, value));
 }
 
 #[inline]
@@ -726,6 +841,121 @@ fn mp_new_mutex_symbol(recursive: bool) -> String {
         format!("%RECURSIVE-MUTEX-{}", id)
     } else {
         format!("%MUTEX-{}", id)
+    }
+}
+
+fn mp_new_condition_variable_symbol() -> String {
+    let id = MP_NEXT_CONDITION_VARIABLE_ID.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    format!("%CONDITION-VARIABLE-{}", id)
+}
+
+fn mp_new_semaphore_symbol() -> String {
+    let id = MP_NEXT_SEMAPHORE_ID.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    format!("%SEMAPHORE-{}", id)
+}
+
+fn async_new_socket_symbol() -> String {
+    let id = ASYNC_NEXT_SOCKET_ID.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    format!("%ASYNC-SOCKET-{}", id)
+}
+
+fn async_new_listener_symbol() -> String {
+    let id = ASYNC_NEXT_LISTENER_ID.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    format!("%ASYNC-LISTENER-{}", id)
+}
+
+fn async_socket_handle_from_value(value: EvalResult, context: &str) -> Result<String, String> {
+    match value {
+        EvalResult::Symbol(s) | EvalResult::String(s) => Ok(s),
+        other => Err(format!("{} requires a socket handle symbol/string, got {:?}", context, other)),
+    }
+}
+
+fn socket_descriptor_handle_from_value(value: &EvalResult, key: &str) -> Option<String> {
+    match value {
+        EvalResult::HashTable(map) => map.borrow().get(key).and_then(|v| match v {
+            EvalResult::Symbol(s) | EvalResult::String(s) => Some(s.clone()),
+            _ => None,
+        }),
+        EvalResult::Symbol(s) | EvalResult::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn socket_descriptor_host_port(value: &EvalResult) -> Option<(String, i64)> {
+    let EvalResult::HashTable(map) = value else {
+        return None;
+    };
+    let map = map.borrow();
+    let host = match map.get("host") {
+        Some(EvalResult::String(s)) | Some(EvalResult::Symbol(s)) => s.clone(),
+        _ => return None,
+    };
+    let port = match map.get("port") {
+        Some(EvalResult::Fixnum(n)) => *n,
+        _ => return None,
+    };
+    Some((host, port))
+}
+
+fn make_socket_descriptor(
+    kind: &str,
+    host: Option<String>,
+    port: Option<i64>,
+    stream_handle: Option<String>,
+    listener_handle: Option<String>,
+) -> EvalResult {
+    let mut map = HashMap::new();
+    map.insert("kind".to_string(), EvalResult::Symbol(kind.to_string()));
+    if let Some(host) = host {
+        map.insert("host".to_string(), EvalResult::String(host));
+    }
+    if let Some(port) = port {
+        map.insert("port".to_string(), EvalResult::Fixnum(port));
+    }
+    if let Some(handle) = stream_handle {
+        map.insert("stream-handle".to_string(), EvalResult::Symbol(handle));
+    }
+    if let Some(handle) = listener_handle {
+        map.insert("listener-handle".to_string(), EvalResult::Symbol(handle));
+    }
+    EvalResult::HashTable(Rc::new(RefCell::new(map)))
+}
+
+fn eval_to_string_designator(value: EvalResult, context: &str) -> Result<String, String> {
+    match value {
+        EvalResult::String(s) | EvalResult::Symbol(s) => Ok(s.trim_matches('"').to_string()),
+        EvalResult::Character(c) => Ok(c.to_string()),
+        other => Err(format!("{} requires a string designator, got {:?}", context, other)),
+    }
+}
+
+fn asdf_normalize_system_name(value: &EvalResult) -> Option<String> {
+    match value {
+        EvalResult::String(s) | EvalResult::Symbol(s) => Some(
+            s.trim_matches('"')
+                .rsplit(':')
+                .next()
+                .unwrap_or(s.as_str())
+                .to_ascii_lowercase(),
+        ),
+        _ => None,
     }
 }
 
@@ -1211,9 +1441,11 @@ fn mp_jit_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> EvalResult {
     if let Some(cons_ptr) = obj.as_cons_ptr() {
         if !cons_ptr.is_null() {
             let cons = unsafe { &*cons_ptr };
+            let car_obj = cons.car();
+            let cdr_obj = cons.cdr();
             return EvalResult::Cons(
-                Rc::new(RefCell::new(mp_jit_lisp_to_eval_result(cons.car()))),
-                Rc::new(RefCell::new(mp_jit_lisp_to_eval_result(cons.cdr()))),
+                Rc::new(RefCell::new(mp_jit_lisp_to_eval_result(car_obj))),
+                Rc::new(RefCell::new(mp_jit_lisp_to_eval_result(cdr_obj))),
             );
         }
     }
@@ -1392,8 +1624,10 @@ pub(super) fn mp_try_call_jit_function_ref_with_values(
             break;
         }
         let cons = unsafe { &*cons_ptr };
-        vals.push(mp_jit_lisp_to_eval_result(cons.car()));
-        cur = cons.cdr();
+        let car_obj = cons.car();
+        let next_cdr = cons.cdr();
+        vals.push(mp_jit_lisp_to_eval_result(car_obj));
+        cur = next_cdr;
     }
 
     if vals.is_empty() {
@@ -1420,7 +1654,43 @@ fn object_finalizer_key(obj: &EvalResult) -> String {
     }
 }
 
+fn mop_metaobject_key(metaobject: &EvalResult) -> String {
+    object_finalizer_key(metaobject)
+}
+
+fn mop_add_dependent(metaobject: &EvalResult, dependent: EvalResult) {
+    let key = mop_metaobject_key(metaobject);
+    MOP_DEPENDENTS.with(|registry| {
+        let mut reg = registry.borrow_mut();
+        let deps = reg.entry(key).or_default();
+        if !deps.iter().any(|d| super::eval_types::structural_equal(d, &dependent)) {
+            deps.push(dependent);
+        }
+    });
+}
+
+fn mop_remove_dependent(metaobject: &EvalResult, dependent: &EvalResult) {
+    let key = mop_metaobject_key(metaobject);
+    MOP_DEPENDENTS.with(|registry| {
+        if let Some(deps) = registry.borrow_mut().get_mut(&key) {
+            deps.retain(|d| !super::eval_types::structural_equal(d, dependent));
+        }
+    });
+}
+
+fn mop_dependents(metaobject: &EvalResult) -> Vec<EvalResult> {
+    let key = mop_metaobject_key(metaobject);
+    MOP_DEPENDENTS.with(|registry| {
+        registry
+            .borrow()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
 const FOREIGN_MEMORY_TAG: &str = "%FOREIGN-MEM%";
+const FOREIGN_RAW_PTR_TAG: &str = "%FOREIGN-RAW-PTR%";
 
 fn eval_to_i64(val: EvalResult, context: &str) -> Result<i64, String> {
     match val {
@@ -1430,6 +1700,25 @@ fn eval_to_i64(val: EvalResult, context: &str) -> Result<i64, String> {
             .parse::<i64>()
             .map_err(|_| format!("{} requires an integer in i64 range", context)),
         _ => Err(format!("{} requires an integer", context)),
+    }
+}
+
+fn eval_to_f64(val: EvalResult, context: &str) -> Result<f64, String> {
+    match val {
+        EvalResult::Fixnum(n) => Ok(n as f64),
+        EvalResult::Float(f) => Ok(f),
+        EvalResult::Bignum(n) => n
+            .to_string()
+            .parse::<f64>()
+            .map_err(|_| format!("{} requires a numeric value in f64 range", context)),
+        EvalResult::Ratio(r) => {
+            let num = r.numerator_ref().to_string().parse::<f64>()
+                .map_err(|_| format!("{} requires a numeric value in f64 range", context))?;
+            let den = r.denominator_ref().to_string().parse::<f64>()
+                .map_err(|_| format!("{} requires a numeric value in f64 range", context))?;
+            Ok(num / den)
+        }
+        _ => Err(format!("{} requires a numeric value", context)),
     }
 }
 
@@ -1443,10 +1732,78 @@ fn foreign_type_size_from_value(val: &EvalResult) -> Option<usize> {
         "INT" | "UNSIGNED-INT" => Some(4),
         "SHORT" | "UNSIGNED-SHORT" => Some(2),
         "LONG" | "UNSIGNED-LONG" => Some(8),
+        "INT64" | "UINT64" | "LONG-LONG" | "UNSIGNED-LONG-LONG" => Some(8),
+        "SIZE-T" | "SSIZE-T" | "OFF-T" => Some(8),
+        "FLOAT" => Some(4),
+        "DOUBLE" => Some(8),
         "CHAR" | "UNSIGNED-CHAR" | "BYTE" => Some(1),
         "POINTER" => Some(8),
         _ => None,
     }
+}
+
+fn foreign_type_alignment_from_value(val: &EvalResult) -> Option<usize> {
+    foreign_type_size_from_value(val).map(|size| match size {
+        0 | 1 => 1,
+        2 => 2,
+        4 => 4,
+        _ => 8,
+    })
+}
+
+fn align_up(value: usize, alignment: usize) -> usize {
+    if alignment <= 1 {
+        value
+    } else {
+        (value + (alignment - 1)) & !(alignment - 1)
+    }
+}
+
+fn evalresult_proper_list_to_vec(list: &EvalResult) -> Result<Vec<EvalResult>, String> {
+    let mut out = Vec::new();
+    let mut cur = list.clone();
+    loop {
+        match cur {
+            EvalResult::Nil => break,
+            EvalResult::Cons(car, cdr) => {
+                out.push(car.borrow().clone());
+                cur = cdr.borrow().clone();
+            }
+            _ => return Err("Expected a proper list of foreign field types".to_string()),
+        }
+    }
+    Ok(out)
+}
+
+fn collect_struct_field_specs(eval_args: &[EvalResult]) -> Result<Vec<EvalResult>, String> {
+    if eval_args.len() == 1 && matches!(eval_args[0], EvalResult::Cons(_, _) | EvalResult::Nil) {
+        evalresult_proper_list_to_vec(&eval_args[0])
+    } else {
+        Ok(eval_args.to_vec())
+    }
+}
+
+fn foreign_struct_layout(field_specs: &[EvalResult]) -> Result<(Vec<usize>, usize, usize), String> {
+    if field_specs.is_empty() {
+        return Ok((Vec::new(), 0, 1));
+    }
+
+    let mut offsets = Vec::with_capacity(field_specs.len());
+    let mut cursor = 0usize;
+    let mut max_align = 1usize;
+
+    for field in field_specs {
+        let size = foreign_type_size_from_value(field)
+            .ok_or_else(|| format!("Unsupported foreign type in struct layout: {:?}", field))?;
+        let align = foreign_type_alignment_from_value(field).unwrap_or(1);
+        max_align = max_align.max(align);
+        cursor = align_up(cursor, align);
+        offsets.push(cursor);
+        cursor = cursor.saturating_add(size);
+    }
+
+    let total_size = align_up(cursor, max_align);
+    Ok((offsets, total_size, max_align))
 }
 
 fn make_foreign_memory(size_bytes: usize) -> EvalResult {
@@ -1457,6 +1814,45 @@ fn make_foreign_memory(size_bytes: usize) -> EvalResult {
         cells.push(EvalResult::Fixnum(0));
     }
     EvalResult::Array(Rc::new(RefCell::new(cells)))
+}
+
+fn make_foreign_raw_ptr(ptr_addr: usize, size_bytes: usize) -> EvalResult {
+    EvalResult::Array(Rc::new(RefCell::new(vec![
+        EvalResult::Symbol(FOREIGN_RAW_PTR_TAG.to_string()),
+        EvalResult::Fixnum(ptr_addr as i64),
+        EvalResult::Fixnum(size_bytes as i64),
+    ])))
+}
+
+fn foreign_raw_pointer_info(ptr: &EvalResult) -> Option<(usize, usize)> {
+    match ptr {
+        EvalResult::Array(arr) => {
+            let cells = arr.borrow();
+            if !matches!(cells.get(0), Some(EvalResult::Symbol(tag)) if tag == FOREIGN_RAW_PTR_TAG) {
+                return None;
+            }
+            let addr = match cells.get(1) {
+                Some(EvalResult::Fixnum(n)) if *n >= 0 => *n as usize,
+                _ => return None,
+            };
+            let size = match cells.get(2) {
+                Some(EvalResult::Fixnum(n)) if *n >= 0 => *n as usize,
+                _ => return None,
+            };
+            Some((addr, size))
+        }
+        _ => None,
+    }
+}
+
+fn eval_to_ptr_addr(val: EvalResult, context: &str) -> Result<usize, String> {
+    if let Some((addr, _)) = foreign_raw_pointer_info(&val) {
+        return Ok(addr);
+    }
+    match val {
+        EvalResult::Fixnum(n) if n >= 0 => Ok(n as usize),
+        _ => Err(format!("{} requires a foreign pointer or non-negative address", context)),
+    }
 }
 
 fn with_foreign_memory_mut<T, F>(ptr: &EvalResult, f: F) -> Result<T, String>
@@ -1480,6 +1876,14 @@ where
 }
 
 fn foreign_mem_write_int(ptr: &EvalResult, offset: usize, value: i64) -> Result<(), String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(4).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        let out_ptr = (addr + offset) as *mut i32;
+        unsafe { std::ptr::write_unaligned(out_ptr, value as i32) };
+        return Ok(());
+    }
     with_foreign_memory_mut(ptr, |cells, size| {
         if offset.checked_add(4).map(|end| end <= size).unwrap_or(false) == false {
             return Err("clasp-ffi:%mem-set out of bounds".to_string());
@@ -1493,6 +1897,14 @@ fn foreign_mem_write_int(ptr: &EvalResult, offset: usize, value: i64) -> Result<
 }
 
 fn foreign_mem_read_int(ptr: &EvalResult, offset: usize) -> Result<i64, String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(4).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let in_ptr = (addr + offset) as *const i32;
+        let v = unsafe { std::ptr::read_unaligned(in_ptr) };
+        return Ok(v as i64);
+    }
     with_foreign_memory_mut(ptr, |cells, size| {
         if offset.checked_add(4).map(|end| end <= size).unwrap_or(false) == false {
             return Err("clasp-ffi:%mem-ref out of bounds".to_string());
@@ -1506,6 +1918,223 @@ fn foreign_mem_read_int(ptr: &EvalResult, offset: usize) -> Result<i64, String> 
             bytes[i] = byte_val;
         }
         Ok(i32::from_le_bytes(bytes) as i64)
+    })
+}
+
+fn foreign_mem_write_i64(ptr: &EvalResult, offset: usize, value: i64) -> Result<(), String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        let out_ptr = (addr + offset) as *mut i64;
+        unsafe { std::ptr::write_unaligned(out_ptr, value) };
+        return Ok(());
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        let bytes = value.to_le_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            cells[2 + offset + i] = EvalResult::Fixnum(*b as i64);
+        }
+        Ok(())
+    })
+}
+
+fn foreign_mem_read_i64(ptr: &EvalResult, offset: usize) -> Result<i64, String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let in_ptr = (addr + offset) as *const i64;
+        let v = unsafe { std::ptr::read_unaligned(in_ptr) };
+        return Ok(v);
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let mut bytes = [0u8; 8];
+        for i in 0..8 {
+            let byte_val = match &cells[2 + offset + i] {
+                EvalResult::Fixnum(n) => *n as u8,
+                _ => 0,
+            };
+            bytes[i] = byte_val;
+        }
+        Ok(i64::from_le_bytes(bytes))
+    })
+}
+
+fn foreign_mem_write_f64(ptr: &EvalResult, offset: usize, value: f64) -> Result<(), String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        let out_ptr = (addr + offset) as *mut f64;
+        unsafe { std::ptr::write_unaligned(out_ptr, value) };
+        return Ok(());
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        let bytes = value.to_le_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            cells[2 + offset + i] = EvalResult::Fixnum(*b as i64);
+        }
+        Ok(())
+    })
+}
+
+fn foreign_mem_read_f64(ptr: &EvalResult, offset: usize) -> Result<f64, String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let in_ptr = (addr + offset) as *const f64;
+        let v = unsafe { std::ptr::read_unaligned(in_ptr) };
+        return Ok(v);
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset.checked_add(8).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let mut bytes = [0u8; 8];
+        for i in 0..8 {
+            let byte_val = match &cells[2 + offset + i] {
+                EvalResult::Fixnum(n) => *n as u8,
+                _ => 0,
+            };
+            bytes[i] = byte_val;
+        }
+        Ok(f64::from_le_bytes(bytes))
+    })
+}
+
+fn foreign_mem_write_u8(ptr: &EvalResult, offset: usize, value: u8) -> Result<(), String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset >= size {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        let out_ptr = (addr + offset) as *mut u8;
+        unsafe { std::ptr::write(out_ptr, value) };
+        return Ok(());
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset >= size {
+            return Err("clasp-ffi:%mem-set out of bounds".to_string());
+        }
+        cells[2 + offset] = EvalResult::Fixnum(value as i64);
+        Ok(())
+    })
+}
+
+fn foreign_mem_read_u8(ptr: &EvalResult, offset: usize) -> Result<u8, String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset >= size {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let in_ptr = (addr + offset) as *const u8;
+        let v = unsafe { std::ptr::read(in_ptr) };
+        return Ok(v);
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset >= size {
+            return Err("clasp-ffi:%mem-ref out of bounds".to_string());
+        }
+        let byte_val = match &cells[2 + offset] {
+            EvalResult::Fixnum(n) => *n as u8,
+            _ => 0,
+        };
+        Ok(byte_val)
+    })
+}
+
+fn foreign_mem_strlen(ptr: &EvalResult, offset: usize) -> Result<i64, String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset >= size {
+            return Ok(0);
+        }
+        let mut count = 0usize;
+        let mut idx = offset;
+        while idx < size {
+            let b = unsafe { std::ptr::read((addr + idx) as *const u8) };
+            if b == 0 {
+                break;
+            }
+            count += 1;
+            idx += 1;
+        }
+        return Ok(count as i64);
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset >= size {
+            return Ok(0);
+        }
+        let mut count = 0usize;
+        let mut idx = offset;
+        while idx < size {
+            let byte_val = match &cells[2 + idx] {
+                EvalResult::Fixnum(n) => *n as u8,
+                _ => 0,
+            };
+            if byte_val == 0 {
+                break;
+            }
+            count += 1;
+            idx += 1;
+        }
+        Ok(count as i64)
+    })
+}
+
+fn foreign_mem_write_bytes(ptr: &EvalResult, offset: usize, bytes: &[u8]) -> Result<(), String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(bytes.len()).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi foreign memory write out of bounds".to_string());
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), (addr + offset) as *mut u8, bytes.len());
+        }
+        return Ok(());
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset.checked_add(bytes.len()).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi foreign memory write out of bounds".to_string());
+        }
+        for (i, b) in bytes.iter().enumerate() {
+            cells[2 + offset + i] = EvalResult::Fixnum(*b as i64);
+        }
+        Ok(())
+    })
+}
+
+fn foreign_mem_read_bytes(ptr: &EvalResult, offset: usize, count: usize) -> Result<Vec<u8>, String> {
+    if let Some((addr, size)) = foreign_raw_pointer_info(ptr) {
+        if offset.checked_add(count).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi foreign memory read out of bounds".to_string());
+        }
+        let mut out = vec![0u8; count];
+        unsafe {
+            std::ptr::copy_nonoverlapping((addr + offset) as *const u8, out.as_mut_ptr(), count);
+        }
+        return Ok(out);
+    }
+    with_foreign_memory_mut(ptr, |cells, size| {
+        if offset.checked_add(count).map(|end| end <= size).unwrap_or(false) == false {
+            return Err("clasp-ffi foreign memory read out of bounds".to_string());
+        }
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let byte_val = match &cells[2 + offset + i] {
+                EvalResult::Fixnum(n) => *n as u8,
+                _ => 0,
+            };
+            out.push(byte_val);
+        }
+        Ok(out)
     })
 }
 
@@ -1523,6 +2152,9 @@ fn eval_clasp_extension_builtin(
         "%defcallback"
             | "%get-callback"
             | "%foreign-type-size"
+            | "%foreign-struct-size"
+            | "%foreign-struct-offsetof"
+            | "%foreign-struct-layout"
             | "%foreign-alloc"
             | "%foreign-free"
             | "%mem-set"
@@ -1576,6 +2208,68 @@ fn eval_clasp_extension_builtin(
                 Ok(EvalResult::Fixnum(size as i64))
             })()
         }
+        "%foreign-struct-size" => {
+            (|| -> Result<EvalResult, String> {
+                if args.is_empty() {
+                    return Err("clasp-ffi:%foreign-struct-size requires at least one field type".to_string());
+                }
+                let eval_args: Result<Vec<EvalResult>, String> =
+                    args.iter().map(|arg| eval_with_env(arg, env)).collect();
+                let field_specs = collect_struct_field_specs(&eval_args?)?;
+                let (_, size, _) = foreign_struct_layout(&field_specs)?;
+                Ok(EvalResult::Fixnum(size as i64))
+            })()
+        }
+        "%foreign-struct-offsetof" => {
+            (|| -> Result<EvalResult, String> {
+                if args.len() < 2 {
+                    return Err(
+                        "clasp-ffi:%foreign-struct-offsetof requires field index and at least one field type"
+                            .to_string(),
+                    );
+                }
+                let index =
+                    eval_to_i64(eval_with_env(&args[0], env)?, "clasp-ffi:%foreign-struct-offsetof index")?;
+                if index < 0 {
+                    return Err("clasp-ffi:%foreign-struct-offsetof index must be non-negative".to_string());
+                }
+                let eval_fields: Result<Vec<EvalResult>, String> = args[1..]
+                    .iter()
+                    .map(|arg| eval_with_env(arg, env))
+                    .collect();
+                let field_specs = collect_struct_field_specs(&eval_fields?)?;
+                let (offsets, _, _) = foreign_struct_layout(&field_specs)?;
+                let idx = index as usize;
+                let offset = offsets
+                    .get(idx)
+                    .ok_or_else(|| format!("clasp-ffi:%foreign-struct-offsetof index {} out of range", index))?;
+                Ok(EvalResult::Fixnum(*offset as i64))
+            })()
+        }
+        "%foreign-struct-layout" => {
+            (|| -> Result<EvalResult, String> {
+                if args.is_empty() {
+                    return Err("clasp-ffi:%foreign-struct-layout requires at least one field type".to_string());
+                }
+                let eval_args: Result<Vec<EvalResult>, String> =
+                    args.iter().map(|arg| eval_with_env(arg, env)).collect();
+                let field_specs = collect_struct_field_specs(&eval_args?)?;
+                let (offsets, size, alignment) = foreign_struct_layout(&field_specs)?;
+                let offset_vals: Vec<EvalResult> = offsets
+                    .into_iter()
+                    .map(|off| EvalResult::Fixnum(off as i64))
+                    .collect();
+                let offset_list = mp_vec_to_list(&offset_vals);
+                Ok(mp_vec_to_list(&[
+                    EvalResult::Symbol(":SIZE".to_string()),
+                    EvalResult::Fixnum(size as i64),
+                    EvalResult::Symbol(":ALIGNMENT".to_string()),
+                    EvalResult::Fixnum(alignment as i64),
+                    EvalResult::Symbol(":OFFSETS".to_string()),
+                    offset_list,
+                ]))
+            })()
+        }
         "%foreign-alloc" => {
             (|| -> Result<EvalResult, String> {
                 let arg0 = args
@@ -1613,6 +2307,16 @@ fn eval_clasp_extension_builtin(
                 };
                 match type_name.as_str() {
                     "INT" => foreign_mem_write_int(&ptr, offset, value).map(|_| EvalResult::Fixnum(value)),
+                    "BYTE" | "CHAR" | "UNSIGNED-CHAR" => {
+                        foreign_mem_write_u8(&ptr, offset, value as u8).map(|_| EvalResult::Fixnum(value as u8 as i64))
+                    }
+                    "INT64" | "LONG-LONG" => {
+                        foreign_mem_write_i64(&ptr, offset, value).map(|_| EvalResult::Fixnum(value))
+                    }
+                    "DOUBLE" => {
+                        let dbl = eval_to_f64(eval_with_env(&args[2], env)?, "clasp-ffi:%mem-set")?;
+                        foreign_mem_write_f64(&ptr, offset, dbl).map(|_| EvalResult::Float(dbl))
+                    }
                     _ => Err("Unsupported foreign type for clasp-ffi:%mem-set".to_string()),
                 }
             })()
@@ -1640,6 +2344,11 @@ fn eval_clasp_extension_builtin(
                 };
                 match type_name.as_str() {
                     "INT" => foreign_mem_read_int(&ptr, offset).map(EvalResult::Fixnum),
+                    "BYTE" | "CHAR" | "UNSIGNED-CHAR" => {
+                        foreign_mem_read_u8(&ptr, offset).map(|v| EvalResult::Fixnum(v as i64))
+                    }
+                    "INT64" | "LONG-LONG" => foreign_mem_read_i64(&ptr, offset).map(EvalResult::Fixnum),
+                    "DOUBLE" => foreign_mem_read_f64(&ptr, offset).map(EvalResult::Float),
                     _ => Err("Unsupported foreign type for clasp-ffi:%mem-ref".to_string()),
                 }
             })()
@@ -1657,32 +2366,295 @@ fn eval_clasp_extension_builtin(
                     EvalResult::Symbol(s) => s.trim_matches('"').to_ascii_lowercase(),
                     _ => return Err("clasp-ffi:%foreign-funcall function name must be a string or symbol".to_string()),
                 };
-                if fn_name == "qsort" {
-                    if eval_args.len() < 7 {
-                        return Err("clasp-ffi:%foreign-funcall qsort requires pointer, count, and element size".to_string());
+                let mut typed_args: Vec<(String, EvalResult)> = Vec::new();
+                let mut ret_type: Option<String> = None;
+                let mut idx = 1usize;
+                while idx < eval_args.len() {
+                    let type_name = match &eval_args[idx] {
+                        EvalResult::Symbol(s) => s.trim_start_matches(':').to_ascii_uppercase(),
+                        EvalResult::String(s) => s.trim_start_matches(':').to_ascii_uppercase(),
+                        _ => return Err("clasp-ffi:%foreign-funcall expected foreign type keyword".to_string()),
+                    };
+                    if idx + 1 < eval_args.len() {
+                        typed_args.push((type_name, eval_args[idx + 1].clone()));
+                        idx += 2;
+                    } else {
+                        ret_type = Some(type_name);
+                        idx += 1;
                     }
-                    let base_ptr = eval_args[2].clone();
-                    let nmemb = eval_to_i64(eval_args[4].clone(), "qsort nmemb")?;
-                    let elem_size = eval_to_i64(eval_args[6].clone(), "qsort element size")?;
-                    if nmemb < 0 || elem_size <= 0 {
-                        return Err("qsort requires non-negative count and positive element size".to_string());
+                }
+
+                match fn_name.as_str() {
+                    "qsort" => {
+                        if typed_args.len() < 3 {
+                            return Err("clasp-ffi:%foreign-funcall qsort requires pointer, count, and element size".to_string());
+                        }
+                        let base_ptr = typed_args[0].1.clone();
+                        let nmemb = eval_to_i64(typed_args[1].1.clone(), "qsort nmemb")?;
+                        let elem_size = eval_to_i64(typed_args[2].1.clone(), "qsort element size")?;
+                        if nmemb < 0 || elem_size <= 0 {
+                            return Err("qsort requires non-negative count and positive element size".to_string());
+                        }
+                        if elem_size as usize != 4 {
+                            return Err("qsort emulation currently supports :int elements only".to_string());
+                        }
+                        let mut values = Vec::with_capacity(nmemb as usize);
+                        for i in 0..(nmemb as usize) {
+                            let off = i * (elem_size as usize);
+                            values.push(foreign_mem_read_int(&base_ptr, off)?);
+                        }
+                        values.sort();
+                        for (i, value) in values.into_iter().enumerate() {
+                            let off = i * (elem_size as usize);
+                            foreign_mem_write_int(&base_ptr, off, value)?;
+                        }
+                        Ok(EvalResult::Nil)
                     }
-                    if elem_size as usize != 4 {
-                        return Err("qsort emulation currently supports :int elements only".to_string());
+                    "getpid" => {
+                        let pid = unsafe { libc::getpid() };
+                        Ok(EvalResult::Fixnum(pid as i64))
                     }
-                    let mut values = Vec::with_capacity(nmemb as usize);
-                    for i in 0..(nmemb as usize) {
-                        let off = i * (elem_size as usize);
-                        values.push(foreign_mem_read_int(&base_ptr, off)?);
+                    "open" => {
+                        if typed_args.len() < 2 {
+                            return Err("open requires path and flags".to_string());
+                        }
+                        let mut path = match &typed_args[0].1 {
+                            EvalResult::String(s) => s.clone(),
+                            EvalResult::Symbol(s) => s.clone(),
+                            _ => return Err("open path must be a string or symbol".to_string()),
+                        };
+                        if path.starts_with('"') && path.ends_with('"') && path.len() >= 2 {
+                            path = path[1..path.len() - 1].to_string();
+                        }
+                        let c_path = std::ffi::CString::new(path)
+                            .map_err(|_| "open path cannot contain NUL bytes".to_string())?;
+                        let flags = eval_to_i64(typed_args[1].1.clone(), "open flags")? as libc::c_int;
+                        let fd = if let Some((_, mode_arg)) = typed_args.get(2) {
+                            let mode = eval_to_i64(mode_arg.clone(), "open mode")? as libc::c_uint;
+                            unsafe { libc::open(c_path.as_ptr(), flags, mode) }
+                        } else {
+                            unsafe { libc::open(c_path.as_ptr(), flags) }
+                        };
+                        Ok(EvalResult::Fixnum(fd as i64))
                     }
-                    values.sort();
-                    for (i, value) in values.into_iter().enumerate() {
-                        let off = i * (elem_size as usize);
-                        foreign_mem_write_int(&base_ptr, off, value)?;
+                    "close" => {
+                        if typed_args.is_empty() {
+                            return Err("close requires a file descriptor".to_string());
+                        }
+                        let fd = eval_to_i64(typed_args[0].1.clone(), "close file descriptor")? as libc::c_int;
+                        let rc = unsafe { libc::close(fd) };
+                        Ok(EvalResult::Fixnum(rc as i64))
                     }
-                    Ok(EvalResult::Nil)
-                } else {
-                    Err(format!("clasp-ffi:%foreign-funcall unsupported function {}", fn_name))
+                    "read" => {
+                        if typed_args.len() < 3 {
+                            return Err("read requires fd, buffer pointer, and count".to_string());
+                        }
+                        let fd = eval_to_i64(typed_args[0].1.clone(), "read file descriptor")? as libc::c_int;
+                        let buffer_ptr = typed_args[1].1.clone();
+                        let count = eval_to_i64(typed_args[2].1.clone(), "read count")?;
+                        if count < 0 {
+                            return Err("read count must be non-negative".to_string());
+                        }
+                        let mut buf = vec![0u8; count as usize];
+                        let rc = unsafe {
+                            libc::read(
+                                fd,
+                                buf.as_mut_ptr() as *mut libc::c_void,
+                                count as usize,
+                            )
+                        };
+                        if rc > 0 {
+                            foreign_mem_write_bytes(&buffer_ptr, 0, &buf[..rc as usize])?;
+                        }
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "write" => {
+                        if typed_args.len() < 3 {
+                            return Err("write requires fd, buffer, and count".to_string());
+                        }
+                        let fd = eval_to_i64(typed_args[0].1.clone(), "write file descriptor")? as libc::c_int;
+                        let count = eval_to_i64(typed_args[2].1.clone(), "write count")?;
+                        if count < 0 {
+                            return Err("write count must be non-negative".to_string());
+                        }
+                        let bytes = match &typed_args[1].1 {
+                            EvalResult::String(s) => {
+                                let full = s.as_bytes();
+                                full[..std::cmp::min(count as usize, full.len())].to_vec()
+                            }
+                            EvalResult::Symbol(s) => {
+                                let full = s.as_bytes();
+                                full[..std::cmp::min(count as usize, full.len())].to_vec()
+                            }
+                            ptr => foreign_mem_read_bytes(ptr, 0, count as usize)?,
+                        };
+                        let rc = unsafe {
+                            libc::write(
+                                fd,
+                                bytes.as_ptr() as *const libc::c_void,
+                                bytes.len(),
+                            )
+                        };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "strlen" => {
+                        if typed_args.is_empty() {
+                            return Err("strlen requires one argument".to_string());
+                        }
+                        let len = match &typed_args[0].1 {
+                            EvalResult::String(s) => s.len() as i64,
+                            EvalResult::Symbol(s) => s.len() as i64,
+                            ptr => foreign_mem_strlen(ptr, 0)?,
+                        };
+                        Ok(EvalResult::Fixnum(len))
+                    }
+                    "malloc" => {
+                        if typed_args.is_empty() {
+                            return Err("malloc requires one size argument".to_string());
+                        }
+                        let size = eval_to_i64(typed_args[0].1.clone(), "malloc size")?;
+                        if size < 0 {
+                            return Err("malloc size must be non-negative".to_string());
+                        }
+                        Ok(make_foreign_memory(size as usize))
+                    }
+                    "signal" | "sigaction" => {
+                        if typed_args.len() < 2 {
+                            return Err("signal/sigaction requires signum and handler".to_string());
+                        }
+                        let signum = eval_to_i64(typed_args[0].1.clone(), "signal signum")? as libc::c_int;
+                        let handler = match &typed_args[1].1 {
+                            EvalResult::Symbol(s) | EvalResult::String(s) => {
+                                let key = s.trim().trim_start_matches(':').trim_matches('"').to_ascii_uppercase();
+                                match key.as_str() {
+                                    "SIG_IGN" | "IGNORE" | "SIG-IGN" => libc::SIG_IGN,
+                                    "SIG_DFL" | "DEFAULT" | "SIG-DFL" => libc::SIG_DFL,
+                                    _ => {
+                                        return Err(
+                                            "signal handler symbol must be one of SIG_IGN/SIG_DFL (or IGNORE/DEFAULT)"
+                                                .to_string(),
+                                        )
+                                    }
+                                }
+                            }
+                            EvalResult::Fixnum(n) if *n >= 0 => *n as libc::sighandler_t,
+                            other => {
+                                return Err(format!(
+                                    "signal handler must be SIG_IGN/SIG_DFL symbol or pointer fixnum, got {:?}",
+                                    other
+                                ))
+                            }
+                        };
+                        let prev = unsafe { libc::signal(signum, handler) };
+                        if prev == libc::SIG_ERR {
+                            Ok(EvalResult::Fixnum(-1))
+                        } else if fn_name == "sigaction" {
+                            Ok(EvalResult::Fixnum(0))
+                        } else {
+                            Ok(EvalResult::Fixnum(prev as isize as i64))
+                        }
+                    }
+                    "raise" => {
+                        if typed_args.is_empty() {
+                            return Err("raise requires one signal number".to_string());
+                        }
+                        let signum = eval_to_i64(typed_args[0].1.clone(), "raise signum")? as libc::c_int;
+                        let rc = unsafe { libc::raise(signum) };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "kill" => {
+                        if typed_args.len() < 2 {
+                            return Err("kill requires pid and signal".to_string());
+                        }
+                        let pid = eval_to_i64(typed_args[0].1.clone(), "kill pid")? as libc::pid_t;
+                        let sig = eval_to_i64(typed_args[1].1.clone(), "kill signal")? as libc::c_int;
+                        let rc = unsafe { libc::kill(pid, sig) };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "mmap" => {
+                        if typed_args.len() < 6 {
+                            return Err("mmap requires addr, length, prot, flags, fd, and offset".to_string());
+                        }
+                        let addr_val = typed_args[0].1.clone();
+                        let length = eval_to_i64(typed_args[1].1.clone(), "mmap length")?;
+                        let prot = eval_to_i64(typed_args[2].1.clone(), "mmap prot")? as libc::c_int;
+                        let flags = eval_to_i64(typed_args[3].1.clone(), "mmap flags")? as libc::c_int;
+                        let fd = eval_to_i64(typed_args[4].1.clone(), "mmap fd")? as libc::c_int;
+                        let offset = eval_to_i64(typed_args[5].1.clone(), "mmap offset")? as libc::off_t;
+                        if length <= 0 {
+                            return Err("mmap length must be positive".to_string());
+                        }
+                        let addr_ptr = match addr_val {
+                            EvalResult::Nil | EvalResult::Fixnum(0) => std::ptr::null_mut(),
+                            other => eval_to_ptr_addr(other, "mmap addr")? as *mut libc::c_void,
+                        };
+                        let mapped = unsafe { libc::mmap(addr_ptr, length as usize, prot, flags, fd, offset) };
+                        if mapped == libc::MAP_FAILED {
+                            Ok(EvalResult::Nil)
+                        } else {
+                            Ok(make_foreign_raw_ptr(mapped as usize, length as usize))
+                        }
+                    }
+                    "munmap" => {
+                        if typed_args.len() < 2 {
+                            return Err("munmap requires pointer and length".to_string());
+                        }
+                        let ptr_val = typed_args[0].1.clone();
+                        let length = eval_to_i64(typed_args[1].1.clone(), "munmap length")?;
+                        if length <= 0 {
+                            return Err("munmap length must be positive".to_string());
+                        }
+                        let addr = eval_to_ptr_addr(ptr_val, "munmap pointer")?;
+                        let rc = unsafe { libc::munmap(addr as *mut libc::c_void, length as usize) };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "mprotect" => {
+                        if typed_args.len() < 3 {
+                            return Err("mprotect requires pointer, length, and prot".to_string());
+                        }
+                        let ptr_val = typed_args[0].1.clone();
+                        let length = eval_to_i64(typed_args[1].1.clone(), "mprotect length")?;
+                        let prot = eval_to_i64(typed_args[2].1.clone(), "mprotect prot")? as libc::c_int;
+                        if length <= 0 {
+                            return Err("mprotect length must be positive".to_string());
+                        }
+                        let addr = eval_to_ptr_addr(ptr_val, "mprotect pointer")?;
+                        let rc = unsafe { libc::mprotect(addr as *mut libc::c_void, length as usize, prot) };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "msync" => {
+                        if typed_args.len() < 3 {
+                            return Err("msync requires pointer, length, and flags".to_string());
+                        }
+                        let ptr_val = typed_args[0].1.clone();
+                        let length = eval_to_i64(typed_args[1].1.clone(), "msync length")?;
+                        let flags = eval_to_i64(typed_args[2].1.clone(), "msync flags")? as libc::c_int;
+                        if length <= 0 {
+                            return Err("msync length must be positive".to_string());
+                        }
+                        let addr = eval_to_ptr_addr(ptr_val, "msync pointer")?;
+                        let rc = unsafe { libc::msync(addr as *mut libc::c_void, length as usize, flags) };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "ptrace" => {
+                        if typed_args.len() < 4 {
+                            return Err("ptrace requires request, pid, addr, and data".to_string());
+                        }
+                        let request = eval_to_i64(typed_args[0].1.clone(), "ptrace request")? as libc::c_int;
+                        let pid = eval_to_i64(typed_args[1].1.clone(), "ptrace pid")? as libc::pid_t;
+                        let addr = eval_to_ptr_addr(typed_args[2].1.clone(), "ptrace addr")? as *mut libc::c_char;
+                        let data = eval_to_i64(typed_args[3].1.clone(), "ptrace data")? as libc::c_int;
+                        let rc = unsafe { libc::ptrace(request, pid, addr, data) };
+                        Ok(EvalResult::Fixnum(rc as i64))
+                    }
+                    "free" => Ok(EvalResult::Nil),
+                    _ => {
+                        let ret_desc = ret_type.unwrap_or_else(|| "VOID".to_string());
+                        Err(format!(
+                            "clasp-ffi:%foreign-funcall unsupported function {} (return {})",
+                            fn_name, ret_desc
+                        ))
+                    }
                 }
             })()
         }
@@ -2172,6 +3144,74 @@ fn params_vec_to_ast_list(params: &[String]) -> ASTNode {
     }
 }
 
+fn ast_items_to_list(items: &[ASTNode]) -> ASTNode {
+    if items.is_empty() {
+        return ASTNode::nil();
+    }
+    let mut nodes = items.to_vec();
+    let first = nodes.remove(0);
+    ASTNode::Call {
+        function: Box::new(first),
+        args: nodes,
+    }
+}
+
+fn ast_node_symbol_or_string(node: &ASTNode) -> Option<String> {
+    match node {
+        ASTNode::Variable(s) => Some(s.clone()),
+        ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+        ASTNode::Constant(ConstantValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn parse_cffi_defcfun_names(node: &ASTNode) -> Option<(String, String)> {
+    match node {
+        ASTNode::Constant(ConstantValue::String(s)) => Some((s.clone(), s.clone())),
+        ASTNode::Variable(s) | ASTNode::Constant(ConstantValue::Symbol(s)) => {
+            Some((s.clone(), s.clone()))
+        }
+        ASTNode::Call { function, args } => {
+            let c_name = ast_node_symbol_or_string(function)?;
+            let lisp_name = args
+                .get(0)
+                .and_then(ast_node_symbol_or_string)
+                .unwrap_or_else(|| c_name.clone());
+            Some((c_name, lisp_name))
+        }
+        _ => None,
+    }
+}
+
+fn parse_cffi_param_specs(specs: &[ASTNode]) -> (Vec<String>, Vec<ASTNode>) {
+    let mut params = Vec::new();
+    let mut ffi_typed_args = Vec::new();
+
+    for (idx, spec) in specs.iter().enumerate() {
+        match spec {
+            ASTNode::Call { function, args } => {
+                let param_name = ast_node_symbol_or_string(function)
+                    .unwrap_or_else(|| format!("arg{}", idx + 1));
+                let type_ast = args
+                    .get(0)
+                    .cloned()
+                    .unwrap_or_else(|| ASTNode::Variable(":pointer".to_string()));
+                params.push(param_name.clone());
+                ffi_typed_args.push(type_ast);
+                ffi_typed_args.push(ASTNode::Variable(param_name));
+            }
+            ASTNode::Variable(name) => {
+                params.push(name.clone());
+                ffi_typed_args.push(ASTNode::Variable(":pointer".to_string()));
+                ffi_typed_args.push(ASTNode::Variable(name.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    (params, ffi_typed_args)
+}
+
 fn collect_macro_param_names(params: &ASTNode, out: &mut HashSet<String>) {
     let elems = ast_list_to_vec(params);
     let mut mode = "required";
@@ -2494,7 +3534,7 @@ pub fn eval_trampoline(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> 
                             supplied_p_vars: supplied_p_vars.clone(),
                             key_params: key_params.clone(),
                             body: body.clone(),
-                            env: Rc::new(RefCell::new(env.clone())),
+                            env: Rc::new(RefCell::new(capture_lexical_env(env))),
                             dynamic_env: false,
                         };
                     }
@@ -2731,6 +3771,12 @@ fn eval_variable(name: &str, env: &HashMap<String, EvalResult>) -> Result<EvalRe
         "t" => return Ok(EvalResult::Bool(true)),
         "nil" | "null" => return Ok(EvalResult::Nil),
         "*features*" => return Ok(super::eval_symbol::get_features()),
+        "*load-hooks*" => {
+            if let Some(val) = lookup_env_binding_fast(name, env).or_else(|| lookup_env_binding(name, env)) {
+                return Ok(val);
+            }
+            return Ok(EvalResult::Nil);
+        }
         "*package*" => {
             let pkg_name = super::eval_package::get_current_package();
             return Ok(EvalResult::Symbol(pkg_name));
@@ -3096,7 +4142,7 @@ pub fn eval_with_persistent_env(ast: &ASTNode, env: &mut HashMap<String, EvalRes
     eval_trampoline(ast, env)
 }
 
-fn init_env_defaults(env: &mut HashMap<String, EvalResult>) {
+pub(super) fn init_env_defaults(env: &mut HashMap<String, EvalResult>) {
     if !env.contains_key("sb-ext:*posix-argv*") {
         let args: Vec<String> = std::env::args().collect();
         let mut list = EvalResult::Nil;
@@ -3112,6 +4158,14 @@ fn init_env_defaults(env: &mut HashMap<String, EvalResult>) {
         .or_insert(EvalResult::Nil);
     env.entry("*load-print*".to_string())
         .or_insert(EvalResult::Nil);
+    env.entry("si:*load-hooks*".to_string())
+        .or_insert(EvalResult::Nil);
+    env.entry("SI:*LOAD-HOOKS*".to_string())
+        .or_insert(EvalResult::Nil);
+    env.entry(format!("{}{}", FUNCTION_NS_PREFIX, "si:load-source"))
+        .or_insert(EvalResult::BuiltinFunction("load".to_string()));
+    env.entry(format!("{}{}", FUNCTION_NS_PREFIX, "SI:LOAD-SOURCE"))
+        .or_insert(EvalResult::BuiltinFunction("load".to_string()));
 }
 
 fn load_time_value_cache_key(form: &ASTNode) -> String {
@@ -3380,6 +4434,13 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 "ext:double-float-negative-infinity" | "ext:long-float-negative-infinity" => Ok(EvalResult::Float(f64::NEG_INFINITY)),
                 "cmp::+derivable-wtag+" => Ok(EvalResult::Fixnum(4)), // Compiler constant
                 "+unix-errno-condition-map+" => Err("Not implemented: +unix-errno-condition-map+ (Clasp-specific)".to_string()),
+                "si:*load-hooks*" | "SI:*LOAD-HOOKS*" | "*load-hooks*" => {
+                    Ok(
+                        lookup_env_binding(name, env)
+                            .or_else(|| lookup_env_binding("*load-hooks*", env))
+                            .unwrap_or(EvalResult::Nil),
+                    )
+                }
                 _ => {
                     // Check IO syntax variables first (e.g., *print-base*, *read-base*, etc.)
                     if let Some(val) = eval_io_syntax::get_io_syntax_var(name) {
@@ -3501,7 +4562,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 supplied_p_vars: supplied_p_vars.clone(),
                 key_params: key_params.clone(),
                 body: body.clone(),
-                env: Rc::new(RefCell::new(env.clone())),
+                env: Rc::new(RefCell::new(capture_lexical_env(env))),
                 dynamic_env: false,
             })
         }
@@ -3561,7 +4622,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                 specializers: specializers.clone(),
                 params: params.clone(),
                 body: body.clone(),
-                env: Rc::new(RefCell::new(env.clone())),
+                env: Rc::new(RefCell::new(capture_lexical_env(env))),
             };
 
             // Redefining a method with the same qualifier + specializers replaces
@@ -3623,7 +4684,7 @@ pub(in crate::repl) fn eval_with_env(ast: &ASTNode, env: &mut HashMap<String, Ev
                             ASTNode::Quote(Box::new(ASTNode::Variable(slot_name.to_string()))),
                         ],
                     }],
-                    env: Rc::new(RefCell::new(env.clone())),
+                    env: Rc::new(RefCell::new(capture_lexical_env(env))),
                 };
 
                 let mut gf_mut = gf.borrow_mut();
@@ -4680,13 +5741,34 @@ fn expand_backquote(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Res
     }
 }
 
+fn deep_copy_eval_result(value: &EvalResult) -> EvalResult {
+    match value {
+        EvalResult::Cons(car, cdr) => EvalResult::Cons(
+            Rc::new(RefCell::new(deep_copy_eval_result(&car.borrow()))),
+            Rc::new(RefCell::new(deep_copy_eval_result(&cdr.borrow()))),
+        ),
+        EvalResult::Array(arr) => {
+            let copied = arr
+                .borrow()
+                .iter()
+                .map(deep_copy_eval_result)
+                .collect::<Vec<_>>();
+            EvalResult::Array(Rc::new(RefCell::new(copied)))
+        }
+        EvalResult::MultipleValues(values) => {
+            EvalResult::MultipleValues(values.iter().map(deep_copy_eval_result).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
 // Helper function that returns a Vec to handle splicing
 fn expand_backquote_element(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<Vec<EvalResult>, String> {
     match ast {
         ASTNode::Unquote(form) => {
             // Evaluate and return as single element
             let val = eval_with_env(form, env)?;
-            Ok(vec![val])
+            Ok(vec![deep_copy_eval_result(&val)])
         }
         ASTNode::UnquoteSplicing(form) => {
             // Evaluate and splice the list
@@ -4698,7 +5780,7 @@ fn expand_backquote_element(ast: &ASTNode, env: &mut HashMap<String, EvalResult>
                 match current {
                     EvalResult::Nil => break,
                     EvalResult::Cons(car, cdr) => {
-                        items.push(car.borrow().clone());
+                        items.push(deep_copy_eval_result(&car.borrow()));
                         current = cdr.borrow().clone();
                     }
                     _ => return Err(",@ requires a list".to_string()),
@@ -5758,13 +6840,145 @@ pub fn expand_macros(ast: &ASTNode) -> ASTNode {
                     // FFI callback definition
                     return ASTNode::nil();
                 }
+                "defcallback" => {
+                    // (cffi:defcallback name return-type ((arg type) ...) body...)
+                    if args.len() < 3 {
+                        return ASTNode::nil();
+                    }
+                    let callback_name = match ast_node_symbol_or_string(&args[0]) {
+                        Some(n) => n,
+                        None => return ASTNode::nil(),
+                    };
+                    let return_type = args[1].clone();
+                    let lambda_specs = ast_list_to_vec(&args[2]);
+                    let (param_names, _) = parse_cffi_param_specs(&lambda_specs);
+                    let callback_arg_types: Vec<ASTNode> = lambda_specs
+                        .iter()
+                        .map(|spec| match spec {
+                            ASTNode::Call { args, .. } => args
+                                .get(0)
+                                .cloned()
+                                .unwrap_or_else(|| ASTNode::Variable(":pointer".to_string())),
+                            _ => ASTNode::Variable(":pointer".to_string()),
+                        })
+                        .collect();
+                    let mut forms = Vec::new();
+                    forms.push(ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("defun".to_string())),
+                        args: {
+                            let mut defun_args = vec![
+                                ASTNode::Variable(callback_name.clone()),
+                                params_vec_to_ast_list(&param_names),
+                            ];
+                            defun_args.extend_from_slice(&args[3..]);
+                            defun_args
+                        },
+                    });
+                    forms.push(ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("clasp-ffi:%defcallback".to_string())),
+                        args: vec![
+                            ASTNode::Variable(callback_name.clone()),
+                            return_type,
+                            ast_items_to_list(&callback_arg_types),
+                        ],
+                    });
+                    forms.push(ASTNode::Quote(Box::new(ASTNode::Variable(callback_name))));
+                    return ASTNode::progn(forms);
+                }
                 "define-convenience-action-methods" => {
                     // ASDF macro for defining action methods
                     return ASTNode::nil();
                 }
                 "defcfun" => {
-                    // CFFI foreign function definition
-                    return ASTNode::nil();
+                    // (cffi:defcfun "c-name" return-type (arg type) ...)
+                    if args.len() < 2 {
+                        return ASTNode::nil();
+                    }
+                    let (c_name, lisp_name) = match parse_cffi_defcfun_names(&args[0]) {
+                        Some(v) => v,
+                        None => return ASTNode::nil(),
+                    };
+                    let return_type = args[1].clone();
+                    let (params, ffi_typed_args) = parse_cffi_param_specs(&args[2..]);
+                    let mut ffi_args = vec![ASTNode::Constant(ConstantValue::String(c_name))];
+                    ffi_args.extend(ffi_typed_args);
+                    ffi_args.push(return_type);
+                    let ffi_call = ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-funcall".to_string())),
+                        args: ffi_args,
+                    };
+                    return ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("defun".to_string())),
+                        args: vec![
+                            ASTNode::Variable(lisp_name),
+                            params_vec_to_ast_list(&params),
+                            ffi_call,
+                        ],
+                    };
+                }
+                "with-foreign-object" => {
+                    // (with-foreign-object (var type) body...)
+                    if args.len() < 2 {
+                        return ASTNode::nil();
+                    }
+                    let (var_name, type_ast) = match &args[0] {
+                        ASTNode::Call { function, args } => {
+                            let var_name = ast_node_symbol_or_string(function)
+                                .unwrap_or_else(|| "__foreign_obj__".to_string());
+                            let type_ast = args
+                                .get(0)
+                                .cloned()
+                                .unwrap_or_else(|| ASTNode::Variable(":pointer".to_string()));
+                            (var_name, type_ast)
+                        }
+                        _ => return ASTNode::nil(),
+                    };
+                    let alloc_size = ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-type-size".to_string())),
+                        args: vec![type_ast],
+                    };
+                    let alloc_call = ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-alloc".to_string())),
+                        args: vec![alloc_size],
+                    };
+                    let free_call = ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-free".to_string())),
+                        args: vec![ASTNode::Variable(var_name.clone())],
+                    };
+                    let protected = if args.len() == 2 {
+                        args[1].clone()
+                    } else {
+                        ASTNode::progn(args[1..].to_vec())
+                    };
+                    return ASTNode::Let {
+                        bindings: vec![(var_name, alloc_call)],
+                        body: vec![ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("unwind-protect".to_string())),
+                            args: vec![protected, free_call],
+                        }],
+                    };
+                }
+                "with-foreign-objects" => {
+                    // (with-foreign-objects ((a :int) (b :double) ...) body...)
+                    if args.len() < 2 {
+                        return ASTNode::nil();
+                    }
+                    let bindings = ast_list_to_vec(&args[0]);
+                    let mut nested = ASTNode::progn(args[1..].to_vec());
+                    for binding in bindings.into_iter().rev() {
+                        nested = ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("with-foreign-object".to_string())),
+                            args: vec![binding, nested],
+                        };
+                    }
+                    return nested;
+                }
+                "with-lock-held" => {
+                    // Bordeaux-threads compatibility: delegate to mp:with-lock.
+                    return ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("mp:with-lock".to_string())),
+                        args: args.clone(),
+                    };
                 }
                 "alien:with-alien" | "sb-alien:with-alien" => {
                     // Foreign function interface binding
@@ -7075,25 +8289,121 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
         "%defcallback"
             | "%get-callback"
             | "%foreign-type-size"
+            | "%foreign-struct-size"
+            | "%foreign-struct-offsetof"
+            | "%foreign-struct-layout"
             | "%foreign-alloc"
             | "%foreign-free"
             | "%mem-set"
             | "%mem-ref"
             | "%foreign-funcall"
+            | "defcfun"
+            | "defcallback"
+            | "with-foreign-object"
+            | "with-foreign-objects"
+            | "foreign-alloc"
+            | "foreign-free"
+            | "foreign-type-size"
+            | "foreign-funcall"
+            | "mem-ref"
+            | "mem-set"
+            | "mem-aref"
+            | "callback"
+            | "make-thread"
+            | "join-thread"
+            | "destroy-thread"
+            | "interrupt-thread"
+            | "thread-alive-p"
+            | "thread-name"
+            | "current-thread"
+            | "all-threads"
+            | "acquire-lock"
+            | "release-lock"
+            | "with-lock-held"
+            | "thread-yield"
+            | "make-condition-variable"
+            | "condition-wait"
+            | "condition-notify"
+            | "condition-broadcast"
+            | "make-semaphore"
+            | "wait-on-semaphore"
+            | "signal-semaphore"
+            | "spawn"
+            | "await"
+            | "sleep-ms"
+            | "yield"
+            | "tcp-connect"
+            | "tcp-send"
+            | "tcp-recv"
+            | "tcp-close"
+            | "get-host-by-name"
+            | "socket-bind"
+            | "socket-listen"
+            | "find-system"
+            | "make-stream-socket"
+            | "add-fd-handler"
+            | "make-lock"
+            | "make-recursive-lock"
+            | "ast-dump-json"
+            | "load-library"
+            | "cpp-new"
+            | "cpp-call-method"
+            | "cpp-delete"
     ) {
         return true;
     }
 
-    // Bridge-dispatched extension builtins may arrive without their package
-    // prefix (e.g. EXT:PACKAGE-ADD-NICKNAME -> package-add-nickname).
+    // Bridge-dispatched extension builtins may arrive without package prefix
+    // (e.g. EXT:GETENV -> getenv). Allow canonical unqualified names here so
+    // they are not rejected before builtin dispatch.
     if !name_lower.contains(':')
         && matches!(
             base,
-            "package-add-nickname"
+            "posix-getenv"
+                | "parse-native-namestring"
+                | "native-namestring"
+                | "chdir"
+                | "setenv"
+                | "unsetenv"
+                | "argc"
+                | "argv"
+                | "getenv"
+                | "float-infinity-p"
+                | "float-nan-p"
+                | "single-float-to-bits"
+                | "double-float-to-bits"
+                | "bits-to-single-float"
+                | "bits-to-double-float"
+                | "with-float-traps-masked"
+                | "hash-table-weakness"
+                | "package-add-nickname"
                 | "package-remove-nickname"
                 | "lock-package"
                 | "unlock-package"
                 | "package-locked-p"
+                | "name-conflict-candidates"
+                | "source-location"
+                | "source-location-p"
+                | "run-program"
+                | "external-process-wait"
+                | "external-process-error-stream"
+                | "stat"
+                | "fstat"
+                | "file-stream-file-descriptor"
+                | "vfork-execvp"
+                | "make-weak-pointer"
+                | "weak-pointer-valid"
+                | "with-unlocked-packages"
+                | "all-encodings"
+                | "load-lib"
+                | "defforeign"
+                | "get-host-by-name"
+                | "socket-bind"
+                | "socket-listen"
+                | "find-system"
+                | "cpp-new"
+                | "cpp-call-method"
+                | "cpp-delete"
         )
     {
         return true;
@@ -7127,8 +8437,15 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
             "source-location" | "source-location-p" |
             "run-program" | "external-process-wait" | "external-process-error-stream" |
             "stat" | "fstat" | "file-stream-file-descriptor" | "vfork-execvp" |
+            "get-host-by-name" |
             "make-weak-pointer" | "weak-pointer-valid" |
             "with-unlocked-packages" | "all-encodings")
+    } else if name_lower.starts_with("asdf:") {
+        matches!(base, "find-system" | "defsystem" | "load-system" | "load-asd")
+    } else if name_lower.starts_with("usocket:") || name_lower.starts_with("usocket::") {
+        matches!(base, "make-stream-socket")
+    } else if name_lower.starts_with("serve-event:") || name_lower.starts_with("serve-event::") {
+        matches!(base, "add-fd-handler")
     } else if name_lower.starts_with("clos:") || name_lower.starts_with("sb-mop:") {
         true
     } else if name_lower.starts_with("core:") {
@@ -7198,13 +8515,75 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
                 | "giveup-lock"
                 | "holding-lock-p"
                 | "with-lock"
+                | "make-condition-variable"
+                | "condition-wait"
+                | "condition-notify"
+                | "condition-broadcast"
+                | "make-semaphore"
+                | "wait-on-semaphore"
+                | "signal-semaphore"
         )
+    } else if name_lower.starts_with("cffi:") {
+        matches!(
+            base,
+            "defcfun"
+                | "defcallback"
+                | "with-foreign-object"
+                | "with-foreign-objects"
+                | "foreign-alloc"
+                | "foreign-free"
+                | "foreign-type-size"
+                | "foreign-funcall"
+                | "mem-ref"
+                | "mem-set"
+                | "mem-aref"
+                | "callback"
+        )
+    } else if name_lower.starts_with("bt:") || name_lower.starts_with("bt2:") || name_lower.starts_with("bordeaux-threads:") {
+        matches!(
+            base,
+            "make-thread"
+                | "join-thread"
+                | "destroy-thread"
+                | "interrupt-thread"
+                | "thread-alive-p"
+                | "thread-name"
+                | "current-thread"
+                | "all-threads"
+                | "acquire-lock"
+                | "release-lock"
+                | "with-lock-held"
+                | "make-lock"
+                | "make-recursive-lock"
+                | "thread-yield"
+                | "make-condition-variable"
+                | "condition-wait"
+                | "condition-notify"
+                | "condition-broadcast"
+                | "make-semaphore"
+                | "wait-on-semaphore"
+                | "signal-semaphore"
+        )
+    } else if name_lower.starts_with("async:") {
+        matches!(
+            base,
+            "spawn" | "await" | "sleep-ms" | "yield" | "tcp-connect" | "tcp-send" | "tcp-recv" | "tcp-close"
+        )
+    } else if name_lower.starts_with("clang:") {
+        matches!(base, "ast-dump-json")
+    } else if name_lower.starts_with("gpu:") {
+        matches!(base, "load-library" | "defforeign")
+    } else if name_lower.starts_with("cpp:") {
+        matches!(base, "new" | "call-method" | "delete")
     } else if name_lower.starts_with("clasp-ffi:") {
         matches!(
             base,
             "%defcallback"
                 | "%get-callback"
                 | "%foreign-type-size"
+                | "%foreign-struct-size"
+                | "%foreign-struct-offsetof"
+                | "%foreign-struct-layout"
                 | "%foreign-alloc"
                 | "%foreign-free"
                 | "%mem-set"
@@ -7216,7 +8595,11 @@ fn is_allowed_extension_builtin(name: &str, base_name: &str) -> bool {
     } else {
         matches!(
             base,
-            "load-mlir" | "copy-hash-table" | "copy-structure" | "copy-struct" | "room" | "step"
+            "load-mlir" | "load-lib" | "defforeign"
+                | "get-host-by-name" | "socket-bind" | "socket-listen" | "find-system"
+                | "make-stream-socket" | "add-fd-handler"
+                | "cpp-new" | "cpp-call-method" | "cpp-delete"
+                | "copy-hash-table" | "copy-structure" | "copy-struct" | "room" | "step"
                 | "stack"
                 | "continue"
         )
@@ -8051,6 +9434,133 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "push" => eval_push(args, env),
             "pop" => eval_pop(args, env),
             "pushnew" => eval_pushnew(args, env),
+
+            // CFFI compatibility aliases
+            "foreign-alloc" | "cffi:foreign-alloc" | "cffi::foreign-alloc" => {
+                if args.is_empty() {
+                    return Err("cffi:foreign-alloc requires a size or foreign type".to_string());
+                }
+                let first = eval_with_env(&args[0], env)?;
+                let bytes = match first {
+                    EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                    EvalResult::Float(f) if f >= 0.0 => f as usize,
+                    type_val => {
+                        let elem_size = foreign_type_size_from_value(&type_val)
+                            .ok_or_else(|| "cffi:foreign-alloc requires numeric size or known foreign type".to_string())?;
+                        let mut count: usize = 1;
+                        let mut i = 1usize;
+                        while i + 1 < args.len() {
+                            let key = match eval_with_env(&args[i], env)? {
+                                EvalResult::Symbol(s) => s
+                                    .rsplit(':')
+                                    .next()
+                                    .unwrap_or(&s)
+                                    .trim_start_matches(':')
+                                    .to_ascii_lowercase(),
+                                _ => {
+                                    i += 1;
+                                    continue;
+                                }
+                            };
+                            if key == "count" {
+                                let cnt = eval_to_i64(eval_with_env(&args[i + 1], env)?, "cffi:foreign-alloc :count")?;
+                                if cnt < 0 {
+                                    return Err("cffi:foreign-alloc :count must be non-negative".to_string());
+                                }
+                                count = cnt as usize;
+                            }
+                            i += 2;
+                        }
+                        elem_size
+                            .checked_mul(count)
+                            .ok_or_else(|| "cffi:foreign-alloc size overflow".to_string())?
+                    }
+                };
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-alloc".to_string())),
+                    args: vec![ASTNode::fixnum(bytes as i64)],
+                };
+                eval_with_env(&call, env)
+            }
+            "foreign-free" | "cffi:foreign-free" | "cffi::foreign-free" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-free".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "foreign-type-size" | "cffi:foreign-type-size" | "cffi::foreign-type-size" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-type-size".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "foreign-funcall" | "cffi:foreign-funcall" | "cffi::foreign-funcall" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-funcall".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "mem-ref" | "cffi:mem-ref" | "cffi::mem-ref" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%mem-ref".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "mem-set" | "cffi:mem-set" | "cffi::mem-set" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%mem-set".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "mem-aref" | "cffi:mem-aref" | "cffi::mem-aref" => {
+                if args.len() < 3 {
+                    return Err("cffi:mem-aref requires pointer, type, and index".to_string());
+                }
+                let ptr = eval_with_env(&args[0], env)?;
+                let type_val = eval_with_env(&args[1], env)?;
+                let index = eval_to_i64(eval_with_env(&args[2], env)?, "cffi:mem-aref index")?;
+                if index < 0 {
+                    return Err("cffi:mem-aref index must be non-negative".to_string());
+                }
+                let elem_size = foreign_type_size_from_value(&type_val)
+                    .ok_or_else(|| "cffi:mem-aref unsupported foreign element type".to_string())?;
+                let base_offset = (index as usize)
+                    .checked_mul(elem_size)
+                    .ok_or_else(|| "cffi:mem-aref offset overflow".to_string())?;
+                let extra_offset = if let Some(off_ast) = args.get(3) {
+                    let off = eval_to_i64(eval_with_env(off_ast, env)?, "cffi:mem-aref offset")?;
+                    if off < 0 {
+                        return Err("cffi:mem-aref offset must be non-negative".to_string());
+                    }
+                    off as usize
+                } else {
+                    0usize
+                };
+                let total_offset = base_offset
+                    .checked_add(extra_offset)
+                    .ok_or_else(|| "cffi:mem-aref offset overflow".to_string())?;
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%mem-ref".to_string())),
+                    args: vec![
+                        super::eval_system::result_to_ast_quoted(&ptr)?,
+                        super::eval_system::result_to_ast_quoted(&type_val)?,
+                        ASTNode::fixnum(total_offset as i64),
+                    ],
+                };
+                eval_with_env(&call, env)
+            }
+            "callback" | "cffi:callback" | "cffi::callback" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("clasp-ffi:%get-callback".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
 
             // Type predicates
             "eql" => eval_eql(args, env),
@@ -9100,6 +10610,47 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "set" => eval_set_symbol_value(args, env),
             "fset" => eval_fset(args, env),
             "parse-integer" => eval_parse_integer(args, env),
+            "ast-dump-json" | "clang:ast-dump-json" | "clang::ast-dump-json" => {
+                if args.is_empty() {
+                    return Err("clang:ast-dump-json requires a source file path".to_string());
+                }
+                let path_val = eval_with_env(&args[0], env)?;
+                let source_path = match path_val {
+                    EvalResult::String(s) => s,
+                    EvalResult::Symbol(s) => s.trim_matches('"').to_string(),
+                    _ => return Err("clang:ast-dump-json path must be a string or symbol".to_string()),
+                };
+                let mut cmd = std::process::Command::new("clang");
+                cmd.arg("-Xclang")
+                    .arg("-ast-dump=json")
+                    .arg("-fsyntax-only");
+                // Optional extra clang flags as additional string/symbol args.
+                for extra in args.iter().skip(1) {
+                    let v = eval_with_env(extra, env)?;
+                    match v {
+                        EvalResult::String(s) => {
+                            cmd.arg(s);
+                        }
+                        EvalResult::Symbol(s) => {
+                            cmd.arg(s.trim_matches('"'));
+                        }
+                        _ => {}
+                    }
+                }
+                cmd.arg(&source_path);
+                let output = cmd
+                    .output()
+                    .map_err(|e| format!("clang:ast-dump-json failed to execute clang: {}", e))?;
+                if !output.status.success() {
+                    let err = String::from_utf8_lossy(&output.stderr).to_string();
+                    return Err(format!("clang:ast-dump-json clang failed: {}", err.trim()));
+                }
+                Ok(EvalResult::String(
+                    String::from_utf8_lossy(&output.stdout).to_string(),
+                ))
+            }
+            "load-library" | "gpu:load-library" | "gpu::load-library" => super::eval_system::eval_load_lib(args, env),
+            "gpu:defforeign" | "gpu::defforeign" => super::eval_system::eval_defforeign(args, env),
             "sxhash" => eval_sxhash(args, env),
             "values-list" => eval_values_list(args, env),
             "macroexpand" => eval_macroexpand(args, env),
@@ -9256,13 +10807,12 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "add-dependent" | "clos:add-dependent" | "sb-mop:add-dependent" => {
                 // (add-dependent metaobject dependent)
                 // Adds dependent to the dependents of metaobject
-                // For now, we store dependents in a global registry
                 if args.len() < 2 {
                     return Err("add-dependent requires metaobject and dependent".to_string());
                 }
-                let _metaobject = eval_with_env(&args[0], env)?;
-                let _dependent = eval_with_env(&args[1], env)?;
-                // MOP dependent tracking not fully implemented - accept silently
+                let metaobject = eval_with_env(&args[0], env)?;
+                let dependent = eval_with_env(&args[1], env)?;
+                mop_add_dependent(&metaobject, dependent);
                 Ok(EvalResult::Nil)
             }
             "remove-dependent" | "clos:remove-dependent" | "sb-mop:remove-dependent" => {
@@ -9271,8 +10821,9 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 if args.len() < 2 {
                     return Err("remove-dependent requires metaobject and dependent".to_string());
                 }
-                let _metaobject = eval_with_env(&args[0], env)?;
-                let _dependent = eval_with_env(&args[1], env)?;
+                let metaobject = eval_with_env(&args[0], env)?;
+                let dependent = eval_with_env(&args[1], env)?;
+                mop_remove_dependent(&metaobject, &dependent);
                 Ok(EvalResult::Nil)
             }
             "map-dependents" | "clos:map-dependents" | "sb-mop:map-dependents" => {
@@ -9281,9 +10832,15 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 if args.len() < 2 {
                     return Err("map-dependents requires metaobject and function".to_string());
                 }
-                let _metaobject = eval_with_env(&args[0], env)?;
-                let _function = eval_with_env(&args[1], env)?;
-                // No dependents tracked currently, so nothing to map
+                let metaobject = eval_with_env(&args[0], env)?;
+                let mapper = eval_with_env(&args[1], env)?;
+                for dependent in mop_dependents(&metaobject) {
+                    let _ = super::eval_system::call_function_with_values(
+                        mapper.clone(),
+                        &[dependent],
+                        env,
+                    )?;
+                }
                 Ok(EvalResult::Nil)
             }
             "update-dependent" | "clos:update-dependent" | "sb-mop:update-dependent" => {
@@ -9292,8 +10849,16 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 if args.len() < 2 {
                     return Err("update-dependent requires metaobject and dependent".to_string());
                 }
-                let _metaobject = eval_with_env(&args[0], env)?;
-                let _dependent = eval_with_env(&args[1], env)?;
+                let metaobject = eval_with_env(&args[0], env)?;
+                let dependent = eval_with_env(&args[1], env)?;
+                mop_add_dependent(&metaobject, dependent.clone());
+                if let EvalResult::Lambda { .. } | EvalResult::BuiltinFunction(_) | EvalResult::GenericFunction(_) = dependent {
+                    let mut update_args = vec![metaobject];
+                    for arg in args.iter().skip(2) {
+                        update_args.push(eval_with_env(arg, env)?);
+                    }
+                    let _ = super::eval_system::call_function_with_values(dependent, &update_args, env)?;
+                }
                 Ok(EvalResult::Nil)
             }
             "cerror" => eval_cerror(args, env),
@@ -9397,7 +10962,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                         eval_args[0] = stream;
                     }
                 }
-                super::eval_io::call_io_builtin("format", &eval_args)
+                super::eval_io::with_io_eval_env(env, || super::eval_io::call_io_builtin("format", &eval_args))
             },
             "fmt" => {
                 let eval_args: Result<Vec<EvalResult>, String> = args
@@ -9410,7 +10975,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                         eval_args[0] = stream;
                     }
                 }
-                super::eval_io::call_io_builtin("format", &eval_args)
+                super::eval_io::with_io_eval_env(env, || super::eval_io::call_io_builtin("format", &eval_args))
             },
             "room" => {
                 if !args.is_empty() {
@@ -9433,6 +10998,9 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "load-mlir" => eval_load_mlir(args, env),
             "load-lib" => eval_load_lib(args, env),
             "defforeign" => eval_defforeign(args, env),
+            "cpp-new" | "cpp:new" | "cpp::new" => eval_cpp_new(args, env),
+            "cpp-call-method" | "cpp:call-method" | "cpp::call-method" => eval_cpp_call_method(args, env),
+            "cpp-delete" | "cpp:delete" | "cpp::delete" => eval_cpp_delete(args, env),
             "warn" => {
                 // (warn format-control &rest args)
                 // Just print warning to stderr and return nil
@@ -10375,6 +11943,333 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 }
                 Ok(current)
             }
+            "make-thread"
+            | "bt:make-thread"
+            | "bt::make-thread"
+            | "bt2:make-thread"
+            | "bt2::make-thread"
+            | "bordeaux-threads:make-thread"
+            | "bordeaux-threads::make-thread"
+            | "async:spawn"
+            | "async::spawn"
+            | "spawn" => {
+                if args.is_empty() {
+                    return Err("make-thread requires a function".to_string());
+                }
+                let mut name_ast = ASTNode::Constant(ConstantValue::String("BT-THREAD".to_string()));
+                let mut special_bindings_ast: Option<ASTNode> = None;
+                let mut i = 1usize;
+                while i + 1 < args.len() {
+                    let key_name = match &args[i] {
+                        ASTNode::Variable(k) => Some(k.as_str()),
+                        ASTNode::Constant(ConstantValue::Symbol(k)) => Some(k.as_str()),
+                        _ => None,
+                    };
+                    if let Some(k) = key_name {
+                        let norm = k.rsplit(':').next().unwrap_or(k).trim_start_matches(':').to_ascii_lowercase();
+                        if norm == "name" {
+                            name_ast = args[i + 1].clone();
+                        } else if norm == "initial-bindings" {
+                            special_bindings_ast = Some(args[i + 1].clone());
+                        }
+                    }
+                    i += 2;
+                }
+                let mut run_args = vec![name_ast, args[0].clone()];
+                if let Some(bindings) = special_bindings_ast {
+                    run_args.push(bindings);
+                }
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:process-run-function".to_string())),
+                    args: run_args,
+                };
+                eval_with_env(&call, env)
+            }
+            "join-thread"
+            | "bt:join-thread"
+            | "bt::join-thread"
+            | "bt2:join-thread"
+            | "bt2::join-thread"
+            | "bordeaux-threads:join-thread"
+            | "bordeaux-threads::join-thread"
+            | "async:await"
+            | "async::await"
+            | "await" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:process-join".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "destroy-thread"
+            | "bt:destroy-thread"
+            | "bt::destroy-thread"
+            | "bordeaux-threads:destroy-thread"
+            | "bordeaux-threads::destroy-thread" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:process-cancel".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "interrupt-thread"
+            | "bt:interrupt-thread"
+            | "bt::interrupt-thread"
+            | "bordeaux-threads:interrupt-thread"
+            | "bordeaux-threads::interrupt-thread" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:interrupt-process".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "thread-alive-p"
+            | "bt:thread-alive-p"
+            | "bt::thread-alive-p"
+            | "bordeaux-threads:thread-alive-p"
+            | "bordeaux-threads::thread-alive-p" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:process-active-p".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "thread-name"
+            | "bt:thread-name"
+            | "bt::thread-name"
+            | "bordeaux-threads:thread-name"
+            | "bordeaux-threads::thread-name" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:process-name".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "current-thread"
+            | "bt:current-thread"
+            | "bt::current-thread"
+            | "bordeaux-threads:current-thread"
+            | "bordeaux-threads::current-thread" => {
+                mp_ensure_runtime();
+                let current = MP_CURRENT_PROCESS.with(|cur| cur.borrow().clone());
+                Ok(EvalResult::Symbol(current))
+            }
+            "all-threads"
+            | "bt:all-threads"
+            | "bt::all-threads"
+            | "bordeaux-threads:all-threads"
+            | "bordeaux-threads::all-threads" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:all-processes".to_string())),
+                    args: vec![],
+                };
+                eval_with_env(&call, env)
+            }
+            "acquire-lock"
+            | "bt:acquire-lock"
+            | "bt::acquire-lock"
+            | "bordeaux-threads:acquire-lock"
+            | "bordeaux-threads::acquire-lock" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:get-lock".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "release-lock"
+            | "bt:release-lock"
+            | "bt::release-lock"
+            | "bordeaux-threads:release-lock"
+            | "bordeaux-threads::release-lock" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:giveup-lock".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "with-lock-held"
+            | "bt:with-lock-held"
+            | "bt::with-lock-held"
+            | "bordeaux-threads:with-lock-held"
+            | "bordeaux-threads::with-lock-held" => {
+                let call = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("mp:with-lock".to_string())),
+                    args: args.to_vec(),
+                };
+                eval_with_env(&call, env)
+            }
+            "async:sleep-ms" | "async::sleep-ms" | "sleep-ms" => {
+                if args.is_empty() {
+                    return Err("async:sleep-ms requires milliseconds".to_string());
+                }
+                let ms = eval_to_i64(eval_with_env(&args[0], env)?, "async:sleep-ms")?;
+                if ms < 0 {
+                    return Err("async:sleep-ms requires non-negative milliseconds".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                Ok(EvalResult::Nil)
+            }
+            "async:yield"
+            | "async::yield"
+            | "yield"
+            | "thread-yield"
+            | "bt:thread-yield"
+            | "bt::thread-yield"
+            | "bt2:thread-yield"
+            | "bt2::thread-yield"
+            | "bordeaux-threads:thread-yield"
+            | "bordeaux-threads::thread-yield" => {
+                std::thread::yield_now();
+                Ok(EvalResult::Nil)
+            }
+            "async:tcp-connect" | "async::tcp-connect" | "tcp-connect" => {
+                if args.len() < 2 {
+                    return Err("async:tcp-connect requires host and port".to_string());
+                }
+                let host = match eval_with_env(&args[0], env)? {
+                    EvalResult::String(s) => s,
+                    EvalResult::Symbol(s) => s.trim_matches('"').to_string(),
+                    other => {
+                        return Err(format!(
+                            "async:tcp-connect host must be string/symbol, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                let port = eval_to_i64(eval_with_env(&args[1], env)?, "async:tcp-connect port")?;
+                if !(1..=65535).contains(&port) {
+                    return Err("async:tcp-connect port must be in 1..65535".to_string());
+                }
+                let mut read_timeout_ms: Option<u64> = None;
+                let mut write_timeout_ms: Option<u64> = None;
+                let mut nonblocking = false;
+                let mut i = 2usize;
+                while i + 1 < args.len() {
+                    let key_name = match &args[i] {
+                        ASTNode::Variable(k) => Some(k.as_str()),
+                        ASTNode::Constant(ConstantValue::Symbol(k)) => Some(k.as_str()),
+                        _ => None,
+                    };
+                    if let Some(k) = key_name {
+                        let norm = k
+                            .rsplit(':')
+                            .next()
+                            .unwrap_or(k)
+                            .trim_start_matches(':')
+                            .to_ascii_lowercase();
+                        let val = eval_with_env(&args[i + 1], env)?;
+                        match norm.as_str() {
+                            "read-timeout-ms" => {
+                                let ms = eval_to_i64(val, "async:tcp-connect :read-timeout-ms")?;
+                                if ms < 0 {
+                                    return Err("async:tcp-connect :read-timeout-ms must be non-negative".to_string());
+                                }
+                                read_timeout_ms = Some(ms as u64);
+                            }
+                            "write-timeout-ms" => {
+                                let ms = eval_to_i64(val, "async:tcp-connect :write-timeout-ms")?;
+                                if ms < 0 {
+                                    return Err("async:tcp-connect :write-timeout-ms must be non-negative".to_string());
+                                }
+                                write_timeout_ms = Some(ms as u64);
+                            }
+                            "non-blocking" | "nonblocking" => {
+                                nonblocking = !matches!(val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false));
+                            }
+                            _ => {}
+                        }
+                    }
+                    i += 2;
+                }
+                let addr = format!("{}:{}", host, port);
+                let stream = TcpStream::connect(&addr)
+                    .map_err(|e| format!("async:tcp-connect failed for {}: {}", addr, e))?;
+                if let Some(ms) = read_timeout_ms {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(ms)));
+                }
+                if let Some(ms) = write_timeout_ms {
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(ms)));
+                }
+                if nonblocking {
+                    let _ = stream.set_nonblocking(true);
+                }
+                let handle = async_new_socket_symbol();
+                ASYNC_TCP_REGISTRY.with(|reg| {
+                    reg.borrow_mut().insert(handle.clone(), stream);
+                });
+                Ok(EvalResult::Symbol(handle))
+            }
+            "async:tcp-send" | "async::tcp-send" | "tcp-send" => {
+                if args.len() < 2 {
+                    return Err("async:tcp-send requires socket and data".to_string());
+                }
+                let handle = async_socket_handle_from_value(eval_with_env(&args[0], env)?, "async:tcp-send")?;
+                let payload = match eval_with_env(&args[1], env)? {
+                    EvalResult::String(s) => s.into_bytes(),
+                    EvalResult::Symbol(s) => s.into_bytes(),
+                    EvalResult::Array(arr) => arr
+                        .borrow()
+                        .iter()
+                        .filter_map(|v| match v {
+                            EvalResult::Fixnum(n) if *n >= 0 && *n <= 255 => Some(*n as u8),
+                            _ => None,
+                        })
+                        .collect(),
+                    other => {
+                        return Err(format!(
+                            "async:tcp-send data must be string/symbol/byte-vector, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                let wrote = ASYNC_TCP_REGISTRY.with(|reg| {
+                    let mut map = reg.borrow_mut();
+                    let stream = map
+                        .get_mut(&handle)
+                        .ok_or_else(|| format!("async:tcp-send unknown socket {}", handle))?;
+                    stream
+                        .write(&payload)
+                        .map_err(|e| format!("async:tcp-send write failed: {}", e))
+                })?;
+                Ok(EvalResult::Fixnum(wrote as i64))
+            }
+            "async:tcp-recv" | "async::tcp-recv" | "tcp-recv" => {
+                if args.is_empty() {
+                    return Err("async:tcp-recv requires socket".to_string());
+                }
+                let handle = async_socket_handle_from_value(eval_with_env(&args[0], env)?, "async:tcp-recv")?;
+                let max_bytes = if let Some(ast) = args.get(1) {
+                    let n = eval_to_i64(eval_with_env(ast, env)?, "async:tcp-recv max-bytes")?;
+                    if n <= 0 {
+                        return Err("async:tcp-recv max-bytes must be positive".to_string());
+                    }
+                    n as usize
+                } else {
+                    4096usize
+                };
+                let mut buf = vec![0u8; max_bytes];
+                let nread = ASYNC_TCP_REGISTRY.with(|reg| {
+                    let mut map = reg.borrow_mut();
+                    let stream = map
+                        .get_mut(&handle)
+                        .ok_or_else(|| format!("async:tcp-recv unknown socket {}", handle))?;
+                    match stream.read(&mut buf) {
+                        Ok(n) => Ok(n),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0usize),
+                        Err(e) => Err(format!("async:tcp-recv read failed: {}", e)),
+                    }
+                })?;
+                buf.truncate(nread);
+                Ok(EvalResult::String(String::from_utf8_lossy(&buf).to_string()))
+            }
+            "async:tcp-close" | "async::tcp-close" | "tcp-close" => {
+                if args.is_empty() {
+                    return Err("async:tcp-close requires socket".to_string());
+                }
+                let handle = async_socket_handle_from_value(eval_with_env(&args[0], env)?, "async:tcp-close")?;
+                let removed = ASYNC_TCP_REGISTRY.with(|reg| reg.borrow_mut().remove(&handle).is_some());
+                Ok(if removed { EvalResult::Bool(true) } else { EvalResult::Nil })
+            }
             "make-process" | "mp:make-process" | "mp::make-process" => {
                 mp_ensure_runtime();
                 if args.len() < 2 {
@@ -10663,7 +12558,15 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                     _ => Ok(EvalResult::Nil),
                 }
             }
-            "make-lock" | "mp:make-lock" | "mp::make-lock" => {
+            "make-lock"
+            | "mp:make-lock"
+            | "mp::make-lock"
+            | "bt:make-lock"
+            | "bt::make-lock"
+            | "bt2:make-lock"
+            | "bt2::make-lock"
+            | "bordeaux-threads:make-lock"
+            | "bordeaux-threads::make-lock" => {
                 mp_ensure_runtime();
                 let mut lock_name: Option<String> = None;
                 let mut i = 0usize;
@@ -10691,7 +12594,14 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 });
                 Ok(EvalResult::Symbol(sym))
             }
-            "make-recursive-mutex" | "mp:make-recursive-mutex" | "mp::make-recursive-mutex" => {
+            "make-recursive-lock"
+            | "make-recursive-mutex"
+            | "mp:make-recursive-mutex"
+            | "mp::make-recursive-mutex"
+            | "bt:make-recursive-lock"
+            | "bt::make-recursive-lock"
+            | "bordeaux-threads:make-recursive-lock"
+            | "bordeaux-threads::make-recursive-lock" => {
                 mp_ensure_runtime();
                 let lock_name = if let Some(arg0) = args.first() {
                     match eval_with_env(arg0, env)? {
@@ -10777,6 +12687,290 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
 
                 let _ = mp_release_lock(&lock_sym, &current);
                 body_result
+            }
+            "make-condition-variable"
+            | "mp:make-condition-variable"
+            | "mp::make-condition-variable"
+            | "bt:make-condition-variable"
+            | "bt::make-condition-variable"
+            | "bt2:make-condition-variable"
+            | "bt2::make-condition-variable"
+            | "bordeaux-threads:make-condition-variable"
+            | "bordeaux-threads::make-condition-variable" => {
+                mp_ensure_runtime();
+                let mut name: Option<String> = None;
+                let mut i = 0usize;
+                while i < args.len() {
+                    match &args[i] {
+                        ASTNode::Variable(k) | ASTNode::Constant(ConstantValue::Symbol(k))
+                            if k.eq_ignore_ascii_case(":name") && i + 1 < args.len() =>
+                        {
+                            let val = eval_with_env(&args[i + 1], env)?;
+                            name = match val {
+                                EvalResult::String(s) | EvalResult::Symbol(s) => Some(s),
+                                _ => None,
+                            };
+                            i += 2;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    if i == 0 {
+                        let val = eval_with_env(&args[i], env)?;
+                        name = match val {
+                            EvalResult::String(s) | EvalResult::Symbol(s) => Some(s),
+                            _ => name,
+                        };
+                    }
+                    i += 1;
+                }
+                let sym = mp_new_condition_variable_symbol();
+                MP_CONDITION_VARIABLE_REGISTRY.with(|reg| {
+                    reg.borrow_mut().insert(
+                        sym.clone(),
+                        MpConditionVariableState {
+                            name,
+                            pending_signals: 0,
+                            waiters: 0,
+                        },
+                    );
+                });
+                Ok(EvalResult::Symbol(sym))
+            }
+            "condition-notify"
+            | "mp:condition-notify"
+            | "mp::condition-notify"
+            | "bt:condition-notify"
+            | "bt::condition-notify"
+            | "bt2:condition-notify"
+            | "bt2::condition-notify"
+            | "bordeaux-threads:condition-notify"
+            | "bordeaux-threads::condition-notify" => {
+                mp_ensure_runtime();
+                if args.is_empty() {
+                    return Err("condition-notify requires a condition variable".to_string());
+                }
+                let cv_sym = mp_eval_to_symbol(&args[0], env, "condition-notify")?;
+                let mut notify_count = 1usize;
+                if let Some(arg1) = args.get(1) {
+                    if !ast_is_keyword(arg1) {
+                        let n = eval_to_i64(eval_with_env(arg1, env)?, "condition-notify count")?;
+                        if n < 0 {
+                            return Err("condition-notify count must be non-negative".to_string());
+                        }
+                        notify_count = n as usize;
+                    }
+                }
+                let notified = MP_CONDITION_VARIABLE_REGISTRY.with(|reg| {
+                    let mut reg = reg.borrow_mut();
+                    if let Some(cv) = reg.get_mut(&cv_sym) {
+                        cv.pending_signals = cv.pending_signals.saturating_add(notify_count);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if notified { Ok(EvalResult::Boolean(true)) } else { Ok(EvalResult::Nil) }
+            }
+            "condition-broadcast"
+            | "mp:condition-broadcast"
+            | "mp::condition-broadcast"
+            | "bt:condition-broadcast"
+            | "bt::condition-broadcast"
+            | "bt2:condition-broadcast"
+            | "bt2::condition-broadcast"
+            | "bordeaux-threads:condition-broadcast"
+            | "bordeaux-threads::condition-broadcast" => {
+                mp_ensure_runtime();
+                if args.is_empty() {
+                    return Err("condition-broadcast requires a condition variable".to_string());
+                }
+                let cv_sym = mp_eval_to_symbol(&args[0], env, "condition-broadcast")?;
+                let broadcasted = MP_CONDITION_VARIABLE_REGISTRY.with(|reg| {
+                    let mut reg = reg.borrow_mut();
+                    if let Some(cv) = reg.get_mut(&cv_sym) {
+                        cv.pending_signals = cv.pending_signals.saturating_add(cv.waiters);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if broadcasted { Ok(EvalResult::Boolean(true)) } else { Ok(EvalResult::Nil) }
+            }
+            "condition-wait"
+            | "mp:condition-wait"
+            | "mp::condition-wait"
+            | "bt:condition-wait"
+            | "bt::condition-wait"
+            | "bt2:condition-wait"
+            | "bt2::condition-wait"
+            | "bordeaux-threads:condition-wait"
+            | "bordeaux-threads::condition-wait" => {
+                mp_ensure_runtime();
+                if args.len() < 2 {
+                    return Err("condition-wait requires condition variable and lock".to_string());
+                }
+                let cv_sym = mp_eval_to_symbol(&args[0], env, "condition-wait")?;
+                let lock_sym = mp_eval_to_symbol(&args[1], env, "condition-wait")?;
+                let current = MP_CURRENT_PROCESS.with(|cur| cur.borrow().clone());
+                let holds_lock = MP_MUTEX_REGISTRY.with(|reg| {
+                    reg.borrow()
+                        .get(&lock_sym)
+                        .and_then(|m| m.owner.clone())
+                        .map(|owner| owner == current)
+                        .unwrap_or(false)
+                });
+                if !holds_lock {
+                    return Err("condition-wait requires caller to hold lock".to_string());
+                }
+
+                MP_CONDITION_VARIABLE_REGISTRY.with(|reg| {
+                    if let Some(cv) = reg.borrow_mut().get_mut(&cv_sym) {
+                        cv.waiters = cv.waiters.saturating_add(1);
+                    }
+                });
+                let _ = mp_release_lock(&lock_sym, &current);
+                let signaled = MP_CONDITION_VARIABLE_REGISTRY.with(|reg| {
+                    let mut reg = reg.borrow_mut();
+                    if let Some(cv) = reg.get_mut(&cv_sym) {
+                        let got = cv.pending_signals > 0;
+                        if got {
+                            cv.pending_signals = cv.pending_signals.saturating_sub(1);
+                        }
+                        cv.waiters = cv.waiters.saturating_sub(1);
+                        got
+                    } else {
+                        false
+                    }
+                });
+                let _ = mp_try_get_lock(&lock_sym, &current, true);
+                if signaled {
+                    Ok(EvalResult::Boolean(true))
+                } else {
+                    Ok(EvalResult::Nil)
+                }
+            }
+            "make-semaphore"
+            | "mp:make-semaphore"
+            | "mp::make-semaphore"
+            | "bt:make-semaphore"
+            | "bt::make-semaphore"
+            | "bt2:make-semaphore"
+            | "bt2::make-semaphore"
+            | "bordeaux-threads:make-semaphore"
+            | "bordeaux-threads::make-semaphore" => {
+                mp_ensure_runtime();
+                let mut count: i64 = 0;
+                let mut name: Option<String> = None;
+                let mut i = 0usize;
+                while i < args.len() {
+                    match &args[i] {
+                        ASTNode::Variable(k) | ASTNode::Constant(ConstantValue::Symbol(k))
+                            if i + 1 < args.len() =>
+                        {
+                            let norm = k.rsplit(':').next().unwrap_or(k).trim_start_matches(':').to_ascii_lowercase();
+                            if norm == "count" {
+                                count = eval_to_i64(eval_with_env(&args[i + 1], env)?, "make-semaphore :count")?;
+                                i += 2;
+                                continue;
+                            }
+                            if norm == "name" {
+                                let val = eval_with_env(&args[i + 1], env)?;
+                                name = match val {
+                                    EvalResult::String(s) | EvalResult::Symbol(s) => Some(s),
+                                    _ => None,
+                                };
+                                i += 2;
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if i == 0 && !ast_is_keyword(&args[i]) {
+                        count = eval_to_i64(eval_with_env(&args[i], env)?, "make-semaphore count")?;
+                    }
+                    i += 1;
+                }
+                if count < 0 {
+                    return Err("make-semaphore count must be non-negative".to_string());
+                }
+                let sym = mp_new_semaphore_symbol();
+                MP_SEMAPHORE_REGISTRY.with(|reg| {
+                    reg.borrow_mut().insert(
+                        sym.clone(),
+                        MpSemaphoreState {
+                            name,
+                            count,
+                        },
+                    );
+                });
+                Ok(EvalResult::Symbol(sym))
+            }
+            "signal-semaphore"
+            | "mp:signal-semaphore"
+            | "mp::signal-semaphore"
+            | "bt:signal-semaphore"
+            | "bt::signal-semaphore"
+            | "bt2:signal-semaphore"
+            | "bt2::signal-semaphore"
+            | "bordeaux-threads:signal-semaphore"
+            | "bordeaux-threads::signal-semaphore" => {
+                mp_ensure_runtime();
+                if args.is_empty() {
+                    return Err("signal-semaphore requires a semaphore".to_string());
+                }
+                let sem_sym = mp_eval_to_symbol(&args[0], env, "signal-semaphore")?;
+                let delta = if let Some(arg1) = args.get(1) {
+                    if ast_is_keyword(arg1) {
+                        1i64
+                    } else {
+                        eval_to_i64(eval_with_env(arg1, env)?, "signal-semaphore count")?
+                    }
+                } else {
+                    1i64
+                };
+                if delta < 0 {
+                    return Err("signal-semaphore count must be non-negative".to_string());
+                }
+                let signaled = MP_SEMAPHORE_REGISTRY.with(|reg| {
+                    let mut reg = reg.borrow_mut();
+                    if let Some(sem) = reg.get_mut(&sem_sym) {
+                        sem.count = sem.count.saturating_add(delta);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if signaled { Ok(EvalResult::Boolean(true)) } else { Ok(EvalResult::Nil) }
+            }
+            "wait-on-semaphore"
+            | "mp:wait-on-semaphore"
+            | "mp::wait-on-semaphore"
+            | "bt:wait-on-semaphore"
+            | "bt::wait-on-semaphore"
+            | "bt2:wait-on-semaphore"
+            | "bt2::wait-on-semaphore"
+            | "bordeaux-threads:wait-on-semaphore"
+            | "bordeaux-threads::wait-on-semaphore" => {
+                mp_ensure_runtime();
+                if args.is_empty() {
+                    return Err("wait-on-semaphore requires a semaphore".to_string());
+                }
+                let sem_sym = mp_eval_to_symbol(&args[0], env, "wait-on-semaphore")?;
+                let acquired = MP_SEMAPHORE_REGISTRY.with(|reg| {
+                    let mut reg = reg.borrow_mut();
+                    if let Some(sem) = reg.get_mut(&sem_sym) {
+                        if sem.count > 0 {
+                            sem.count -= 1;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                });
+                if acquired { Ok(EvalResult::Boolean(true)) } else { Ok(EvalResult::Nil) }
             }
             "holding-lock-p" | "mp:holding-lock-p" | "mp::holding-lock-p" => {
                 mp_ensure_runtime();
@@ -11477,7 +13671,29 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 }
                 Ok(EvalResult::Nil)
             }
-            "get-host-by-name" => Err("Not implemented: get-host-by-name".to_string()),
+            "get-host-by-name" => {
+                if args.is_empty() {
+                    return Err("get-host-by-name requires a host name".to_string());
+                }
+                let host = eval_to_string_designator(eval_with_env(&args[0], env)?, "get-host-by-name")?;
+                let query = format!("{}:0", host);
+                let mut seen = HashSet::<String>::new();
+                let mut addresses = Vec::<EvalResult>::new();
+                if let Ok(addrs) = query.to_socket_addrs() {
+                    for addr in addrs {
+                        let ip = addr.ip().to_string();
+                        if seen.insert(ip.clone()) {
+                            addresses.push(EvalResult::String(ip));
+                        }
+                    }
+                }
+                let mut out = HashMap::new();
+                out.insert("name".to_string(), EvalResult::String(host));
+                out.insert("aliases".to_string(), EvalResult::Nil);
+                out.insert("address-type".to_string(), EvalResult::Symbol(":INET".to_string()));
+                out.insert("addresses".to_string(), mp_vec_to_list(&addresses));
+                Ok(EvalResult::HashTable(Rc::new(RefCell::new(out))))
+            }
             "jclass" | "jcall" => Err("Not implemented: jclass / jcall (Java interop)".to_string()),
             "generate-grammar" | "include" | "in-suite*" => {
                 Err("Not implemented: generate-grammar / include / in-suite* (test framework)".to_string())
@@ -11618,7 +13834,44 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 super::eval_io::call_io_builtin("princ", &eval_args?)
             }
             // "featurep" - let user-defined function from ASDF handle this
-            "find-system" => Err("Not implemented: find-system (ASDF)".to_string()),
+            "find-system" => {
+                if args.is_empty() {
+                    return Err("find-system requires a system designator".to_string());
+                }
+                let system_value = eval_with_env(&args[0], env)?;
+                let system_norm = asdf_normalize_system_name(&system_value)
+                    .ok_or_else(|| "find-system requires a string or symbol".to_string())?;
+
+                if let Some(found) = ASDF_SYSTEM_REGISTRY.with(|reg| reg.borrow().get(&system_norm).cloned()) {
+                    return Ok(found);
+                }
+
+                let mut signal_missing = true;
+                let mut i = 1usize;
+                while i + 1 < args.len() {
+                    let key = eval_with_env(&args[i], env)?;
+                    let val = eval_with_env(&args[i + 1], env)?;
+                    let key_name = match key {
+                        EvalResult::Symbol(s) | EvalResult::String(s) => {
+                            s.trim_start_matches(':').to_ascii_lowercase()
+                        }
+                        _ => String::new(),
+                    };
+                    if key_name == "if-does-not-exist" {
+                        signal_missing = !matches!(
+                            val,
+                            EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+                        );
+                    }
+                    i += 2;
+                }
+
+                if signal_missing {
+                    Err(format!("ASDF/FIND-SYSTEM: system '{}' not found", system_norm))
+                } else {
+                    Ok(EvalResult::Nil)
+                }
+            }
             "sys:sap-ref-8" | "sb-sys:sap-ref-8" => {
                 Err("Not implemented: sys:sap-ref-8 (low-level memory access)".to_string())
             }
@@ -11944,7 +14197,7 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                     supplied_p_vars,
                     key_params,
                     body,
-                    env: Rc::new(RefCell::new(env.clone())),
+                    env: Rc::new(RefCell::new(capture_lexical_env(env))),
                     dynamic_env: false,
                 };
                 let key = format!("{}{}", COMPILER_MACRO_NS_PREFIX, name.to_uppercase());
@@ -12097,7 +14350,14 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
 
             // Other functions - not implemented
             "warn" => super::eval_conditions::eval_warn(args, env),
-            "make-pathname" => Err("Not implemented: make-pathname".to_string()),
+            "make-pathname" => {
+                let eval_args: Result<Vec<EvalResult>, String> = args
+                    .iter()
+                    .map(|arg| eval_with_env(arg, env).map(super::eval_types::primary_value))
+                    .collect();
+                let eval_args = eval_args?;
+                super::eval_pathname::call_pathname_builtin("make-pathname", &eval_args)
+            }
             "defstruct" => eval_defstruct_runtime(args, env),
             "delete-package" => {
                 let eval_args: Result<Vec<EvalResult>, String> = args.iter().map(|a| eval_with_env(a, env)).collect();
@@ -12861,8 +15121,79 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                 };
                 std::process::exit(code);
             }
-            "socket-bind" => Err("Not implemented: socket-bind".to_string()),
-            "socket-listen" => Err("Not implemented: socket-listen".to_string()),
+            "socket-bind" => {
+                // Supports both (socket-bind socket host port) and (socket-bind host port).
+                let (socket_obj_opt, host_ast, port_ast) = match args.len() {
+                    n if n >= 3 => (Some(&args[0]), &args[1], &args[2]),
+                    2 => (None, &args[0], &args[1]),
+                    _ => return Err("socket-bind requires (socket host port) or (host port)".to_string()),
+                };
+
+                let host = eval_to_string_designator(eval_with_env(host_ast, env)?, "socket-bind host")?;
+                let port = eval_to_i64(eval_with_env(port_ast, env)?, "socket-bind port")?;
+                if !(0..=65535).contains(&port) {
+                    return Err("socket-bind port must be in 0..65535".to_string());
+                }
+
+                let bind_host = if host.is_empty() { "0.0.0.0".to_string() } else { host.clone() };
+                let listener = TcpListener::bind((bind_host.as_str(), port as u16))
+                    .map_err(|e| format!("socket-bind failed for {}:{} ({})", bind_host, port, e))?;
+                let _ = listener.set_nonblocking(true);
+                let bound_port = listener.local_addr().map(|a| a.port() as i64).unwrap_or(port);
+
+                let listener_handle = async_new_listener_symbol();
+                ASYNC_TCP_LISTENER_REGISTRY.with(|reg| {
+                    reg.borrow_mut().insert(listener_handle.clone(), listener);
+                });
+
+                // Preserve existing stream handle when binding an existing socket descriptor.
+                let stream_handle = socket_obj_opt
+                    .and_then(|ast| eval_with_env(ast, env).ok())
+                    .and_then(|v| socket_descriptor_handle_from_value(&v, "stream-handle"));
+
+                Ok(make_socket_descriptor(
+                    "%USOCKET-STREAM-SOCKET%",
+                    Some(host),
+                    Some(bound_port),
+                    stream_handle,
+                    Some(listener_handle),
+                ))
+            }
+            "socket-listen" => {
+                if args.is_empty() {
+                    return Err("socket-listen requires a socket descriptor".to_string());
+                }
+                let socket_val = eval_with_env(&args[0], env)?;
+                if let Some(listener_handle) = socket_descriptor_handle_from_value(&socket_val, "listener-handle") {
+                    let exists = ASYNC_TCP_LISTENER_REGISTRY.with(|reg| reg.borrow().contains_key(&listener_handle));
+                    if !exists {
+                        return Err(format!("socket-listen unknown listener {}", listener_handle));
+                    }
+                    return Ok(socket_val);
+                }
+
+                // If descriptor has host/port but no listener yet, bind it lazily now.
+                if let Some((host, port)) = socket_descriptor_host_port(&socket_val) {
+                    let listener = TcpListener::bind((host.as_str(), port as u16))
+                        .map_err(|e| format!("socket-listen bind failed for {}:{} ({})", host, port, e))?;
+                    let _ = listener.set_nonblocking(true);
+                    let bound_port = listener.local_addr().map(|a| a.port() as i64).unwrap_or(port);
+                    let listener_handle = async_new_listener_symbol();
+                    ASYNC_TCP_LISTENER_REGISTRY.with(|reg| {
+                        reg.borrow_mut().insert(listener_handle.clone(), listener);
+                    });
+                    let stream_handle = socket_descriptor_handle_from_value(&socket_val, "stream-handle");
+                    return Ok(make_socket_descriptor(
+                        "%USOCKET-STREAM-SOCKET%",
+                        Some(host),
+                        Some(bound_port),
+                        stream_handle,
+                        Some(listener_handle),
+                    ));
+                }
+
+                Err("socket-listen requires a socket descriptor with host/port or listener handle".to_string())
+            }
             "sys:*make-special" => Err("Not implemented: sys:*make-special".to_string()),
             "with-upgradability" => {
                 // (with-upgradability () body...)
@@ -13135,8 +15466,62 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
             "position-if-not" => eval_position_if_not(args, env),
             "find-if" => eval_find_if(args, env),
             "find-if-not" => eval_find_if_not(args, env),
-            "usocket::make-stream-socket" => Err("Not implemented: usocket::make-stream-socket".to_string()),
-            "serve-event::add-fd-handler" => Err("Not implemented: serve-event::add-fd-handler".to_string()),
+            "make-stream-socket" => {
+                // If host/port are provided, create a connected stream socket.
+                // Otherwise return an unbound descriptor intended for socket-bind/socket-listen.
+                if args.len() >= 2 {
+                    let host = eval_to_string_designator(eval_with_env(&args[0], env)?, "usocket::make-stream-socket host")?;
+                    let port = eval_to_i64(eval_with_env(&args[1], env)?, "usocket::make-stream-socket port")?;
+                    if !(1..=65535).contains(&port) {
+                        return Err("usocket::make-stream-socket port must be in 1..65535".to_string());
+                    }
+                    let addr = format!("{}:{}", host, port);
+                    let stream = TcpStream::connect(&addr)
+                        .map_err(|e| format!("usocket::make-stream-socket connect failed for {} ({})", addr, e))?;
+                    let stream_handle = async_new_socket_symbol();
+                    ASYNC_TCP_REGISTRY.with(|reg| {
+                        reg.borrow_mut().insert(stream_handle.clone(), stream);
+                    });
+                    Ok(make_socket_descriptor(
+                        "%USOCKET-STREAM-SOCKET%",
+                        Some(host),
+                        Some(port),
+                        Some(stream_handle),
+                        None,
+                    ))
+                } else {
+                    Ok(make_socket_descriptor(
+                        "%USOCKET-STREAM-SOCKET%",
+                        None,
+                        None,
+                        None,
+                        None,
+                    ))
+                }
+            }
+            "add-fd-handler" => {
+                if args.len() < 3 {
+                    return Err("serve-event::add-fd-handler requires fd, direction, and handler".to_string());
+                }
+                let fd_key = match eval_with_env(&args[0], env)? {
+                    EvalResult::Fixnum(n) => format!("FD:{}", n),
+                    EvalResult::Symbol(s) | EvalResult::String(s) => s,
+                    EvalResult::HashTable(_) => "SOCKET-DESCRIPTOR".to_string(),
+                    other => format!("{}", other),
+                };
+                let direction = eval_with_env(&args[1], env)?;
+                let handler = eval_with_env(&args[2], env)?;
+                SERVE_EVENT_REGISTRY.with(|reg| {
+                    reg.borrow_mut()
+                        .entry(fd_key)
+                        .or_insert_with(Vec::new)
+                        .push(EvalResult::Cons(
+                            Rc::new(RefCell::new(direction)),
+                            Rc::new(RefCell::new(handler)),
+                        ));
+                });
+                Ok(EvalResult::Boolean(true))
+            }
             "with-input-from-string" => {
                 // (with-input-from-string (var string-form) body...)
                 if args.is_empty() {
@@ -14069,19 +16454,44 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                             return Err("Not implemented: compile-matcher (project-specific)".to_string());
                         }
                         "asdf:load-asd" | "asdf::load-asd" => {
-                            // Load ASDF system definition - for now just return T
-                            // Full implementation would load and register the system
+                            // Minimal ASDF registry update: when given a pathname, register its stem
+                            // as a discoverable system for find-system/load-system compatibility.
+                            if let Some(arg0) = eval_args.get(0) {
+                                if let Some(path) = resolve_path_designator(arg0) {
+                                    if let Some(stem) = std::path::Path::new(&path)
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                    {
+                                        let norm = stem.to_ascii_lowercase();
+                                        ASDF_SYSTEM_REGISTRY.with(|reg| {
+                                            reg.borrow_mut()
+                                                .insert(norm, EvalResult::Symbol(stem.to_string()));
+                                        });
+                                    }
+                                }
+                            }
                             return Ok(EvalResult::Boolean(true));
                         }
                         "asdf:defsystem" | "asdf::defsystem" => {
-                            // Define ASDF system - return system name
                             if eval_args.is_empty() {
                                 return Err("defsystem requires a system name".to_string());
+                            }
+                            if let Some(norm) = asdf_normalize_system_name(&eval_args[0]) {
+                                ASDF_SYSTEM_REGISTRY.with(|reg| {
+                                    reg.borrow_mut().insert(norm, eval_args[0].clone());
+                                });
                             }
                             return Ok(eval_args[0].clone());
                         }
                         "asdf:load-system" | "asdf::load-system" => {
-                            // Load ASDF system - return T
+                            if let Some(arg0) = eval_args.get(0) {
+                                if let Some(norm) = asdf_normalize_system_name(arg0) {
+                                    ASDF_SYSTEM_REGISTRY.with(|reg| {
+                                        let mut reg = reg.borrow_mut();
+                                        reg.entry(norm).or_insert_with(|| arg0.clone());
+                                    });
+                                }
+                            }
                             return Ok(EvalResult::Boolean(true));
                         }
                         "register-image-restore-hook" => {
@@ -14254,6 +16664,11 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                         // Execute :before methods
                         for method in &before_methods {
                             let mut method_env = method.env.borrow().clone();
+                            for (k, v) in env.iter() {
+                                if is_global_binding_name_for_sync(k) {
+                                    method_env.insert(k.clone(), v.clone());
+                                }
+                            }
                             for (param, arg) in method.params.iter().zip(eval_args.iter()) {
                                 method_env.insert(param.clone(), arg.clone());
                             }
@@ -14265,6 +16680,11 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                         // Execute primary method
                         let result = if let Some(method) = primary_methods.first() {
                             let mut method_env = method.env.borrow().clone();
+                            for (k, v) in env.iter() {
+                                if is_global_binding_name_for_sync(k) {
+                                    method_env.insert(k.clone(), v.clone());
+                                }
+                            }
                             for (param, arg) in method.params.iter().zip(eval_args.iter()) {
                                 method_env.insert(param.clone(), arg.clone());
                             }
@@ -14284,6 +16704,11 @@ pub(in crate::repl) fn eval_call_with_env(function: &ASTNode, args: &[ASTNode], 
                         // Execute :after methods (reverse order - least-specific-first)
                         for method in after_methods.iter().rev() {
                             let mut method_env = method.env.borrow().clone();
+                            for (k, v) in env.iter() {
+                                if is_global_binding_name_for_sync(k) {
+                                    method_env.insert(k.clone(), v.clone());
+                                }
+                            }
                             for (param, arg) in method.params.iter().zip(eval_args.iter()) {
                                 method_env.insert(param.clone(), arg.clone());
                             }
@@ -14853,12 +17278,6 @@ pub(super) fn eval_lambda_call(
     args: &[ASTNode],
     call_env: &mut HashMap<String, EvalResult>,
 ) -> Result<EvalResult, String> {
-    fn is_global_binding_name(name: &str) -> bool {
-        name.starts_with(FUNCTION_NS_PREFIX)
-            || name.starts_with('*')
-            || name.contains("::")
-            || name.contains(':')
-    }
     fn canonical_lookup_token(name: &str) -> String {
         let mut n = name;
         if let Some(stripped) = n.strip_prefix(FUNCTION_NS_PREFIX) {
@@ -15035,7 +17454,7 @@ pub(super) fn eval_lambda_call(
         }
         let mut keys = Vec::new();
         for key in source_env.keys() {
-            if is_global_binding_name(key) && referenced.contains(&canonical_lookup_token(key)) {
+            if is_global_binding_name_for_sync(key) && referenced.contains(&canonical_lookup_token(key)) {
                 keys.push(key.clone());
             }
         }
@@ -15199,7 +17618,7 @@ pub(super) fn eval_lambda_call(
             // Lexical closures still need visibility to globally defined functions/macros/specials
             // (e.g. load/eval of arbitrary forms), so sync all global-like bindings.
             for (key, value) in source_env_for_sync.iter() {
-                if is_global_binding_name(key) {
+                if is_global_binding_name_for_sync(key) {
                     closure_env.insert(key.clone(), value.clone());
                 }
             }
@@ -15370,9 +17789,12 @@ pub(super) fn eval_lambda_call(
             TailEvalResult::Value(result) => {
                 // Propagate only global-like bindings to caller env.
                 for (k, v) in closure_env.iter() {
-                    if is_global_binding_name(k) {
+                    if is_global_binding_name_for_sync(k) {
                         call_env.insert(k.clone(), v.clone());
                     }
+                }
+                if !current_dynamic_env {
+                    compact_captured_env_in_place(&mut closure_env);
                 }
                 {
                     let mut persisted = current_closure_env_rc.borrow_mut();
@@ -15385,6 +17807,9 @@ pub(super) fn eval_lambda_call(
                     .call_env_override
                     .take()
                     .unwrap_or_else(|| closure_env.clone());
+                if !current_dynamic_env {
+                    compact_captured_env_in_place(&mut closure_env);
+                }
                 {
                     let mut persisted = current_closure_env_rc.borrow_mut();
                     *persisted = closure_env;
@@ -15408,6 +17833,9 @@ pub(super) fn eval_lambda_call(
                 } else {
                     None
                 };
+                if !current_dynamic_env {
+                    compact_captured_env_in_place(&mut closure_env);
+                }
                 {
                     let mut persisted = current_closure_env_rc.borrow_mut();
                     *persisted = closure_env;
@@ -15450,6 +17878,9 @@ pub(super) fn eval_lambda_call(
                 } else {
                     None
                 };
+                if !current_dynamic_env {
+                    compact_captured_env_in_place(&mut closure_env);
+                }
                 {
                     let mut persisted = current_closure_env_rc.borrow_mut();
                     *persisted = closure_env;
@@ -16114,6 +18545,7 @@ fn macroexpand_1_call_to_ast(
 /// Recursively expand all macros in an AST using the interpreter.
 /// This handles user-defined macros that have complex bodies (like those using `loop`).
 pub fn macroexpand_all_to_ast(ast: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<ASTNode, String> {
+    let _macroexpand_depth_guard = MacroexpandDepthGuard::enter()?;
     match ast {
         ASTNode::Call { function, args } => {
             if let ASTNode::Variable(name) = &**function {

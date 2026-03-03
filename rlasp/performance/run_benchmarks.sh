@@ -10,7 +10,8 @@ SBCL_BIN="${SBCL_BIN:-/opt/homebrew/bin/sbcl}"
 CLASP_BIN="${CLASP_BIN:-/opt/homebrew/bin/clasp}"
 IRLASP_BIN="${IRLASP_BIN:-/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp}"
 RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-180}"
-IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-5120}"
+IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
+IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 TIMEOUT_BIN=""
 if command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="$(command -v gtimeout)"
@@ -70,6 +71,8 @@ result_line() {
 
 CSV_FILE="${LOG_DIR}/benchmark-results.csv"
 echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,result_match" >"$CSV_FILE"
+echo "IRLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB"
+echo "IRLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS"
 
 while IFS='|' read -r bench_file bench_args_raw; do
   [[ -z "$bench_file" ]] && continue
@@ -117,14 +120,14 @@ while IFS='|' read -r bench_file bench_args_raw; do
   clasp_s="$RUN_TIME_S"
 
   run_timed "$interp_out" "$interp_time" \
-    env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit \
+    env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
       "$IRLASP_BIN" -m interpret "$bench_path" "${args[@]}"
   interp_rc="$RUN_RC"
   interp_s="$RUN_TIME_S"
 
   rm -f "$mlirbc_path"
   run_timed "$mlir_compile_out" "$mlir_compile_time" \
-    env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit \
+    env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
       RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SELECTIVE_EVAL=1 \
       "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
   mlir_compile_rc="$RUN_RC"
@@ -132,7 +135,7 @@ while IFS='|' read -r bench_file bench_args_raw; do
 
   if [[ "$mlir_compile_rc" -eq 0 && -f "$mlirbc_path" ]]; then
     run_timed "$mlir_exec_out" "$mlir_exec_time" \
-      env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit \
+      env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
         "$IRLASP_BIN" -m mlir "$mlirbc_path" "${args[@]}"
     mlir_exec_rc="$RUN_RC"
     mlir_exec_s="$RUN_TIME_S"

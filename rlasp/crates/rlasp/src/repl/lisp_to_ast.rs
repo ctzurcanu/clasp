@@ -88,7 +88,7 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         ObjectType::Symbol => {
                             let symbol = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                            let name = symbol.name();
+                            let name = symbol.name().to_string();
 
                             // Check if it's a string disguised as a symbol (starts and ends with ")
                             if name.starts_with('"') && name.ends_with('"') {
@@ -102,16 +102,16 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             }
 
                             // Special case: the symbol 'nil' should be treated as NIL constant
-                            if name.to_lowercase() == "nil" {
+                            if name.eq_ignore_ascii_case("nil") {
                                 return Ok(ASTNode::nil());
                             }
 
                             // Special case: the symbol 't' should be treated as T (true)
-                            if name.to_lowercase() == "t" {
+                            if name.eq_ignore_ascii_case("t") {
                                 return Ok(ASTNode::Constant(ConstantValue::T));
                             }
 
-                            return Ok(ASTNode::variable(name.to_string()));
+                            return Ok(ASTNode::variable(name));
                         }
                         ObjectType::String => {
                             // Strings are self-evaluating in code position.
@@ -197,7 +197,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
     let cons_ptr = obj.as_cons_ptr().ok_or("Invalid cons pointer")?;
     if cons_ptr.is_null() {
-        return Err("Null cons pointer".to_string());
+        return Ok(ASTNode::nil());
     }
     let cons = unsafe { &*cons_ptr };
     let car = cons.car();
@@ -216,7 +216,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
-                let name = symbol.name();
+                let name = symbol.name().to_string();
 
                 if name == "quote" {
                     // (quote x) -> Quote(x)
@@ -225,7 +225,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                             if !cdr_ptr.is_null() {
                                 let cdr_cons = unsafe { &*cdr_ptr };
-                                let quoted = lisp_to_ast_as_data(cdr_cons.car())?;
+                                let quoted_obj = cdr_cons.car();
+                                let quoted = lisp_to_ast_as_data(quoted_obj)?;
                                 return Ok(ASTNode::Quote(Box::new(quoted)));
                             }
                         }
@@ -234,11 +235,15 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                 if name == "backquote" || name == "quasiquote" {
                     // (backquote x) -> Backquote(x)
+                    // The inner form is DATA, not executable code. Parsing it as code
+                    // breaks macro templates by trying to validate forms like dolist/funcall
+                    // while they are only being constructed.
                     if cdr.is_cons() {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                             if !cdr_ptr.is_null() {
                                 let cdr_cons = unsafe { &*cdr_ptr };
-                                let form = lisp_to_ast(cdr_cons.car())?;
+                                let form_obj = cdr_cons.car();
+                                let form = lisp_to_ast_as_data(form_obj)?;
                                 return Ok(ASTNode::Backquote(Box::new(form)));
                             }
                         }
@@ -251,7 +256,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                             if !cdr_ptr.is_null() {
                                 let cdr_cons = unsafe { &*cdr_ptr };
-                                let form = lisp_to_ast(cdr_cons.car())?;
+                                let form_obj = cdr_cons.car();
+                                let form = lisp_to_ast(form_obj)?;
                                 return Ok(ASTNode::Unquote(Box::new(form)));
                             }
                         }
@@ -264,7 +270,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                             if !cdr_ptr.is_null() {
                                 let cdr_cons = unsafe { &*cdr_ptr };
-                                let form = lisp_to_ast(cdr_cons.car())?;
+                                let form_obj = cdr_cons.car();
+                                let form = lisp_to_ast(form_obj)?;
                                 return Ok(ASTNode::UnquoteSplicing(Box::new(form)));
                             }
                         }
@@ -279,16 +286,16 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
-                let raw_name = symbol.name();
+                let raw_name = symbol.name().to_string();
 
                 // Normalize name by stripping common package prefixes (case-insensitive)
                 let name_lower = raw_name.to_lowercase();
                 let name = if name_lower.starts_with("cl:") || name_lower.starts_with("cl::") {
-                    raw_name.splitn(2, ':').last().unwrap_or(raw_name).trim_start_matches(':')
+                    raw_name.splitn(2, ':').last().unwrap_or(raw_name.as_str()).trim_start_matches(':')
                 } else if name_lower.starts_with("common-lisp:") || name_lower.starts_with("common-lisp::") {
-                    raw_name.splitn(2, ':').last().unwrap_or(raw_name).trim_start_matches(':')
+                    raw_name.splitn(2, ':').last().unwrap_or(raw_name.as_str()).trim_start_matches(':')
                 } else {
-                    raw_name
+                    raw_name.as_str()
                 };
 
                 let base = name.rsplit(':').next().unwrap_or(name);
@@ -300,11 +307,13 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     if cdr_ptr.is_null() {
                         return Err("read-time-eval requires one argument".to_string());
                     }
-                    let cdr_cons = unsafe { &*cdr_ptr };
-                    if !cdr_cons.cdr().is_nil() {
+                let cdr_cons = unsafe { &*cdr_ptr };
+                    let eval_arg = cdr_cons.car();
+                    let rest = cdr_cons.cdr();
+                    if !rest.is_nil() {
                         return Err("read-time-eval requires one argument".to_string());
                     }
-                    return eval_read_time_form(cdr_cons.car(), false);
+                    return eval_read_time_form(eval_arg, false);
                 }
 
                 if base.eq_ignore_ascii_case("psetq") {
@@ -419,6 +428,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                         let mut clause_keys = Vec::new();
                                         for raw_clause in raw_clauses.iter().skip(1) {
                                             if let Some(cons_ptr) = raw_clause.as_cons_ptr() {
+                                                if cons_ptr.is_null() {
+                                                    clause_keys.push("null-cons".to_string());
+                                                    continue;
+                                                }
                                                 let cons = unsafe { &*cons_ptr };
                                                 clause_keys.push(debug_key_list(&cons.car()));
                                             } else {
@@ -440,6 +453,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         let mut cond_clauses = Vec::new();
                         for raw_clause in &raw_clauses[1..] {
                             if let Some(clause_cons) = raw_clause.as_cons_ptr() {
+                                if clause_cons.is_null() {
+                                    continue;
+                                }
                                 let clause_cons = unsafe { &*clause_cons };
                                 let key_obj = clause_cons.car();
                                 let body_cdr = clause_cons.cdr();
@@ -721,8 +737,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // Parse: (dotimes (var count [result]) body...)
                         // First get the control list and body from raw cdr
                         let cdr_list = cdr_to_vec(cdr)?;
-                        if cdr_list.len() < 2 {
-                            return Err("dotimes requires control list and body".to_string());
+                        if cdr_list.is_empty() {
+                            return Err("dotimes requires a control list".to_string());
                         }
 
                         // Extract control list as (var count [result])
@@ -744,7 +760,11 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             _ => return Err("dotimes control must be a list (var count [result])".to_string()),
                         };
 
-                        let body = cdr_list[1..].to_vec();
+                        let body = if cdr_list.len() > 1 {
+                            cdr_list[1..].to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         return Ok(ASTNode::Dotimes {
                             var,
                             count: Box::new(count_ast),
@@ -755,8 +775,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     "dolist" => {
                         // Parse: (dolist (var list [result]) body...)
                         let cdr_list = cdr_to_vec(cdr)?;
-                        if cdr_list.len() < 2 {
-                            return Err("dolist requires control list and body".to_string());
+                        if cdr_list.is_empty() {
+                            return Err("dolist requires a control list".to_string());
                         }
 
                         // Extract control list as (var list [result])
@@ -776,7 +796,11 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             _ => return Err("dolist control must be a list (var list [result])".to_string()),
                         };
 
-                        let body = cdr_list[1..].to_vec();
+                        let body = if cdr_list.len() > 1 {
+                            cdr_list[1..].to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         return Ok(ASTNode::Dolist {
                             var,
                             list: Box::new(list_ast),
@@ -1551,7 +1575,7 @@ fn contains_unquote_raw(obj: &LispObject) -> bool {
         if let Some(ptr) = obj.as_general_ptr::<u8>() {
             if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
                 let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                let name = sym.name();
+                let name = sym.name().to_string();
                 return name == "unquote" || name == "unquote-splicing";
             }
         }
@@ -1560,15 +1584,19 @@ fn contains_unquote_raw(obj: &LispObject) -> bool {
     // Check if it's a cons cell
     if obj.is_cons() {
         if let Some(cons_ptr) = obj.as_cons_ptr() {
+            if cons_ptr.is_null() {
+                return false;
+            }
             let cons = unsafe { &*cons_ptr };
             let car = cons.car();
+            let cdr = cons.cdr();
 
             // Check if car is unquote or unquote-splicing symbol
             if car.is_general() {
                 if let Some(ptr) = car.as_general_ptr::<u8>() {
                     if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
                         let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                        let name = sym.name();
+                        let name = sym.name().to_string();
                         if name == "unquote" || name == "unquote-splicing" {
                             return true;
                         }
@@ -1580,7 +1608,7 @@ fn contains_unquote_raw(obj: &LispObject) -> bool {
             if contains_unquote_raw(&car) {
                 return true;
             }
-            if contains_unquote_raw(&cons.cdr()) {
+            if contains_unquote_raw(&cdr) {
                 return true;
             }
         }
@@ -1864,7 +1892,7 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         rlasp_runtime::header::ObjectType::Symbol => {
                             let symbol = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                            let name = symbol.name();
+                            let name = symbol.name().to_string();
                             // Strings are currently encoded by the reader as symbols with quotes.
                             // Preserve them as string constants even in quoted/data context.
                             if name.starts_with('"') && name.ends_with('"') && name.len() >= 2 {
@@ -1931,10 +1959,12 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                     return Err("read-time-eval requires one argument".to_string());
                 }
                 let cdr_cons = unsafe { &*cdr_ptr };
-                if !cdr_cons.cdr().is_nil() {
+                let eval_arg = cdr_cons.car();
+                let rest = cdr_cons.cdr();
+                if !rest.is_nil() {
                     return Err("read-time-eval requires one argument".to_string());
                 }
-                return eval_read_time_form(cdr_cons.car(), true);
+                return eval_read_time_form(eval_arg, true);
             }
         }
 
@@ -1949,7 +1979,8 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                     if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                         if !cdr_ptr.is_null() {
                             let cdr_cons = unsafe { &*cdr_ptr };
-                            let form = lisp_to_ast(cdr_cons.car())?;
+                            let form_obj = cdr_cons.car();
+                            let form = lisp_to_ast(form_obj)?;
                             return Ok(ASTNode::Unquote(Box::new(form)));
                         }
                     }
@@ -1964,7 +1995,8 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                     if let Some(cdr_ptr) = cdr.as_cons_ptr() {
                         if !cdr_ptr.is_null() {
                             let cdr_cons = unsafe { &*cdr_ptr };
-                            let form = lisp_to_ast(cdr_cons.car())?;
+                            let form_obj = cdr_cons.car();
+                            let form = lisp_to_ast(form_obj)?;
                             return Ok(ASTNode::UnquoteSplicing(Box::new(form)));
                         }
                     }
@@ -1976,9 +2008,15 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
         let mut current = cdr;
         while current.is_cons() {
             let cdr_ptr = current.as_cons_ptr().ok_or("Invalid cons")?;
+            if cdr_ptr.is_null() {
+                break;
+            }
             let cdr_cons = unsafe { &*cdr_ptr };
-            elements.push(lisp_to_ast_as_data(cdr_cons.car())?);
+            // Copy car/cdr out before recursing so we do not keep a raw cons pointer
+            // alive across allocations triggered by recursive conversion.
+            let next_car = cdr_cons.car();
             current = cdr_cons.cdr();
+            elements.push(lisp_to_ast_as_data(next_car)?);
         }
         let tail = if current.is_nil() {
             None
@@ -1998,11 +2036,14 @@ fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
     while cdr.is_cons() {
         let cons_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
         if cons_ptr.is_null() {
-            return Err("Null cons pointer in cdr_to_vec".to_string());
+            break;
         }
         let cons = unsafe { &*cons_ptr };
-        result.push(lisp_to_ast(cons.car())?);
+        // Copy car/cdr out before recursing so the raw pointer is not reused after
+        // a recursive conversion may allocate.
+        let car_obj = cons.car();
         cdr = cons.cdr();
+        result.push(lisp_to_ast(car_obj)?);
     }
 
     // Handle dotted pair
@@ -2023,7 +2064,7 @@ fn raw_cdr_to_vec(mut cdr: LispObject) -> Result<Vec<LispObject>, String> {
     while cdr.is_cons() {
         let cons_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
         if cons_ptr.is_null() {
-            return Err("Null cons pointer in raw_cdr_to_vec".to_string());
+            break;
         }
         let cons = unsafe { &*cons_ptr };
         result.push(cons.car());
@@ -2079,7 +2120,13 @@ fn extract_bindings_raw(bindings_obj: LispObject) -> Result<Vec<(String, ASTNode
         }
 
         // Binding is a cons cell like (var value) or (var)
-        let binding_cons = unsafe { &*binding_obj.as_cons_ptr().unwrap() };
+        let binding_ptr = binding_obj
+            .as_cons_ptr()
+            .ok_or_else(|| "Invalid binding cons pointer".to_string())?;
+        if binding_ptr.is_null() {
+            return Err("Invalid binding cons pointer".to_string());
+        }
+        let binding_cons = unsafe { &*binding_ptr };
         let var_obj = binding_cons.car();
         let rest = binding_cons.cdr();
 
@@ -2092,8 +2139,15 @@ fn extract_bindings_raw(bindings_obj: LispObject) -> Result<Vec<(String, ASTNode
         let value = if rest.is_nil() {
             ASTNode::Constant(ConstantValue::Nil)
         } else if rest.is_cons() {
-            let val_cons = unsafe { &*rest.as_cons_ptr().unwrap() };
-            lisp_to_ast(val_cons.car())?
+            let val_ptr = rest
+                .as_cons_ptr()
+                .ok_or_else(|| "Invalid binding value pointer".to_string())?;
+            if val_ptr.is_null() {
+                return Err("Invalid binding value pointer".to_string());
+            }
+            let val_cons = unsafe { &*val_ptr };
+            let val_obj = val_cons.car();
+            lisp_to_ast(val_obj)?
         } else {
             ASTNode::Constant(ConstantValue::Nil)
         };
@@ -2112,7 +2166,7 @@ fn raw_cdr_to_vec_with_first(obj: LispObject) -> Result<Vec<LispObject>, String>
     while current.is_cons() {
         let cons_ptr = current.as_cons_ptr().ok_or("Invalid cons pointer")?;
         if cons_ptr.is_null() {
-            return Err("Null cons pointer".to_string());
+            break;
         }
         let cons = unsafe { &*cons_ptr };
         result.push(cons.car());
@@ -2148,7 +2202,12 @@ fn debug_key_list(obj: &LispObject) -> String {
     let mut parts = Vec::new();
     let mut current = *obj;
     while current.is_cons() {
-        let cons_ptr = current.as_cons_ptr().unwrap();
+        let Some(cons_ptr) = current.as_cons_ptr() else {
+            break;
+        };
+        if cons_ptr.is_null() {
+            break;
+        }
         let cons = unsafe { &*cons_ptr };
         parts.push(debug_key_obj(&cons.car()));
         current = cons.cdr();
@@ -2225,6 +2284,9 @@ fn case_key_to_test(key_obj: &LispObject, tmp_var: &str) -> Result<ASTNode, Stri
     // Check if it's a list of keys
     if key_obj.is_cons() {
         let cons_ptr = key_obj.as_cons_ptr().ok_or("Invalid cons")?;
+        if cons_ptr.is_null() {
+            return Ok(ASTNode::nil());
+        }
         let cons = unsafe { &*cons_ptr };
         let first_key = cons.car();
         // Get the rest of the keys from the cdr

@@ -230,6 +230,12 @@ fn dispatch_generic_function_with_values(
     env: &mut HashMap<String, EvalResult>
 ) -> Result<EvalResult, String> {
     use super::eval_types::specializer_matches;
+    fn is_global_binding_name(name: &str) -> bool {
+        name.starts_with(super::eval_core::FUNCTION_NS_PREFIX)
+            || name.starts_with('*')
+            || name.contains("::")
+            || name.contains(':')
+    }
 
     let gf_ref = gf.borrow();
     let mut before_methods = Vec::new();
@@ -287,6 +293,11 @@ fn dispatch_generic_function_with_values(
     // Execute :before methods
     for method in &before_methods {
         let mut method_env = method.env.borrow().clone();
+        for (k, v) in env.iter() {
+            if is_global_binding_name(k) {
+                method_env.insert(k.clone(), v.clone());
+            }
+        }
         for (param, arg) in method.params.iter().zip(eval_args.iter()) {
             method_env.insert(param.clone(), arg.clone());
         }
@@ -298,6 +309,11 @@ fn dispatch_generic_function_with_values(
     // Execute primary method
     let result = if let Some(method) = primary_methods.first() {
         let mut method_env = method.env.borrow().clone();
+        for (k, v) in env.iter() {
+            if is_global_binding_name(k) {
+                method_env.insert(k.clone(), v.clone());
+            }
+        }
         for (param, arg) in method.params.iter().zip(eval_args.iter()) {
             method_env.insert(param.clone(), arg.clone());
         }
@@ -316,6 +332,11 @@ fn dispatch_generic_function_with_values(
     // Execute :after methods (reverse order - least-specific-first)
     for method in after_methods.iter().rev() {
         let mut method_env = method.env.borrow().clone();
+        for (k, v) in env.iter() {
+            if is_global_binding_name(k) {
+                method_env.insert(k.clone(), v.clone());
+            }
+        }
         for (param, arg) in method.params.iter().zip(eval_args.iter()) {
             method_env.insert(param.clone(), arg.clone());
         }
@@ -1915,6 +1936,14 @@ pub(super) fn eval_format(args: &[ASTNode], env: &mut HashMap<String, EvalResult
             if let Some(&directive) = chars.peek() {
                 chars.next(); // consume directive
                 match directive {
+                    '\n' | '\r' => {
+                        if directive == '\r' && matches!(chars.peek(), Some('\n')) {
+                            chars.next();
+                        }
+                        while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
                     '&' => {
                         // Fresh line - for simplicity, just add newline if output is not empty
                         if !output.is_empty() && !output.ends_with('\n') {
@@ -1942,6 +1971,35 @@ pub(super) fn eval_format(args: &[ASTNode], env: &mut HashMap<String, EvalResult
                     '~' => {
                         // Literal tilde
                         output.push('~');
+                    }
+                    '/' => {
+                        // User-defined format directive: ~/function-name/
+                        let mut fn_name = String::new();
+                        while let Some(ch) = chars.next() {
+                            if ch == '/' {
+                                break;
+                            }
+                            fn_name.push(ch);
+                        }
+                        let fn_name = fn_name.trim();
+                        if !fn_name.is_empty() {
+                            let arg_val = if arg_index < format_args.len() {
+                                let v = format_args[arg_index].clone();
+                                arg_index += 1;
+                                v
+                            } else {
+                                EvalResult::Nil
+                            };
+                            let call = ASTNode::Call {
+                                function: Box::new(ASTNode::Variable(fn_name.to_string())),
+                                args: vec![result_to_ast_quoted(&arg_val)?],
+                            };
+                            let rendered = match eval_with_env(&call, env) {
+                                Ok(v) => super::eval_types::primary_value(v),
+                                Err(_) => arg_val,
+                            };
+                            output.push_str(&format_value(&rendered));
+                        }
                     }
                     _ => {
                         // Unknown directive - just output as-is
@@ -2228,6 +2286,8 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         (contents, file_path, Some(resolved_path))
     };
 
+    super::eval_core::init_env_defaults(env);
+
     // Save old values of dynamic load-path variables
     let old_load_pathname = env.get("*load-pathname*").cloned();
     let old_load_truename = env.get("*load-truename*").cloned();
@@ -2312,6 +2372,9 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     let mut reader = rlasp_reader::Reader::from_string(&contents)
         .map_err(|e| format!("Error parsing {}: {:?}", source_label, e))?;
     let mut form_index = 0usize;
+    let max_forms = std::env::var("RLASP_MAX_FORMS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
     loop {
         let obj = match reader.read() {
             Ok(obj) => obj,
@@ -2322,8 +2385,38 @@ pub(super) fn eval_load(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
             continue;
         }
         form_index += 1;
+        if let Some(max) = max_forms {
+            if form_index > max {
+                break;
+            }
+        }
+        if let Ok(target_raw) = std::env::var("RLASP_DEBUG_LOAD_RAW_INDEX") {
+            if let Ok(target_idx) = target_raw.parse::<usize>() {
+                if target_idx == form_index {
+                    eprintln!("[load-form-raw] idx={} obj={}", form_index, obj);
+                }
+            }
+        }
         let ast = with_read_time_env(env, || lisp_to_ast(obj))
             .map_err(|e| format!("{} [while reading form {} in {}]", e, form_index, source_label))?;
+        if std::env::var("RLASP_DEBUG_LOAD_FORM").is_ok() {
+            let head = match &ast {
+                ASTNode::Call { function, .. } => match function.as_ref() {
+                    ASTNode::Variable(name) => name.clone(),
+                    other => format!("{:?}", other),
+                },
+                ASTNode::Variable(name) => name.clone(),
+                other => format!("{:?}", std::mem::discriminant(other)),
+            };
+            eprintln!("[load-form] idx={} head={}", form_index, head);
+            if let Ok(target_raw) = std::env::var("RLASP_DEBUG_LOAD_FORM_AST_INDEX") {
+                if let Ok(target_idx) = target_raw.parse::<usize>() {
+                    if target_idx == form_index {
+                        eprintln!("[load-form-ast] idx={} ast={:?}", form_index, ast);
+                    }
+                }
+            }
+        }
         _result = match eval_with_env(&ast, env) {
             Ok(v) => v,
             Err(e) => {
@@ -2481,24 +2574,26 @@ pub(super) fn eval_defforeign(args: &[ASTNode], env: &mut HashMap<String, EvalRe
 
     // Helper function to parse type from AST
     fn parse_type(ast: &ASTNode) -> Result<ForeignType, String> {
-        if let ASTNode::Variable(type_name) = ast {
-            match type_name.as_str() {
-                "void" => Ok(ForeignType::Void),
-                "int8" => Ok(ForeignType::Int8),
-                "uint8" => Ok(ForeignType::UInt8),
-                "int16" => Ok(ForeignType::Int16),
-                "uint16" => Ok(ForeignType::UInt16),
-                "int32" => Ok(ForeignType::Int32),
-                "uint32" => Ok(ForeignType::UInt32),
-                "int64" => Ok(ForeignType::Int64),
-                "uint64" => Ok(ForeignType::UInt64),
-                "float" => Ok(ForeignType::Float),
-                "double" => Ok(ForeignType::Double),
-                "pointer" => Ok(ForeignType::Pointer),
-                _ => Err(format!("Unknown FFI type: {}", type_name)),
-            }
-        } else {
-            Err("Type must be a symbol".to_string())
+        let raw = match ast {
+            ASTNode::Variable(type_name) => type_name.clone(),
+            ASTNode::Constant(ConstantValue::Symbol(type_name)) => type_name.clone(),
+            _ => return Err("Type must be a symbol".to_string()),
+        };
+        let t = raw.trim_start_matches(':').to_ascii_lowercase();
+        match t.as_str() {
+            "void" => Ok(ForeignType::Void),
+            "int8" | "char" | "signed-char" => Ok(ForeignType::Int8),
+            "uint8" | "unsigned-char" => Ok(ForeignType::UInt8),
+            "int16" | "short" => Ok(ForeignType::Int16),
+            "uint16" | "unsigned-short" => Ok(ForeignType::UInt16),
+            "int32" | "int" => Ok(ForeignType::Int32),
+            "uint32" | "unsigned-int" => Ok(ForeignType::UInt32),
+            "int64" | "long-long" => Ok(ForeignType::Int64),
+            "uint64" | "unsigned-long-long" => Ok(ForeignType::UInt64),
+            "float" => Ok(ForeignType::Float),
+            "double" => Ok(ForeignType::Double),
+            "pointer" | "ptr" => Ok(ForeignType::Pointer),
+            _ => Err(format!("Unknown FFI type: {}", raw)),
         }
     }
 
@@ -2525,6 +2620,88 @@ pub(super) fn eval_defforeign(args: &[ASTNode], env: &mut HashMap<String, EvalRe
     }
 
     Err(format!("Symbol '{}' not found in any loaded library", symbol_name))
+}
+
+fn eval_result_to_cpp_arg(value: EvalResult) -> crate::ffi::CppArg {
+    match primary_value(value) {
+        EvalResult::Fixnum(n) => crate::ffi::CppArg::Int(n),
+        EvalResult::Float(f) => crate::ffi::CppArg::Float(f),
+        EvalResult::String(s) => crate::ffi::CppArg::String(s),
+        EvalResult::Symbol(s) => crate::ffi::CppArg::String(s),
+        EvalResult::Nil => crate::ffi::CppArg::Nil,
+        other => crate::ffi::CppArg::String(format!("{}", other)),
+    }
+}
+
+fn cpp_value_to_eval_result(value: crate::ffi::CppValue) -> EvalResult {
+    match value {
+        crate::ffi::CppValue::Int(n) => EvalResult::Fixnum(n),
+        crate::ffi::CppValue::Float(f) => EvalResult::Float(f),
+        crate::ffi::CppValue::String(s) => EvalResult::String(s),
+        crate::ffi::CppValue::Handle(h) => EvalResult::Fixnum(h),
+        crate::ffi::CppValue::Nil => EvalResult::Nil,
+    }
+}
+
+pub(super) fn eval_cpp_new(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("cpp-new requires class-name".to_string());
+    }
+
+    let class_name = match primary_value(eval_with_env(&args[0], env)?) {
+        EvalResult::String(s) => s,
+        EvalResult::Symbol(s) => s,
+        _ => return Err("cpp-new class-name must be a string or symbol".to_string()),
+    };
+
+    let mut ctor_args = Vec::new();
+    for arg in args.iter().skip(1) {
+        ctor_args.push(eval_result_to_cpp_arg(eval_with_env(arg, env)?));
+    }
+
+    let handle = crate::ffi::new_object(&class_name, &ctor_args)?;
+    Ok(EvalResult::Fixnum(handle))
+}
+
+pub(super) fn eval_cpp_call_method(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        return Err("cpp-call-method requires object-handle and method-name".to_string());
+    }
+
+    let handle = match primary_value(eval_with_env(&args[0], env)?) {
+        EvalResult::Fixnum(n) => n,
+        EvalResult::Float(f) if f.fract() == 0.0 => f as i64,
+        _ => return Err("cpp-call-method object-handle must be an integer handle".to_string()),
+    };
+
+    let method_name = match primary_value(eval_with_env(&args[1], env)?) {
+        EvalResult::String(s) => s,
+        EvalResult::Symbol(s) => s,
+        _ => return Err("cpp-call-method method-name must be a string or symbol".to_string()),
+    };
+
+    let mut method_args = Vec::new();
+    for arg in args.iter().skip(2) {
+        method_args.push(eval_result_to_cpp_arg(eval_with_env(arg, env)?));
+    }
+
+    let value = crate::ffi::call_method(handle, &method_name, &method_args)?;
+    Ok(cpp_value_to_eval_result(value))
+}
+
+pub(super) fn eval_cpp_delete(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+    if args.len() != 1 {
+        return Err("cpp-delete requires exactly one object handle".to_string());
+    }
+
+    let handle = match primary_value(eval_with_env(&args[0], env)?) {
+        EvalResult::Fixnum(n) => n,
+        EvalResult::Float(f) if f.fract() == 0.0 => f as i64,
+        _ => return Err("cpp-delete object-handle must be an integer handle".to_string()),
+    };
+
+    crate::ffi::delete_object(handle)?;
+    Ok(EvalResult::Bool(true))
 }
 
 pub(super) fn eval_complement(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
@@ -4138,7 +4315,18 @@ pub(super) fn eval_fboundp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
                 "intern" | "string" | "symbol-name" | "gensym" |
                 "type-of" | "typep" | "subtypep" | "coerce" |
                 "error" | "warn" | "signal" | "handler-case" | "handler-bind" |
-                "make-instance" | "slot-value" | "defclass" | "defgeneric" | "defmethod"
+                "make-instance" | "slot-value" | "defclass" | "defgeneric" | "defmethod" |
+                "defcfun" | "defcallback" | "with-foreign-object" | "with-foreign-objects" |
+                "foreign-alloc" | "foreign-free" | "foreign-type-size" | "foreign-funcall" |
+                "mem-ref" | "mem-set" | "mem-aref" | "callback" |
+                "make-thread" | "join-thread" | "destroy-thread" | "thread-alive-p" |
+                "all-threads" | "current-thread" | "thread-name" |
+                "make-lock" | "acquire-lock" | "release-lock" | "with-lock-held" |
+                "async:spawn" | "async:await" | "async:sleep-ms" | "async:yield" |
+                "async:tcp-connect" | "async:tcp-send" | "async:tcp-recv" | "async:tcp-close" |
+                "clang:ast-dump-json" | "gpu:load-library" | "gpu:defforeign" |
+                "cpp-new" | "cpp-call-method" | "cpp-delete" |
+                "cpp:new" | "cpp:call-method" | "cpp:delete"
             );
             Ok(EvalResult::Boolean(is_builtin))
         }

@@ -7,22 +7,64 @@ pub mod lisp_to_ast;
 use reader::Reader;
 use std::io::{self, Write};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::os::raw::c_int;
 
 pub use reader::*;
 pub use eval::*;
 
 use rlasp_ffi::{Library, ForeignFunction};
 use rlasp_compiler::Expander;
+use rlasp_runtime::{LispObject, RString, Symbol};
+use rlasp_runtime::header::{ObjectType, TypeHeader};
 
 /// Type for Rust functions exposed to Lisp
-pub type RustFn = fn(&[rlasp_runtime::LispObject]) -> Result<rlasp_runtime::LispObject, String>;
+pub type RustFn = fn(&[LispObject]) -> Result<LispObject, String>;
+pub type RustCAbiFn = unsafe extern "C" fn(argc: usize, argv: *const usize, result_out: *mut usize) -> c_int;
+
+type RustFnDyn = dyn Fn(&[LispObject]) -> Result<LispObject, String> + Send + Sync;
+
+fn lisp_object_to_eval_result(obj: &LispObject) -> EvalResult {
+    if obj.is_nil() {
+        return EvalResult::Nil;
+    }
+    if obj.raw() == LispObject::t().raw() {
+        return EvalResult::Bool(true);
+    }
+    if let Some(n) = obj.as_fixnum() {
+        return EvalResult::Fixnum(n);
+    }
+    if let Some(f) = obj.as_float() {
+        return EvalResult::Float(f);
+    }
+    if obj.is_general() {
+        if let Some(ptr) = obj.as_general_ptr::<()>() {
+            if !ptr.is_null() {
+                if let Some(obj_type) = unsafe { TypeHeader::from_ptr(ptr) } {
+                    match obj_type {
+                        ObjectType::String => {
+                            let s = unsafe { &*(ptr as *const RString) };
+                            return EvalResult::String(s.as_str().to_string());
+                        }
+                        ObjectType::Symbol => {
+                            let s = unsafe { &*(ptr as *const Symbol) };
+                            return EvalResult::Symbol(s.name().to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    EvalResult::String(format!("{}", obj))
+}
 
 /// REPL state
 pub struct Repl {
     env: HashMap<String, EvalResult>,
     libraries: HashMap<String, Library>,
     foreign_functions: HashMap<String, ForeignFunction>,
-    rust_functions: HashMap<String, RustFn>,
+    rust_functions: HashMap<String, Arc<RustFnDyn>>,
     expander: Expander,
 }
 
@@ -39,7 +81,27 @@ impl Repl {
 
     /// Register a Rust function created with #[lisp_fn]
     pub fn register_rust_fn(&mut self, name: &str, func: RustFn) {
-        self.rust_functions.insert(name.to_string(), func);
+        self.rust_functions.insert(name.to_string(), Arc::new(func));
+    }
+
+    pub fn register_rust_fn_closure<F>(&mut self, name: &str, func: F)
+    where
+        F: Fn(&[LispObject]) -> Result<LispObject, String> + Send + Sync + 'static,
+    {
+        self.rust_functions.insert(name.to_string(), Arc::new(func));
+    }
+
+    pub fn register_rust_cabi_fn(&mut self, name: &str, func: RustCAbiFn) {
+        let fn_name = name.to_string();
+        self.register_rust_fn_closure(name, move |args| {
+            let raw_args: Vec<usize> = args.iter().map(|arg| arg.raw()).collect();
+            let mut raw_result = LispObject::nil().raw();
+            let rc = unsafe { func(raw_args.len(), raw_args.as_ptr(), &mut raw_result as *mut usize) };
+            if rc != 0 {
+                return Err(format!("native rust callback '{}' returned {}", fn_name, rc));
+            }
+            Ok(unsafe { LispObject::from_raw(raw_result) })
+        });
     }
 
     /// Evaluate one form
@@ -206,15 +268,15 @@ impl Repl {
                     }
                     _ => {
                         // Check if it's a Rust function call
-                        if let Some(func) = self.rust_functions.get(name) {
+                        if let Some(func) = self.rust_functions.get(name).cloned() {
                             // Evaluate arguments and convert to LispObjects
                             use rlasp_ffi::types::ToLisp;
-                            let lisp_args: Result<Vec<rlasp_runtime::LispObject>, String> = args.iter().map(|arg| {
+                            let lisp_args: Result<Vec<LispObject>, String> = args.iter().map(|arg| {
                                 let val = eval::eval_with_persistent_env(arg, &mut self.env)?;
                                 Ok(match val {
                                     EvalResult::Fixnum(n) => n.to_lisp(),
                                     EvalResult::Float(f) => f.to_lisp(),
-                                    _ => rlasp_runtime::LispObject::nil(),
+                                    _ => LispObject::nil(),
                                 })
                             }).collect();
                             let lisp_args = lisp_args?;
@@ -223,13 +285,7 @@ impl Repl {
                             let result = func(&lisp_args).map_err(|e| format!("Rust function call failed: {}", e))?;
 
                             // Convert result back
-                            use rlasp_ffi::types::FromLisp;
-                            if let Some(n) = result.as_fixnum() {
-                                return Ok(Some(EvalResult::Fixnum(n)));
-                            } else if let Some(f) = result.as_float() {
-                                return Ok(Some(EvalResult::Float(f)));
-                            }
-                            return Ok(Some(EvalResult::Nil));
+                            return Ok(Some(lisp_object_to_eval_result(&result)));
                         }
 
                         // Check if it's a foreign function call
@@ -250,13 +306,7 @@ impl Repl {
                             let result = func.call(&lisp_args).map_err(|e| format!("FFI call failed: {:?}", e))?;
 
                             // Convert result back
-                            use rlasp_ffi::types::FromLisp;
-                            if let Some(n) = result.as_fixnum() {
-                                return Ok(Some(EvalResult::Fixnum(n)));
-                            } else if let Some(f) = result.as_float() {
-                                return Ok(Some(EvalResult::Float(f)));
-                            }
-                            return Ok(Some(EvalResult::Nil));
+                            return Ok(Some(lisp_object_to_eval_result(&result)));
                         }
 
                         // Check for namespace syntax: libm:sqrt
@@ -288,13 +338,7 @@ impl Repl {
 
                                         let result = func.call(&lisp_args).map_err(|e| format!("FFI call failed: {:?}", e))?;
 
-                                        use rlasp_ffi::types::FromLisp;
-                                        if let Some(n) = result.as_fixnum() {
-                                            return Ok(Some(EvalResult::Fixnum(n)));
-                                        } else if let Some(f) = result.as_float() {
-                                            return Ok(Some(EvalResult::Float(f)));
-                                        }
-                                        return Ok(Some(EvalResult::Nil));
+                                        return Ok(Some(lisp_object_to_eval_result(&result)));
                                     }
                                 }
                             }

@@ -11,6 +11,7 @@ pub mod vector_managed;
 pub mod performance;
 pub mod backend_selector;
 pub mod overload;
+pub mod cpp_lifecycle;
 
 pub use ctypes::*;
 pub use cfunc::*;
@@ -21,3 +22,4 @@ pub use cpp_ast::*;
 pub use cpp_codegen::*;
 pub use cxx_bridge::*;
 pub use vector_wrapper::*;
+pub use cpp_lifecycle::*;

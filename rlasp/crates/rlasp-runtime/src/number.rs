@@ -123,7 +123,7 @@ impl Number {
 impl std::fmt::Display for Number {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Verify this is actually a Number before accessing
-        if self.header.obj_type != crate::header::ObjectType::Number {
+        if self.header.object_type() != Some(crate::header::ObjectType::Number) {
             return write!(f, "#<INVALID-NUMBER>");
         }
         match &self.value {
@@ -179,7 +179,7 @@ impl LispObject {
         if let Some(ptr) = self.as_general_ptr::<Number>() {
             let num = unsafe { &*ptr };
             // Double-check the header
-            if num.header.obj_type != crate::header::ObjectType::Number {
+            if num.header.object_type() != Some(crate::header::ObjectType::Number) {
                 return None;
             }
             match &num.value {

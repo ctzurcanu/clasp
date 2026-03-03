@@ -563,18 +563,26 @@ impl StackMLIRCodegen {
     /// Uses cc_intern so repeated quoted symbols share identity (CL reader semantics).
     /// Symbol names are uppercased to match CL's default readcase
     fn create_symbol_constant(&mut self, name: &str) -> String {
-        // Uppercase the symbol name to match CL's default readcase
-        // Keywords keep the colon prefix but uppercase the rest
-        // Gensym-style symbols (#:name) are preserved as-is
-        let normalized_name = if name.starts_with("#:") {
-            // Uninterned symbol (gensym) - preserve as-is
-            name.to_string()
+        // Uppercase symbol/package names to match CL default readcase.
+        // Package-qualified names (pkg:sym / pkg::sym) must intern SYM in PKG.
+        let (normalized_name, explicit_package) = if name.starts_with("#:") {
+            // Uninterned symbol (gensym) marker is preserved as-is here.
+            // NOTE: backend still interns it (existing behavior).
+            (name.to_string(), None)
         } else if name.starts_with(':') {
-            // Keyword - keep colon, uppercase the rest
-            format!(":{}", &name[1..].to_uppercase())
+            // Keyword literal :foo => symbol FOO in KEYWORD package.
+            (name[1..].to_uppercase(), Some("KEYWORD".to_string()))
+        } else if let Some(idx) = name.rfind(':') {
+            let pkg_raw = &name[..idx];
+            let sym_raw = &name[idx + 1..];
+            let pkg_clean = pkg_raw.trim_end_matches(':');
+            if !pkg_clean.is_empty() && !sym_raw.is_empty() {
+                (sym_raw.to_uppercase(), Some(pkg_clean.to_uppercase()))
+            } else {
+                (name.to_uppercase(), None)
+            }
         } else {
-            // Regular symbol - uppercase
-            name.to_uppercase()
+            (name.to_uppercase(), None)
         };
 
         // Create a string constant for the symbol name
@@ -593,22 +601,21 @@ impl StackMLIRCodegen {
             "{} = func.call @cc_make_string({}, {}) : (!llvm.ptr, i64) -> i64",
             name_obj, str_ptr, len_ssa
         ));
-        let pkg_obj = if normalized_name.starts_with(':') {
-            // Reader-faithful keyword literals: intern in KEYWORD package.
-            let keyword_pkg_const = self.create_string_constant("KEYWORD");
-            let keyword_pkg_ptr = self.fresh_ssa();
+        let pkg_obj = if let Some(pkg_name) = explicit_package {
+            let pkg_const = self.create_string_constant(&pkg_name);
+            let pkg_ptr = self.fresh_ssa();
             self.writeln(&format!(
                 "{} = llvm.mlir.addressof {} : !llvm.ptr",
-                keyword_pkg_ptr, keyword_pkg_const
+                pkg_ptr, pkg_const
             ));
-            let keyword_pkg_len = self.fresh_ssa();
-            self.writeln(&format!("{} = arith.constant 7 : i64", keyword_pkg_len));
-            let keyword_pkg_obj = self.fresh_ssa();
+            let pkg_len = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", pkg_len, pkg_name.len()));
+            let pkg_obj = self.fresh_ssa();
             self.writeln(&format!(
                 "{} = func.call @cc_make_string({}, {}) : (!llvm.ptr, i64) -> i64",
-                keyword_pkg_obj, keyword_pkg_ptr, keyword_pkg_len
+                pkg_obj, pkg_ptr, pkg_len
             ));
-            keyword_pkg_obj
+            pkg_obj
         } else {
             let pkg_nil = self.fresh_ssa();
             self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", pkg_nil));
@@ -11989,7 +11996,11 @@ impl StackMLIRCodegen {
                     }
 
                     if !rlasp::is_cl_builtin(base_name) && !is_non_cl_macro_stub {
-                        return self.compile_tail_user_function_call(base_name, args);
+                        // Tail-position user calls must preserve result semantics even when
+                        // emitted as direct compiled calls from __main or other direct callers.
+                        // Use the normal call path here; trampoline tailcalls are only safe
+                        // when the caller itself is executing under cc_funcall_stack.
+                        return self.compile_user_function_call(base_name, args);
                     }
 
                     return self.compile_call(func_name, args);
@@ -12117,19 +12128,19 @@ impl StackMLIRCodegen {
             // Extract each parameter using cc_arg(args_list, param_info)
             for param in params.iter() {
                 // Check for &optional, &rest, &key, or &allow-other-keys markers
-                if param == "&optional" {
+                if param.eq_ignore_ascii_case("&optional") {
                     mode = "optional";
                     continue;
-                } else if param == "&rest" {
+                } else if param.eq_ignore_ascii_case("&rest") {
                     mode = "rest";
                     continue;
-                } else if param == "&key" {
+                } else if param.eq_ignore_ascii_case("&key") {
                     mode = "key";
                     continue;
-                } else if param == "&aux" {
+                } else if param.eq_ignore_ascii_case("&aux") {
                     mode = "aux";
                     continue;
-                } else if param == "&allow-other-keys" {
+                } else if param.eq_ignore_ascii_case("&allow-other-keys") {
                     // Just a marker, no variable binding
                     continue;
                 } else if param.starts_with('&') {

@@ -671,23 +671,48 @@ pub fn call_clos_builtin(
         }
 
         "allocate-instance" => {
-            // Allocate an instance without initialization
-            Ok(EvalResult::Symbol("INSTANCE".to_string()))
+            // Allocate an instance without applying initargs.
+            if args.is_empty() {
+                return Err("allocate-instance requires a class".to_string());
+            }
+            let class_name = match &args[0] {
+                EvalResult::Symbol(s) => s.clone(),
+                EvalResult::String(s) => s.clone(),
+                EvalResult::Instance(inst) => effective_instance_class_name(inst),
+                _ => return Err("allocate-instance: class must be a symbol/string/class metaobject".to_string()),
+            };
+            let allocated = call_clos_builtin("make-instance", &[EvalResult::Symbol(class_name)], env)?;
+            Ok(allocated)
         }
 
         "initialize-instance" => {
-            // Initialize an instance
-            Ok(EvalResult::Nil)
+            // Initialize instance slots from initargs.
+            if args.is_empty() {
+                return Err("initialize-instance requires an instance".to_string());
+            }
+            let inst = match &args[0] {
+                EvalResult::Instance(i) => i.clone(),
+                _ => return Err("initialize-instance: first argument must be an instance".to_string()),
+            };
+            let mut i = 1usize;
+            while i + 1 < args.len() {
+                if let EvalResult::Symbol(key) = &args[i] {
+                    let slot_name = normalize_slot_name(key);
+                    inst.slots.borrow_mut().insert(slot_name, args[i + 1].clone());
+                }
+                i += 2;
+            }
+            Ok(EvalResult::Instance(inst))
         }
 
         "reinitialize-instance" => {
-            // Reinitialize an instance
-            Ok(EvalResult::Nil)
+            // Reinitialize instance by reusing initialize-instance behavior.
+            call_clos_builtin("initialize-instance", args, env)
         }
 
         "shared-initialize" => {
-            // Shared initialization protocol
-            Ok(EvalResult::Nil)
+            // Shared initialization protocol; currently equivalent to initialize-instance.
+            call_clos_builtin("initialize-instance", args, env)
         }
 
         "update-instance-for-different-class" => {
@@ -696,8 +721,12 @@ pub fn call_clos_builtin(
         }
 
         "update-instance-for-redefined-class" => {
-            // Update instance when class is redefined
-            Ok(EvalResult::Nil)
+            // Update instance when class is redefined; accept and return instance.
+            if let Some(EvalResult::Instance(inst)) = args.get(0) {
+                Ok(EvalResult::Instance(inst.clone()))
+            } else {
+                Ok(EvalResult::Nil)
+            }
         }
 
         "call-next-method" => {

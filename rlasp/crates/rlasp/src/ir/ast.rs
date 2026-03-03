@@ -351,7 +351,7 @@ mod tests {
         let lambda = ASTNode::lambda(params.clone(), body);
 
         match lambda {
-            ASTNode::Lambda { params: p, body } => {
+            ASTNode::Lambda { params: p, body, .. } => {
                 assert_eq!(p, params);
                 assert_eq!(body.len(), 1);
             }

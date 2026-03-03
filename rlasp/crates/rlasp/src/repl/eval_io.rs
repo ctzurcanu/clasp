@@ -8,6 +8,7 @@ use std::io::Write;
 
 thread_local! {
     static PPRINT_DISPATCH: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
+    static IO_EVAL_ENV_PTR: RefCell<Option<*mut HashMap<String, EvalResult>>> = RefCell::new(None);
 }
 
 const STREAM_INPUT_TAG: &str = "%STREAM-INPUT%";
@@ -329,6 +330,31 @@ fn set_stream_closed(value: &EvalResult, closed: bool) -> Result<(), String> {
         }
         _ => Err("not a stream".to_string()),
     }
+}
+
+pub(super) fn with_io_eval_env<T, F>(
+    env: &mut HashMap<String, EvalResult>,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    IO_EVAL_ENV_PTR.with(|slot| {
+        let prev = slot.replace(Some(env as *mut _));
+        let out = f();
+        slot.replace(prev);
+        out
+    })
+}
+
+fn with_current_io_env<T, F>(f: F) -> Option<T>
+where
+    F: FnOnce(&mut HashMap<String, EvalResult>) -> T,
+{
+    IO_EVAL_ENV_PTR.with(|slot| {
+        let ptr_opt = *slot.borrow();
+        ptr_opt.map(|ptr| unsafe { f(&mut *ptr) })
+    })
 }
 
 pub(super) fn make_input_stream(content: String) -> EvalResult {
@@ -2406,6 +2432,14 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
             if let Some(&directive) = chars.peek() {
                 chars.next(); // consume directive
                 match directive {
+                    '\n' | '\r' => {
+                        if directive == '\r' && matches!(chars.peek(), Some('\n')) {
+                            chars.next();
+                        }
+                        while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
                     'A' | 'a' => {
                         // Aesthetic (princ-like)
                         if let Some(arg) = args.get(*arg_index) {
@@ -2454,7 +2488,9 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                     }
                     '&' => {
                         // Fresh line
-                        result.push('\n');
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
                     }
                     '~' => {
                         // Literal tilde
@@ -2606,6 +2642,52 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                         // Escape from enclosing ~{...~} if no more args
                         // In this simplified version, we just skip it
                         // The parent iteration handler checks for this
+                    }
+                    '/' => {
+                        // User-defined format directive: ~/function-name/
+                        let mut fn_name = String::new();
+                        while let Some(c) = chars.next() {
+                            if c == '/' {
+                                break;
+                            }
+                            fn_name.push(c);
+                        }
+                        let fn_name = fn_name.trim();
+                        if !fn_name.is_empty() {
+                            let arg_val = if let Some(arg) = args.get(*arg_index) {
+                                *arg_index += 1;
+                                arg.clone()
+                            } else {
+                                EvalResult::Nil
+                            };
+                            let stream = make_output_stream();
+                            let call_result = with_current_io_env(|env| {
+                                super::eval_system::call_function_with_values(
+                                    EvalResult::Symbol(fn_name.to_string()),
+                                    &[
+                                        stream.clone(),
+                                        arg_val.clone(),
+                                        EvalResult::Boolean(colon_modifier),
+                                        EvalResult::Boolean(at_modifier),
+                                    ],
+                                    env,
+                                )
+                            });
+                            let streamed = get_output_stream_string(&stream).unwrap_or_default();
+                            match call_result {
+                                Some(Ok(res)) => {
+                                    if !streamed.is_empty() {
+                                        result.push_str(&streamed);
+                                    } else if !matches!(res, EvalResult::Nil) {
+                                        result.push_str(&format_for_princ(&res));
+                                    }
+                                }
+                                Some(Err(_)) | None => {
+                                    // Graceful fallback keeps format usable if the callback is unavailable.
+                                    result.push_str(&format_for_princ(&arg_val));
+                                }
+                            }
+                        }
                     }
                     '*' => {
                         // Argument repositioning

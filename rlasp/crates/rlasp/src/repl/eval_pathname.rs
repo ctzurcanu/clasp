@@ -103,16 +103,17 @@ fn directory_list_to_string_with_mode(dir: &EvalResult) -> Option<(String, bool)
             _ => return None,
         };
 
-        if item_str.eq_ignore_ascii_case(":absolute") {
+        let marker = item_str.trim_start_matches(':');
+        if marker.eq_ignore_ascii_case("absolute") {
             if idx == 0 {
                 is_absolute = true;
             }
             continue;
         }
-        if item_str.eq_ignore_ascii_case(":relative") {
+        if marker.eq_ignore_ascii_case("relative") {
             continue;
         }
-        if item_str.eq_ignore_ascii_case(":back") {
+        if marker.eq_ignore_ascii_case("back") {
             parts.push("..".to_string());
             continue;
         }
@@ -194,7 +195,7 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             let mut i = 0;
             while i < args.len() {
                 if let EvalResult::Symbol(key) = &args[i] {
-                    if key.starts_with(':') && i + 1 < args.len() {
+                    if i + 1 < args.len() {
                         let key_norm = {
                             let base = key.rsplit(':').next().unwrap_or(key.as_str());
                             if base.starts_with(':') {
@@ -203,6 +204,7 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                                 format!(":{}", base.to_ascii_lowercase())
                             }
                         };
+                        let mut consumed = true;
                         match key_norm.as_str() {
                             ":name" => {
                                 match &args[i + 1] {
@@ -260,15 +262,15 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                                     defaults_path = Some(path);
                                 }
                             }
-                            _ => {}
+                            _ => consumed = false,
                         }
-                        i += 2;
-                    } else {
-                        i += 1;
+                        if consumed {
+                            i += 2;
+                            continue;
+                        }
                     }
-                } else {
-                    i += 1;
                 }
+                i += 1;
             }
 
             let mut default_dir = String::new();

@@ -143,6 +143,9 @@ impl Parser {
 
     /// Parse one s-expression
     pub fn read(&mut self) -> ReaderResult<LispObject> {
+        // Keep intermediate parser vectors/slices stable while constructing one form.
+        // They live in Rust-managed memory, which Boehm does not trace as roots.
+        let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
         self.read_expr()
     }
 
@@ -150,6 +153,8 @@ impl Parser {
     /// 1) before trailing whitespace/comments are skipped
     /// 2) after trailing whitespace/comments are skipped (start of next token)
     pub fn read_with_positions(&mut self) -> ReaderResult<(LispObject, usize, usize)> {
+        // Keep intermediate parser vectors/slices stable while constructing one form.
+        let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
         let obj = self.read_expr()?;
         Ok((obj, self.last_token_end_pos, self.current_token.pos))
     }
@@ -378,18 +383,10 @@ impl Parser {
                 if evaluate_feature_expr(feature_expr) {
                     Ok(form) // Feature present - include the form
                 } else {
-                    // Feature absent - form discarded, now continue reading
-                    // Check if there's another form to read
-                    match self.current_token.kind {
-                        // At structural boundary - return skip marker for caller to filter
-                        TokenKind::RightParen | TokenKind::RightBracket |
-                        TokenKind::RightBrace | TokenKind::Eof => {
-                            Ok(Symbol::allocate(FEATURE_SKIP_MARKER))
-                        }
-                        // More input available - recursively read next form
-                        // This correctly handles consecutive feature conditionals
-                        _ => self.read_expr()
-                    }
+                    // Feature absent: discard exactly one following form and return a
+                    // marker for the caller to filter. Do not recursively read again
+                    // here, otherwise one read() can consume multiple top-level forms.
+                    Ok(Symbol::allocate(FEATURE_SKIP_MARKER))
                 }
             }
 
@@ -403,14 +400,10 @@ impl Parser {
                 if !evaluate_feature_expr(feature_expr) {
                     Ok(form) // Feature absent - include the form
                 } else {
-                    // Feature present - form discarded, now continue reading
-                    match self.current_token.kind {
-                        TokenKind::RightParen | TokenKind::RightBracket |
-                        TokenKind::RightBrace | TokenKind::Eof => {
-                            Ok(Symbol::allocate(FEATURE_SKIP_MARKER))
-                        }
-                        _ => self.read_expr()
-                    }
+                    // Feature present: discard exactly one following form and return a
+                    // marker for the caller to filter. Do not recursively read again
+                    // here, otherwise one read() can consume multiple top-level forms.
+                    Ok(Symbol::allocate(FEATURE_SKIP_MARKER))
                 }
             }
 

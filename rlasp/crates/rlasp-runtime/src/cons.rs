@@ -123,6 +123,8 @@ impl Cons {
             return LispObject::nil();
         }
 
+        // Keep list backbone allocation stable across GC runs while chaining cons cells.
+        let _gc_pause = crate::gc::GcPauseGuard::new();
         let mut result = LispObject::nil();
         for elem in elements.iter().rev() {
             result = Cons::allocate(*elem, result);
@@ -138,6 +140,8 @@ impl Cons {
             return tail;
         }
 
+        // Keep list backbone allocation stable across GC runs while chaining cons cells.
+        let _gc_pause = crate::gc::GcPauseGuard::new();
         let mut result = tail;
         for elem in elements.iter().rev() {
             result = Cons::allocate(*elem, result);

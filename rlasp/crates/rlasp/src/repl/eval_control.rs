@@ -1595,6 +1595,62 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             }
                             _ => return Err(format!("setf aref: first argument must be an array or string, got {:?}", array_result)),
                         }
+                    } else if (base_name.eq_ignore_ascii_case("mem-ref") || base_name.eq_ignore_ascii_case("mem-aref"))
+                        && place_args.len() >= 2
+                    {
+                        let ptr = eval_with_env(&place_args[0], env)?;
+                        let type_val = eval_with_env(&place_args[1], env)?;
+                        let mut byte_offset = if place_args.len() >= 3 {
+                            let off_val = eval_with_env(&place_args[2], env)?;
+                            match off_val {
+                                EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                                _ => return Err("setf mem-ref offset must be a non-negative integer".to_string()),
+                            }
+                        } else {
+                            0usize
+                        };
+                        if base_name.eq_ignore_ascii_case("mem-aref") {
+                            let size_call = ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-type-size".to_string())),
+                                args: vec![super::eval_system::result_to_ast_quoted(&type_val)?],
+                            };
+                            let elem_size = match eval_with_env(&size_call, env)? {
+                                EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                                _ => {
+                                    return Err("setf mem-aref unsupported foreign element type".to_string())
+                                }
+                            };
+                            byte_offset = byte_offset
+                                .checked_mul(elem_size)
+                                .ok_or_else(|| "setf mem-aref offset overflow".to_string())?;
+                            if place_args.len() >= 4 {
+                                let extra_off = eval_with_env(&place_args[3], env)?;
+                                let extra = match extra_off {
+                                    EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                                    _ => {
+                                        return Err(
+                                            "setf mem-aref extra offset must be a non-negative integer".to_string()
+                                        )
+                                    }
+                                };
+                                byte_offset = byte_offset
+                                    .checked_add(extra)
+                                    .ok_or_else(|| "setf mem-aref offset overflow".to_string())?;
+                            }
+                        }
+                        let ptr_tmp = format!("__SETF_MEM_PTR_{}__", i);
+                        env.insert(ptr_tmp.clone(), ptr);
+                        let set_call = ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("clasp-ffi:%mem-set".to_string())),
+                            args: vec![
+                                ASTNode::Variable(ptr_tmp.clone()),
+                                super::eval_system::result_to_ast_quoted(&type_val)?,
+                                super::eval_system::result_to_ast_quoted(&value)?,
+                                ASTNode::fixnum(byte_offset as i64),
+                            ],
+                        };
+                        last_value = eval_with_env(&set_call, env)?;
+                        env.remove(&ptr_tmp);
                     } else if func_name == "char" && place_args.len() >= 2 {
                         // (setf (char string index) value) - same as aref for strings
                         let string_result = eval_with_env(&place_args[0], env)?;

@@ -81,6 +81,21 @@ fn trace_tests_enabled() -> bool {
     *TRACE_TESTS_ENABLED.get_or_init(|| std::env::var("RLASP_TRACE_TESTS").is_ok())
 }
 
+fn trace_progv_enabled() -> bool {
+    static TRACE_PROGV_ENABLED: OnceLock<bool> = OnceLock::new();
+    *TRACE_PROGV_ENABLED.get_or_init(|| std::env::var("RLASP_TRACE_PROGV").is_ok())
+}
+
+fn debug_symbol_value_enabled() -> bool {
+    static DEBUG_SYMBOL_VALUE_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_SYMBOL_VALUE_ENABLED.get_or_init(|| std::env::var("RLASP_DEBUG_SYMBOL_VALUE").is_ok())
+}
+
+fn debug_intern_enabled() -> bool {
+    static DEBUG_INTERN_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_INTERN_ENABLED.get_or_init(|| std::env::var("RLASP_DEBUG_INTERN").is_ok())
+}
+
 pub fn runtime_debug_stack_snapshot() -> Vec<String> {
     RUNTIME_DEBUG_CALL_STACK.with(|s| s.borrow().clone())
 }
@@ -258,6 +273,30 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
             | "interactive-stream-p"
             | "open-stream-p"
             | "streamp"
+            | "pathname"
+            | "pathnamep"
+            | "make-pathname"
+            | "merge-pathnames"
+            | "parse-namestring"
+            | "parse-unix-namestring"
+            | "parse-native-namestring"
+            | "native-namestring"
+            | "namestring"
+            | "file-namestring"
+            | "directory-namestring"
+            | "host-namestring"
+            | "enough-namestring"
+            | "pathname-name"
+            | "pathname-type"
+            | "pathname-directory"
+            | "pathname-host"
+            | "pathname-device"
+            | "pathname-version"
+            | "probe-file"
+            | "truename"
+            | "resolve-symlinks"
+            | "truenamize"
+            | "user-homedir-pathname"
             | "run-program"
             | "external-process-wait"
             | "external-process-error-stream"
@@ -2313,7 +2352,7 @@ pub extern "C" fn cc_reverse(sequence: usize) -> usize {
 
     if let Some(vec_ptr) = as_vector_ptr_checked(seq_obj) {
         let vec = unsafe { &*vec_ptr };
-        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len()).min(vec.len());
         let mut out = Vec::with_capacity(logical_len);
         for idx in (0..logical_len).rev() {
             out.push(vec.get(idx).unwrap_or_else(LispObject::nil));
@@ -2603,7 +2642,7 @@ pub extern "C" fn cc_copy_seq(seq: usize) -> usize {
                 Some(ObjectType::Vector) => {
                     let vec_ptr = ptr as *const rlasp_runtime::RVector;
                     let vec = unsafe { &*vec_ptr };
-                    let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len());
+                    let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len()).min(vec.len());
                     let elements: Vec<LispObject> = vec.as_slice().iter().take(logical_len).copied().collect();
                     return rlasp_runtime::RVector::allocate(elements).raw();
                 }
@@ -2734,7 +2773,7 @@ pub extern "C" fn cc_string_equal_full(args: usize) -> usize {
                                     let vec_ptr = ptr as *const rlasp_runtime::RVector;
                                     let vec = unsafe { &*vec_ptr };
                                     let logical_len =
-                                        get_array_fill_pointer_for_object(item).unwrap_or(vec.len());
+                                        get_array_fill_pointer_for_object(item).unwrap_or(vec.len()).min(vec.len());
                                     let mut out = String::new();
                                     let mut ok = true;
                                     for i in 0..logical_len {
@@ -2823,7 +2862,7 @@ fn string_compare_extract_string(obj: LispObject) -> Option<String> {
             Some(ObjectType::Vector) => {
                 let vec_ptr = ptr as *const rlasp_runtime::RVector;
                 let vec = unsafe { &*vec_ptr };
-                let logical_len = get_array_fill_pointer_for_object(obj).unwrap_or(vec.len());
+                let logical_len = get_array_fill_pointer_for_object(obj).unwrap_or(vec.len()).min(vec.len());
                 let mut out = String::new();
                 for i in 0..logical_len {
                     let Some(elem) = vec.get(i) else {
@@ -3127,16 +3166,16 @@ fn safe_cons_ptr_from_obj(obj: LispObject) -> Option<*const rlasp_runtime::Cons>
 
 #[inline]
 fn symbol_name_for_matching(obj: LispObject) -> Option<String> {
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        let sym = unsafe { &*sym_ptr };
+        return Some(sym.name().to_string());
+    }
+
     if let Some(name) = {
         let map = get_symbol_name_map().lock().unwrap();
         map.get(&obj.raw()).cloned()
     } {
         return Some(name);
-    }
-
-    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
-        let sym = unsafe { &*sym_ptr };
-        return Some(sym.name().to_string());
     }
     None
 }
@@ -3911,14 +3950,26 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
     let control_str = control_str_owned.as_str();
 
     let mut result = String::new();
-    let mut chars = control_str.chars();
+    let mut chars = control_str.chars().peekable();
     let mut arg_list = arg_list;
 
     while let Some(ch) = chars.next() {
         if ch == '~' {
             if let Some(directive) = chars.next() {
                 match directive {
-                    '&' => {},  // Fresh line - ignored for now
+                    '\n' | '\r' => {
+                        if directive == '\r' && matches!(chars.peek(), Some('\n')) {
+                            chars.next();
+                        }
+                        while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
+                    '&' => {
+                        if !result.is_empty() && !result.ends_with('\n') {
+                            result.push('\n');
+                        }
+                    }
                     '%' => result.push('\n'),
                     'A' | 'a' => {
                         if let Some(cons_ptr) = arg_list.as_cons_ptr() {
@@ -4656,8 +4707,6 @@ pub extern "C" fn cc_make_symbol(name_ptr: *const i8, len: i64) -> usize {
     let sym = rlasp_runtime::Symbol::allocate(name_str.clone());
     let raw = sym.raw();
 
-    track_symbol_name(raw, &name_str);
-
     if std::env::var("RLASP_TRACE_ARGS").is_ok() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SYM_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -4838,7 +4887,8 @@ fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
 /// Uses name-based lookup since symbols aren't interned
 #[no_mangle]
 pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
-    let trace = std::env::var("RLASP_TRACE_PROGV").is_ok();
+    let trace = trace_progv_enabled();
+    let trace_symbol_value = debug_symbol_value_enabled();
     let tid = std::thread::current().id();
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
 
@@ -4852,9 +4902,62 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
         let sym = unsafe { &*sym_ptr };
         sym.name().to_string()
     } else {
+        if trace_symbol_value {
+            let kind = if let Some(str_ptr) = as_string_ptr_checked(sym_obj) {
+                if str_ptr.is_null() {
+                    "STRING(NULL)".to_string()
+                } else {
+                    let s = unsafe { &*str_ptr };
+                    format!("STRING({})", s.as_str())
+                }
+            } else if let Some(pkg_ptr) = as_package_ptr_checked(sym_obj) {
+                if pkg_ptr.is_null() {
+                    "PACKAGE(NULL)".to_string()
+                } else {
+                    let pkg = unsafe { &*pkg_ptr };
+                    format!("PACKAGE({})", pkg.name())
+                }
+            } else if let Some(vec_ptr) = as_vector_ptr_checked(sym_obj) {
+                if vec_ptr.is_null() {
+                    "VECTOR(NULL)".to_string()
+                } else {
+                    let vec = unsafe { &*vec_ptr };
+                    format!("VECTOR(len={})", vec.len())
+                }
+            } else if let Some(ptr) = sym_obj.as_general_ptr::<()>() {
+                if ptr.is_null() {
+                    "GENERAL(NULL)".to_string()
+                } else {
+                    use rlasp_runtime::header::TypeHeader;
+                    match unsafe { TypeHeader::from_ptr(ptr) } {
+                        Some(t) => format!("GENERAL({:?})", t),
+                        None => "GENERAL(UNKNOWN)".to_string(),
+                    }
+                }
+            } else {
+                "NON-GENERAL".to_string()
+            };
+            eprintln!(
+                "[symbol-value non-symbol] raw=0x{:x} tag={:?} kind={} rendered={}",
+                symbol,
+                sym_obj.tag(),
+                kind,
+                format_lisp_object(sym_obj)
+            );
+            let stack = runtime_debug_stack_snapshot();
+            if !stack.is_empty() {
+                eprintln!("[symbol-value non-symbol] runtime-stack={:?}", stack);
+            }
+        }
         // Not a symbol - return nil
         return LispObject::nil().raw();
     };
+    if trace_symbol_value {
+        eprintln!(
+            "[symbol-value] name={} raw=0x{:x}",
+            name, symbol
+        );
+    }
 
     // CL self-evaluating symbols
     match name.as_str() {
@@ -5024,6 +5127,30 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "interactive-stream-p"
             | "open-stream-p"
             | "streamp"
+            | "pathname"
+            | "pathnamep"
+            | "make-pathname"
+            | "merge-pathnames"
+            | "parse-namestring"
+            | "parse-unix-namestring"
+            | "parse-native-namestring"
+            | "native-namestring"
+            | "namestring"
+            | "file-namestring"
+            | "directory-namestring"
+            | "host-namestring"
+            | "enough-namestring"
+            | "pathname-name"
+            | "pathname-type"
+            | "pathname-directory"
+            | "pathname-host"
+            | "pathname-device"
+            | "pathname-version"
+            | "probe-file"
+            | "truename"
+            | "resolve-symlinks"
+            | "truenamize"
+            | "user-homedir-pathname"
             | "run-program"
             | "external-process-wait"
             | "external-process-error-stream"
@@ -5279,7 +5406,14 @@ fn resolve_package_symbol_object(canon_pkg: &str, symbol_name: &str) -> usize {
     // Runtime package symbol identities are maintained locally and cached.
     // Avoid recursive bridge calls here: they are expensive and can trigger
     // pathological feedback during package bootstrapping (e.g. ASDF).
-    let raw = rlasp_runtime::Symbol::allocate(canon_symbol).raw();
+    // Keep package-qualified interned symbol identities stable for the whole process.
+    // Storing only raw pointers inside Rust HashMaps is not visible to Boehm root scanning,
+    // so GC-managed symbol allocations can be reclaimed/reused and break EQ identity.
+    // Allocate these cached symbols as process-lifetime objects instead.
+    let raw = {
+        let sym = Box::new(rlasp_runtime::Symbol::new(canon_symbol));
+        LispObject::from_general_ptr(Box::into_raw(sym)).raw()
+    };
 
     {
         let mut map = PACKAGE_SYMBOL_OBJECTS.lock().unwrap();
@@ -5319,12 +5453,6 @@ fn find_package_entry(name: &str) -> Option<String> {
             if nick.to_uppercase() == normalized {
                 return Some(canon_name.clone());
             }
-        }
-    }
-    // Check prefix match (e.g., "ASDF" matches "ASDF/INTERFACE")
-    for canon_name in reg.keys() {
-        if canon_name.starts_with(&format!("{}/", normalized)) {
-            return Some(canon_name.clone());
         }
     }
     None
@@ -6110,7 +6238,7 @@ pub extern "C" fn cc_make_symbol_from_name(name_obj: usize) -> usize {
     }
     if let Some(vec_ptr) = as_vector_ptr_checked(name_lo) {
         let vec = unsafe { &*vec_ptr };
-        let logical_len = get_array_fill_pointer_for_object(name_lo).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(name_lo).unwrap_or(vec.len()).min(vec.len());
         let mut out = String::with_capacity(logical_len);
         for i in 0..logical_len {
             let Some(elem) = vec.get(i) else {
@@ -6315,8 +6443,20 @@ pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
         return value;
     };
 
-    // Store in dynamic bindings by name
-    DYNAMIC_BINDINGS.lock().unwrap().insert(name, value);
+    // Store with canonical aliases so package-qualified and case-variant lookups
+    // resolve the same dynamic binding.
+    let mut b = DYNAMIC_BINDINGS.lock().unwrap();
+    let upper = name.to_ascii_uppercase();
+    let lower = name.to_ascii_lowercase();
+    b.insert(name.clone(), value);
+    b.insert(upper, value);
+    b.insert(lower, value);
+    let base = strip_package_prefix(&name);
+    if base != name.as_str() {
+        b.insert(base.to_string(), value);
+        b.insert(base.to_ascii_uppercase(), value);
+        b.insert(base.to_ascii_lowercase(), value);
+    }
 
     value
 }
@@ -6639,32 +6779,27 @@ pub extern "C" fn cc_gensym(prefix: usize) -> usize {
 /// (symbol-name symbol) -> string
 #[no_mangle]
 pub extern "C" fn cc_symbol_name(symbol: usize) -> usize {
-    use rlasp_runtime::{Symbol, RString};
-    use rlasp_runtime::header::{TypeHeader, ObjectType};
+    use rlasp_runtime::RString;
 
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
-
-    // Check if it's a General-tagged object
-    if !sym_obj.is_general() {
-        return RString::allocate(String::new()).raw();
+    if sym_obj.is_nil() {
+        return RString::allocate("NIL".to_string()).raw();
     }
-
-    let ptr = sym_obj.as_general_ptr::<()>().unwrap();
-    if ptr.is_null() {
-        return RString::allocate(String::new()).raw();
+    if sym_obj.raw() == LispObject::t().raw() {
+        return RString::allocate("T".to_string()).raw();
     }
-
-    // Check type header to ensure it's actually a Symbol
-    let obj_type = unsafe { TypeHeader::from_ptr(ptr) };
-    if obj_type == Some(ObjectType::Symbol) {
-        let sym_ptr = ptr as *const Symbol;
+    if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
-        let name = sym.name();
-        return RString::allocate(name.to_string()).raw();
+        return RString::allocate(sym.name().to_string()).raw();
+    }
+    if let Some(name) = {
+        let map = get_symbol_name_map().lock().unwrap();
+        map.get(&sym_obj.raw()).cloned()
+    } {
+        return RString::allocate(name).raw();
     }
 
-    // Not a symbol - return empty string
-    RString::allocate(String::new()).raw()
+    rlasp_runtime::LispError::type_error("symbol-name expects a symbol").raw()
 }
 
 /// CL string function: coerce to string
@@ -6674,70 +6809,50 @@ pub extern "C" fn cc_symbol_name(symbol: usize) -> usize {
 /// - If x is a character, return a 1-character string
 #[no_mangle]
 pub extern "C" fn cc_string(obj: usize) -> usize {
-    use rlasp_runtime::{Symbol, RString};
-    use rlasp_runtime::header::{TypeHeader, ObjectType};
+    use rlasp_runtime::RString;
 
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
 
     if lisp_obj.is_nil() {
         return RString::allocate("NIL".to_string()).raw();
     }
-
-    if !lisp_obj.is_general() {
-        // Could be a character (fixnum-tagged)
-        if let Some(n) = lisp_obj.as_fixnum() {
-            if let Some(c) = char::from_u32(n as u32) {
-                return RString::allocate(c.to_string()).raw();
-            }
-        }
-        return RString::allocate(format!("{}", lisp_obj)).raw();
+    if lisp_obj.raw() == LispObject::t().raw() {
+        return RString::allocate("T".to_string()).raw();
     }
 
-    let ptr = lisp_obj.as_general_ptr::<()>().unwrap();
-    if ptr.is_null() {
-        return RString::allocate(String::new()).raw();
+    // STRING accepts only string designators: string, symbol, character.
+    if as_string_ptr_checked(lisp_obj).is_some() {
+        return obj;
     }
 
-    match unsafe { TypeHeader::from_ptr(ptr) } {
-        Some(ObjectType::String) => {
-            // Already a string - return as-is
-            obj
-        }
-        Some(ObjectType::Vector) => {
-            if let Some(vec_ptr) = as_vector_ptr_checked(lisp_obj) {
-                let vec = unsafe { &*vec_ptr };
-                let logical_len = get_array_fill_pointer_for_object(lisp_obj).unwrap_or(vec.len());
-                let mut out = String::with_capacity(logical_len);
-                for i in 0..logical_len {
-                    let Some(elem) = vec.get(i) else {
-                        return RString::allocate(format!("{}", lisp_obj)).raw();
-                    };
-                    let Some(ch) = elem.as_character() else {
-                        return RString::allocate(format!("{}", lisp_obj)).raw();
-                    };
-                    out.push(ch);
-                }
-                return RString::allocate(out).raw();
-            }
-            RString::allocate(format!("{}", lisp_obj)).raw()
-        }
-        Some(ObjectType::Symbol) => {
-            let sym = unsafe { &*(ptr as *const Symbol) };
-            let name = sym.name();
-            // Strip leading colon for keywords
-            let clean = if name.starts_with(':') { &name[1..] } else { name };
-            RString::allocate(clean.to_string()).raw()
-        }
-        _ => {
-            RString::allocate(format!("{}", lisp_obj)).raw()
-        }
+    if let Some(sym_ptr) = as_symbol_ptr_checked(lisp_obj) {
+        let sym = unsafe { &*sym_ptr };
+        let name = sym.name();
+        let clean = if name.starts_with(':') { &name[1..] } else { name };
+        return RString::allocate(clean.to_string()).raw();
     }
+
+    if let Some(name) = {
+        let map = get_symbol_name_map().lock().unwrap();
+        map.get(&lisp_obj.raw()).cloned()
+    } {
+        // Strip leading colon for keywords
+        let clean = if name.starts_with(':') { &name[1..] } else { name.as_str() };
+        return RString::allocate(clean.to_string()).raw();
+    }
+
+    if let Some(ch) = lisp_obj.as_character() {
+        return RString::allocate(ch.to_string()).raw();
+    }
+
+    rlasp_runtime::LispError::type_error("string expects a string designator").raw()
 }
 
 /// Intern a symbol in a package (intern)
 /// (intern name &optional package) -> symbol, status
 #[no_mangle]
 pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
+    let trace_intern = debug_intern_enabled();
     let pack_result = |symbol: usize, status: usize| -> usize {
         let mut values = cc_nil_value();
         values = cc_cons(status, values);
@@ -6796,6 +6911,19 @@ pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
 
     if let Some((home_pkg, status_name)) = existing_home_and_status {
         let raw = resolve_package_symbol_object(&home_pkg, &canonical);
+        if trace_intern
+            && (canonical == "*VERSION*" || home_pkg.eq_ignore_ascii_case("QLQS-INFO"))
+        {
+            let obj = unsafe { LispObject::from_raw(raw) };
+            eprintln!(
+                "[intern existing] name={} pkg={} status={} raw=0x{:x} is_symbol={}",
+                canonical,
+                home_pkg,
+                status_name,
+                raw,
+                as_symbol_ptr_checked(obj).is_some()
+            );
+        }
         cache_symbol_home_package(raw, &home_pkg);
         return pack_result(raw, keyword_symbol(status_name));
     }
@@ -6813,6 +6941,18 @@ pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
     }
 
     let raw = resolve_package_symbol_object(&canon_pkg, &canonical);
+    if trace_intern
+        && (canonical == "*VERSION*" || canon_pkg.eq_ignore_ascii_case("QLQS-INFO"))
+    {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        eprintln!(
+            "[intern new] name={} pkg={} raw=0x{:x} is_symbol={}",
+            canonical,
+            canon_pkg,
+            raw,
+            as_symbol_ptr_checked(obj).is_some()
+        );
+    }
     cache_symbol_home_package(raw, &canon_pkg);
     pack_result(raw, LispObject::nil().raw())
 }
@@ -6822,7 +6962,7 @@ pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
 /// In CL this returns two values; we return just the symbol (or nil if not found).
 #[no_mangle]
 pub extern "C" fn cc_find_symbol(name: usize, package: usize) -> usize {
-    use rlasp_runtime::{Symbol, RString};
+    use rlasp_runtime::{RString, Symbol};
     use rlasp_runtime::header::{TypeHeader, ObjectType};
     let pack_result = |symbol: usize, status: usize| -> usize {
         let mut values = cc_nil_value();
@@ -6867,64 +7007,36 @@ pub extern "C" fn cc_find_symbol(name: usize, package: usize) -> usize {
     } else {
         extract_name_string(package)
     };
-    if let Some(canon_pkg) = find_package_entry(&pkg_name) {
-        let found_home_and_status = {
-            let reg = PACKAGE_REGISTRY.lock().unwrap();
-            reg.get(&canon_pkg).and_then(|pkg| {
-                if pkg.exported_symbols.contains(&upper) {
-                    Some((canon_pkg.clone(), ":EXTERNAL"))
-                } else if pkg.internal_symbols.contains(&upper) {
-                    Some((canon_pkg.clone(), ":INTERNAL"))
-                } else {
-                    for used_pkg in &pkg.use_list {
-                        if let Some(used) = reg.get(used_pkg) {
-                            if used.exported_symbols.contains(&upper) {
-                                return Some((used_pkg.clone(), ":INHERITED"));
-                            }
-                        }
-                    }
-                    None
-                }
-            })
-        };
-        if let Some((home_pkg, status_name)) = found_home_and_status {
-            let raw = resolve_package_symbol_object(&home_pkg, &upper);
-            return pack_result(raw, keyword_symbol(status_name));
-        }
-    }
-
-    // Check if it exists as a dynamic binding
-    let found_dynamic = {
-        let b = DYNAMIC_BINDINGS.lock().unwrap();
-        b.contains_key(&name_str) || b.contains_key(&upper) || b.contains_key(&name_str.to_lowercase())
+    let Some(canon_pkg) = find_package_entry(&pkg_name) else {
+        return pack_result(LispObject::nil().raw(), LispObject::nil().raw());
     };
 
-    if found_dynamic {
-        if let Some(canon_pkg) = find_package_entry(&pkg_name) {
-            let raw = resolve_package_symbol_object(&canon_pkg, &upper);
-            cache_symbol_home_package(raw, &canon_pkg);
-            return pack_result(raw, keyword_symbol(":INTERNAL"));
-        }
-        return pack_result(Symbol::allocate(upper).raw(), keyword_symbol(":INTERNAL"));
-    }
-
-    // Check if it exists as a function in the JIT registry
-    {
-        let registry = get_registry().lock().unwrap();
-        let fn_key = format!("%FN%{}", upper);
-        let fn_key_lower = format!("%FN%{}", name_str.to_lowercase());
-        if registry.contains_key(&fn_key) || registry.contains_key(&fn_key_lower) ||
-           registry.contains_key(&upper) || registry.contains_key(&name_str.to_lowercase()) {
-            if let Some(canon_pkg) = find_package_entry(&pkg_name) {
-                let raw = resolve_package_symbol_object(&canon_pkg, &upper);
-                cache_symbol_home_package(raw, &canon_pkg);
-                return pack_result(raw, keyword_symbol(":INTERNAL"));
+    let found_home_and_status = {
+        let reg = PACKAGE_REGISTRY.lock().unwrap();
+        reg.get(&canon_pkg).and_then(|pkg| {
+            if pkg.exported_symbols.contains(&upper) {
+                Some((canon_pkg.clone(), ":EXTERNAL"))
+            } else if pkg.internal_symbols.contains(&upper) {
+                Some((canon_pkg.clone(), ":INTERNAL"))
+            } else {
+                for used_pkg in &pkg.use_list {
+                    if let Some(used) = reg.get(used_pkg) {
+                        if used.exported_symbols.contains(&upper) {
+                            return Some((used_pkg.clone(), ":INHERITED"));
+                        }
+                    }
+                }
+                None
             }
-            return pack_result(Symbol::allocate(upper).raw(), keyword_symbol(":INTERNAL"));
-        }
+        })
+    };
+    if let Some((home_pkg, status_name)) = found_home_and_status {
+        let raw = resolve_package_symbol_object(&home_pkg, &upper);
+        return pack_result(raw, keyword_symbol(status_name));
     }
 
-    // Not found
+    // CL find-symbol only searches the package namespace (plus inherited exports),
+    // not global dynamic bindings or function registries.
     pack_result(LispObject::nil().raw(), LispObject::nil().raw())
 }
 
@@ -7413,7 +7525,7 @@ fn sequence_length(seq: LispObject) -> Option<usize> {
     }
     if let Some(vec_ptr) = as_vector_ptr_checked(seq) {
         let vec = unsafe { &*vec_ptr };
-        return Some(get_array_fill_pointer_for_object(seq).unwrap_or(vec.len()));
+        return Some(get_array_fill_pointer_for_object(seq).unwrap_or(vec.len()).min(vec.len()));
     }
     if seq.as_cons_ptr().is_some() || seq.is_nil() {
         let mut len = 0usize;
@@ -8497,7 +8609,7 @@ pub extern "C" fn cc_equalp(obj1: usize, obj2: usize) -> usize {
                 if ta == Some(ObjectType::String) && tb == Some(ObjectType::Vector) {
                     let sa = unsafe { &*(pa as *const rlasp_runtime::RString) };
                     let vb = unsafe { &*(pb as *const rlasp_runtime::RVector) };
-                    let lb = get_array_fill_pointer_for_object(b).unwrap_or(vb.len());
+                    let lb = get_array_fill_pointer_for_object(b).unwrap_or(vb.len()).min(vb.len());
                     if sa.len_chars() != lb {
                         return false;
                     }
@@ -8515,7 +8627,7 @@ pub extern "C" fn cc_equalp(obj1: usize, obj2: usize) -> usize {
                 if ta == Some(ObjectType::Vector) && tb == Some(ObjectType::String) {
                     let va = unsafe { &*(pa as *const rlasp_runtime::RVector) };
                     let sb = unsafe { &*(pb as *const rlasp_runtime::RString) };
-                    let la = get_array_fill_pointer_for_object(a).unwrap_or(va.len());
+                    let la = get_array_fill_pointer_for_object(a).unwrap_or(va.len()).min(va.len());
                     if la != sb.len_chars() {
                         return false;
                     }
@@ -8533,8 +8645,8 @@ pub extern "C" fn cc_equalp(obj1: usize, obj2: usize) -> usize {
                 if ta == Some(ObjectType::Vector) && tb == Some(ObjectType::Vector) {
                     let va = unsafe { &*(pa as *const rlasp_runtime::RVector) };
                     let vb = unsafe { &*(pb as *const rlasp_runtime::RVector) };
-                    let la = get_array_fill_pointer_for_object(a).unwrap_or(va.len());
-                    let lb = get_array_fill_pointer_for_object(b).unwrap_or(vb.len());
+                    let la = get_array_fill_pointer_for_object(a).unwrap_or(va.len()).min(va.len());
+                    let lb = get_array_fill_pointer_for_object(b).unwrap_or(vb.len()).min(vb.len());
                     if la != lb {
                         return false;
                     }
@@ -9498,7 +9610,7 @@ pub extern "C" fn cc_subseq(sequence: usize, start: usize, end: usize) -> usize 
 
     if let Some(vec_ptr) = as_vector_ptr_checked(seq_obj) {
         let vec = unsafe { &*vec_ptr };
-        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len()).min(vec.len());
         let end_idx = if end_obj.is_nil() {
             logical_len
         } else {
@@ -9760,7 +9872,7 @@ pub extern "C" fn cc_elt(sequence: usize, index: usize) -> usize {
 
     if let Some(vec_ptr) = as_vector_ptr_checked(seq_obj) {
         let vec = unsafe { &*vec_ptr };
-        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len()).min(vec.len());
         if idx >= logical_len {
             return rlasp_runtime::LispError::type_error("elt index out of bounds").raw();
         }
@@ -9814,7 +9926,7 @@ pub extern "C" fn cc_set_elt(sequence: usize, index: usize, value: usize) -> usi
 
     if let Some(vec_ptr) = as_vector_ptr_checked(seq_obj) {
         let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
-        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len()).min(vec.len());
         if std::env::var("RLASP_DEBUG_SET_ELT").is_ok() {
             let key = vector_key(seq_obj).unwrap_or(0);
             eprintln!(
@@ -9876,7 +9988,7 @@ pub extern "C" fn cc_fill(sequence: usize, item: usize, start: usize, end: usize
 
     if let Some(vec_ptr) = as_vector_ptr_checked(seq_obj) {
         let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
-        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(seq_obj).unwrap_or(vec.len()).min(vec.len());
         let end_idx = if end_obj.is_nil() {
             logical_len
         } else {
@@ -16922,11 +17034,28 @@ pub extern "C" fn cc_incf(args_and_env: usize) -> usize {
 /// Create a new vector with the given length (all elements initialized to nil)
 #[no_mangle]
 pub extern "C" fn cc_make_vector(len: usize) -> usize {
-    let mut elements = Vec::with_capacity(len);
-    for _ in 0..len {
+    let len_obj = unsafe { LispObject::from_raw(len) };
+    let Some(logical_len) = parse_non_negative_fixnum(len_obj) else {
+        return rlasp_runtime::LispError::type_error(
+            "make-vector length must be a non-negative integer",
+        )
+        .raw();
+    };
+    if logical_len > ARRAY_TOTAL_SIZE_LIMIT_RUNTIME {
+        return rlasp_runtime::LispError::type_error(
+            "make-vector length exceeds ARRAY-TOTAL-SIZE-LIMIT",
+        )
+        .raw();
+    }
+
+    let mut elements = Vec::with_capacity(logical_len);
+    for _ in 0..logical_len {
         elements.push(LispObject::nil());
     }
     let vec = rlasp_runtime::RVector::allocate(elements);
+    set_array_dims_for_object(vec, vec![logical_len]);
+    clear_array_displacement_for_object(vec);
+    clear_array_fill_pointer_for_object(vec);
     clear_array_element_type_for_object(vec);
     set_array_adjustable_for_object(vec, false);
     vec.raw()
@@ -16937,29 +17066,42 @@ pub extern "C" fn cc_make_vector(len: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_svset(vector: usize, index: usize, value: usize) -> usize {
     let vec_obj = unsafe { LispObject::from_raw(vector) };
+    let index_obj = unsafe { LispObject::from_raw(index) };
     let value_obj = unsafe { LispObject::from_raw(value) };
+    let Some(idx) = parse_non_negative_fixnum(index_obj) else {
+        return rlasp_runtime::LispError::type_error("svset index must be a non-negative integer").raw();
+    };
 
     if let Some(vec_ptr) = as_vector_ptr_checked(vec_obj) {
         let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
-        vec.set(index, value_obj);
+        if idx >= vec.len() {
+            return rlasp_runtime::LispError::type_error("svset index out of bounds").raw();
+        }
+        vec.set(idx, value_obj);
+        return value;
     }
 
-    value
+    rlasp_runtime::LispError::type_error("svset requires a vector").raw()
 }
 
 /// Get an element from a simple vector (svref)
 #[no_mangle]
 pub extern "C" fn cc_svref(vector: usize, index: usize) -> usize {
     let vec_obj = unsafe { LispObject::from_raw(vector) };
+    let index_obj = unsafe { LispObject::from_raw(index) };
+    let Some(idx) = parse_non_negative_fixnum(index_obj) else {
+        return rlasp_runtime::LispError::type_error("svref index must be a non-negative integer").raw();
+    };
 
     if let Some(vec_ptr) = as_vector_ptr_checked(vec_obj) {
         let vec = unsafe { &*vec_ptr };
-        if let Some(elem) = vec.get(index) {
+        if let Some(elem) = vec.get(idx) {
             return elem.raw();
         }
+        return rlasp_runtime::LispError::type_error("svref index out of bounds").raw();
     }
 
-    LispObject::nil().raw()
+    rlasp_runtime::LispError::type_error("svref requires a vector").raw()
 }
 
 /// Get the length of a vector
@@ -17070,7 +17212,7 @@ fn sequence_to_vec(seq: LispObject) -> Option<Vec<LispObject>> {
     }
     if let Some(vec_ptr) = as_vector_ptr_checked(seq) {
         let vec = unsafe { &*vec_ptr };
-        let logical_len = get_array_fill_pointer_for_object(seq).unwrap_or(vec.len());
+        let logical_len = get_array_fill_pointer_for_object(seq).unwrap_or(vec.len()).min(vec.len());
         let mut items = Vec::with_capacity(logical_len);
         for i in 0..logical_len {
             items.push(vec.get(i).unwrap_or_else(LispObject::nil));

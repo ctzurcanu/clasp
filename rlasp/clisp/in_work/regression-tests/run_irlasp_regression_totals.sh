@@ -15,11 +15,13 @@ SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
 COMPARE_CL_BASELINE="${COMPARE_CL_BASELINE:-1}"
 REQUIRE_CL_BASELINE_SUCCESS="${REQUIRE_CL_BASELINE_SUCCESS:-1}"
-CL_BASELINE_ENGINE="${CL_BASELINE_ENGINE:-auto}"
+CL_BASELINE_ENGINE="${CL_BASELINE_ENGINE:-clasp}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
 MLIR_SELECTIVE_EVAL="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
 MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-0}"
 IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-100000}"
+IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
+IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
   exit 2
@@ -28,6 +30,11 @@ MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-1}"
 typeset -a IRLASP_ENV=()
 if [[ -n "$IRLASP_GC_FREE_SPACE_DIVISOR" ]]; then
   IRLASP_ENV+=("GC_FREE_SPACE_DIVISOR=$IRLASP_GC_FREE_SPACE_DIVISOR")
+fi
+if [[ -n "$IRLASP_MEMORY_CEILING_MB" ]]; then
+  IRLASP_ENV+=("RLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB")
+  IRLASP_ENV+=("RLASP_MEMORY_CEILING_ACTION=exit")
+  IRLASP_ENV+=("RLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS")
 fi
 
 # Canonical suite test inventory for run-all-irlasp (47 suites, TOTAL 1953).
@@ -401,6 +408,7 @@ run_cl_suite_baseline() {
 
   run_and_validate_engine() {
     local engine="$1"
+    BASELINE_LAST_ENGINE="$engine"
     run_baseline_suite_with_engine "$engine" "$suite" "$baseline_log"
     rc=$?
     if [[ "$rc" -ne 0 ]]; then
@@ -426,13 +434,6 @@ run_cl_suite_baseline() {
     auto)
       if [[ -x "$CLASP_BIN" ]]; then
         run_and_validate_engine "clasp"
-        rc=$?
-        if [[ "$rc" -eq 0 ]]; then
-          return 0
-        fi
-      fi
-      if [[ -x "$SBCL_BIN" ]]; then
-        run_and_validate_engine "sbcl"
         return $?
       fi
       return 127
@@ -705,6 +706,8 @@ run_mode() {
   echo "Running mode=$mode log=$log_file" | tee -a "$summary_file"
   echo "SUITE_TIMEOUT_S $SUITE_TIMEOUT_S" | tee -a "$summary_file"
   echo "TIMEOUT_BIN ${TIMEOUT_BIN:-none}" | tee -a "$summary_file"
+  echo "IRLASP_MEMORY_CEILING_MB $IRLASP_MEMORY_CEILING_MB" | tee -a "$summary_file"
+  echo "IRLASP_MEMORY_CEILING_CHECK_MS $IRLASP_MEMORY_CEILING_CHECK_MS" | tee -a "$summary_file"
   if [[ "$mode" == "mlir" ]]; then
     echo "MLIR_BEHAVIOR $MLIR_BEHAVIOR" | tee -a "$summary_file"
     echo "MLIR_SELECTIVE_EVAL $MLIR_SELECTIVE_EVAL" | tee -a "$summary_file"
@@ -726,6 +729,7 @@ run_mode() {
   local extra_total=0
   local compared_suites=0
   local baseline_errors=0
+  local baseline_unavailable=0
   local timed_out=0
 
   if [[ "$COMPARE_CL_BASELINE" == "1" ]]; then
@@ -743,8 +747,13 @@ run_mode() {
       suite_baseline_logs[$suite]="$baseline_log"
       suite_baseline_engines[$suite]="${BASELINE_LAST_ENGINE:-none}"
       if [[ "${suite_baseline_rcs[$suite]}" -ne 0 ]]; then
-        baseline_errors=$((baseline_errors + 1))
-        echo "BASELINE_SUITE_WARN $suite engine=${suite_baseline_engines[$suite]} rc=${suite_baseline_rcs[$suite]} log=$baseline_log" >> "$summary_file"
+        if [[ "${suite_baseline_rcs[$suite]}" -eq 65 ]]; then
+          baseline_unavailable=$((baseline_unavailable + 1))
+          echo "BASELINE_SUITE_UNAVAILABLE $suite engine=${suite_baseline_engines[$suite]} rc=${suite_baseline_rcs[$suite]} log=$baseline_log" >> "$summary_file"
+        else
+          baseline_errors=$((baseline_errors + 1))
+          echo "BASELINE_SUITE_WARN $suite engine=${suite_baseline_engines[$suite]} rc=${suite_baseline_rcs[$suite]} log=$baseline_log" >> "$summary_file"
+        fi
       else
         echo "BASELINE_SUITE_OK $suite engine=${suite_baseline_engines[$suite]} log=$baseline_log" >> "$summary_file"
       fi
@@ -901,7 +910,7 @@ run_mode() {
     mismatch_total_display="NA"
     missing_total_display="NA"
     extra_total_display="NA"
-  elif [[ "$baseline_errors" -gt 0 ]]; then
+  elif [[ "$baseline_errors" -gt 0 || "$compared_suites" -eq 0 ]]; then
     correct_total_display="NA"
     expected_from_cl_total_display="NA"
     mismatch_total_display="NA"
@@ -917,7 +926,7 @@ run_mode() {
   else
     echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp CORRECT: $correct_total_display EXPECTED_FROM_CL: $expected_from_cl_total_display MISMATCH: $mismatch_total_display MISSING: $missing_total_display EXTRA: $extra_total_display SUITE_TIME_SUM_S $suite_time_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
   fi
-  echo "SUITES_TOTAL ${#suites[@]} SUITES_TIMED_OUT $timed_out CL_BASELINE_ERRORS $baseline_errors CL_BASELINE_COMPARED_SUITES $compared_suites" >> "$summary_file"
+  echo "SUITES_TOTAL ${#suites[@]} SUITES_TIMED_OUT $timed_out CL_BASELINE_ERRORS $baseline_errors CL_BASELINE_UNAVAILABLE $baseline_unavailable CL_BASELINE_COMPARED_SUITES $compared_suites" >> "$summary_file"
   echo "Summary ($mode):"
   cat "$summary_file"
   echo

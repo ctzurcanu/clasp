@@ -375,6 +375,38 @@ pub fn global_gc() -> &'static dyn GCAllocator {
     }
 }
 
+/// Disable GC collection (Boehm only). No-op for non-Boehm builds.
+pub fn gc_disable() {
+    #[cfg(feature = "boehm-gc")]
+    unsafe {
+        ffi::GC_disable();
+    }
+}
+
+/// Re-enable GC collection (Boehm only). No-op for non-Boehm builds.
+pub fn gc_enable() {
+    #[cfg(feature = "boehm-gc")]
+    unsafe {
+        ffi::GC_enable();
+    }
+}
+
+/// RAII guard to pause GC during fragile pointer-construction sequences.
+pub struct GcPauseGuard;
+
+impl GcPauseGuard {
+    pub fn new() -> Self {
+        gc_disable();
+        Self
+    }
+}
+
+impl Drop for GcPauseGuard {
+    fn drop(&mut self) {
+        gc_enable();
+    }
+}
+
 /// Allocate using the global GC
 pub unsafe fn gc_allocate<T: GCInfo>(value: T) -> NonNull<T> {
     allocate(global_gc(), value)

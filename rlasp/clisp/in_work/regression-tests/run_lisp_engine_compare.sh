@@ -21,11 +21,10 @@ SBCL_TIMEOUT_S="${SBCL_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 CLASP_TIMEOUT_S="${CLASP_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 IRLASP_INTERP_TIMEOUT_S="${IRLASP_INTERP_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 IRLASP_MLIR_TIMEOUT_S="${IRLASP_MLIR_TIMEOUT_S:-$RUN_TIMEOUT_S}"
-IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-100000}"
+IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-}"
+IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
+IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 typeset -a IRLASP_ENV=()
-if [[ -n "$IRLASP_GC_FREE_SPACE_DIVISOR" ]]; then
-  IRLASP_ENV+=("GC_FREE_SPACE_DIVISOR=$IRLASP_GC_FREE_SPACE_DIVISOR")
-fi
 mkdir -p "$LOG_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -33,6 +32,7 @@ if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <file.lisp|directory>"
   echo "Optional env: SBCL_BIN, CLASP_BIN, IRLASP_BIN, LOG_DIR, REQUIRE_BASELINE_PASS, BASELINE_POLICY, HARNESS_MODE"
   echo "Optional env timeouts (seconds): RUN_TIMEOUT_S, SBCL_TIMEOUT_S, CLASP_TIMEOUT_S, IRLASP_INTERP_TIMEOUT_S, IRLASP_MLIR_TIMEOUT_S"
+  echo "Optional env memory guard: IRLASP_MEMORY_CEILING_MB (default 1024), IRLASP_MEMORY_CEILING_CHECK_MS (default 100)"
   echo "BASELINE_POLICY: auto|clasp|sbcl|sbcl_and_clasp (default: auto)"
   echo "HARNESS_MODE: auto|direct|regression (default: auto)"
   exit 2
@@ -193,6 +193,10 @@ normalize_output() {
   sed -E \
     -e 's/\r$//' \
     -e '/^\[HARNESS-TIMING\]/d' \
+    -e '/^RLASP_MEMORY_CEILING_ACTIVE /d' \
+    -e '/^RLASP_MEMORY_CEILING_SUMMARY /d' \
+    -e '/^RLASP_MEMORY_CEILING_REACHED /d' \
+    -e '/^Error: memory ceiling reached /d' \
     -e '/^\[MLIR\]/d' \
     -e '/^\[Saved /d' \
     -e '/^\[Lowered /d' \
@@ -243,7 +247,7 @@ run_mlir_with_phase_timing() {
   local file_path="$1"
   local log_file="$2"
   local timeout_s="$3"
-  local selective_eval="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
+  local selective_eval="${RLASP_MLIR_SELECTIVE_EVAL:-1}"
 
   local start="$(now_mono_ts)"
   local exec_mark=""
@@ -315,6 +319,18 @@ elif [[ "$HARNESS_MODE" == "auto" ]]; then
     REGRESSION_ROOT="$candidate_root"
     HARNESS_KIND="regression"
   fi
+fi
+if [[ -z "$IRLASP_GC_FREE_SPACE_DIVISOR" && "$HARNESS_KIND" == "regression" ]]; then
+  IRLASP_GC_FREE_SPACE_DIVISOR="100000"
+fi
+IRLASP_ENV=()
+if [[ -n "$IRLASP_GC_FREE_SPACE_DIVISOR" ]]; then
+  IRLASP_ENV+=("GC_FREE_SPACE_DIVISOR=$IRLASP_GC_FREE_SPACE_DIVISOR")
+fi
+if [[ -n "$IRLASP_MEMORY_CEILING_MB" ]]; then
+  IRLASP_ENV+=("RLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB")
+  IRLASP_ENV+=("RLASP_MEMORY_CEILING_ACTION=exit")
+  IRLASP_ENV+=("RLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS")
 fi
 if [[ "$BASELINE_POLICY" == "auto" ]]; then
   if [[ "$HARNESS_KIND" == "regression" ]]; then
@@ -391,9 +407,11 @@ CSV_FILE="$LOG_DIR/lisp-engine-compare-$STAMP.csv"
   echo "REGRESSION_ROOT: ${REGRESSION_ROOT:-<none>}"
   echo "SUITE_LIST_SOURCE: $SUITE_LIST_SOURCE"
   echo "TIMEOUT_BIN: ${TIMEOUT_BIN:-<none>}"
-  echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-0}"
+  echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-1}"
   echo "TIMEOUTS_S: SBCL=$SBCL_TIMEOUT_S CLASP=$CLASP_TIMEOUT_S IRLASP_INTERP=$IRLASP_INTERP_TIMEOUT_S IRLASP_MLIR=$IRLASP_MLIR_TIMEOUT_S"
   echo "IRLASP_GC_FREE_SPACE_DIVISOR: $IRLASP_GC_FREE_SPACE_DIVISOR"
+  echo "IRLASP_MEMORY_CEILING_MB: $IRLASP_MEMORY_CEILING_MB"
+  echo "IRLASP_MEMORY_CEILING_CHECK_MS: $IRLASP_MEMORY_CEILING_CHECK_MS"
   echo "IRLASP_BIN: $IRLASP_BIN"
   echo "SBCL_BIN: ${SBCL_BIN:-<missing>}"
   echo "CLASP_BIN: ${CLASP_BIN:-<missing>}"

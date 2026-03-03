@@ -13,7 +13,7 @@ use rustyline::error::ReadlineError;
 use rustyline::{DefaultEditor, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs;
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
@@ -88,10 +88,18 @@ enum MemoryCeilingAction {
     Exit,
 }
 
+fn env_var_any(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| std::env::var(k).ok())
+}
+
+fn env_var_os_any(keys: &[&str]) -> Option<OsString> {
+    keys.iter().find_map(|k| std::env::var_os(k))
+}
+
 impl MemoryCeilingAction {
     fn from_env() -> Self {
-        match std::env::var("RLASP_MEMORY_CEILING_ACTION")
-            .unwrap_or_else(|_| "exit".to_string())
+        match env_var_any(&["IRLASP_MEMORY_CEILING_ACTION", "RLASP_MEMORY_CEILING_ACTION"])
+            .unwrap_or_else(|| "exit".to_string())
             .to_ascii_lowercase()
             .as_str()
         {
@@ -118,10 +126,10 @@ struct MemoryCeilingConfig {
 
 impl MemoryCeilingConfig {
     fn from_env() -> Option<Self> {
-        let limit_bytes = if let Some(raw) = std::env::var_os("RLASP_MEMORY_CEILING_BYTES") {
+        let limit_bytes = if let Some(raw) = env_var_os_any(&["IRLASP_MEMORY_CEILING_BYTES", "RLASP_MEMORY_CEILING_BYTES"]) {
             let parsed = raw.to_string_lossy().trim().parse::<u64>().ok()?;
             Some(parsed)
-        } else if let Some(raw) = std::env::var_os("RLASP_MEMORY_CEILING_MB") {
+        } else if let Some(raw) = env_var_os_any(&["IRLASP_MEMORY_CEILING_MB", "RLASP_MEMORY_CEILING_MB"]) {
             let parsed_mb = raw.to_string_lossy().trim().parse::<u64>().ok()?;
             Some(parsed_mb.saturating_mul(1024 * 1024))
         } else {
@@ -132,13 +140,12 @@ impl MemoryCeilingConfig {
             return None;
         }
 
-        let check_ms = std::env::var("RLASP_MEMORY_CEILING_CHECK_MS")
-            .ok()
+        let check_ms = env_var_any(&["IRLASP_MEMORY_CEILING_CHECK_MS", "RLASP_MEMORY_CEILING_CHECK_MS"])
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(250);
 
-        let marker_file = std::env::var_os("RLASP_MEMORY_CEILING_MARKER_FILE")
+        let marker_file = env_var_os_any(&["IRLASP_MEMORY_CEILING_MARKER_FILE", "RLASP_MEMORY_CEILING_MARKER_FILE"])
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty());
 
@@ -1026,6 +1033,17 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
                         let p = unsafe { &*(ptr as *const rlasp_runtime::Package) };
                         return EvalResult::Package(p.name().to_string());
                     }
+                    ObjectType::Pathname => {
+                        if let Some(path) = extract_pathname_string(obj) {
+                            return EvalResult::Cons(
+                                Rc::new(RefCell::new(EvalResult::Symbol("pathname".to_string()))),
+                                Rc::new(RefCell::new(EvalResult::Cons(
+                                    Rc::new(RefCell::new(EvalResult::String(path))),
+                                    Rc::new(RefCell::new(EvalResult::Nil)),
+                                ))),
+                            );
+                        }
+                    }
                     ObjectType::Number => {
                         let n = unsafe { &*(ptr as *const rlasp_runtime::Number) };
                         return match &n.value {
@@ -1812,13 +1830,21 @@ fn run_file(file_path: &str, mode: ExecutionMode) -> Result<()> {
                 }
             } else {
                 let source = read_source();
-                if let Err(e) = eval_file_mlir_via_artifact(
-                    &source,
-                    file_path,
-                    true,
-                    MlirBehavior::Strict,
-                    true,
-                ) {
+                let exec_artifact = env_var_truthy("RLASP_MLIR_EXEC_ARTIFACT");
+                let result = if exec_artifact {
+                    eval_file_mlir_via_artifact(
+                        &source,
+                        file_path,
+                        true,
+                        MlirBehavior::Strict,
+                        true,
+                    )
+                } else {
+                    // Default MLIR mode executes the freshly compiled MLIR in-memory via ORC.
+                    // Artifact execution remains available by setting RLASP_MLIR_EXEC_ARTIFACT=1.
+                    eval_file_mlir(&source, file_path, true, MlirBehavior::Strict)
+                };
+                if let Err(e) = result {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
@@ -2633,9 +2659,16 @@ fn eval_file_fasl(source: &str, file_path: &str) -> std::result::Result<(), Stri
     let mut interp_env: HashMap<String, EvalResult> = HashMap::new();
 
     for (idx, lisp_obj) in lisp_objs.iter().enumerate() {
-        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
-            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
-        }) {
+        let ast_result = {
+            // Keep the just-read top-level form stable while converting to AST.
+            // Without this guard, large macro-heavy files can hit nondeterministic
+            // corruption during compile-time processing.
+            let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
+            lisp_to_ast::with_read_time_env(&mut interp_env, || {
+                lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+            })
+        };
+        match ast_result {
             Ok(ast) => {
                 let _ = eval_with_persistent_env(&ast, &mut interp_env);
             }
@@ -2712,6 +2745,7 @@ fn eval_file_mlir_via_artifact(
         path: load_identity,
         armed,
     };
+    let _load_specials_guard = install_mlir_load_specials(file_path);
 
     let compile_only_requested = respect_compile_only && env_var_truthy("RLASP_MLIR_COMPILE_ONLY");
     let artifact_path = mlir_artifact_path_for_source(file_path);
@@ -2753,6 +2787,7 @@ fn eval_file_mlir(
 ) -> std::result::Result<(), String> {
     use rlasp_mlir::lib_stack::StackMLIRCodegen;
     use rlasp::repl::{lisp_to_ast, eval_with_persistent_env, macroexpand_all_to_ast, EvalResult};
+    use rlasp_runtime::LispObject;
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     let behavior = resolve_mlir_behavior(default_behavior);
@@ -2789,6 +2824,7 @@ fn eval_file_mlir(
         path: load_path,
         armed,
     };
+    let _load_specials_guard = install_mlir_load_specials(file_path);
 
     // Bridge object handles are process-local implementation details and must
     // not leak across independent file loads.
@@ -2824,6 +2860,16 @@ fn eval_file_mlir(
             !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
         })
         .unwrap_or(false);
+    let memory_ceiling_active = std::env::var_os("IRLASP_MEMORY_CEILING_MB").is_some()
+        || std::env::var_os("RLASP_MEMORY_CEILING_MB").is_some()
+        || std::env::var_os("IRLASP_MEMORY_CEILING_BYTES").is_some()
+        || std::env::var_os("RLASP_MEMORY_CEILING_BYTES").is_some();
+    let force_gc_every_form = std::env::var("RLASP_MLIR_FORCE_GC_EVERY_FORM")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(memory_ceiling_active);
 
     // Stream forms from the reader instead of storing all LispObjects up-front.
     // This avoids stale/unrooted form handles across compile-time eval/GC.
@@ -3159,6 +3205,7 @@ fn eval_file_mlir(
                     | "require"
                     | "provide"
                     | "defstruct"
+                    | "with-upgradability"
             )
         }
 
@@ -3193,12 +3240,30 @@ fn eval_file_mlir(
 
     // ===== INCREMENTAL: Expand forms with compile-time environment tracking =====
     loop {
-        let lisp_obj = match reader.read() {
-            Ok(obj) => {
+        let trace_stage = trace_compile_eval || std::env::var("RLASP_TRACE_MLIR_STAGE").is_ok();
+        let read_start = std::time::Instant::now();
+        if trace_stage {
+            println!("[MLIR-STAGE] form={} stage=read begin", form_count + 1);
+        }
+        let (lisp_obj, read_pos): (LispObject, Option<(usize, usize)>) = match if trace_stage {
+            reader
+                .read_with_positions()
+                .map(|(obj, before_ws, after_ws)| (obj, Some((before_ws, after_ws))))
+        } else {
+            reader.read().map(|obj| (obj, None))
+        } {
+            Ok((obj, pos)) => {
                 if rlasp_reader::is_skip_marker(&obj) {
+                    if trace_stage {
+                        println!(
+                            "[MLIR-STAGE] form={} stage=read skip-marker elapsed_ms={}",
+                            form_count + 1,
+                            read_start.elapsed().as_millis()
+                        );
+                    }
                     continue;
                 }
-                obj
+                (obj, pos)
             }
             Err(rlasp_reader::ReaderError::UnexpectedEof) => break,
             Err(e) => {
@@ -3210,19 +3275,63 @@ fn eval_file_mlir(
                 ));
             }
         };
+        if trace_stage {
+            if let Some((before_ws, after_ws)) = read_pos {
+                println!(
+                    "[MLIR-STAGE] form={} stage=read end elapsed_ms={} pos_before_ws={} pos_after_ws={}",
+                    form_count + 1,
+                    read_start.elapsed().as_millis(),
+                    before_ws,
+                    after_ws
+                );
+            } else {
+                println!(
+                    "[MLIR-STAGE] form={} stage=read end elapsed_ms={}",
+                    form_count + 1,
+                    read_start.elapsed().as_millis()
+                );
+            }
+        }
         form_count += 1;
-        match lisp_to_ast::with_read_time_env(&mut interp_env, || {
-            lisp_to_ast::lisp_to_ast(lisp_obj.clone())
-        }) {
+        if std::env::var("RLASP_TRACE_MLIR_READ").is_ok() {
+            println!(
+                "[MLIR-READ] form={} head={}",
+                form_count,
+                head_of_lisp_form(lisp_obj)
+            );
+        }
+        let ast_start = std::time::Instant::now();
+        if trace_stage {
+            println!("[MLIR-STAGE] form={} stage=to-ast begin", form_count);
+        }
+        let ast_result = {
+            // Keep this top-level form rooted while we convert it to AST.
+            // Macro-heavy loaders (e.g. ASDF/Quicklisp) are sensitive to GC
+            // movement during read-time evaluation and expansion scaffolding.
+            let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
+            lisp_to_ast::with_read_time_env(&mut interp_env, || {
+                lisp_to_ast::lisp_to_ast(lisp_obj.clone())
+            })
+        };
+        if trace_stage {
+            println!(
+                "[MLIR-STAGE] form={} stage=to-ast end elapsed_ms={}",
+                form_count,
+                ast_start.elapsed().as_millis()
+            );
+        }
+        match ast_result {
             Ok(ast) => {
                 let head = if trace_toplevel || trace_compile_eval {
                     Some(head_of_lisp_form(lisp_obj))
                 } else {
                     None
                 };
-                // Step 1: By default, keep compile-time eval permissive to preserve CL
-                // semantics in suites that rely on fully-evaluated top-level forms.
-                // Set RLASP_MLIR_SELECTIVE_EVAL=1 to force compile-time-only eval.
+                // Step 1: Default to permissive compile-time eval.
+                // Selective compile-time eval can skip required top-level effects
+                // (macro setup, declarations, special bindings) and produce large
+                // semantic regressions across CL suites.
+                // Set RLASP_MLIR_SELECTIVE_EVAL=1 to enable selective mode.
                 let selective_eval_default = false;
                 let selective_eval = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
                     .map(|v| {
@@ -3259,7 +3368,18 @@ fn eval_file_mlir(
                     );
                 }
                 if evaled_for_compile {
+                    if trace_stage {
+                        println!("[MLIR-STAGE] form={} stage=compile-eval begin", form_count);
+                    }
+                    let compile_eval_start = std::time::Instant::now();
                     let _ = eval_with_persistent_env(&ast, &mut interp_env);
+                    if trace_stage {
+                        println!(
+                            "[MLIR-STAGE] form={} stage=compile-eval end elapsed_ms={}",
+                            form_count,
+                            compile_eval_start.elapsed().as_millis()
+                        );
+                    }
                 }
                 if skip_side_effect_forms
                     && matches!(behavior, MlirBehavior::Strict)
@@ -3271,6 +3391,10 @@ fn eval_file_mlir(
 
                 // Step 2: Now try to expand macros for MLIR compilation
                 // The environment should now have all definitions from this and previous forms
+                let macroexpand_start = std::time::Instant::now();
+                if trace_stage {
+                    println!("[MLIR-STAGE] form={} stage=macroexpand begin", form_count);
+                }
                 let expanded = match macroexpand_all_to_ast(&ast, &mut interp_env) {
                     Ok(exp) => exp,
                     Err(e) => {
@@ -3280,6 +3404,13 @@ fn eval_file_mlir(
                         ast.clone()
                     }
                 };
+                if trace_stage {
+                    println!(
+                        "[MLIR-STAGE] form={} stage=macroexpand end elapsed_ms={}",
+                        form_count,
+                        macroexpand_start.elapsed().as_millis()
+                    );
+                }
                 if std::env::var("RLASP_TRACE_TEST_MACRO").is_ok() {
                     if head
                         .as_deref()
@@ -3320,7 +3451,21 @@ fn eval_file_mlir(
 
                 // Step 3: Collect definitions for MLIR compilation
                 let toplevel_before = toplevel_forms.len();
+                let defuns_before = defuns.len();
+                let collect_start = std::time::Instant::now();
+                if trace_stage {
+                    println!("[MLIR-STAGE] form={} stage=collect begin", form_count);
+                }
                 collect_definitions_expanded(&expanded, &mut defuns, &mut user_functions, &mut toplevel_forms);
+                if trace_stage {
+                    println!(
+                        "[MLIR-STAGE] form={} stage=collect end elapsed_ms={} added_toplevel={} added_defuns={}",
+                        form_count,
+                        collect_start.elapsed().as_millis(),
+                        toplevel_forms.len().saturating_sub(toplevel_before),
+                        defuns.len().saturating_sub(defuns_before)
+                    );
+                }
                 if trace_toplevel {
                     let added = toplevel_forms.len().saturating_sub(toplevel_before);
                     if added > 0 {
@@ -3340,6 +3485,9 @@ fn eval_file_mlir(
             Err(e) => {
                 println!("[Warning: Could not parse form {}: {}]", form_count, e);
             }
+        }
+        if force_gc_every_form {
+            rlasp_runtime::gc::global_gc().collect();
         }
     }
     // Count defgeneric forms in toplevel
@@ -3873,13 +4021,17 @@ fn eval_file_mlir(
     // Route runtime (eval ...) through the interpreter for CL-faithful semantics.
     rlasp_jit::intrinsics::cc_set_eval_bridge(cc_eval_bridge as usize);
 
-    if init_runtime {
+    let _runtime_load_specials_guard = if init_runtime {
         // Initialize standard Common Lisp variables
         rlasp_jit::intrinsics::init_standard_cl_variables();
         if mlir_verbose {
             println!("[Initialized standard CL variables]");
         }
-    }
+        // Re-apply file-load specials after init, which resets dynamic defaults.
+        install_mlir_load_specials(file_path)
+    } else {
+        None
+    };
 
     // Read the emitted args-list metadata so registration stays consistent for
     // both named functions and generated lambdas.
@@ -4059,7 +4211,7 @@ fn eval_file_mlir(
                 }
             }
 
-            if trace_batches && batch_count > 0 {
+            if batch_count > 0 {
                 for i in 0..batch_count {
                     if let Some(target_idx) = trace_batch_index {
                         if i != target_idx {
@@ -4068,12 +4220,20 @@ fn eval_file_mlir(
                     }
                     let batch_name = format!("__main_batch_{}", i);
                     if let Ok(batch_addr) = lookup_symbol(&batch_name) {
-                        println!("[Executing {}]", batch_name);
+                        if trace_batches {
+                            println!("[Executing {}]", batch_name);
+                        }
                         stack_clear();
                         let jit_fn: extern "C" fn() = std::mem::transmute(batch_addr);
                         jit_fn();
                         if stack_depth() > 0 {
-                            let _ = stack_pop_pointer();
+                            let result = stack_pop_pointer();
+                            let result_obj = unsafe { rlasp_runtime::LispObject::from_raw(result) };
+                            if result_obj.is_error() {
+                                let detail = format_jit_result(result as i64);
+                                eprintln!("[JIT runtime error in {}] {}", batch_name, detail);
+                                panic!("JIT runtime error in {}: {}", batch_name, detail);
+                            }
                         }
                     }
                 }
@@ -4426,6 +4586,75 @@ fn active_load_identity(path_like: &str) -> String {
         return path.with_extension("").to_string_lossy().to_string();
     }
     path_like.to_string()
+}
+
+struct MlirLoadSpecialsGuard {
+    load_sym: usize,
+    truename_sym: usize,
+    defaults_sym: usize,
+    old_load: usize,
+    old_truename: usize,
+    old_defaults: usize,
+}
+
+impl Drop for MlirLoadSpecialsGuard {
+    fn drop(&mut self) {
+        rlasp_jit::intrinsics::cc_set_symbol_value(self.load_sym, self.old_load);
+        rlasp_jit::intrinsics::cc_set_symbol_value(self.truename_sym, self.old_truename);
+        rlasp_jit::intrinsics::cc_set_symbol_value(self.defaults_sym, self.old_defaults);
+    }
+}
+
+fn resolve_load_special_values(path_like: &str) -> Option<(String, String, String)> {
+    use std::path::Path;
+
+    // Stream labels (e.g. "<stream>") should not override load-path specials.
+    if path_like.starts_with('<') && path_like.ends_with('>') {
+        return None;
+    }
+
+    let resolved = if Path::new(path_like).is_absolute() {
+        path_like.to_string()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path_like).to_string_lossy().to_string())
+            .ok()?
+    };
+    let truename = std::fs::canonicalize(&resolved)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| resolved.clone());
+    let defaults_dir = Path::new(&resolved)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    Some((resolved, truename, defaults_dir))
+}
+
+fn install_mlir_load_specials(path_like: &str) -> Option<MlirLoadSpecialsGuard> {
+    use rlasp_runtime::{RString, Symbol};
+
+    let (resolved, truename, defaults_dir) = resolve_load_special_values(path_like)?;
+
+    let load_sym = Symbol::allocate("*load-pathname*".to_string()).raw();
+    let truename_sym = Symbol::allocate("*load-truename*".to_string()).raw();
+    let defaults_sym = Symbol::allocate("*default-pathname-defaults*".to_string()).raw();
+
+    let old_load = rlasp_jit::intrinsics::cc_symbol_value(load_sym);
+    let old_truename = rlasp_jit::intrinsics::cc_symbol_value(truename_sym);
+    let old_defaults = rlasp_jit::intrinsics::cc_symbol_value(defaults_sym);
+
+    rlasp_jit::intrinsics::cc_set_symbol_value(load_sym, RString::allocate(resolved).raw());
+    rlasp_jit::intrinsics::cc_set_symbol_value(truename_sym, RString::allocate(truename).raw());
+    rlasp_jit::intrinsics::cc_set_symbol_value(defaults_sym, RString::allocate(defaults_dir).raw());
+
+    Some(MlirLoadSpecialsGuard {
+        load_sym,
+        truename_sym,
+        defaults_sym,
+        old_load,
+        old_truename,
+        old_defaults,
+    })
 }
 
 fn load_object_with_options(
@@ -4934,9 +5163,12 @@ fn jit_execute_llvm_ir(
     rlasp_jit::intrinsics::register_builtin_intrinsics();
     rlasp_jit::intrinsics::cc_set_eval_bridge(cc_eval_bridge as usize);
 
-    if init_runtime {
+    let _runtime_load_specials_guard = if init_runtime {
         rlasp_jit::intrinsics::init_standard_cl_variables();
-    }
+        install_mlir_load_specials(source_path)
+    } else {
+        None
+    };
 
     // Execute __main or batch functions
     let trace_batches = std::env::var("RLASP_TRACE_BATCHES").is_ok();
@@ -4970,7 +5202,7 @@ fn jit_execute_llvm_ir(
                 );
             }
 
-            if batch_count > 0 && trace_batches {
+            if batch_count > 0 {
                 for i in 0..batch_count {
                     if let Some(target_idx) = trace_batch_index {
                         if i != target_idx {
@@ -4986,7 +5218,22 @@ fn jit_execute_llvm_ir(
                         let jit_fn: extern "C" fn() = std::mem::transmute(batch_addr);
                         jit_fn();
                         if stack_depth() > 0 {
-                            let _ = stack_pop_pointer();
+                            let result = stack_pop_pointer();
+                            let result_obj = unsafe { rlasp_runtime::LispObject::from_raw(result) };
+                            if result_obj.is_error() {
+                                let mut detail = format_jit_result(result as i64);
+                                if let Some(kind) = result_obj.as_error_kind() {
+                                    detail = format!("{} ({:?})", detail, kind);
+                                }
+                                if let Some(ptr) = result_obj.as_general_ptr::<rlasp_runtime::LispError>() {
+                                    unsafe {
+                                        if let Some(msg) = &(*ptr).message {
+                                            detail = format!("{}: {}", detail, msg);
+                                        }
+                                    }
+                                }
+                                return Err(format!("MLIR artifact batch {} error: {}", batch_name, detail));
+                            }
                         }
                     }
                 }
