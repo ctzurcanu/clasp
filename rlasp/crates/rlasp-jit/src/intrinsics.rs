@@ -690,7 +690,20 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
                                 arg_list = cc_cons(cc_nil_value(), arg_list);
                                 continue;
                             }
-                            if obj_type == ObjectType::Closure || obj_type == ObjectType::Error {
+                            if obj_type == ObjectType::Closure {
+                                // Preserve compiled closures across evaluator bridge calls by
+                                // quoting a raw callable handle symbol. The evaluator already
+                                // knows how to funcall __RLASP_JIT_RAW_OBJECT__* designators.
+                                let handle_name =
+                                    format!("__RLASP_JIT_RAW_OBJECT__{:x}", arg_obj.raw());
+                                let handle_sym =
+                                    rlasp_runtime::Symbol::allocate(handle_name).raw();
+                                let quoted_tail = cc_cons(handle_sym, cc_nil_value());
+                                let quoted_form = cc_cons(quote_sym, quoted_tail);
+                                arg_list = cc_cons(quoted_form, arg_list);
+                                continue;
+                            }
+                            if obj_type == ObjectType::Error {
                                 if bridge_trace {
                                     eprintln!(
                                         "[bridge-call] fn={} skip-bridge: {:?} argument not AST-representable",
@@ -1149,6 +1162,31 @@ fn char_name_len(c: char) -> usize {
     }
 }
 
+const CHAR_ROUNDTRIP_SCAN_LIMIT: u32 = 55_296;
+
+fn collect_bad_char_roundtrips() -> usize {
+    let mut failures: Vec<char> = Vec::new();
+    for x in 0..CHAR_ROUNDTRIP_SCAN_LIMIT {
+        let Some(ch) = char::from_u32(x) else {
+            continue;
+        };
+        let name = char_to_name(ch);
+        if parse_name_char(&name) != Some(ch) {
+            failures.push(ch);
+        }
+    }
+
+    let mut out = LispObject::nil().raw();
+    for ch in failures.into_iter().rev() {
+        out = rlasp_runtime::Cons::allocate(
+            LispObject::character(ch),
+            unsafe { LispObject::from_raw(out) },
+        )
+        .raw();
+    }
+    out
+}
+
 #[inline]
 fn parse_name_char(name: &str) -> Option<char> {
     #[inline]
@@ -1326,6 +1364,16 @@ pub extern "C" fn cc_char_reader_roundtrip_truth(ch: usize) -> usize {
     .raw()
 }
 
+#[no_mangle]
+pub extern "C" fn cc_collect_bad_char_reader_roundtrips() -> usize {
+    collect_bad_char_roundtrips()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_collect_bad_char_name_roundtrips() -> usize {
+    collect_bad_char_roundtrips()
+}
+
 /// Parse a bignum from a string (for large numeric literals)
 #[no_mangle]
 pub extern "C" fn cc_parse_bignum(ptr: *const u8, len: usize) -> usize {
@@ -1387,6 +1435,19 @@ pub extern "C" fn cc_set_car(obj: usize, value: usize) -> usize {
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
     let value_obj = unsafe { LispObject::from_raw(value) };
     if let Some(cons_ptr) = lisp_obj.as_cons_ptr() {
+        if std::env::var("RLASP_TRACE_MP_ATOMIC").is_ok() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+            let n = TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if n < 200 {
+                eprintln!(
+                    "[mp-atomic set-car] tid={:?} cons=0x{:x} value=0x{:x}",
+                    std::thread::current().id(),
+                    obj,
+                    value
+                );
+            }
+        }
         unsafe {
             (*cons_ptr).set_car(value_obj);
         }
@@ -1408,6 +1469,52 @@ pub extern "C" fn cc_set_cdr(obj: usize, value: usize) -> usize {
         value
     } else {
         LispObject::nil().raw()
+    }
+}
+
+/// Atomically compare-and-swap the car of a cons.
+///
+/// Returns the previously observed value, whether or not the swap succeeded.
+#[no_mangle]
+pub extern "C" fn cc_cas_car(obj: usize, current: usize, new: usize) -> usize {
+    let lisp_obj = unsafe { LispObject::from_raw(obj) };
+    let current_obj = unsafe { LispObject::from_raw(current) };
+    let new_obj = unsafe { LispObject::from_raw(new) };
+    if let Some(cons_ptr) = lisp_obj.as_cons_ptr() {
+        let observed = unsafe { (*cons_ptr).compare_exchange_car(current_obj, new_obj).raw() };
+        if std::env::var("RLASP_TRACE_MP_ATOMIC").is_ok() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+            let n = TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if n < 200 {
+                eprintln!(
+                    "[mp-atomic cas-car] tid={:?} cons=0x{:x} current=0x{:x} new=0x{:x} observed=0x{:x}",
+                    std::thread::current().id(),
+                    obj,
+                    current,
+                    new,
+                    observed
+                );
+            }
+        }
+        observed
+    } else {
+        rlasp_runtime::LispError::type_error("cas car requires a cons").raw()
+    }
+}
+
+/// Atomically compare-and-swap the cdr of a cons.
+///
+/// Returns the previously observed value, whether or not the swap succeeded.
+#[no_mangle]
+pub extern "C" fn cc_cas_cdr(obj: usize, current: usize, new: usize) -> usize {
+    let lisp_obj = unsafe { LispObject::from_raw(obj) };
+    let current_obj = unsafe { LispObject::from_raw(current) };
+    let new_obj = unsafe { LispObject::from_raw(new) };
+    if let Some(cons_ptr) = lisp_obj.as_cons_ptr() {
+        unsafe { (*cons_ptr).compare_exchange_cdr(current_obj, new_obj).raw() }
+    } else {
+        rlasp_runtime::LispError::type_error("cas cdr requires a cons").raw()
     }
 }
 
@@ -22009,6 +22116,56 @@ pub extern "C" fn cc_functionp(args_and_env: usize) -> usize {
     } else {
         args_obj
     };
+
+    if extract_function_name(obj.raw()).is_some() {
+        return LispObject::t().raw();
+    }
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        if !sym_ptr.is_null() {
+            let name = unsafe { (&*sym_ptr).name() };
+            let base = name.rsplit(':').next().unwrap_or(name);
+            let base_upper = base.to_ascii_uppercase();
+            if base_upper.starts_with("__RLASP_JIT_RAW_OBJECT__") {
+                return LispObject::t().raw();
+            }
+        }
+    }
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        if !cons_ptr.is_null() {
+            let cons = unsafe { &*cons_ptr };
+            if let Some(head_ptr) = as_symbol_ptr_checked(cons.car()) {
+                if !head_ptr.is_null() {
+                    let head_name = unsafe { (&*head_ptr).name() };
+                    if head_name.eq_ignore_ascii_case("function") {
+                        let tail = cons.cdr();
+                        if let Some(tail_ptr) = tail.as_cons_ptr() {
+                            if !tail_ptr.is_null() {
+                                let tail_cons = unsafe { &*tail_ptr };
+                                if tail_cons.cdr().is_nil() {
+                                    let target = tail_cons.car();
+                                    if extract_function_name(target.raw()).is_some() {
+                                        return LispObject::t().raw();
+                                    }
+                                    if let Some(target_ptr) = as_symbol_ptr_checked(target) {
+                                        if !target_ptr.is_null() {
+                                            let target_name = unsafe { (&*target_ptr).name() };
+                                            let target_base = target_name.rsplit(':').next().unwrap_or(target_name);
+                                            let target_upper = target_base.to_ascii_uppercase();
+                                            if target_upper.starts_with("__RLASP_JIT_RAW_OBJECT__")
+                                                || target_upper.starts_with("__BRIDGE_LAMBDA_")
+                                            {
+                                                return LispObject::t().raw();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Prefer interpreter bridge semantics when available.
     if let Some(result) = try_eval_bridge_call("functionp", &[obj.raw()]) {

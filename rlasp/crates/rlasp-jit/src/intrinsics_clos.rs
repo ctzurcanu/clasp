@@ -1401,6 +1401,13 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
     let is_simple_array = is_array_like && !has_fill_pointer && !has_displacement && !is_adjustable;
 
     match name_str.as_str() {
+        "FUNCTION" | "COMPILED-FUNCTION" => {
+            return if is_bridge_function_designator_object(obj) {
+                LispObject::t().raw()
+            } else {
+                LispObject::nil().raw()
+            };
+        }
         "NULL" => {
             return if obj.is_nil() { LispObject::t().raw() } else { LispObject::nil().raw() };
         }
@@ -1598,6 +1605,49 @@ enum TypeSpec {
         element_type: String,
         dim: Option<i64>, // None means wildcard (*)
     },
+}
+
+fn is_bridge_function_designator_object(obj: LispObject) -> bool {
+    if crate::intrinsics::extract_function_name(obj.raw()).is_some() {
+        return true;
+    }
+
+    if let Some(name) = symbol_name_if_symbol(obj) {
+        let base = name.rsplit(':').next().unwrap_or(name.as_str());
+        let base_upper = base.to_ascii_uppercase();
+        if base_upper.starts_with("__RLASP_JIT_RAW_OBJECT__") {
+            return true;
+        }
+    }
+
+    let Some(cons_ptr) = obj.as_cons_ptr() else {
+        return false;
+    };
+    let cons = unsafe { &*cons_ptr };
+    let Some(head) = symbol_name_if_symbol(cons.car()) else {
+        return false;
+    };
+    if normalize_type_name(&head) != "FUNCTION" {
+        return false;
+    }
+    let Some(rest_ptr) = cons.cdr().as_cons_ptr() else {
+        return false;
+    };
+    let rest = unsafe { &*rest_ptr };
+    if !rest.cdr().is_nil() {
+        return false;
+    }
+    if crate::intrinsics::extract_function_name(rest.car().raw()).is_some() {
+        return true;
+    }
+    symbol_name_if_symbol(rest.car())
+        .map(|name| {
+            let base = name.rsplit(':').next().unwrap_or(name.as_str());
+            let base_upper = base.to_ascii_uppercase();
+            base_upper.starts_with("__RLASP_JIT_RAW_OBJECT__")
+                || base_upper.starts_with("__BRIDGE_LAMBDA_")
+        })
+        .unwrap_or(false)
 }
 
 fn normalize_type_name(name: &str) -> String {

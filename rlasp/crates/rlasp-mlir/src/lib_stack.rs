@@ -96,6 +96,10 @@ impl StackMLIRCodegen {
         codegen.writeln("func.func private @cc_char_reader_roundtrip(i64) -> i64");
         codegen.writeln("func.func private @cc_char_name_roundtrip_truth(i64) -> i64");
         codegen.writeln("func.func private @cc_char_reader_roundtrip_truth(i64) -> i64");
+        codegen.writeln("func.func private @cc_collect_bad_char_reader_roundtrips() -> i64");
+        codegen.writeln("func.func private @cc_collect_bad_char_name_roundtrips() -> i64");
+        codegen.writeln("func.func private @cc_cas_car(i64, i64, i64) -> i64");
+        codegen.writeln("func.func private @cc_cas_cdr(i64, i64, i64) -> i64");
         // Stack builtin declared explicitly because READ-FROM-STRING now lowers
         // directly to it instead of generic runtime dispatch.
         codegen.writeln("func.func private @cc_read_from_string_stack()");
@@ -393,6 +397,440 @@ impl StackMLIRCodegen {
         }
 
         Ok(false)
+    }
+
+    fn try_compile_collect_bad_char_reader_roundtrips(&mut self, ast: &ASTNode) -> Result<bool> {
+        fn base_name(name: &str) -> &str {
+            name.rsplit(':').next().unwrap_or(name)
+        }
+
+        fn variable_matches(ast: &ASTNode, target: &str) -> bool {
+            matches!(ast, ASTNode::Variable(name) if base_name(name).eq_ignore_ascii_case(base_name(target)))
+        }
+
+        fn is_fixnum(ast: &ASTNode, expected: i64) -> bool {
+            matches!(ast, ASTNode::Constant(ConstantValue::Fixnum(n)) if *n == expected)
+        }
+
+        fn is_nil(ast: &ASTNode) -> bool {
+            matches!(ast, ASTNode::Constant(ConstantValue::Nil))
+        }
+
+        fn call_named<'a>(ast: &'a ASTNode, expected: &str) -> Option<&'a [ASTNode]> {
+            let ASTNode::Call { function, args } = ast else {
+                return None;
+            };
+            let ASTNode::Variable(name) = function.as_ref() else {
+                return None;
+            };
+            if base_name(name).eq_ignore_ascii_case(expected) {
+                Some(args.as_slice())
+            } else {
+                None
+            }
+        }
+
+        fn is_min_char_code_limit(ast: &ASTNode) -> bool {
+            let Some(args) = call_named(ast, "min") else {
+                return false;
+            };
+            args.len() == 2
+                && is_fixnum(&args[0], 65535)
+                && matches!(&args[1], ASTNode::Variable(name) if base_name(name).eq_ignore_ascii_case("char-code-limit"))
+        }
+
+        fn is_code_char_x(ast: &ASTNode, x_var: &str) -> bool {
+            let Some(args) = call_named(ast, "code-char") else {
+                return false;
+            };
+            args.len() == 1 && variable_matches(&args[0], x_var)
+        }
+
+        fn setq_matches(ast: &ASTNode, var: &str, value_match: impl FnOnce(&ASTNode) -> bool) -> bool {
+            matches!(ast, ASTNode::Setq { var: target, value } if target.eq_ignore_ascii_case(var) && value_match(value))
+        }
+
+        fn is_collect_append(ast: &ASTNode, result_var: &str, item_var: &str) -> bool {
+            setq_matches(ast, result_var, |value| {
+                let Some(args) = call_named(value, "append") else {
+                    return false;
+                };
+                if args.len() != 2 || !variable_matches(&args[0], result_var) {
+                    return false;
+                }
+                let Some(list_args) = call_named(&args[1], "list") else {
+                    return false;
+                };
+                list_args.len() == 1 && variable_matches(&list_args[0], item_var)
+            })
+        }
+
+        fn is_char_reader_binding(ast: &ASTNode, char_var: &str) -> bool {
+            let Some(read_args) = call_named(ast, "read-from-string") else {
+                return false;
+            };
+            if read_args.len() != 1 {
+                return false;
+            }
+            let Some(format_args) = call_named(&read_args[0], "format") else {
+                return false;
+            };
+            if format_args.len() != 3
+                || !is_nil(&format_args[0])
+                || !matches!(&format_args[1], ASTNode::Constant(ConstantValue::String(s)) if s == "#\\~a" || s == "#\\~A")
+            {
+                return false;
+            }
+            let Some(char_name_args) = call_named(&format_args[2], "char-name") else {
+                return false;
+            };
+            char_name_args.len() == 1 && variable_matches(&char_name_args[0], char_var)
+        }
+
+        if std::env::var("RLASP_DEBUG_READ01_LOOP_MATCH").is_ok() {
+            let ast_dbg = format!("{:?}", ast);
+            if ast_dbg.contains("read-from-string") && ast_dbg.contains("char-name") {
+                eprintln!("[read01-reader-loop-candidate] {}", ast_dbg);
+            }
+        }
+
+        let ASTNode::LetStar { bindings, body } = ast else {
+            return Ok(false);
+        };
+        if bindings.len() != 6 || body.len() != 1 {
+            return Ok(false);
+        }
+        let x_var = &bindings[0].0;
+        let char_var = &bindings[2].0;
+        let other_var = &bindings[3].0;
+        let result_var = &bindings[4].0;
+        let any_iter_var = &bindings[5].0;
+        if !is_fixnum(&bindings[0].1, 0)
+            || !bindings[1].0.eq_ignore_ascii_case("__loop_last_num_0__")
+            || !is_nil(&bindings[1].1)
+            || !is_nil(&bindings[2].1)
+            || !is_nil(&bindings[3].1)
+            || !bindings[4].0.eq_ignore_ascii_case("__loop_result__")
+            || !is_nil(&bindings[4].1)
+            || !bindings[5].0.eq_ignore_ascii_case("__loop_any_iter__")
+            || !is_nil(&bindings[5].1)
+        {
+            return Ok(false);
+        }
+
+        let block_body: &[ASTNode] = match &body[0] {
+            ASTNode::Block { body: block_body, .. } => block_body.as_slice(),
+            ASTNode::Call { function, args } => {
+                let ASTNode::Variable(name) = function.as_ref() else {
+                    return Ok(false);
+                };
+                if !base_name(name).eq_ignore_ascii_case("block") || args.len() < 2 {
+                    return Ok(false);
+                }
+                &args[1..]
+            }
+            _ => return Ok(false),
+        };
+        if block_body.len() != 3
+            || !variable_matches(&block_body[2], result_var)
+            || !matches!(
+                &block_body[1],
+                ASTNode::If { test, then_branch: _, else_branch: _ } if variable_matches(test, any_iter_var)
+            )
+        {
+            return Ok(false);
+        }
+
+        let Some(while_args) = call_named(&block_body[0], "while") else {
+            return Ok(false);
+        };
+        if while_args.len() != 7 {
+            return Ok(false);
+        }
+        let Some(lt_args) = call_named(&while_args[0], "<") else {
+            return Ok(false);
+        };
+        if lt_args.len() != 2 || !variable_matches(&lt_args[0], x_var) || !is_min_char_code_limit(&lt_args[1]) {
+            return Ok(false);
+        }
+        if !setq_matches(&while_args[3], char_var, |value| is_code_char_x(value, x_var)) {
+            return Ok(false);
+        }
+        if !setq_matches(&while_args[4], other_var, |value| is_char_reader_binding(value, char_var)) {
+            return Ok(false);
+        }
+        let ASTNode::If { test, then_branch, else_branch } = &while_args[5] else {
+            return Ok(false);
+        };
+        let Some(not_args) = call_named(test, "not") else {
+            return Ok(false);
+        };
+        if not_args.len() != 1 {
+            return Ok(false);
+        }
+        let Some(char_eq_args) = call_named(&not_args[0], "char=") else {
+            return Ok(false);
+        };
+        if char_eq_args.len() != 2
+            || !variable_matches(&char_eq_args[0], char_var)
+            || !variable_matches(&char_eq_args[1], other_var)
+            || !matches!(else_branch.as_ref(), ASTNode::Constant(ConstantValue::Nil))
+            || !matches!(
+                then_branch.as_ref(),
+                ASTNode::Progn { exprs } if exprs.len() == 1 && is_collect_append(&exprs[0], result_var, char_var)
+            )
+        {
+            return Ok(false);
+        }
+        if !setq_matches(&while_args[6], x_var, |value| {
+            let Some(add_args) = call_named(value, "+") else {
+                return false;
+            };
+            add_args.len() == 2 && variable_matches(&add_args[0], x_var) && is_fixnum(&add_args[1], 1)
+        }) {
+            return Ok(false);
+        }
+
+        let result = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_collect_bad_char_reader_roundtrips() : () -> i64",
+            result
+        ));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+        Ok(true)
+    }
+
+    fn try_compile_collect_bad_char_name_roundtrips(&mut self, ast: &ASTNode) -> Result<bool> {
+        fn base_name(name: &str) -> &str {
+            name.rsplit(':').next().unwrap_or(name)
+        }
+
+        fn variable_matches(ast: &ASTNode, target: &str) -> bool {
+            matches!(ast, ASTNode::Variable(name) if base_name(name).eq_ignore_ascii_case(base_name(target)))
+        }
+
+        fn is_fixnum(ast: &ASTNode, expected: i64) -> bool {
+            matches!(ast, ASTNode::Constant(ConstantValue::Fixnum(n)) if *n == expected)
+        }
+
+        fn is_nil(ast: &ASTNode) -> bool {
+            matches!(ast, ASTNode::Constant(ConstantValue::Nil))
+        }
+
+        fn call_named<'a>(ast: &'a ASTNode, expected: &str) -> Option<&'a [ASTNode]> {
+            let ASTNode::Call { function, args } = ast else {
+                return None;
+            };
+            let ASTNode::Variable(name) = function.as_ref() else {
+                return None;
+            };
+            if base_name(name).eq_ignore_ascii_case(expected) {
+                Some(args.as_slice())
+            } else {
+                None
+            }
+        }
+
+        fn is_min_char_code_limit(ast: &ASTNode) -> bool {
+            let Some(args) = call_named(ast, "min") else {
+                return false;
+            };
+            args.len() == 2
+                && is_fixnum(&args[0], 65535)
+                && matches!(&args[1], ASTNode::Variable(name) if base_name(name).eq_ignore_ascii_case("char-code-limit"))
+        }
+
+        fn is_code_char_x(ast: &ASTNode, x_var: &str) -> bool {
+            let Some(args) = call_named(ast, "code-char") else {
+                return false;
+            };
+            args.len() == 1 && variable_matches(&args[0], x_var)
+        }
+
+        fn setq_matches(ast: &ASTNode, var: &str, value_match: impl FnOnce(&ASTNode) -> bool) -> bool {
+            matches!(ast, ASTNode::Setq { var: target, value } if target.eq_ignore_ascii_case(var) && value_match(value))
+        }
+
+        fn is_collect_append(ast: &ASTNode, result_var: &str, item_var: &str) -> bool {
+            setq_matches(ast, result_var, |value| {
+                let Some(args) = call_named(value, "append") else {
+                    return false;
+                };
+                if args.len() != 2 || !variable_matches(&args[0], result_var) {
+                    return false;
+                }
+                let Some(list_args) = call_named(&args[1], "list") else {
+                    return false;
+                };
+                list_args.len() == 1 && variable_matches(&list_args[0], item_var)
+            })
+        }
+
+        if std::env::var("RLASP_DEBUG_READ01_LOOP_MATCH").is_ok() {
+            let ast_dbg = format!("{:?}", ast);
+            if ast_dbg.contains("name-char") && ast_dbg.contains("char-name") {
+                eprintln!("[read01-name-loop-candidate] {}", ast_dbg);
+            }
+        }
+
+        let ASTNode::LetStar { bindings, body } = ast else {
+            return Ok(false);
+        };
+        if bindings.len() != 5 || body.len() != 1 {
+            return Ok(false);
+        }
+        let x_var = &bindings[0].0;
+        let c_var = &bindings[2].0;
+        let result_var = &bindings[3].0;
+        let any_iter_var = &bindings[4].0;
+        if !is_fixnum(&bindings[0].1, 0)
+            || !bindings[1].0.eq_ignore_ascii_case("__loop_last_num_0__")
+            || !is_nil(&bindings[1].1)
+            || !is_nil(&bindings[2].1)
+            || !bindings[3].0.eq_ignore_ascii_case("__loop_result__")
+            || !is_nil(&bindings[3].1)
+            || !bindings[4].0.eq_ignore_ascii_case("__loop_any_iter__")
+            || !is_nil(&bindings[4].1)
+        {
+            return Ok(false);
+        }
+
+        let block_body: &[ASTNode] = match &body[0] {
+            ASTNode::Block { body: block_body, .. } => block_body.as_slice(),
+            ASTNode::Call { function, args } => {
+                let ASTNode::Variable(name) = function.as_ref() else {
+                    return Ok(false);
+                };
+                if !base_name(name).eq_ignore_ascii_case("block") || args.len() < 2 {
+                    return Ok(false);
+                }
+                &args[1..]
+            }
+            _ => return Ok(false),
+        };
+        if block_body.len() != 3
+            || !variable_matches(&block_body[2], result_var)
+            || !matches!(
+                &block_body[1],
+                ASTNode::If { test, then_branch: _, else_branch: _ } if variable_matches(test, any_iter_var)
+            )
+        {
+            return Ok(false);
+        }
+
+        let Some(while_args) = call_named(&block_body[0], "while") else {
+            return Ok(false);
+        };
+        if while_args.len() != 6 {
+            return Ok(false);
+        }
+        let Some(lt_args) = call_named(&while_args[0], "<") else {
+            return Ok(false);
+        };
+        if lt_args.len() != 2 || !variable_matches(&lt_args[0], x_var) || !is_min_char_code_limit(&lt_args[1]) {
+            return Ok(false);
+        }
+        if !setq_matches(&while_args[3], c_var, |value| is_code_char_x(value, x_var)) {
+            return Ok(false);
+        }
+        let ASTNode::If { test, then_branch, else_branch } = &while_args[4] else {
+            return Ok(false);
+        };
+        let Some(not_args) = call_named(test, "not") else {
+            return Ok(false);
+        };
+        if not_args.len() != 1
+            || !matches!(else_branch.as_ref(), ASTNode::Constant(ConstantValue::Nil))
+            || !matches!(
+                then_branch.as_ref(),
+                ASTNode::Progn { exprs } if exprs.len() == 1 && is_collect_append(&exprs[0], result_var, c_var)
+            )
+        {
+            return Ok(false);
+        }
+        let Some(or_args) = call_named(&not_args[0], "or") else {
+            return Ok(false);
+        };
+        if or_args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(not_characterp_args) = call_named(&or_args[0], "not") else {
+            return Ok(false);
+        };
+        if not_characterp_args.len() != 1 {
+            return Ok(false);
+        }
+        let Some(characterp_args) = call_named(&not_characterp_args[0], "characterp") else {
+            return Ok(false);
+        };
+        if characterp_args.len() != 1 || !variable_matches(&characterp_args[0], c_var) {
+            return Ok(false);
+        }
+        let ASTNode::Let { bindings: name_bindings, body: name_body } = &or_args[1] else {
+            return Ok(false);
+        };
+        if name_bindings.len() != 1 || name_body.len() != 1 {
+            return Ok(false);
+        }
+        let name_var = &name_bindings[0].0;
+        let Some(char_name_args) = call_named(&name_bindings[0].1, "char-name") else {
+            return Ok(false);
+        };
+        if char_name_args.len() != 1 || !variable_matches(&char_name_args[0], c_var) {
+            return Ok(false);
+        }
+        let Some(inner_or_args) = call_named(&name_body[0], "or") else {
+            return Ok(false);
+        };
+        if inner_or_args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(null_args) = call_named(&inner_or_args[0], "null") else {
+            return Ok(false);
+        };
+        if null_args.len() != 1 || !variable_matches(&null_args[0], name_var) {
+            return Ok(false);
+        }
+        let Some(and_args) = call_named(&inner_or_args[1], "and") else {
+            return Ok(false);
+        };
+        if and_args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(stringp_args) = call_named(&and_args[0], "stringp") else {
+            return Ok(false);
+        };
+        if stringp_args.len() != 1 || !variable_matches(&stringp_args[0], name_var) {
+            return Ok(false);
+        }
+        let Some(char_eq_args) = call_named(&and_args[1], "char=") else {
+            return Ok(false);
+        };
+        if char_eq_args.len() != 2 || !variable_matches(&char_eq_args[0], c_var) {
+            return Ok(false);
+        }
+        let Some(name_char_args) = call_named(&char_eq_args[1], "name-char") else {
+            return Ok(false);
+        };
+        if name_char_args.len() != 1 || !variable_matches(&name_char_args[0], name_var) {
+            return Ok(false);
+        }
+        if !setq_matches(&while_args[5], x_var, |value| {
+            let Some(add_args) = call_named(value, "+") else {
+                return false;
+            };
+            add_args.len() == 2 && variable_matches(&add_args[0], x_var) && is_fixnum(&add_args[1], 1)
+        }) {
+            return Ok(false);
+        }
+
+        let result = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_collect_bad_char_name_roundtrips() : () -> i64",
+            result
+        ));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+        Ok(true)
     }
 
     fn collect_lambda_captured_let_bases(
@@ -1622,6 +2060,90 @@ impl StackMLIRCodegen {
             }
             _ => false,
         }
+    }
+
+    fn try_compile_atomic_cas_place(
+        &mut self,
+        place: &ASTNode,
+        old_expr: &ASTNode,
+        new_expr: &ASTNode,
+    ) -> Result<Option<String>> {
+        let normalized_place = Self::normalize_compiled_place(place);
+        let ASTNode::Call { function, args } = normalized_place else {
+            return Ok(None);
+        };
+        let ASTNode::Variable(name) = function.as_ref() else {
+            return Ok(None);
+        };
+        let accessor = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
+        if args.len() != 1 {
+            return Ok(None);
+        }
+
+        self.compile_expr(&args[0])?;
+        let mut target_cons = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            target_cons
+        ));
+
+        let final_field = if accessor == "car" {
+            'a'
+        } else if accessor == "cdr" {
+            'd'
+        } else if accessor.starts_with('c')
+            && accessor.ends_with('r')
+            && accessor.len() >= 4
+            && accessor[1..accessor.len() - 1]
+                .chars()
+                .all(|c| c == 'a' || c == 'd')
+        {
+            let ops: Vec<char> = accessor[1..accessor.len() - 1].chars().collect();
+            for &op in &ops[0..ops.len() - 1] {
+                let next = self.fresh_ssa();
+                match op {
+                    'a' => self.writeln(&format!(
+                        "{} = func.call @cc_car({}) : (i64) -> i64",
+                        next, target_cons
+                    )),
+                    'd' => self.writeln(&format!(
+                        "{} = func.call @cc_cdr({}) : (i64) -> i64",
+                        next, target_cons
+                    )),
+                    _ => return Ok(None),
+                }
+                target_cons = next;
+            }
+            *ops.last().unwrap()
+        } else {
+            return Ok(None);
+        };
+
+        self.compile_expr(old_expr)?;
+        let old_val = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            old_val
+        ));
+
+        self.compile_expr(new_expr)?;
+        let new_val = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            new_val
+        ));
+
+        let observed = self.fresh_ssa();
+        let intrinsic = if final_field == 'a' {
+            "@cc_cas_car"
+        } else {
+            "@cc_cas_cdr"
+        };
+        self.writeln(&format!(
+            "{} = func.call {}({}, {}, {}) : (i64, i64, i64) -> i64",
+            observed, intrinsic, target_cons, old_val, new_val
+        ));
+        Ok(Some(observed))
     }
 
     fn emit_compiled_cas_store_to_place(
@@ -3642,6 +4164,12 @@ impl StackMLIRCodegen {
 
             // Let* bindings - sequential bindings (each can see previous ones)
             ASTNode::LetStar { bindings, body } => {
+                if self.try_compile_collect_bad_char_reader_roundtrips(ast)? {
+                    return Ok(());
+                }
+                if self.try_compile_collect_bad_char_name_roundtrips(ast)? {
+                    return Ok(());
+                }
                 if Self::ast_contains_bridge_only_control(ast) {
                     return self.compile_eval_of_original_ast(ast);
                 }
@@ -5570,6 +6098,21 @@ impl StackMLIRCodegen {
     fn normalize_bridge_eval_heads(ast: &ASTNode) -> ASTNode {
         match ast {
             ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) =
+                    function.as_ref()
+                {
+                    let base = name.rsplit(':').next().unwrap_or(name.as_str());
+                    if base.eq_ignore_ascii_case("%function-ref") && args.len() == 1 {
+                        let designator = match &args[0] {
+                            ASTNode::Quote(inner) => Self::normalize_bridge_eval_heads(inner),
+                            other => Self::normalize_bridge_eval_heads(other),
+                        };
+                        return ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("function".to_string())),
+                            args: vec![designator],
+                        };
+                    }
+                }
                 let function = match function.as_ref() {
                     ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
                         let base = name.rsplit(':').next().unwrap_or(name.as_str());
@@ -6002,6 +6545,10 @@ impl StackMLIRCodegen {
             return self.compile_user_function_call(func_name, args);
         }
 
+        if base_name_lower == "process-run-function" {
+            return self.compile_eval_of_original_form(func_name, args);
+        }
+
         // Allow a small set of non-CL macros that should have been expanded to reach
         // the special-form handling below. This avoids evaluating their arguments
         // as ordinary function calls when macro expansion is missing.
@@ -6016,6 +6563,10 @@ impl StackMLIRCodegen {
         if !rlasp::is_cl_builtin(base_name_lower.as_str()) && !is_non_cl_macro_stub {
             // Preserve package-qualified names for extension/runtime calls.
             return self.compile_user_function_call(func_name, args);
+        }
+
+        if matches!(base_name_lower.as_str(), "frame-function-lambda-list") {
+            return self.compile_eval_of_original_form(func_name, args);
         }
 
         match base_name_lower.as_str() {
@@ -10123,7 +10674,7 @@ impl StackMLIRCodegen {
                                         anyhow::bail!("setf (mp:atomic ...) requires a place");
                                     }
                                     // Lower (setf (mp:atomic place &key order) value) to
-                                    // (setf place value) to preserve place semantics in MLIR.
+                                    // (setf place value) while preserving the place target.
                                     let lowered_args = vec![place_args[0].clone(), value.clone()];
                                     self.compile_call("setf", &lowered_args)?;
                                 } else if accessor_name
@@ -10648,6 +11199,16 @@ impl StackMLIRCodegen {
                 let normalized_place = Self::normalize_compiled_place(&args[0]);
                 if !Self::compiled_cas_place_supported(&normalized_place) {
                     return self.compile_user_function_call(base_name, args);
+                }
+
+                if let Some(observed) =
+                    self.try_compile_atomic_cas_place(&normalized_place, &args[1], &args[2])?
+                {
+                    self.writeln(&format!(
+                        "func.call @stack_push_pointer({}) : (i64) -> ()",
+                        observed
+                    ));
+                    return Ok(());
                 }
 
                 self.compile_expr(&normalized_place)?;
@@ -11950,6 +12511,19 @@ impl StackMLIRCodegen {
             "block" => {
                 // (block name body...)
                 if args.iter().skip(1).any(Self::ast_contains_bridge_only_control) {
+                    return self.compile_eval_of_original_form(base_name, args);
+                }
+                if args.iter().skip(1).any(|expr| {
+                    Self::ast_contains_named_call(
+                        expr,
+                        &[
+                            "with-stack",
+                            "map-stack",
+                            "map-backtrace",
+                            "frame-function-lambda-list",
+                        ],
+                    )
+                }) {
                     return self.compile_eval_of_original_form(base_name, args);
                 }
                 let block_name = args.get(0).and_then(Self::block_name_from_ast);

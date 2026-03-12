@@ -4805,12 +4805,7 @@ pub(super) fn eval_functionp(args: &[ASTNode], env: &mut HashMap<String, EvalRes
     let obj = eval_with_env(&args[0], env)?;
 
     fn is_function(val: &EvalResult) -> bool {
-        matches!(val,
-            EvalResult::Lambda { .. } |
-            EvalResult::BuiltinFunction(_) |
-            EvalResult::GenericFunction(_) |
-            EvalResult::ForeignFunction(_)
-        )
+        eval_result_is_function_like(val)
     }
 
     match &obj {
@@ -4826,6 +4821,49 @@ pub(super) fn eval_functionp(args: &[ASTNode], env: &mut HashMap<String, EvalRes
             Ok(EvalResult::Nil)
         }
         _ => Ok(EvalResult::Nil),
+    }
+}
+
+fn eval_result_is_function_quoted_designator(val: &EvalResult) -> bool {
+    let EvalResult::Cons(head, tail) = val else {
+        return false;
+    };
+    let EvalResult::Symbol(head_name) = &*head.borrow() else {
+        return false;
+    };
+    if !head_name.eq_ignore_ascii_case("function") {
+        return false;
+    }
+    let EvalResult::Cons(inner, inner_tail) = &*tail.borrow() else {
+        return false;
+    };
+    matches!(&*inner_tail.borrow(), EvalResult::Nil)
+        && matches!(
+            &*inner.borrow(),
+            EvalResult::Symbol(_)
+                | EvalResult::BuiltinFunction(_)
+                | EvalResult::Lambda { .. }
+                | EvalResult::GenericFunction(_)
+        )
+}
+
+fn eval_result_is_function_like(val: &EvalResult) -> bool {
+    match val {
+        EvalResult::Lambda { .. }
+        | EvalResult::BuiltinFunction(_)
+        | EvalResult::GenericFunction(_)
+        | EvalResult::ForeignFunction(_) => true,
+        EvalResult::Symbol(name) => name
+            .rsplit(':')
+            .next()
+            .map(|base| base.to_ascii_uppercase().starts_with("__RLASP_JIT_RAW_OBJECT__"))
+            .unwrap_or(false),
+        EvalResult::Fixnum(n) => {
+            let raw = rlasp_runtime::LispObject::fixnum(*n).raw();
+            rlasp_jit::intrinsics::extract_function_name(raw).is_some()
+        }
+        EvalResult::Cons(_, _) => eval_result_is_function_quoted_designator(val),
+        _ => false,
     }
 }
 
@@ -6585,8 +6623,20 @@ pub(super) fn eval_type_of(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         EvalResult::Complex(_, _) => "COMPLEX",
         EvalResult::Character(_) => "CHARACTER",
         EvalResult::String(_) => "STRING",
-        EvalResult::Symbol(_) => "SYMBOL",
-        EvalResult::Cons(_, _) => "CONS",
+        EvalResult::Symbol(_) => {
+            if eval_result_is_function_like(&val) {
+                "FUNCTION"
+            } else {
+                "SYMBOL"
+            }
+        }
+        EvalResult::Cons(_, _) => {
+            if eval_result_is_function_like(&val) {
+                "FUNCTION"
+            } else {
+                "CONS"
+            }
+        }
         EvalResult::Lambda { .. } => "FUNCTION",
         EvalResult::Macro { .. } => "MACRO",
         EvalResult::ModifyMacro { .. } => "MACRO",
@@ -6733,7 +6783,7 @@ pub fn eval_typep(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Re
         },
         "SEQUENCE" => matches!(object, EvalResult::Nil | EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_)),
         "HASH-TABLE" => matches!(object, EvalResult::HashTable(_)),
-        "FUNCTION" | "COMPILED-FUNCTION" => matches!(object, EvalResult::Lambda { .. } | EvalResult::BuiltinFunction(_) | EvalResult::GenericFunction(_)),
+        "FUNCTION" | "COMPILED-FUNCTION" => eval_result_is_function_like(&object),
         "STANDARD-OBJECT" | "STRUCTURE-OBJECT" => matches!(object, EvalResult::Instance(_)),
         "CONDITION" | "ERROR" | "SIMPLE-ERROR" | "SIMPLE-CONDITION" | "WARNING" | "SIMPLE-WARNING" |
         "SERIOUS-CONDITION" | "STYLE-WARNING" | "TYPE-ERROR" | "UNDEFINED-FUNCTION" => {

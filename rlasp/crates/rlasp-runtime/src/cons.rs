@@ -45,10 +45,44 @@ impl Cons {
         self.car.store(value.raw(), Ordering::Release);
     }
 
+    /// Atomically compare-and-swap the car.
+    ///
+    /// Returns the observed previous value regardless of success.
+    #[inline]
+    pub fn compare_exchange_car(&self, current: LispObject, new: LispObject) -> LispObject {
+        let observed = self
+            .car
+            .compare_exchange(
+                current.raw(),
+                new.raw(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .unwrap_or_else(|observed| observed);
+        unsafe { LispObject::from_raw(observed) }
+    }
+
     /// Set the cdr (rplacd in Common Lisp)
     #[inline]
     pub fn set_cdr(&self, value: LispObject) {
         self.cdr.store(value.raw(), Ordering::Release);
+    }
+
+    /// Atomically compare-and-swap the cdr.
+    ///
+    /// Returns the observed previous value regardless of success.
+    #[inline]
+    pub fn compare_exchange_cdr(&self, current: LispObject, new: LispObject) -> LispObject {
+        let observed = self
+            .cdr
+            .compare_exchange(
+                current.raw(),
+                new.raw(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .unwrap_or_else(|observed| observed);
+        unsafe { LispObject::from_raw(observed) }
     }
 
     /// Create a boxed cons cell and return a LispObject pointer to it
