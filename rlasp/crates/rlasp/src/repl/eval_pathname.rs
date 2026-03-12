@@ -9,6 +9,63 @@ fn symbol_base_name(sym: &str) -> &str {
     sym.rsplit(':').next().unwrap_or(sym)
 }
 
+fn sys_logical_root() -> PathBuf {
+    if let Ok(root) = std::env::var("RLASP_SYS_ROOT") {
+        let trimmed = root.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        // Typical dev layout: <repo>/target/{debug,release}/irlasp
+        if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
+            if target_dir.file_name().and_then(|n| n.to_str()) == Some("target") {
+                if let Some(repo_root) = target_dir.parent() {
+                    // In this workspace irlasp lives under <clasp>/rlasp, while CLASP's
+                    // implementation lisp sources live under <clasp>/src/lisp. Prefer that
+                    // tree for SYS: so ASDF's implementation-source scan matches CLASP.
+                    let candidate_roots = [
+                        repo_root.join("src").join("lisp"),
+                        repo_root
+                            .parent()
+                            .map(|p| p.join("src").join("lisp"))
+                            .unwrap_or_else(|| PathBuf::from("__nonexistent__")),
+                        repo_root.join("clisp").join("in_work").join("modules"),
+                    ];
+                    for candidate in candidate_roots {
+                        if candidate.is_dir() {
+                            return candidate;
+                        }
+                    }
+                    return repo_root.to_path_buf();
+                }
+            }
+        }
+        if let Some(parent) = exe.parent() {
+            return parent.to_path_buf();
+        }
+    }
+
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn normalize_path_designator(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    if lower.starts_with("sys:") {
+        let mut suffix = path[4..].replace(';', "/");
+        while suffix.starts_with('/') {
+            suffix.remove(0);
+        }
+        let mut base = sys_logical_root();
+        if !suffix.is_empty() {
+            base.push(suffix);
+        }
+        return base.to_string_lossy().to_string();
+    }
+    path.to_string()
+}
+
 /// Extract a pathname string from various Common Lisp pathname representations
 fn extract_pathname_string(arg: &EvalResult) -> Option<String> {
     match arg {
@@ -16,11 +73,11 @@ fn extract_pathname_string(arg: &EvalResult) -> Option<String> {
         EvalResult::Symbol(s) => {
             // Handle symbols that might be pathnames (strip quotes if present)
             if s.starts_with("#P\"") && s.ends_with('"') {
-                Some(s[3..s.len()-1].to_string())
+                Some(normalize_path_designator(&s[3..s.len()-1]))
             } else if s.starts_with('"') && s.ends_with('"') {
-                Some(s[1..s.len()-1].to_string())
+                Some(normalize_path_designator(&s[1..s.len()-1]))
             } else {
-                Some(s.clone())
+                Some(normalize_path_designator(s))
             }
         }
         EvalResult::Nil => {
@@ -36,7 +93,7 @@ fn extract_pathname_string(arg: &EvalResult) -> Option<String> {
                     let cdr_val = cdr.borrow();
                     if let EvalResult::Cons(path_car, _) = &*cdr_val {
                         let path_val = path_car.borrow();
-                        return extract_pathname_string(&path_val);
+                        return extract_pathname_string(&path_val).map(|s| normalize_path_designator(&s));
                     }
                 }
             }
@@ -46,12 +103,24 @@ fn extract_pathname_string(arg: &EvalResult) -> Option<String> {
     }
 }
 
-fn is_pathname_object(arg: &EvalResult) -> bool {
+pub(super) fn is_pathname_object(arg: &EvalResult) -> bool {
     match arg {
         EvalResult::Cons(car, cdr) => {
             if let EvalResult::Symbol(sym) = &*car.borrow() {
-                symbol_base_name(sym).eq_ignore_ascii_case("pathname")
-                    && matches!(&*cdr.borrow(), EvalResult::Cons(_, _))
+                if !symbol_base_name(sym).eq_ignore_ascii_case("pathname") {
+                    return false;
+                }
+                if let EvalResult::Cons(path_car, path_tail) = &*cdr.borrow() {
+                    // Distinguish real tagged pathname objects from ordinary lists
+                    // that happen to start with the symbol PATHNAME.
+                    if !matches!(&*path_tail.borrow(), EvalResult::Nil) {
+                        return false;
+                    }
+                    let path_val = path_car.borrow().clone();
+                    extract_pathname_string(&path_val).is_some()
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -61,7 +130,7 @@ fn is_pathname_object(arg: &EvalResult) -> bool {
     }
 }
 
-fn make_pathname_object_from_string(path: &str) -> EvalResult {
+pub(super) fn make_pathname_object_from_string(path: &str) -> EvalResult {
     EvalResult::Cons(
         Rc::new(RefCell::new(EvalResult::Symbol("pathname".to_string()))),
         Rc::new(RefCell::new(EvalResult::Cons(
@@ -86,6 +155,27 @@ fn list_to_vec(list: &EvalResult) -> Option<Vec<EvalResult>> {
     }
 }
 
+fn pathname_component_to_string(item: &EvalResult) -> Option<String> {
+    match item {
+        EvalResult::String(s) => Some(s.clone()),
+        EvalResult::Symbol(s) => {
+            let marker = s.trim_start_matches(':');
+            if marker.eq_ignore_ascii_case("wild") {
+                Some("*".to_string())
+            } else if marker.eq_ignore_ascii_case("wild-inferiors") {
+                Some("**".to_string())
+            } else if marker.eq_ignore_ascii_case("unspecific") {
+                Some(String::new())
+            } else {
+                Some(s.clone())
+            }
+        }
+        EvalResult::Character(c) => Some(c.to_string()),
+        EvalResult::Nil => Some(String::new()),
+        _ => None,
+    }
+}
+
 fn directory_list_to_string_with_mode(dir: &EvalResult) -> Option<(String, bool)> {
     let items = list_to_vec(dir)?;
     if items.is_empty() {
@@ -96,12 +186,7 @@ fn directory_list_to_string_with_mode(dir: &EvalResult) -> Option<(String, bool)
     let mut parts: Vec<String> = Vec::new();
 
     for (idx, item) in items.iter().enumerate() {
-        let item_str = match item {
-            EvalResult::String(s) => s.clone(),
-            EvalResult::Symbol(s) => s.clone(),
-            EvalResult::Character(c) => c.to_string(),
-            _ => return None,
-        };
+        let item_str = pathname_component_to_string(item)?;
 
         let marker = item_str.trim_start_matches(':');
         if marker.eq_ignore_ascii_case("absolute") {
@@ -159,6 +244,171 @@ fn list_pathname_designator_to_string(arg: &EvalResult) -> Option<String> {
     result
 }
 
+fn contains_wildcard_component(path: &str) -> bool {
+    path.contains('*') || path.contains('?')
+}
+
+fn wildcard_match_component(pattern: &str, text: &str) -> bool {
+    // Common Lisp implementations commonly use *.* as the portable
+    // "all entries in directory" wildcard, including subdirectories.
+    if pattern == "*.*" || pattern == "*" {
+        return true;
+    }
+
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut dp = vec![vec![false; text.len() + 1]; pattern.len() + 1];
+    dp[0][0] = true;
+
+    for i in 1..=pattern.len() {
+        if pattern[i - 1] == '*' {
+            dp[i][0] = dp[i - 1][0];
+        }
+    }
+
+    for i in 1..=pattern.len() {
+        for j in 1..=text.len() {
+            dp[i][j] = match pattern[i - 1] {
+                '*' => dp[i - 1][j] || dp[i][j - 1],
+                '?' => dp[i - 1][j - 1],
+                c => dp[i - 1][j - 1] && c == text[j - 1],
+            };
+        }
+    }
+
+    dp[pattern.len()][text.len()]
+}
+
+fn pathname_string_for_entry(path: &Path, is_dir: bool) -> String {
+    let mut s = path.to_string_lossy().to_string();
+    if is_dir && !s.ends_with('/') {
+        s.push('/');
+    }
+    s
+}
+
+fn split_glob_base_and_patterns(path: &str) -> (PathBuf, Vec<String>) {
+    let is_absolute = path.starts_with('/');
+    let trimmed = path.trim_matches('/');
+    let parts: Vec<String> = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        trimmed.split('/').map(|part| part.to_string()).collect()
+    };
+
+    let mut base = if is_absolute {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(".")
+    };
+    let mut idx = 0usize;
+    while idx < parts.len() && !contains_wildcard_component(&parts[idx]) {
+        base.push(&parts[idx]);
+        idx += 1;
+    }
+
+    (base, parts[idx..].to_vec())
+}
+
+fn collect_glob_matches(
+    base: &Path,
+    patterns: &[String],
+    directory_only_pattern: bool,
+    entries: &mut Vec<String>,
+) {
+    if patterns.is_empty() {
+        if let Ok(metadata) = fs::metadata(base) {
+            if !directory_only_pattern || metadata.is_dir() {
+                entries.push(pathname_string_for_entry(base, metadata.is_dir()));
+            }
+        }
+        return;
+    }
+
+    let pattern = &patterns[0];
+
+    // :wild-inferiors => recursively match zero or more directory components.
+    if pattern == "**" {
+        collect_glob_matches(base, &patterns[1..], directory_only_pattern, entries);
+        if let Ok(read_dir) = fs::read_dir(base) {
+            for entry in read_dir.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_dir() {
+                        collect_glob_matches(&entry.path(), patterns, directory_only_pattern, entries);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let read_dir = match fs::read_dir(base) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return,
+    };
+
+    for entry in read_dir.flatten() {
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+        if !wildcard_match_component(pattern, &name) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if patterns.len() == 1 {
+            if directory_only_pattern && !metadata.is_dir() {
+                continue;
+            }
+            entries.push(pathname_string_for_entry(&entry.path(), metadata.is_dir()));
+        } else if metadata.is_dir() {
+            collect_glob_matches(&entry.path(), &patterns[1..], directory_only_pattern, entries);
+        }
+    }
+}
+
+fn directory_entries_for_designator(path: &str) -> Result<Vec<String>, String> {
+    let has_wildcards = contains_wildcard_component(path);
+    let mut entries = Vec::new();
+
+    if !has_wildcards {
+        match fs::read_dir(path) {
+            Ok(read_dir) => {
+                for entry in read_dir.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        entries.push(pathname_string_for_entry(&entry.path(), metadata.is_dir()));
+                    }
+                }
+                entries.sort();
+                return Ok(entries);
+            }
+            Err(_) => return Ok(Vec::new()),
+        }
+    }
+
+    let directory_only_pattern = path.ends_with('/') || path.ends_with(std::path::MAIN_SEPARATOR);
+    let candidate_path = if directory_only_pattern {
+        path.trim_end_matches(&['/', '\\'][..])
+    } else {
+        path
+    };
+    let (base, patterns) = split_glob_base_and_patterns(candidate_path);
+    if patterns.is_empty() {
+        if let Ok(metadata) = fs::metadata(&base) {
+            if !directory_only_pattern || metadata.is_dir() {
+                entries.push(pathname_string_for_entry(&base, metadata.is_dir()));
+            }
+        }
+    } else {
+        collect_glob_matches(&base, &patterns, directory_only_pattern, &mut entries);
+    }
+
+    entries.sort();
+    entries.dedup();
+    Ok(entries)
+}
+
 pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
         "pathname" => {
@@ -208,41 +458,37 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                         match key_norm.as_str() {
                             ":name" => {
                                 match &args[i + 1] {
-                                    EvalResult::Symbol(s) | EvalResult::String(s) => {
-                                        let value = if s.starts_with('"') && s.ends_with('"') {
-                                            s[1..s.len()-1].to_string()
-                                        } else {
-                                            s.clone()
-                                        };
-                                        name = Some(value);
+                                    EvalResult::Symbol(s) | EvalResult::String(s) if s.starts_with('"') && s.ends_with('"') => {
+                                        name = Some(s[1..s.len()-1].to_string());
                                     }
-                                    EvalResult::Nil => name = Some(String::new()),
-                                    _ => {}
+                                    value => {
+                                        if let Some(component) = pathname_component_to_string(value) {
+                                            name = Some(component);
+                                        }
+                                    }
                                 }
                             }
                             ":type" => {
                                 match &args[i + 1] {
-                                    EvalResult::Symbol(s) | EvalResult::String(s) => {
-                                        let value = if s.starts_with('"') && s.ends_with('"') {
-                                            s[1..s.len()-1].to_string()
-                                        } else {
-                                            s.clone()
-                                        };
-                                        type_ext = Some(value);
+                                    EvalResult::Symbol(s) | EvalResult::String(s) if s.starts_with('"') && s.ends_with('"') => {
+                                        type_ext = Some(s[1..s.len()-1].to_string());
                                     }
-                                    EvalResult::Nil => type_ext = Some(String::new()),
-                                    _ => {}
+                                    value => {
+                                        if let Some(component) = pathname_component_to_string(value) {
+                                            type_ext = Some(component);
+                                        }
+                                    }
                                 }
                             }
                             ":directory" => {
                                 match &args[i + 1] {
-                                    EvalResult::Symbol(s) | EvalResult::String(s) => {
-                                        let value = if s.starts_with('"') && s.ends_with('"') {
-                                            s[1..s.len()-1].to_string()
-                                        } else {
-                                            s.clone()
-                                        };
-                                        directory = Some(value);
+                                    EvalResult::Symbol(s) | EvalResult::String(s) if s.starts_with('"') && s.ends_with('"') => {
+                                        directory = Some(s[1..s.len()-1].to_string());
+                                    }
+                                    value if !matches!(value, EvalResult::Cons(_, _)) => {
+                                        if let Some(component) = pathname_component_to_string(value) {
+                                            directory = Some(component);
+                                        }
                                     }
                                     EvalResult::Cons(_, _) => {
                                         if let Some((dir_str, _is_relative)) =
@@ -409,7 +655,7 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             Ok(EvalResult::Nil)
         }
 
-        "namestring" | "file-namestring" | "directory-namestring" | "host-namestring" | "enough-namestring" => {
+        "namestring" | "host-namestring" | "enough-namestring" => {
             match args.get(0).and_then(extract_pathname_string) {
                 Some(s) => Ok(EvalResult::String(s)),
                 None => Ok(EvalResult::String("".to_string())),
@@ -488,9 +734,10 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                 extract_pathname_string(arg).or_else(|| list_pathname_designator_to_string(arg))
             }) {
                 Some(s) => {
-                    match fs::canonicalize(&s) {
+                    let normalized = normalize_path_designator(&s);
+                    match fs::canonicalize(&normalized) {
                         Ok(path) => Ok(make_pathname_object_from_string(&path.to_string_lossy().to_string())),
-                        Err(_) => Ok(make_pathname_object_from_string(&s)),
+                        Err(_) => Ok(make_pathname_object_from_string(&normalized)),
                     }
                 }
                 None => Err(format!("{} requires a pathname", name)),
@@ -581,19 +828,18 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
         "directory" => {
             match args.get(0).and_then(extract_pathname_string) {
                 Some(s) => {
-                    match fs::read_dir(&s) {
+                    match directory_entries_for_designator(&s) {
                         Ok(entries) => {
                             let mut result = EvalResult::Nil;
-                            for entry in entries.flatten() {
-                                let path_str = entry.path().to_string_lossy().to_string();
+                            for entry in entries.into_iter().rev() {
                                 result = EvalResult::Cons(
-                                    Rc::new(RefCell::new(make_pathname_object_from_string(&path_str))),
+                                    Rc::new(RefCell::new(make_pathname_object_from_string(&entry))),
                                     Rc::new(RefCell::new(result))
                                 );
                             }
                             Ok(result)
                         }
-                        Err(_) => Ok(EvalResult::Nil),
+                        Err(err) => Err(err),
                     }
                 }
                 None => Ok(EvalResult::Nil),
@@ -629,21 +875,7 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
 
             if let Some(path_str) = args.get(0).and_then(extract_pathname_string) {
-                let mut physical_path = path_str;
-                if physical_path.starts_with("sys:") {
-                    let mut rest = &physical_path[4..];
-                    if let Some(stripped) = rest.strip_prefix("src;lisp;") {
-                        rest = stripped;
-                    } else if let Some(stripped) = rest.strip_prefix("src/lisp/") {
-                        rest = stripped;
-                    }
-                    physical_path = if rest.is_empty() {
-                        ".".to_string()
-                    } else {
-                        format!("./{}", rest)
-                    };
-                }
-                physical_path = physical_path.replace(';', "/");
+                let physical_path = normalize_path_designator(&path_str).replace(';', "/");
                 return Ok(make_pathname_object_from_string(&physical_path));
             }
 

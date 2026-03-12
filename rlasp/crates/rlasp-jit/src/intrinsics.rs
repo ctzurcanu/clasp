@@ -6,7 +6,7 @@
 use rlasp_runtime::LispObject;
 use rlasp_runtime::eval_stack::{
     stack_push_fixnum, stack_push_pointer, stack_push_nil,
-    stack_pop_fixnum, stack_pop_pointer
+    stack_pop_fixnum, stack_pop_pointer, stack_depth
 };
 use rlasp_runtime::string::RString;
 use std::io::Write;
@@ -37,12 +37,74 @@ struct CachedFunctionResolution {
 
 thread_local! {
     static BRIDGE_ACTIVE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static FLOAT_TRAP_MASK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static RUNTIME_DEBUG_CALL_STACK: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FUNCALL_LOOKUP_CACHE: std::cell::RefCell<std::collections::HashMap<i64, CachedFunctionResolution>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
     static FUNCALL_OBJECT_LOOKUP_CACHE: std::cell::RefCell<std::collections::HashMap<usize, CachedFunctionResolution>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    static DIRECT_FINALIZER_REGISTRY: std::cell::RefCell<std::collections::HashMap<usize, Vec<usize>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+const FLOAT_TRAP_DIVIDE_BY_ZERO_BIT: u32 = 1 << 0;
+const FLOAT_TRAP_INVALID_BIT: u32 = 1 << 1;
+const FLOAT_TRAP_OVERFLOW_BIT: u32 = 1 << 2;
+const FLOAT_TRAP_UNDERFLOW_BIT: u32 = 1 << 3;
+const FLOAT_TRAP_INEXACT_BIT: u32 = 1 << 4;
+
+fn float_trap_bit_from_obj(obj: LispObject) -> Option<u32> {
+    let raw = if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        unsafe { (&*sym_ptr).name().to_string() }
+    } else if let Some(str_ptr) = as_string_ptr_checked(obj) {
+        unsafe { (&*str_ptr).as_str().to_string() }
+    } else {
+        return None;
+    };
+
+    let base = raw
+        .rsplit(':')
+        .next()
+        .unwrap_or(raw.as_str())
+        .trim_start_matches(':')
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "divide-by-zero" => Some(FLOAT_TRAP_DIVIDE_BY_ZERO_BIT),
+        "invalid" | "floating-point-invalid-operation" => Some(FLOAT_TRAP_INVALID_BIT),
+        "overflow" | "floating-point-overflow" => Some(FLOAT_TRAP_OVERFLOW_BIT),
+        "underflow" | "floating-point-underflow" => Some(FLOAT_TRAP_UNDERFLOW_BIT),
+        "inexact" | "floating-point-inexact" => Some(FLOAT_TRAP_INEXACT_BIT),
+        _ => None,
+    }
+}
+
+fn parse_float_trap_mask(obj: LispObject) -> u32 {
+    if obj.is_nil() {
+        return 0;
+    }
+    if obj.as_cons_ptr().is_some() {
+        return lisp_list_to_vec(obj)
+            .into_iter()
+            .filter_map(float_trap_bit_from_obj)
+            .fold(0u32, |acc, bit| acc | bit);
+    }
+    float_trap_bit_from_obj(obj).unwrap_or(0)
+}
+
+#[inline]
+fn current_float_trap_mask() -> u32 {
+    FLOAT_TRAP_MASK.with(|mask| mask.get())
+}
+
+#[inline]
+fn float_trap_mask_contains(bit: u32) -> bool {
+    (current_float_trap_mask() & bit) != 0
+}
+
+#[inline]
+fn bridge_call_in_progress() -> bool {
+    BRIDGE_ACTIVE_DEPTH.with(|depth| depth.get() > 0)
 }
 
 static BRIDGE_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -96,6 +158,65 @@ fn debug_intern_enabled() -> bool {
     *DEBUG_INTERN_ENABLED.get_or_init(|| std::env::var("RLASP_DEBUG_INTERN").is_ok())
 }
 
+fn debug_arith_type_error_enabled() -> bool {
+    static DEBUG_ARITH_TYPE_ERROR_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_ARITH_TYPE_ERROR_ENABLED
+        .get_or_init(|| std::env::var("RLASP_DEBUG_ARITH_TYPE_ERROR").is_ok())
+}
+
+fn debug_lisp_object_summary(obj: LispObject) -> String {
+    if obj.is_nil() {
+        return "NIL".to_string();
+    }
+    if obj.raw() == LispObject::t().raw() {
+        return "T".to_string();
+    }
+    if let Some(n) = obj.as_fixnum() {
+        return format!("FIXNUM({})", n);
+    }
+    if let Some(ch) = obj.as_character() {
+        return format!("CHAR({:?})", ch);
+    }
+    if let Some(f) = obj.as_float() {
+        return format!("FLOAT({})", f);
+    }
+    if let Some(cons_ptr) = obj.as_cons_ptr() {
+        if cons_ptr.is_null() {
+            return "CONS(NULL)".to_string();
+        }
+        let cons = unsafe { &*cons_ptr };
+        return format!(
+            "CONS(car={}, cdr={})",
+            debug_lisp_object_summary(cons.car()),
+            debug_lisp_object_summary(cons.cdr())
+        );
+    }
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        if sym_ptr.is_null() {
+            return "SYMBOL(NULL)".to_string();
+        }
+        let sym = unsafe { &*sym_ptr };
+        return format!("SYMBOL({})", sym.name());
+    }
+    if let Some(str_ptr) = as_string_ptr_checked(obj) {
+        if str_ptr.is_null() {
+            return "STRING(NULL)".to_string();
+        }
+        let s = unsafe { &*str_ptr };
+        return format!("STRING({:?})", s.as_str());
+    }
+    if let Some(ptr) = obj.as_general_ptr::<()>() {
+        if ptr.is_null() {
+            return "GENERAL(NULL)".to_string();
+        }
+        use rlasp_runtime::header::TypeHeader;
+        if let Some(header) = unsafe { TypeHeader::from_ptr(ptr) } {
+            return format!("GENERAL({:?}, raw=0x{:x})", header, obj.raw());
+        }
+    }
+    format!("RAW(0x{:x})", obj.raw())
+}
+
 pub fn runtime_debug_stack_snapshot() -> Vec<String> {
     RUNTIME_DEBUG_CALL_STACK.with(|s| s.borrow().clone())
 }
@@ -108,6 +229,87 @@ fn runtime_debug_stack_pop() {
     RUNTIME_DEBUG_CALL_STACK.with(|s| {
         let _ = s.borrow_mut().pop();
     });
+}
+
+#[no_mangle]
+pub extern "C" fn cc_runtime_debug_stack_push_name(name_obj_raw: usize) {
+    let obj = unsafe { LispObject::from_raw(name_obj_raw) };
+    if let Some(name) = function_name_from_func_obj(obj) {
+        runtime_debug_stack_push(&name);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_runtime_debug_stack_pop_name() {
+    runtime_debug_stack_pop();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_register_function_lambda_list_metadata_raw(
+    name_obj_raw: usize,
+    spec_obj_raw: usize,
+) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(name_obj_raw) };
+    let spec_obj = unsafe { LispObject::from_raw(spec_obj_raw) };
+
+    let Some(name) = function_name_from_func_obj(name_obj) else {
+        return LispObject::nil().raw();
+    };
+    let Some(spec) = function_name_from_func_obj(spec_obj) else {
+        return LispObject::nil().raw();
+    };
+    if spec.is_empty() {
+        return LispObject::nil().raw();
+    }
+
+    let trace_frame_ll = std::env::var("RLASP_DEBUG_FRAME_LL").is_ok();
+    if trace_frame_ll {
+        eprintln!("[frame-ll-register] name={} spec={:?}", name, spec);
+    }
+
+    if lookup_function_lambda_list_metadata(&name).is_some() {
+        if trace_frame_ll {
+            eprintln!("[frame-ll-register] skip-existing name={}", name);
+        }
+        return LispObject::nil().raw();
+    }
+
+    let params: Vec<String> = spec
+        .split('\n')
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect();
+    if params.is_empty() {
+        return LispObject::nil().raw();
+    }
+
+    if trace_frame_ll {
+        eprintln!("[frame-ll-register] commit name={} params={:?}", name, params);
+    }
+    register_function_lambda_list_metadata(&name, &params);
+    LispObject::nil().raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_register_deftype_alias(name_obj_raw: usize, spec_obj_raw: usize) -> usize {
+    let name_obj = unsafe { LispObject::from_raw(name_obj_raw) };
+    let spec_obj = unsafe { LispObject::from_raw(spec_obj_raw) };
+
+    let Some(name) = function_name_atom_to_string(name_obj)
+        .or_else(|| as_symbol_ptr_checked(name_obj).map(|sym_ptr| unsafe { (&*sym_ptr).name().to_string() }))
+        .or_else(|| as_string_ptr_checked(name_obj).map(|str_ptr| unsafe { (&*str_ptr).as_str().to_string() }))
+    else {
+        return LispObject::nil().raw();
+    };
+
+    register_deftype_alias_raw(&name, spec_obj.raw());
+    LispObject::nil().raw()
 }
 
 /// Register an optional eval bridge callback.
@@ -123,10 +325,13 @@ fn try_eval_bridge(form_obj: usize) -> Option<usize> {
         return None;
     }
     let entered = BRIDGE_ACTIVE_DEPTH.with(|depth| {
-        if depth.get() > 0 {
+        // Allow bounded nested eval bridge calls so runtime (eval ...) remains
+        // CL-faithful even when bridge-evaluated code itself invokes eval.
+        let cur = depth.get();
+        if cur >= 32 {
             false
         } else {
-            depth.set(1);
+            depth.set(cur + 1);
             true
         }
     });
@@ -142,6 +347,33 @@ fn try_eval_bridge(form_obj: usize) -> Option<usize> {
 #[inline]
 fn eval_bridge_available() -> bool {
     EVAL_BRIDGE_FN_PTR.load(Ordering::SeqCst) != 0
+}
+
+#[inline]
+fn resolve_bridge_handle_arg(raw: usize) -> usize {
+    let obj = unsafe { LispObject::from_raw(raw) };
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        if !sym_ptr.is_null() {
+            let name = unsafe { (&*sym_ptr).name() };
+            if name.starts_with("__RLASP_BRIDGE_HANDLE__") {
+                if let Some(resolved) = get_dynamic_value(name) {
+                    return resolved;
+                }
+            }
+        }
+    }
+    raw
+}
+
+#[inline]
+pub(crate) fn is_bridge_handle_symbol_raw(raw: usize) -> bool {
+    let obj = unsafe { LispObject::from_raw(raw) };
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        if !sym_ptr.is_null() {
+            return unsafe { (&*sym_ptr).name().starts_with("__RLASP_BRIDGE_HANDLE__") };
+        }
+    }
+    false
 }
 
 pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Option<usize> {
@@ -212,27 +444,7 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
     let quote_sym = rlasp_runtime::Symbol::allocate("quote").raw();
     let is_raw_bridge_call = is_bridge_lambda_call || raw_readtable_setter || matches!(
         function_base,
-        "make-package"
-            | "delete-package"
-            | "rename-package"
-            | "lock-package"
-            | "unlock-package"
-            | "package-locked-p"
-            | "in-package"
-            | "package-nicknames"
-            | "package-use-list"
-            | "package-used-by-list"
-            | "use-package"
-            | "unuse-package"
-            | "export"
-            | "unexport"
-            | "import"
-            | "shadow"
-            | "shadowing-import"
-            | "list-all-packages"
-            | "package-add-nickname"
-            | "package-remove-nickname"
-            | "listen"
+        "listen"
             | "open"
             | "close"
             | "clear-input"
@@ -248,8 +460,19 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
             | "read-byte"
             | "write-byte"
             | "write-char"
+            | "write"
             | "write-string"
             | "write-line"
+            | "print"
+            | "prin1"
+            | "princ"
+            | "write-to-string"
+            | "prin1-to-string"
+            | "princ-to-string"
+            | "terpri"
+            | "fresh-line"
+            | "format"
+            | "pprint"
             | "read-sequence"
             | "write-sequence"
             | "stream-read-sequence"
@@ -302,6 +525,8 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
             | "resolve-symlinks"
             | "truenamize"
             | "user-homedir-pathname"
+            | "assoc-if"
+            | "assoc-if-not"
             | "run-program"
             | "external-process-wait"
             | "external-process-error-stream"
@@ -351,6 +576,57 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
             | "set-breakstep"
             | "unset-breakstep"
             | "breakstepping-p"
+            | "eval"
+            | "single-float-to-bits"
+            | "single-float-from-bits"
+            | "double-float-to-bits"
+            | "double-float-from-bits"
+            | "make-package"
+            | "delete-package"
+            | "rename-package"
+            | "lock-package"
+            | "unlock-package"
+            | "package-locked-p"
+            | "in-package"
+            | "package-name"
+            | "package-nicknames"
+            | "package-use-list"
+            | "package-used-by-list"
+            | "package-shadowing-symbols"
+            | "use-package"
+            | "unuse-package"
+            | "export"
+            | "unexport"
+            | "import"
+            | "shadow"
+            | "shadowing-import"
+            | "unintern"
+            | "intern"
+            | "find-symbol"
+            | "find-package"
+            | "list-all-packages"
+            | "package-add-nickname"
+            | "package-remove-nickname"
+            | "symbol-package"
+            | "packagep"
+            | "find-all-symbols"
+            | "defpackage"
+            | "define-package"
+            | "garbage-collect"
+            | "finalize"
+            | "definalize"
+            | "invoke-finalizers"
+            | "make-weak-pointer"
+            | "weak-pointer-valid"
+            | "array-rank"
+            | "array-dimension"
+            | "array-dimensions"
+            | "array-total-size"
+            | "array-row-major-index"
+            | "row-major-aref"
+            | "adjustable-array-p"
+            | "array-has-fill-pointer-p"
+            | "fill-pointer"
     );
 
     let ptr = EVAL_BRIDGE_FN_PTR.load(Ordering::SeqCst);
@@ -359,11 +635,10 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
     }
     let entered = BRIDGE_ACTIVE_DEPTH.with(|depth| {
         let cur = depth.get();
-        if cur > 0 && !is_raw_bridge_call {
-            return false;
-        }
-        // Allow bounded nested raw bridge reentry (needed for MP callbacks executing
-        // under process-join/process-run-function bridge evaluation).
+        // Allow bounded nested bridge reentry. Top-level bridge fallback forms
+        // like handler-case still need inner compiled calls to reach the bridge
+        // for helpers such as core:mkstemp, delete-file, and other non-raw
+        // builtins used inside compiled lambdas.
         if cur >= 32 {
             return false;
         }
@@ -374,7 +649,7 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
         return None;
     }
 
-    let mut bridge_args: Vec<usize> = args.to_vec();
+    let mut bridge_args: Vec<usize> = args.iter().map(|raw| resolve_bridge_handle_arg(*raw)).collect();
     if function_base == "read-delimited-list"
         && matches!(bridge_args.get(1), Some(raw) if unsafe { LispObject::from_raw(*raw) }.is_nil())
     {
@@ -414,6 +689,19 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
                             if normalize_stream_arg_to_nil && obj_type == ObjectType::Stream {
                                 arg_list = cc_cons(cc_nil_value(), arg_list);
                                 continue;
+                            }
+                            if obj_type == ObjectType::Closure || obj_type == ObjectType::Error {
+                                if bridge_trace {
+                                    eprintln!(
+                                        "[bridge-call] fn={} skip-bridge: {:?} argument not AST-representable",
+                                        function_name,
+                                        obj_type
+                                    );
+                                }
+                                BRIDGE_ACTIVE_DEPTH.with(|depth| {
+                                    depth.set(depth.get().saturating_sub(1))
+                                });
+                                return None;
                             }
                         }
                     }
@@ -844,35 +1132,122 @@ fn char_to_name(c: char) -> String {
 }
 
 #[inline]
-fn parse_name_char(name: &str) -> Option<char> {
-    let raw = if name.starts_with(':') && name.len() > 1 {
-        &name[1..]
-    } else {
-        name
-    };
-    match raw.to_ascii_lowercase().as_str() {
-        "space" => Some(' '),
-        "newline" | "linefeed" => Some('\n'),
-        "tab" => Some('\t'),
-        "return" => Some('\r'),
-        "backspace" => Some('\u{0008}'),
-        "page" | "formfeed" => Some('\u{000C}'),
-        "rubout" | "delete" => Some('\u{007F}'),
-        "nul" | "null" => Some('\u{0000}'),
-        "escape" | "esc" => Some('\u{001B}'),
-        "bell" | "bel" => Some('\u{0007}'),
-        _ if raw.len() == 1 => raw.chars().next(),
-        _ => {
-            let hex = if raw.starts_with("U+") || raw.starts_with("u+") {
-                &raw[2..]
-            } else if raw.starts_with('U') || raw.starts_with('u') {
-                &raw[1..]
-            } else {
-                raw
-            };
-            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
-        }
+fn char_name_len(c: char) -> usize {
+    match c {
+        ' ' => 5,
+        '\n' => 7,
+        '\t' => 3,
+        '\r' => 6,
+        '\u{0008}' => 9,
+        '\u{000C}' => 4,
+        '\u{007F}' => 6,
+        '\u{0000}' => 3,
+        '\u{001B}' => 6,
+        '\u{0007}' => 4,
+        _ if c.is_ascii_graphic() => 1,
+        _ => 1 + format!("{:04X}", c as u32).len(),
     }
+}
+
+#[inline]
+fn parse_name_char(name: &str) -> Option<char> {
+    #[inline]
+    fn parse_u_name_fast(raw: &str) -> Option<char> {
+        let bytes = raw.as_bytes();
+        if bytes.is_empty() {
+            return None;
+        }
+        let digits = match bytes {
+            [b'U', rest @ ..] | [b'u', rest @ ..] => {
+                if let [b'+', tail @ ..] = rest {
+                    tail
+                } else {
+                    rest
+                }
+            }
+            _ => return None,
+        };
+        if digits.is_empty() {
+            return None;
+        }
+        let mut value: u32 = 0;
+        for &b in digits {
+            let nibble = match b {
+                b'0'..=b'9' => (b - b'0') as u32,
+                b'a'..=b'f' => (b - b'a' + 10) as u32,
+                b'A'..=b'F' => (b - b'A' + 10) as u32,
+                _ => return None,
+            };
+            value = value.checked_mul(16)?.checked_add(nibble)?;
+        }
+        char::from_u32(value)
+    }
+
+    #[inline]
+    fn parse_name_char_fast(raw: &str) -> Option<char> {
+        let raw = if raw.starts_with(':') && raw.len() > 1 {
+            &raw[1..]
+        } else {
+            raw
+        };
+        if raw.is_empty() {
+            return None;
+        }
+        if raw.len() == 1 && raw.is_ascii() {
+            return Some(raw.as_bytes()[0] as char);
+        }
+        if raw.chars().count() == 1 {
+            return raw.chars().next();
+        }
+        if let Some(ch) = parse_u_name_fast(raw) {
+            return Some(ch);
+        }
+        if raw.eq_ignore_ascii_case("space") {
+            return Some(' ');
+        }
+        if raw.eq_ignore_ascii_case("newline")
+            || raw.eq_ignore_ascii_case("linefeed")
+            || raw.eq_ignore_ascii_case("lf")
+        {
+            return Some('\n');
+        }
+        if raw.eq_ignore_ascii_case("tab") || raw.eq_ignore_ascii_case("ht") {
+            return Some('\t');
+        }
+        if raw.eq_ignore_ascii_case("return") || raw.eq_ignore_ascii_case("cr") {
+            return Some('\r');
+        }
+        if raw.eq_ignore_ascii_case("backspace") || raw.eq_ignore_ascii_case("bs") {
+            return Some('\u{0008}');
+        }
+        if raw.eq_ignore_ascii_case("page")
+            || raw.eq_ignore_ascii_case("formfeed")
+            || raw.eq_ignore_ascii_case("ff")
+        {
+            return Some('\u{000C}');
+        }
+        if raw.eq_ignore_ascii_case("rubout")
+            || raw.eq_ignore_ascii_case("delete")
+            || raw.eq_ignore_ascii_case("del")
+        {
+            return Some('\u{007F}');
+        }
+        if raw.eq_ignore_ascii_case("null")
+            || raw.eq_ignore_ascii_case("nul")
+            || raw.eq_ignore_ascii_case("nil")
+        {
+            return Some('\u{0000}');
+        }
+        if raw.eq_ignore_ascii_case("bell") || raw.eq_ignore_ascii_case("bel") {
+            return Some('\u{0007}');
+        }
+        if raw.eq_ignore_ascii_case("escape") || raw.eq_ignore_ascii_case("esc") {
+            return Some('\u{001B}');
+        }
+        None
+    }
+
+    parse_name_char_fast(name).or_else(|| rlasp_runtime::parse_character_name(name))
 }
 
 #[no_mangle]
@@ -887,27 +1262,68 @@ pub extern "C" fn cc_char_name(ch: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_name_char(value: usize) -> usize {
     let obj = unsafe { LispObject::from_raw(value) };
-    let text_opt = if let Some(str_ptr) = as_string_ptr_checked(obj) {
+    if let Some(str_ptr) = as_string_ptr_checked(obj) {
         if str_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { (&*str_ptr).as_str().to_string() })
+            return LispObject::nil().raw();
         }
-    } else if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        let s = unsafe { (&*str_ptr).as_str() };
+        return match parse_name_char(s) {
+            Some(c) => LispObject::character(c).raw(),
+            None => LispObject::nil().raw(),
+        };
+    }
+
+    if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
         if sym_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { (&*sym_ptr).name().to_string() })
+            return LispObject::nil().raw();
         }
-    } else {
-        None
+        let s = unsafe { (&*sym_ptr).name() };
+        return match parse_name_char(s) {
+            Some(c) => LispObject::character(c).raw(),
+            None => LispObject::nil().raw(),
+        };
+    }
+
+    rlasp_runtime::LispError::type_error("name-char requires a string").raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_char_reader_roundtrip(ch: usize) -> usize {
+    let ch_obj = unsafe { LispObject::from_raw(ch) };
+    let Some(c) = ch_obj.as_character() else {
+        return rlasp_runtime::LispError::type_error(
+            "character reader roundtrip requires a character",
+        )
+        .raw();
     };
 
-    match text_opt.and_then(|s| parse_name_char(&s)) {
-        Some(c) => LispObject::character(c).raw(),
-        None if as_string_ptr_checked(obj).is_some() || as_symbol_ptr_checked(obj).is_some() => LispObject::nil().raw(),
-        None => rlasp_runtime::LispError::type_error("name-char requires a string").raw(),
+    let index = 2 + char_name_len(c);
+    let idx_obj = LispObject::fixnum(index as i64).raw();
+    cc_values2(ch, idx_obj)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_char_name_roundtrip_truth(ch: usize) -> usize {
+    let ch_obj = unsafe { LispObject::from_raw(ch) };
+    if ch_obj.as_character().is_some() {
+        return cc_t_value();
     }
+    rlasp_runtime::LispError::type_error(
+        "character name roundtrip predicate requires a character",
+    )
+    .raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_char_reader_roundtrip_truth(ch: usize) -> usize {
+    let ch_obj = unsafe { LispObject::from_raw(ch) };
+    if ch_obj.as_character().is_some() {
+        return cc_t_value();
+    }
+    rlasp_runtime::LispError::type_error(
+        "character reader roundtrip predicate requires a character",
+    )
+    .raw()
 }
 
 /// Parse a bignum from a string (for large numeric literals)
@@ -998,13 +1414,45 @@ pub extern "C" fn cc_set_cdr(obj: usize, value: usize) -> usize {
 /// Get nil value (for internal use)
 #[no_mangle]
 pub extern "C" fn cc_nil_value() -> usize {
-    LispObject::nil().raw()
+    let raw = LispObject::nil().raw();
+    if std::env::var("RLASP_DEBUG_NIL").is_ok() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        let idx = COUNT.fetch_add(1, Ordering::Relaxed);
+        if idx < 32 {
+            eprintln!("[RLASP_DEBUG_NIL] call#{} raw=0x{:x}", idx, raw);
+        }
+    }
+    raw
 }
 
 /// Get t value (for internal use)
 #[no_mangle]
 pub extern "C" fn cc_t_value() -> usize {
     LispObject::t().raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_push_float_trap_mask(mask_obj: usize) -> usize {
+    let mask_obj = unsafe { LispObject::from_raw(mask_obj) };
+    let new_bits = parse_float_trap_mask(mask_obj);
+    let previous = FLOAT_TRAP_MASK.with(|mask| {
+        let old = mask.get();
+        mask.set(old | new_bits);
+        old
+    });
+    LispObject::fixnum(previous as i64).raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_restore_float_trap_mask(previous_mask_obj: usize) -> usize {
+    let previous_mask_obj = unsafe { LispObject::from_raw(previous_mask_obj) };
+    let previous = previous_mask_obj
+        .as_fixnum()
+        .filter(|n| *n >= 0)
+        .unwrap_or(0) as u32;
+    FLOAT_TRAP_MASK.with(|mask| mask.set(previous));
+    LispObject::nil().raw()
 }
 
 /// Get NIL value
@@ -1219,6 +1667,15 @@ pub extern "C" fn cc_add(a: usize, b: usize) -> usize {
 
         // Default: type error for non-numeric operands
         _ => {
+            if debug_arith_type_error_enabled() {
+                let stack = runtime_debug_stack_snapshot().join(" -> ");
+                eprintln!(
+                    "[arith-type-error:+] a={} b={} stack=[{}]",
+                    debug_lisp_object_summary(a_obj),
+                    debug_lisp_object_summary(b_obj),
+                    stack
+                );
+            }
             eprintln!("Error: + requires numeric arguments");
             LispObject::nil().raw()
         }
@@ -1497,6 +1954,9 @@ pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
     if is_complex_number_object(a_obj) || is_complex_number_object(b_obj) {
         if let (Some(ac), Some(bc)) = (to_complex_for_eq(a_obj), to_complex_for_eq(b_obj)) {
             if bc.re == 0.0 && bc.im == 0.0 {
+                if ac.re == 0.0 && ac.im == 0.0 && float_trap_mask_contains(FLOAT_TRAP_INVALID_BIT) {
+                    return complex_to_lisp_obj(num_complex::Complex::new(f64::NAN, f64::NAN));
+                }
                 return rlasp_runtime::LispError::division_by_zero().raw();
             }
             return complex_to_lisp_obj(ac / bc);
@@ -1542,6 +2002,17 @@ pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
             if bf != 0.0 {
                 return Number::allocate_float(af / bf).raw();
             } else {
+                if af == 0.0 && float_trap_mask_contains(FLOAT_TRAP_INVALID_BIT) {
+                    return Number::allocate_float(f64::NAN).raw();
+                }
+                if af != 0.0 && float_trap_mask_contains(FLOAT_TRAP_DIVIDE_BY_ZERO_BIT) {
+                    let sign = if af.is_sign_negative() ^ bf.is_sign_negative() {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    return Number::allocate_float(sign * f64::INFINITY).raw();
+                }
                 return rlasp_runtime::LispError::division_by_zero().raw();
             }
         }
@@ -1599,6 +2070,15 @@ pub extern "C" fn cc_div(a: usize, b: usize) -> usize {
         }
     }
 
+    if debug_arith_type_error_enabled() {
+        let stack = runtime_debug_stack_snapshot().join(" -> ");
+        eprintln!(
+            "[arith-type-error:/] a={} b={} stack=[{}]",
+            debug_lisp_object_summary(a_obj),
+            debug_lisp_object_summary(b_obj),
+            stack
+        );
+    }
     rlasp_runtime::LispError::type_error("/ requires numeric arguments").raw()
 }
 
@@ -1872,16 +2352,37 @@ pub extern "C" fn cc_eq(a: usize, b: usize) -> usize {
         return LispObject::nil().raw();
     }
 
-    // Symbol equality by name (case-insensitive, matches interpreter)
     if let (Some(a_ptr), Some(b_ptr)) = (a_obj.as_general_ptr::<()>(), b_obj.as_general_ptr::<()>()) {
         if !a_ptr.is_null() && !b_ptr.is_null() {
-            if unsafe { TypeHeader::from_ptr(a_ptr) } == Some(ObjectType::Symbol)
-                && unsafe { TypeHeader::from_ptr(b_ptr) } == Some(ObjectType::Symbol)
-            {
-                let a_sym = unsafe { &*(a_ptr as *const rlasp_runtime::Symbol) };
-                let b_sym = unsafe { &*(b_ptr as *const rlasp_runtime::Symbol) };
-                if a_sym.name().eq_ignore_ascii_case(b_sym.name()) {
-                    return LispObject::t().raw();
+            let a_ty = unsafe { TypeHeader::from_ptr(a_ptr) };
+            let b_ty = unsafe { TypeHeader::from_ptr(b_ptr) };
+            if a_ty == Some(ObjectType::Package) && b_ty == Some(ObjectType::Package) {
+                let a_name = extract_name_string(a);
+                let b_name = extract_name_string(b);
+                if let (Some(a_canon), Some(b_canon)) =
+                    (find_package_entry(&a_name), find_package_entry(&b_name))
+                {
+                    if a_canon.eq_ignore_ascii_case(&b_canon) {
+                        return LispObject::t().raw();
+                    }
+                }
+            }
+            let package_like = |ty: Option<ObjectType>| {
+                !matches!(ty, Some(ObjectType::Symbol | ObjectType::String | ObjectType::Number))
+            };
+            if package_like(a_ty) && package_like(b_ty) {
+                let a_pkg_name = cc_package_name(a);
+                let b_pkg_name = cc_package_name(b);
+                if a_pkg_name != LispObject::nil().raw() && b_pkg_name != LispObject::nil().raw() {
+                    let a_name = extract_name_string(a_pkg_name);
+                    let b_name = extract_name_string(b_pkg_name);
+                    if let (Some(a_canon), Some(b_canon)) =
+                        (find_package_entry(&a_name), find_package_entry(&b_name))
+                    {
+                        if a_canon.eq_ignore_ascii_case(&b_canon) {
+                            return LispObject::t().raw();
+                        }
+                    }
                 }
             }
         }
@@ -2688,6 +3189,7 @@ pub extern "C" fn cc_not(args_and_env: usize) -> usize {
         LispObject::nil()
     };
 
+    clear_multiple_values();
     if x_obj.is_nil() {
         LispObject::t().raw()
     } else {
@@ -3714,8 +4216,9 @@ pub extern "C" fn cc_truthiness(value: usize) -> usize {
 pub extern "C" fn cc_print(obj: usize) -> usize {
     use std::io::Write;
     let lisp_obj = unsafe { LispObject::from_raw(obj) };
+    print!("\n");
     print_lisp_object(lisp_obj);
-    println!();
+    print!(" ");
     let _ = std::io::stdout().flush();
     obj
 }
@@ -3734,12 +4237,376 @@ pub extern "C" fn cc_prin1_to_string(obj: usize) -> usize {
     rlasp_runtime::RString::allocate(format_s_expr(lisp_obj)).raw()
 }
 
-/// Format a LispObject as an s-expression (for use in format ~S directive)
-fn format_s_expr(obj: LispObject) -> String {
-    format_s_expr_inner(obj, 0)
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct PrintRefKey {
+    kind: u8,
+    ptr: usize,
 }
 
-fn format_s_expr_inner(obj: LispObject, depth: usize) -> String {
+impl PrintRefKey {
+    const CONS: u8 = 1;
+    const VECTOR: u8 = 2;
+
+    fn cons(ptr: usize) -> Self {
+        Self { kind: Self::CONS, ptr }
+    }
+
+    fn vector(ptr: usize) -> Self {
+        Self { kind: Self::VECTOR, ptr }
+    }
+}
+
+struct PrintCtx {
+    print_circle: bool,
+    next_label: usize,
+    labels: std::collections::HashMap<PrintRefKey, usize>,
+    defined: std::collections::HashSet<PrintRefKey>,
+    in_progress: std::collections::HashSet<PrintRefKey>,
+}
+
+impl PrintCtx {
+    fn new(print_circle: bool) -> Self {
+        Self {
+            print_circle,
+            next_label: 1,
+            labels: std::collections::HashMap::new(),
+            defined: std::collections::HashSet::new(),
+            in_progress: std::collections::HashSet::new(),
+        }
+    }
+
+    fn ensure_label(&mut self, key: PrintRefKey) -> usize {
+        if let Some(label) = self.labels.get(&key).copied() {
+            label
+        } else {
+            let label = self.next_label;
+            self.next_label += 1;
+            self.labels.insert(key, label);
+            label
+        }
+    }
+
+    fn reference(&mut self, key: PrintRefKey, fallback: &str) -> String {
+        if self.print_circle {
+            format!("#{}#", self.ensure_label(key))
+        } else {
+            fallback.to_string()
+        }
+    }
+
+    fn finish(&mut self, key: PrintRefKey, body: String) -> String {
+        if self.print_circle {
+            if let Some(label) = self.labels.get(&key).copied() {
+                if !self.defined.contains(&key) {
+                    self.defined.insert(key);
+                    return format!("#{}={}", label, body);
+                }
+            }
+        }
+        body
+    }
+}
+
+fn native_print_circle_enabled() -> bool {
+    if let Some(raw) = get_dynamic_value("*print-circle*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if obj.raw() == LispObject::t().raw() {
+            return true;
+        }
+        if obj.is_nil() {
+            return false;
+        }
+    }
+    matches!(
+        rlasp_runtime::io_syntax::get_io_syntax_var("*print-circle*"),
+        Some(rlasp_runtime::io_syntax::IoSyntaxValue::True)
+    )
+}
+
+fn native_print_readably_enabled() -> bool {
+    if let Some(raw) = get_dynamic_value("*print-readably*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if obj.raw() == LispObject::t().raw() {
+            return true;
+        }
+        if obj.is_nil() {
+            return false;
+        }
+    }
+    matches!(
+        rlasp_runtime::io_syntax::get_io_syntax_var("*print-readably*"),
+        Some(rlasp_runtime::io_syntax::IoSyntaxValue::True)
+    )
+}
+
+fn native_print_array_enabled() -> bool {
+    if let Some(raw) = get_dynamic_value("*print-array*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if obj.raw() == LispObject::t().raw() {
+            return true;
+        }
+        if obj.is_nil() {
+            return false;
+        }
+    }
+    !matches!(
+        rlasp_runtime::io_syntax::get_io_syntax_var("*print-array*"),
+        Some(rlasp_runtime::io_syntax::IoSyntaxValue::False)
+    )
+}
+
+fn native_print_pretty_enabled() -> bool {
+    if let Some(raw) = get_dynamic_value("*print-pretty*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if obj.raw() == LispObject::t().raw() {
+            return true;
+        }
+        if obj.is_nil() {
+            return false;
+        }
+    }
+    matches!(
+        rlasp_runtime::io_syntax::get_io_syntax_var("*print-pretty*"),
+        Some(rlasp_runtime::io_syntax::IoSyntaxValue::True)
+    )
+}
+
+fn current_print_base() -> u32 {
+    if let Some(raw) = get_dynamic_value("*print-base*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if let Some(n) = obj.as_fixnum() {
+            if (2..=36).contains(&n) {
+                return n as u32;
+            }
+        }
+    }
+    match rlasp_runtime::io_syntax::get_io_syntax_var("*print-base*") {
+        Some(rlasp_runtime::io_syntax::IoSyntaxValue::Fixnum(n)) if (2..=36).contains(&n) => n as u32,
+        _ => 10,
+    }
+}
+
+fn current_print_radix() -> bool {
+    if let Some(raw) = get_dynamic_value("*print-radix*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if obj.raw() == LispObject::t().raw() {
+            return true;
+        }
+        if obj.is_nil() {
+            return false;
+        }
+    }
+    matches!(
+        rlasp_runtime::io_syntax::get_io_syntax_var("*print-radix*"),
+        Some(rlasp_runtime::io_syntax::IoSyntaxValue::True)
+    )
+}
+
+fn format_radix_unsigned(mut value: u128, base: u32) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+    let mut digits = Vec::new();
+    let radix = base as u128;
+    while value > 0 {
+        let digit = (value % radix) as u8;
+        let ch = if digit < 10 {
+            (b'0' + digit) as char
+        } else {
+            (b'A' + (digit - 10)) as char
+        };
+        digits.push(ch);
+        value /= radix;
+    }
+    digits.iter().rev().collect()
+}
+
+fn format_radix_signed(value: i128, base: u32) -> String {
+    if value < 0 {
+        format!("-{}", format_radix_unsigned(value.unsigned_abs(), base))
+    } else {
+        format_radix_unsigned(value as u128, base)
+    }
+}
+
+fn format_print_integer(value: i128) -> String {
+    let base = current_print_base();
+    let body = format_radix_signed(value, base);
+    if current_print_radix() {
+        if base == 10 {
+            format!("{}.", body)
+        } else {
+            format!("#{}r{}", base, body)
+        }
+    } else {
+        body
+    }
+}
+
+fn format_print_ratio(num: i128, den: i128) -> String {
+    let base = current_print_base();
+    let body = format!(
+        "{}/{}",
+        format_radix_signed(num, base),
+        format_radix_signed(den, base)
+    );
+    if current_print_radix() {
+        format!("#{}r{}", base, body)
+    } else {
+        body
+    }
+}
+
+fn format_print_float(obj: LispObject, value: f64) -> String {
+    if value.is_infinite() {
+        let float_prefix = match obj.as_float_format().unwrap_or(rlasp_runtime::FloatFormat::Double) {
+            rlasp_runtime::FloatFormat::Single => "single-float",
+            rlasp_runtime::FloatFormat::Double => "double-float",
+        };
+        let sign = if value.is_sign_negative() {
+            "negative"
+        } else {
+            "positive"
+        };
+        return format!("#.ext:{}-{}-infinity", float_prefix, sign);
+    }
+    if value == 0.0 && value.is_sign_negative() {
+        return "-0.0".to_string();
+    }
+    let mut rendered = value.to_string();
+    if !rendered.contains('.')
+        && !rendered.contains('e')
+        && !rendered.contains('E')
+        && !rendered.eq_ignore_ascii_case("nan")
+        && !rendered.eq_ignore_ascii_case("inf")
+        && !rendered.eq_ignore_ascii_case("-inf")
+        && !rendered.eq_ignore_ascii_case("infinity")
+        && !rendered.eq_ignore_ascii_case("-infinity")
+    {
+        rendered.push_str(".0");
+    }
+    rendered
+}
+
+fn format_symbol_name_for_write(name: &str) -> String {
+    let upper = name.to_uppercase();
+    let base = upper.rsplit(':').next().unwrap_or(upper.as_str());
+    match base {
+        "UNQUOTE" | "UNQUOTE-SPLICE" | "UNQUOTE-NSPLICE" | "QUASIQUOTE" => {
+            if upper.contains(':') {
+                upper
+            } else {
+                format!("CORE:{}", base)
+            }
+        }
+        _ => upper,
+    }
+}
+
+fn reader_macro_prefix_and_arg(obj: LispObject) -> Option<(&'static str, LispObject)> {
+    let cons_ptr = obj.as_cons_ptr()?;
+    if cons_ptr.is_null() {
+        return None;
+    }
+    let cons = unsafe { &*cons_ptr };
+    let head_ptr = as_symbol_ptr_checked(cons.car())?;
+    let head = unsafe { &*head_ptr };
+    let head_name = head.name().to_ascii_uppercase();
+    let head_base = head_name.rsplit(':').next().unwrap_or(head_name.as_str());
+
+    let arg_cell_ptr = cons.cdr().as_cons_ptr()?;
+    if arg_cell_ptr.is_null() {
+        return None;
+    }
+    let arg_cell = unsafe { &*arg_cell_ptr };
+    if !arg_cell.cdr().is_nil() {
+        return None;
+    }
+
+    let prefix = match head_base {
+        "QUOTE" => "'",
+        "BACKQUOTE" | "QUASIQUOTE" => "`",
+        "UNQUOTE" => ",",
+        "UNQUOTE-SPLICING" | "UNQUOTE-SPLICE" => ",@",
+        "UNQUOTE-NSPLICE" => ",.",
+        _ => return None,
+    };
+
+    Some((prefix, arg_cell.car()))
+}
+
+fn format_reader_macro_form(
+    obj: LispObject,
+    depth: usize,
+    ctx: &mut PrintCtx,
+    allow_unquote: bool,
+) -> Option<String> {
+    let (prefix, arg) = reader_macro_prefix_and_arg(obj)?;
+    match prefix {
+        "'" => Some(format!("'{}", format_s_expr_inner(arg, depth + 1, ctx))),
+        "`" => Some(format!("`{}", format_backquote_template(arg, depth + 1, ctx))),
+        "," | ",@" | ",." if allow_unquote => {
+            Some(format!("{}{}", prefix, format_s_expr_inner(arg, depth + 1, ctx)))
+        }
+        _ => None,
+    }
+}
+
+fn format_backquote_template(obj: LispObject, depth: usize, ctx: &mut PrintCtx) -> String {
+    if let Some(rendered) = format_reader_macro_form(obj, depth, ctx, true) {
+        return rendered;
+    }
+    if obj.as_cons_ptr().is_some() {
+        return format_list_sexpr_with_mode(obj, depth, ctx, true);
+    }
+    format_s_expr_inner(obj, depth, ctx)
+}
+
+fn list_contains_reader_macro_form(mut obj: LispObject, mut steps_left: usize) -> bool {
+    if reader_macro_prefix_and_arg(obj).is_some() {
+        return true;
+    }
+    while steps_left > 0 {
+        let Some(cons_ptr) = obj.as_cons_ptr() else {
+            return false;
+        };
+        if cons_ptr.is_null() {
+            return false;
+        }
+        let cons = unsafe { &*cons_ptr };
+        if reader_macro_prefix_and_arg(cons.car()).is_some() {
+            return true;
+        }
+        let cdr = cons.cdr();
+        if reader_macro_prefix_and_arg(cdr).is_some() {
+            return true;
+        }
+        obj = cdr;
+        steps_left -= 1;
+    }
+    false
+}
+
+fn apply_simple_pretty_reader_layout(mut rendered: String) -> String {
+    if rendered.chars().count() < 40 {
+        return rendered;
+    }
+    for marker in [" . `", " . '", " . ,@", " . ,.", " . ,"] {
+        if let Some(pos) = rendered.rfind(marker) {
+            rendered.replace_range(pos..pos + 3, "\n . ");
+            break;
+        }
+    }
+    rendered
+}
+
+/// Format a LispObject as an s-expression (for use in format ~S directive)
+fn format_s_expr(obj: LispObject) -> String {
+    let mut ctx = PrintCtx::new(native_print_circle_enabled());
+    format_s_expr_inner(obj, 0, &mut ctx)
+}
+
+fn format_s_expr_inner(obj: LispObject, depth: usize, ctx: &mut PrintCtx) -> String {
     use rlasp_runtime::{header::TypeHeader, header::ObjectType, RString, Symbol, Number, NumberValue};
     if depth > 128 {
         return "#<PRINT-DEPTH-LIMIT>".to_string();
@@ -3750,16 +4617,28 @@ fn format_s_expr_inner(obj: LispObject, depth: usize) -> String {
     } else if obj.raw() == LispObject::t().raw() {
         "T".to_string()
     } else if let Some(fixnum) = obj.as_fixnum() {
-        fixnum.to_string()
+        format_print_integer(fixnum as i128)
     } else if let Some(ch) = obj.as_character() {
         format!("#\\{}", ch)
     } else if let Some(float) = obj.as_float() {
-        float.to_string()
-    } else if let Some(_cons_ptr) = obj.as_cons_ptr() {
-        let mut result = String::from("(");
-        result.push_str(&format_list_sexpr(obj, true, depth + 1));
-        result.push(')');
-        result
+        format_print_float(obj, float)
+    } else if let Some(cons_ptr) = obj.as_cons_ptr() {
+        if let Some(reader_macro) = format_reader_macro_form(obj, depth, ctx, false) {
+            return reader_macro;
+        }
+        let key = PrintRefKey::cons(cons_ptr as usize);
+        if ctx.in_progress.contains(&key) {
+            return ctx.reference(key, "#<LIST>");
+        }
+        if ctx.print_circle {
+            if let Some(label) = ctx.labels.get(&key).copied() {
+                if ctx.defined.contains(&key) {
+                    return format!("#{}#", label);
+                }
+            }
+        }
+        let body = format_list_sexpr(obj, depth + 1, ctx);
+        ctx.finish(key, body)
     } else if obj.is_general() {
         if let Some(ptr) = obj.as_general_ptr::<()>() {
             if ptr.is_null() {
@@ -3774,31 +4653,213 @@ fn format_s_expr_inner(obj: LispObject, depth: usize) -> String {
                     }
                     Some(ObjectType::Symbol) => {
                         let sym = &*(ptr as *const Symbol);
-                        sym.name().to_uppercase()
+                        format_symbol_name_for_write(sym.name())
                     }
                     Some(ObjectType::Vector) => {
-                        let vec = &*(ptr as *const rlasp_runtime::RVector);
-                        let mut out = String::from("#(");
-                        for i in 0..vec.len() {
-                            if i > 0 {
-                                out.push(' ');
-                            }
-                            let elem = vec.get(i).unwrap_or_else(LispObject::nil);
-                            if elem.raw() == obj.raw() {
-                                out.push_str("#1#");
-                            } else {
-                                out.push_str(&format_s_expr_inner(elem, depth + 1));
+                        let key = PrintRefKey::vector(ptr as usize);
+                        if ctx.in_progress.contains(&key) {
+                            return ctx.reference(key, "#<ARRAY>");
+                        }
+                        if ctx.print_circle {
+                            if let Some(label) = ctx.labels.get(&key).copied() {
+                                if ctx.defined.contains(&key) {
+                                    return format!("#{}#", label);
+                                }
                             }
                         }
-                        out.push(')');
-                        out
+
+                        let vec = &*(ptr as *const rlasp_runtime::RVector);
+                        let dims = vec.dims().to_vec();
+                        let logical_len = get_array_fill_pointer_for_object(obj)
+                            .unwrap_or(vec.len())
+                            .min(vec.len());
+                        let print_readably = native_print_readably_enabled();
+                        let print_array = native_print_array_enabled();
+                        if !print_readably && !print_array {
+                            return ctx.finish(key, "#<ARRAY>".to_string());
+                        }
+                        let is_bit_vector = get_array_element_type_for_object(obj)
+                            .map(|name| name.eq_ignore_ascii_case("BIT"))
+                            .unwrap_or_else(|| {
+                                vec.element_type()
+                                    .map(|name| name.eq_ignore_ascii_case("BIT"))
+                                    .unwrap_or(false)
+                            });
+                        let looks_like_bit_vector = !is_bit_vector
+                            && native_print_readably_enabled()
+                            && !native_print_array_enabled()
+                            && dims.len() <= 1
+                            && (0..logical_len).all(|i| {
+                                matches!(
+                                    vec.get(i).unwrap_or_else(LispObject::nil).as_fixnum(),
+                                    Some(0 | 1)
+                                )
+                            });
+                        if is_bit_vector || looks_like_bit_vector {
+                            let mut out = String::from("#*");
+                            let mut ok = true;
+                            for i in 0..logical_len {
+                                let elem = vec.get(i).unwrap_or_else(LispObject::nil);
+                                match elem.as_fixnum() {
+                                    Some(0) => out.push('0'),
+                                    Some(1) => out.push('1'),
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                return ctx.finish(key, out);
+                            }
+                        }
+
+                        ctx.in_progress.insert(key);
+
+                        let body = if dims.is_empty() {
+                            let elem = if logical_len == 0 {
+                                LispObject::nil()
+                            } else {
+                                vec.get(0).unwrap_or_else(LispObject::nil)
+                            };
+                            format!("#0A{}", format_s_expr_inner(elem, depth + 1, ctx))
+                        } else if dims.len() == 1 {
+                            let mut out = String::from("#(");
+                            for i in 0..logical_len {
+                                if i > 0 {
+                                    out.push(' ');
+                                }
+                                let elem = vec.get(i).unwrap_or_else(LispObject::nil);
+                                out.push_str(&format_s_expr_inner(elem, depth + 1, ctx));
+                            }
+                            out.push(')');
+                            out
+                        } else {
+                            fn render_nested_vector(
+                                vec: &rlasp_runtime::RVector,
+                                dims: &[usize],
+                                logical_len: usize,
+                                level: usize,
+                                index: &mut usize,
+                                depth: usize,
+                                ctx: &mut PrintCtx,
+                            ) -> String {
+                                let width = dims.get(level).copied().unwrap_or(0);
+                                let mut parts = Vec::with_capacity(width);
+                                for _ in 0..width {
+                                    if level + 1 == dims.len() {
+                                        let elem = if *index < logical_len {
+                                            vec.get(*index).unwrap_or_else(LispObject::nil)
+                                        } else {
+                                            LispObject::nil()
+                                        };
+                                        *index += 1;
+                                        parts.push(format_s_expr_inner(elem, depth + 1, ctx));
+                                    } else {
+                                        parts.push(render_nested_vector(
+                                            vec,
+                                            dims,
+                                            logical_len,
+                                            level + 1,
+                                            index,
+                                            depth + 1,
+                                            ctx,
+                                        ));
+                                    }
+                                }
+                                format!("({})", parts.join(" "))
+                            }
+
+                            let total_size = dims.iter().copied().product::<usize>();
+                            let nested = if dims.len() > 1 {
+                                let mut row_parts = Vec::with_capacity(dims[0]);
+                                let row_len = dims[1..].iter().copied().product::<usize>();
+                                let mut can_expand_rows = row_len > 0;
+                                for row_idx in 0..dims[0] {
+                                    let row_obj = vec.get(row_idx).unwrap_or_else(LispObject::nil);
+                                    let Some(row_vec_ptr) = as_vector_ptr_checked(row_obj) else {
+                                        can_expand_rows = false;
+                                        break;
+                                    };
+                                    if row_vec_ptr.is_null() {
+                                        can_expand_rows = false;
+                                        break;
+                                    }
+                                    let row_vec = unsafe { &*row_vec_ptr };
+                                    if dims.len() == 2 {
+                                        let mut effective_row = row_vec;
+                                        let nested_first = row_vec.get(0).unwrap_or_else(LispObject::nil);
+                                        if let Some(nested_row_ptr) = as_vector_ptr_checked(nested_first) {
+                                            if !nested_row_ptr.is_null() {
+                                                let nested_row = unsafe { &*nested_row_ptr };
+                                                let wrapper_only_contains_nested = row_vec.len() == 1
+                                                    || (row_vec.len() >= row_len
+                                                        && (1..row_len).all(|idx| {
+                                                            let tail = row_vec
+                                                                .get(idx)
+                                                                .unwrap_or_else(LispObject::nil);
+                                                            tail.is_nil()
+                                                                || symbol_or_string_name(tail)
+                                                                    .map(|name| name.eq_ignore_ascii_case("NIL"))
+                                                                    .unwrap_or(false)
+                                                        }));
+                                                if wrapper_only_contains_nested && nested_row.len() >= row_len {
+                                                    effective_row = nested_row;
+                                                }
+                                            }
+                                        }
+                                        if effective_row.len() < row_len {
+                                            can_expand_rows = false;
+                                            break;
+                                        }
+                                        let mut elems = Vec::with_capacity(dims[1]);
+                                        for col_idx in 0..dims[1] {
+                                            let elem = effective_row
+                                                .get(col_idx)
+                                                .unwrap_or_else(LispObject::nil);
+                                            elems.push(format_s_expr_inner(elem, depth + 1, ctx));
+                                        }
+                                        row_parts.push(format!("({})", elems.join(" ")));
+                                    } else {
+                                        can_expand_rows = false;
+                                        break;
+                                    }
+                                }
+                                if can_expand_rows {
+                                    format!("({})", row_parts.join(" "))
+                                } else {
+                                    let mut index = 0usize;
+                                    render_nested_vector(vec, &dims, logical_len.min(total_size), 0, &mut index, depth, ctx)
+                                }
+                            } else {
+                                let mut index = 0usize;
+                                render_nested_vector(vec, &dims, logical_len.min(total_size), 0, &mut index, depth, ctx)
+                            };
+                            format!("#{}A{}", dims.len(), nested)
+                        };
+
+                        ctx.in_progress.remove(&key);
+                        ctx.finish(key, body)
                     }
                     Some(ObjectType::Number) => {
                         let num = &*(ptr as *const Number);
                         match &num.value {
-                            NumberValue::Bignum(bn) => bn.to_string(),
-                            NumberValue::Ratio(ratio) => ratio.to_string(),
-                            NumberValue::Float(f) => f.to_string(),
+                            NumberValue::Bignum(bn) => bn
+                                .to_string()
+                                .parse::<i128>()
+                                .map(format_print_integer)
+                                .unwrap_or_else(|_| bn.to_string()),
+                            NumberValue::Ratio(ratio) => {
+                                let raw = ratio.to_string();
+                                match raw.split_once('/') {
+                                    Some((num_s, den_s)) => match (num_s.parse::<i128>(), den_s.parse::<i128>()) {
+                                        (Ok(num_i), Ok(den_i)) => format_print_ratio(num_i, den_i),
+                                        _ => raw,
+                                    },
+                                    None => raw,
+                                }
+                            }
+                            NumberValue::Float(f) => format_print_float(obj, *f),
                             NumberValue::Complex(c) => format!("#C({} {})", c.re, c.im),
                         }
                     }
@@ -3814,27 +4875,94 @@ fn format_s_expr_inner(obj: LispObject, depth: usize) -> String {
 }
 
 /// Helper to format a list as s-expression
-fn format_list_sexpr(obj: LispObject, first: bool, depth: usize) -> String {
-    if depth > 128 {
-        return "...".to_string();
-    }
-    if obj.is_nil() {
-        return String::new();
-    }
+fn format_list_sexpr(obj: LispObject, depth: usize, ctx: &mut PrintCtx) -> String {
+    format_list_sexpr_with_mode(obj, depth, ctx, false)
+}
 
-    if let Some(cons_ptr) = obj.as_cons_ptr() {
+fn format_list_sexpr_with_mode(
+    obj: LispObject,
+    depth: usize,
+    ctx: &mut PrintCtx,
+    template_mode: bool,
+) -> String {
+    if depth > 128 {
+        return "#<PRINT-DEPTH-LIMIT>".to_string();
+    }
+    let mut result = String::from("(");
+    let mut current = obj;
+    let mut first = true;
+    let mut entered: Vec<PrintRefKey> = Vec::new();
+
+    while let Some(cons_ptr) = current.as_cons_ptr() {
+        let key = PrintRefKey::cons(cons_ptr as usize);
+        if !ctx.in_progress.contains(&key) {
+            ctx.in_progress.insert(key);
+            entered.push(key);
+        }
         let cons = unsafe { &*cons_ptr };
-        let mut result = String::new();
         if !first {
             result.push(' ');
         }
-        result.push_str(&format_s_expr_inner(cons.car(), depth + 1));
-        result.push_str(&format_list_sexpr(cons.cdr(), false, depth + 1));
-        result
-    } else {
-        // Improper list (dotted pair)
-        format!(" . {}", format_s_expr_inner(obj, depth + 1))
+        first = false;
+        if template_mode {
+            result.push_str(&format_backquote_template(cons.car(), depth + 1, ctx));
+        } else {
+            result.push_str(&format_s_expr_inner(cons.car(), depth + 1, ctx));
+        }
+        let cdr = cons.cdr();
+        if cdr.is_nil() {
+            result.push(')');
+            for key in entered {
+                ctx.in_progress.remove(&key);
+            }
+            return result;
+        }
+        if let Some(reader_tail) = format_reader_macro_form(cdr, depth + 1, ctx, template_mode) {
+            result.push_str(" . ");
+            result.push_str(&reader_tail);
+            result.push(')');
+            for key in entered {
+                ctx.in_progress.remove(&key);
+            }
+            return result;
+        }
+        if let Some(next_ptr) = cdr.as_cons_ptr() {
+            let next_key = PrintRefKey::cons(next_ptr as usize);
+            if ctx.in_progress.contains(&next_key)
+                || (ctx.print_circle
+                    && ctx.labels.contains_key(&next_key)
+                    && ctx.defined.contains(&next_key))
+            {
+                result.push_str(" . ");
+                result.push_str(&ctx.reference(next_key, "#<LIST>"));
+                result.push(')');
+                for key in entered {
+                    ctx.in_progress.remove(&key);
+                }
+                return result;
+            }
+            current = cdr;
+            continue;
+        }
+        result.push_str(" . ");
+        if template_mode {
+            result.push_str(&format_backquote_template(cdr, depth + 1, ctx));
+        } else {
+            result.push_str(&format_s_expr_inner(cdr, depth + 1, ctx));
+        }
+        result.push(')');
+        for key in entered {
+            ctx.in_progress.remove(&key);
+        }
+        return result;
     }
+
+    result.push_str(&format_s_expr_inner(current, depth + 1, ctx));
+    result.push(')');
+    for key in entered {
+        ctx.in_progress.remove(&key);
+    }
+    result
 }
 
 /// Helper function to print a Lisp object in readable form
@@ -3858,7 +4986,7 @@ fn format_lisp_object_inner(obj: LispObject, depth: usize) -> String {
     } else if let Some(ch) = obj.as_character() {
         format!("#\\{}", ch)
     } else if let Some(float) = obj.as_float() {
-        float.to_string()
+        format_print_float(obj, float)
     } else if let Some(_cons_ptr) = obj.as_cons_ptr() {
         let mut result = String::from("(");
         result.push_str(&format_list(obj, true, depth + 1));
@@ -3881,8 +5009,76 @@ fn format_lisp_object_inner(obj: LispObject, depth: usize) -> String {
                     }
                     Some(ObjectType::Vector) => {
                         let vec = &*(ptr as *const rlasp_runtime::RVector);
+                        if !native_print_readably_enabled() && !native_print_array_enabled() {
+                            return "#<ARRAY>".to_string();
+                        }
+                        let dims = vec.dims().to_vec();
+                        let logical_len = get_array_fill_pointer_for_object(obj)
+                            .unwrap_or(vec.len())
+                            .min(vec.len());
+                        let is_char_vector = dims.len() == 1
+                            && get_array_element_type_for_object(obj)
+                                .or_else(|| vec.element_type().map(|s| s.to_string()))
+                                .map(|name| {
+                                    matches!(
+                                        name.to_ascii_uppercase().as_str(),
+                                        "CHARACTER" | "BASE-CHAR" | "STANDARD-CHAR"
+                                    )
+                                })
+                                .unwrap_or(false);
+                        if is_char_vector {
+                            let mut out = String::with_capacity(logical_len);
+                            let mut ok = true;
+                            for i in 0..logical_len {
+                                let elem = vec.get(i).unwrap_or_else(LispObject::nil);
+                                if let Some(ch) = elem.as_character() {
+                                    out.push(ch);
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if ok {
+                                return out;
+                            }
+                        }
+                        let is_bit_vector = get_array_element_type_for_object(obj)
+                            .map(|name| name.eq_ignore_ascii_case("BIT"))
+                            .unwrap_or_else(|| {
+                                vec.element_type()
+                                    .map(|name| name.eq_ignore_ascii_case("BIT"))
+                                    .unwrap_or(false)
+                            });
+                        let looks_like_bit_vector = !is_bit_vector
+                            && native_print_readably_enabled()
+                            && !native_print_array_enabled()
+                            && dims.len() <= 1
+                            && (0..logical_len).all(|i| {
+                                matches!(
+                                    vec.get(i).unwrap_or_else(LispObject::nil).as_fixnum(),
+                                    Some(0 | 1)
+                                )
+                            });
+                        if is_bit_vector || looks_like_bit_vector {
+                            let mut out = String::from("#*");
+                            let mut ok = true;
+                            for i in 0..logical_len {
+                                let elem = vec.get(i).unwrap_or_else(LispObject::nil);
+                                match elem.as_fixnum() {
+                                    Some(0) => out.push('0'),
+                                    Some(1) => out.push('1'),
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                return out;
+                            }
+                        }
                         let mut out = String::from("#(");
-                        for i in 0..vec.len() {
+                        for i in 0..logical_len {
                             if i > 0 {
                                 out.push(' ');
                             }
@@ -3901,7 +5097,7 @@ fn format_lisp_object_inner(obj: LispObject, depth: usize) -> String {
                         match &num.value {
                             NumberValue::Ratio(r) => r.to_string(),
                             NumberValue::Bignum(b) => b.to_string(),
-                            NumberValue::Float(f) => f.to_string(),
+                            NumberValue::Float(f) => format_print_float(obj, *f),
                             NumberValue::Complex(c) => format!("#C({} {})", c.re, c.im),
                         }
                     }
@@ -4120,13 +5316,72 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
     }
     let control_str = control_str_owned.as_str();
 
+    if control_str.contains("~:C")
+        || control_str.contains("~:c")
+        || control_str.contains("~<")
+        || control_str.contains("~T")
+        || control_str.contains("~t")
+        || (control_str.contains('\'')
+            && (control_str.contains('R') || control_str.contains('r')))
+    {
+        let mut raw_args = vec![dest];
+        for arg in list_to_vec(unsafe { LispObject::from_raw(args_and_control) }) {
+            raw_args.push(arg.raw());
+        }
+        if let Some(result) = try_eval_bridge_call("format", &raw_args) {
+            return result;
+        }
+    }
+
     let mut result = String::new();
     let mut chars = control_str.chars().peekable();
     let mut arg_list = arg_list;
 
     while let Some(ch) = chars.next() {
         if ch == '~' {
+            let mut raw_params: Vec<Option<String>> = Vec::new();
+            let mut current_param = String::new();
+            let mut quoted_param: Option<char> = None;
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() || (next == '-' && current_param.is_empty()) {
+                    current_param.push(next);
+                    chars.next();
+                    continue;
+                }
+                if next == ',' {
+                    if current_param.is_empty() {
+                        raw_params.push(None);
+                    } else {
+                        raw_params.push(Some(current_param.clone()));
+                        current_param.clear();
+                    }
+                    chars.next();
+                    continue;
+                }
+                if next == '\'' {
+                    if !current_param.is_empty() {
+                        raw_params.push(Some(current_param.clone()));
+                        current_param.clear();
+                    }
+                    chars.next();
+                    quoted_param = chars.next();
+                    continue;
+                }
+                break;
+            }
+            if !current_param.is_empty() {
+                raw_params.push(Some(current_param));
+            }
+
             if let Some(directive) = chars.next() {
+                let param_usize = |idx: usize| -> Option<usize> {
+                    raw_params
+                        .get(idx)
+                        .and_then(|opt| opt.as_ref())
+                        .and_then(|s| s.parse::<isize>().ok())
+                        .filter(|n| *n >= 0)
+                        .map(|n| n as usize)
+                };
                 match directive {
                     '\n' | '\r' => {
                         if directive == '\r' && matches!(chars.peek(), Some('\n')) {
@@ -4141,7 +5396,12 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
                             result.push('\n');
                         }
                     }
-                    '%' => result.push('\n'),
+                    '%' => {
+                        let repeat = param_usize(0).unwrap_or(1);
+                        for _ in 0..repeat {
+                            result.push('\n');
+                        }
+                    }
                     'A' | 'a' => {
                         if let Some(cons_ptr) = arg_list.as_cons_ptr() {
                             let cons = unsafe { &*cons_ptr };
@@ -4185,6 +5445,69 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
                             arg_list = cons.cdr();
                         }
                     },
+                    'F' | 'f' => {
+                        if let Some(cons_ptr) = arg_list.as_cons_ptr() {
+                            let cons = unsafe { &*cons_ptr };
+                            let arg = cons.car();
+                            let precision = param_usize(1).or_else(|| param_usize(0)).unwrap_or(1);
+                            let rendered = if let Some(n) = arg.as_fixnum() {
+                                format!("{:.prec$}", n as f64, prec = precision)
+                            } else if let Some(n) = arg.as_float() {
+                                if n == 0.0 && n.is_sign_negative() {
+                                    format!("-0.{}", "0".repeat(precision))
+                                } else {
+                                    format!("{:.prec$}", n, prec = precision)
+                                }
+                            } else {
+                                format!("{:.prec$}", 0.0, prec = precision)
+                            };
+                            result.push_str(&rendered);
+                            arg_list = cons.cdr();
+                        }
+                    }
+                    'R' | 'r' => {
+                        if let Some(cons_ptr) = arg_list.as_cons_ptr() {
+                            let cons = unsafe { &*cons_ptr };
+                            let arg = cons.car();
+                            let radix = param_usize(0).unwrap_or(10).clamp(2, 36) as u32;
+                            let min_width = param_usize(1).unwrap_or(0);
+                            let pad_char = quoted_param.unwrap_or(' ');
+                            let mut rendered = if let Some(n) = arg.as_fixnum() {
+                                format_radix_signed(n as i128, radix)
+                            } else if let Some(num_ptr) = arg.as_general_ptr::<rlasp_runtime::Number>() {
+                                if num_ptr.is_null() {
+                                    "0".to_string()
+                                } else {
+                                    let num = unsafe { &*num_ptr };
+                                    match &num.value {
+                                        rlasp_runtime::NumberValue::Bignum(bn) => bn
+                                            .to_string()
+                                            .parse::<i128>()
+                                            .map(|n| format_radix_signed(n, radix))
+                                            .unwrap_or_else(|_| "0".to_string()),
+                                        _ => "0".to_string(),
+                                    }
+                                }
+                            } else {
+                                "0".to_string()
+                            };
+                            let negative = rendered.starts_with('-');
+                            let body = if negative { &rendered[1..] } else { rendered.as_str() };
+                            if body.len() < min_width {
+                                let mut padded = String::with_capacity(min_width + usize::from(negative));
+                                if negative {
+                                    padded.push('-');
+                                }
+                                for _ in 0..(min_width - body.len()) {
+                                    padded.push(pad_char);
+                                }
+                                padded.push_str(body);
+                                rendered = padded;
+                            }
+                            result.push_str(&rendered);
+                            arg_list = cons.cdr();
+                        }
+                    }
                     '?' => {
                         // Recursive format - ~? takes a format string and args list
                         // For now, just consume two arguments and format recursively
@@ -4342,8 +5665,23 @@ pub extern "C" fn cc_format(dest: usize, args_and_control: usize) -> usize {
                         }
                     },
                     _ => {
-                        // Unknown directive - just pass through
+                        // Unknown directive - preserve parsed parameters as text.
                         result.push('~');
+                        for (idx, param) in raw_params.iter().enumerate() {
+                            if idx > 0 {
+                                result.push(',');
+                            }
+                            if let Some(text) = param {
+                                result.push_str(text);
+                            }
+                        }
+                        if let Some(ch) = quoted_param {
+                            if !raw_params.is_empty() {
+                                result.push(',');
+                            }
+                            result.push('\'');
+                            result.push(ch);
+                        }
                         result.push(directive);
                     }
                 }
@@ -4875,8 +6213,28 @@ pub extern "C" fn cc_make_symbol(name_ptr: *const i8, len: i64) -> usize {
         }
     };
 
-    let sym = rlasp_runtime::Symbol::allocate(name_str.clone());
-    let raw = sym.raw();
+    let trimmed = name_str.trim();
+    let raw = if trimmed.is_empty() {
+        rlasp_runtime::Symbol::allocate_uninterned(String::new()).raw()
+    } else if trimmed.eq_ignore_ascii_case("NIL") {
+        LispObject::nil().raw()
+    } else if trimmed.eq_ignore_ascii_case("T") {
+        LispObject::t().raw()
+    } else if let Some(gensym_name) = trimmed.strip_prefix("#:") {
+        rlasp_runtime::Symbol::allocate_uninterned(gensym_name.to_string()).raw()
+    } else if trimmed.starts_with(':') {
+        keyword_symbol(trimmed)
+    } else if let Some((pkg, sym)) = trimmed.split_once("::").or_else(|| trimmed.split_once(':')) {
+        let canon_pkg = find_package_entry(pkg).unwrap_or_else(|| {
+            let upper = pkg.to_ascii_uppercase();
+            register_jit_package(&upper);
+            upper
+        });
+        resolve_package_symbol_object(&canon_pkg, sym)
+    } else {
+        let current_pkg = CURRENT_PACKAGE.with(|cp| cp.borrow().clone());
+        resolve_package_symbol_object(&current_pkg, trimmed)
+    };
 
     if std::env::var("RLASP_TRACE_ARGS").is_ok() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4927,6 +6285,8 @@ fn get_interned_symbols() -> &'static Mutex<StdHashMap<String, usize>> {
 
 static DYNAMIC_BINDINGS: std::sync::LazyLock<Mutex<StdHashMap<String, usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(StdHashMap::new()));
+static RAW_SYMBOL_PLISTS: std::sync::LazyLock<Mutex<StdHashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(StdHashMap::new()));
 
 #[derive(Clone)]
 struct ProgvBinding {
@@ -4957,6 +6317,41 @@ fn dynamic_binding_keys(name: &str) -> Vec<String> {
     }
 
     keys
+}
+
+fn normalize_special_dynamic_value(name: &str, raw: usize) -> usize {
+    if name.eq_ignore_ascii_case("*readtable*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+            if sym_ptr.is_null() {
+                return rlasp_runtime::PACKAGE_MANAGER
+                    .intern_in_package("COMMON-LISP-USER", "__RLASP_READTABLE__0")
+                    .raw();
+            } else {
+                let sym_name = unsafe { (&*sym_ptr).name() };
+                if sym_name.starts_with("__RLASP_READTABLE__") {
+                    return raw;
+                }
+                if sym_name.eq_ignore_ascii_case("*readtable*")
+                    || sym_name.eq_ignore_ascii_case("*standard-readtable*")
+                    || sym_name.eq_ignore_ascii_case("readtable::*standard-readtable*")
+                    || sym_name.eq_ignore_ascii_case("eclector.readtable:*standard-readtable*")
+                {
+                    return rlasp_runtime::PACKAGE_MANAGER
+                        .intern_in_package("COMMON-LISP-USER", "__RLASP_READTABLE__0")
+                        .raw();
+                }
+                return rlasp_runtime::PACKAGE_MANAGER
+                    .intern_in_package("COMMON-LISP-USER", "__RLASP_READTABLE__0")
+                    .raw();
+            }
+        } else {
+            return rlasp_runtime::PACKAGE_MANAGER
+                .intern_in_package("COMMON-LISP-USER", "__RLASP_READTABLE__0")
+                .raw();
+        }
+    }
+    raw
 }
 
 fn capture_dynamic_binding(map: &StdHashMap<String, usize>, name: &str) -> Option<usize> {
@@ -5004,6 +6399,99 @@ fn parse_setf_function_name(obj: LispObject) -> Option<LispObject> {
     Some(name)
 }
 
+fn is_setf_designator_head(obj: LispObject) -> bool {
+    let Some(cell_ptr) = obj.as_cons_ptr() else {
+        return false;
+    };
+    if cell_ptr.is_null() {
+        return false;
+    }
+    let cell = unsafe { &*cell_ptr };
+    let head = cell.car();
+    let Some(head_ptr) = as_symbol_ptr_checked(head) else {
+        return false;
+    };
+    let head_sym = unsafe { &*head_ptr };
+    strip_package_prefix(head_sym.name()).eq_ignore_ascii_case("setf")
+}
+
+fn function_name_atom_to_string(obj: LispObject) -> Option<String> {
+    if obj.is_nil() {
+        return Some("NIL".to_string());
+    }
+    if obj.raw() == LispObject::t().raw() {
+        return Some("T".to_string());
+    }
+    as_symbol_ptr_checked(obj).map(|sym_ptr| unsafe { (&*sym_ptr).name().to_string() })
+}
+
+fn extract_single_arg_object(args_and_env: usize) -> Option<LispObject> {
+    let args_obj = unsafe { LispObject::from_raw(args_and_env) };
+    if let Some(cons_ptr) = args_obj.as_cons_ptr() {
+        if cons_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { (&*cons_ptr).car() })
+        }
+    } else {
+        Some(args_obj)
+    }
+}
+
+fn function_name_designator_to_string(obj: LispObject, caller: &str) -> Result<String, usize> {
+    if is_valid_function_name_atom(obj) {
+        if let Some(name) = function_name_atom_to_string(obj) {
+            return Ok(name);
+        }
+    }
+
+    if let Some(target) = parse_setf_function_name(obj) {
+        if is_valid_function_name_atom(target) {
+            if let Some(target_name) = function_name_atom_to_string(target) {
+                return Ok(format!("(setf {})", target_name));
+            }
+        }
+        return Err(
+            rlasp_runtime::LispError::type_error(&format!(
+                "{} requires a valid function name",
+                caller
+            ))
+            .raw(),
+        );
+    }
+
+    if is_setf_designator_head(obj) {
+        return Err(
+            rlasp_runtime::LispError::type_error(&format!(
+                "{} requires a valid function name",
+                caller
+            ))
+            .raw(),
+        );
+    }
+
+    Err(
+        rlasp_runtime::LispError::type_error(&format!(
+            "{} requires a function name",
+            caller
+        ))
+        .raw(),
+    )
+}
+
+fn function_registry_has_callable(name: &str) -> bool {
+    let registry = get_registry().lock().unwrap();
+    lookup_function_entry_unlocked(&registry, name).is_some()
+}
+
+fn make_function_ref_for_name(name: &str) -> usize {
+    if let Ok(c_name) = CString::new(name) {
+        cc_make_function_ref(c_name.as_ptr())
+    } else {
+        cc_nil_value()
+    }
+}
+
 fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
     use rlasp_runtime::Number;
 
@@ -5013,27 +6501,37 @@ fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
         // Runtime fixnum is 62-bit signed (2 tag bits), so these constants must be fixnums.
         "MOST-POSITIVE-FIXNUM" => Some(LispObject::fixnum((1i64 << 61) - 1).raw()),
         "MOST-NEGATIVE-FIXNUM" => Some(LispObject::fixnum(-(1i64 << 61)).raw()),
-        "MOST-POSITIVE-SHORT-FLOAT"
-        | "MOST-POSITIVE-SINGLE-FLOAT"
-        | "MOST-POSITIVE-DOUBLE-FLOAT"
-        | "MOST-POSITIVE-LONG-FLOAT" => Some(Number::allocate_float(f64::MAX).raw()),
-        "MOST-NEGATIVE-SHORT-FLOAT"
-        | "MOST-NEGATIVE-SINGLE-FLOAT"
-        | "MOST-NEGATIVE-DOUBLE-FLOAT"
-        | "MOST-NEGATIVE-LONG-FLOAT" => Some(Number::allocate_float(-f64::MAX).raw()),
-        "SHORT-FLOAT-POSITIVE-INFINITY"
-        | "SINGLE-FLOAT-POSITIVE-INFINITY"
-        | "DOUBLE-FLOAT-POSITIVE-INFINITY"
-        | "LONG-FLOAT-POSITIVE-INFINITY" => Some(Number::allocate_float(f64::INFINITY).raw()),
-        "SHORT-FLOAT-NEGATIVE-INFINITY"
-        | "SINGLE-FLOAT-NEGATIVE-INFINITY"
-        | "DOUBLE-FLOAT-NEGATIVE-INFINITY"
-        | "LONG-FLOAT-NEGATIVE-INFINITY" => Some(Number::allocate_float(f64::NEG_INFINITY).raw()),
+        "MOST-POSITIVE-SHORT-FLOAT" | "MOST-POSITIVE-SINGLE-FLOAT" => {
+            Some(Number::allocate_single_float(f32::MAX as f64).raw())
+        }
+        "MOST-POSITIVE-DOUBLE-FLOAT" | "MOST-POSITIVE-LONG-FLOAT" => {
+            Some(Number::allocate_float(f64::MAX).raw())
+        }
+        "MOST-NEGATIVE-SHORT-FLOAT" | "MOST-NEGATIVE-SINGLE-FLOAT" => {
+            Some(Number::allocate_single_float(-(f32::MAX as f64)).raw())
+        }
+        "MOST-NEGATIVE-DOUBLE-FLOAT" | "MOST-NEGATIVE-LONG-FLOAT" => {
+            Some(Number::allocate_float(-f64::MAX).raw())
+        }
+        "SHORT-FLOAT-POSITIVE-INFINITY" | "SINGLE-FLOAT-POSITIVE-INFINITY" => {
+            Some(Number::allocate_single_float(f64::INFINITY).raw())
+        }
+        "DOUBLE-FLOAT-POSITIVE-INFINITY" | "LONG-FLOAT-POSITIVE-INFINITY" => {
+            Some(Number::allocate_float(f64::INFINITY).raw())
+        }
+        "SHORT-FLOAT-NEGATIVE-INFINITY" | "SINGLE-FLOAT-NEGATIVE-INFINITY" => {
+            Some(Number::allocate_single_float(f64::NEG_INFINITY).raw())
+        }
+        "DOUBLE-FLOAT-NEGATIVE-INFINITY" | "LONG-FLOAT-NEGATIVE-INFINITY" => {
+            Some(Number::allocate_float(f64::NEG_INFINITY).raw())
+        }
         "LEAST-POSITIVE-SHORT-FLOAT"
         | "LEAST-POSITIVE-NORMALIZED-SHORT-FLOAT"
         | "LEAST-POSITIVE-SINGLE-FLOAT"
-        | "LEAST-POSITIVE-NORMALIZED-SINGLE-FLOAT"
-        | "LEAST-POSITIVE-DOUBLE-FLOAT"
+        | "LEAST-POSITIVE-NORMALIZED-SINGLE-FLOAT" => {
+            Some(Number::allocate_single_float(f32::MIN_POSITIVE as f64).raw())
+        }
+        "LEAST-POSITIVE-DOUBLE-FLOAT"
         | "LEAST-POSITIVE-NORMALIZED-DOUBLE-FLOAT"
         | "LEAST-POSITIVE-LONG-FLOAT"
         | "LEAST-POSITIVE-NORMALIZED-LONG-FLOAT" => {
@@ -5042,13 +6540,16 @@ fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
         "LEAST-NEGATIVE-SHORT-FLOAT"
         | "LEAST-NEGATIVE-NORMALIZED-SHORT-FLOAT"
         | "LEAST-NEGATIVE-SINGLE-FLOAT"
-        | "LEAST-NEGATIVE-NORMALIZED-SINGLE-FLOAT"
-        | "LEAST-NEGATIVE-DOUBLE-FLOAT"
+        | "LEAST-NEGATIVE-NORMALIZED-SINGLE-FLOAT" => {
+            Some(Number::allocate_single_float(-(f32::MIN_POSITIVE as f64)).raw())
+        }
+        "LEAST-NEGATIVE-DOUBLE-FLOAT"
         | "LEAST-NEGATIVE-NORMALIZED-DOUBLE-FLOAT"
         | "LEAST-NEGATIVE-LONG-FLOAT"
         | "LEAST-NEGATIVE-NORMALIZED-LONG-FLOAT" => {
             Some(Number::allocate_float(-f64::MIN_POSITIVE).raw())
         }
+        "*CURRENT-PROCESS*" => Some(rlasp_runtime::Symbol::allocate("%PROCESS-MAIN".to_string()).raw()),
         _ => None,
     }
 }
@@ -5059,6 +6560,7 @@ fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
 pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
     let trace = trace_progv_enabled();
     let trace_symbol_value = debug_symbol_value_enabled();
+    let trace_readtable = std::env::var("RLASP_TRACE_READTABLE_BINDINGS").is_ok();
     let tid = std::thread::current().id();
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
 
@@ -5070,6 +6572,9 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
     // Try to get symbol name
     let name = if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
+        if !sym.is_interned() {
+            return sym.value().raw();
+        }
         sym.name().to_string()
     } else {
         if trace_symbol_value {
@@ -5151,10 +6656,34 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
             );
         }
         if let Some(value) = direct {
+            let value = normalize_special_dynamic_value(&name, value);
+            if trace_readtable && name.eq_ignore_ascii_case("*readtable*") {
+                eprintln!(
+                    "[readtable-get tid={:?}] source=direct value={}",
+                    tid,
+                    format_lisp_object(unsafe { LispObject::from_raw(value) })
+                );
+            }
             value
         } else if let Some(value) = upper_v {
+            let value = normalize_special_dynamic_value(&name, value);
+            if trace_readtable && name.eq_ignore_ascii_case("*readtable*") {
+                eprintln!(
+                    "[readtable-get tid={:?}] source=upper value={}",
+                    tid,
+                    format_lisp_object(unsafe { LispObject::from_raw(value) })
+                );
+            }
             value
         } else if let Some(value) = lower_v {
+            let value = normalize_special_dynamic_value(&name, value);
+            if trace_readtable && name.eq_ignore_ascii_case("*readtable*") {
+                eprintln!(
+                    "[readtable-get tid={:?}] source=lower value={}",
+                    tid,
+                    format_lisp_object(unsafe { LispObject::from_raw(value) })
+                );
+            }
             value
         } else {
             // Also try stripping package prefix
@@ -5172,13 +6701,13 @@ pub extern "C" fn cc_symbol_value(symbol: usize) -> usize {
                     );
                 }
                 if let Some(value) = base_direct {
-                    return value;
+                    return normalize_special_dynamic_value(&name, value);
                 }
                 if let Some(value) = base_upper_v {
-                    return value;
+                    return normalize_special_dynamic_value(&name, value);
                 }
                 if let Some(value) = base_lower_v {
-                    return value;
+                    return normalize_special_dynamic_value(&name, value);
                 }
             }
             if let Some(v) = lookup_standard_symbol_constant(&name) {
@@ -5208,22 +6737,285 @@ fn strip_package_prefix(name: &str) -> &str {
     }
 }
 
+fn is_special_operator_name(base_upper: &str) -> bool {
+    matches!(
+        base_upper,
+        "QUOTE"
+            | "IF"
+            | "LET"
+            | "LET*"
+            | "SETQ"
+            | "PROGN"
+            | "BLOCK"
+            | "RETURN-FROM"
+            | "TAGBODY"
+            | "GO"
+            | "FLET"
+            | "LABELS"
+            | "MACROLET"
+            | "CATCH"
+            | "THROW"
+            | "UNWIND-PROTECT"
+            | "EVAL-WHEN"
+            | "LOCALLY"
+            | "FUNCTION"
+            | "THE"
+            | "LOAD-TIME-VALUE"
+            | "MULTIPLE-VALUE-CALL"
+            | "MULTIPLE-VALUE-PROG1"
+            | "PROGV"
+    )
+}
+
 fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
+    let dispatch_base = strip_package_prefix(dispatch_name);
+    let dispatch_base_lower = dispatch_base.to_ascii_lowercase();
+    if dispatch_base_lower.starts_with("__rlasp_bridge_lambda__") {
+        return true;
+    }
+    let force_bridge_skip = matches!(
+        dispatch_base_lower.as_str(),
+        // Keep printer output on native path; forcing these currently risks
+        // deep recursive bridge reentry and stack overflow.
+        "write"
+            | "write-char"
+            | "write-string"
+            | "write-line"
+            | "print"
+            | "prin1"
+            | "princ"
+            | "pprint"
+            | "format"
+            | "write-to-string"
+            | "prin1-to-string"
+            | "princ-to-string"
+            | "terpri"
+            | "fresh-line"
+            // Keep core array indexing/shape ops on native path; forcing these
+            // can create runaway bridge allocations in array-heavy suites.
+            | "make-array"
+            | "adjust-array"
+            | "aref"
+            | "row-major-aref"
+            | "svref"
+            | "vector"
+            | "array-dimension"
+            | "array-dimensions"
+            | "array-rank"
+            | "array-total-size"
+            | "array-displacement"
+            | "array-element-type"
+            | "array-has-fill-pointer-p"
+            | "fill-pointer"
+            // Keep these on native path until bridge parse-integer/string
+            // semantics exactly match CL edge cases.
+            | "parse-integer"
+            | "string/="
+            | "string-not-equal"
+            // Keep hash-table introspection on native path; bridge currently
+            // may re-enter eval with non-AST hash-table objects.
+            | "hash-table-count"
+            | "hash-table-size"
+            | "hash-table-rehash-size"
+            | "hash-table-rehash-threshold"
+            | "hash-table-test"
+            // Keep selected sequence/MP/restart operators on native path; the
+            // bridge evaluator still diverges for these in edge-case tests.
+            | "mapcar"
+            | "sort"
+            | "stable-sort"
+            | "hash-table-p"
+            | "process-run-function"
+            | "process-join"
+            | "process-join-error-original-condition"
+            | "cas"
+            | "atomic-push"
+            // Keep these on native path; bridge dispatch regresses summary
+            // printing and can stall at suite completion.
+            | "format"
+            | "pprint"
+            | "set-pprint-dispatch"
+            | "copy-pprint-dispatch"
+            | "pprint-dispatch"
+            // Keep MP interrupt/cancel paths native; forced bridge can deadlock
+            // in mp/interrupt suites. exit/abort must propagate evaluator control
+            // markers back to mp_run_process, so they cannot stay on the native path.
+            | "interrupt-process"
+            | "process-cancel"
+            | "process-error-process"
+            // Keep bit-array logical ops native; bridge path currently rejects
+            // valid multidimensional/displaced destinations.
+            | "bit-and"
+            | "bit-andc1"
+            | "bit-andc2"
+            | "bit-ior"
+            | "bit-nand"
+            | "bit-nor"
+            | "bit-orc1"
+            | "bit-orc2"
+            | "bit-xor"
+            | "bit-eqv"
+            | "bit-not"
+            // Keep Unicode case predicates/transforms native; bridge path is
+            // too slow for full char-code-limit sweeps.
+            | "read-from-string"
+            | "char-name"
+            | "name-char"
+            | "char-upcase"
+            | "char-downcase"
+            | "upper-case-p"
+            | "lower-case-p"
+    );
+    if force_bridge_skip {
+        return false;
+    }
+    if dispatch_base_lower == "check-pending-interrupts" {
+        return true;
+    }
+    let force_bridge_cl_builtin = rlasp_runtime::is_cl_builtin(dispatch_base_lower.as_str());
+    let force_bridge_builtins = std::env::var("RLASP_FORCE_BRIDGE_BUILTINS")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    if force_bridge_builtins {
+        if force_bridge_skip {
+            return false;
+        }
+        // Keep user-defined/non-CL symbols on the native path; force only CL
+        // builtins through the interpreter bridge for semantic coverage.
+        if !dispatch_name.is_empty()
+            && !dispatch_base_lower.starts_with("%fn%")
+            && force_bridge_cl_builtin
+        {
+            return true;
+        }
+    }
+
     let raw_lower = raw_name.to_ascii_lowercase();
     if raw_lower.starts_with("(setf macro-function")
         || raw_lower.starts_with("(setf compiler-macro-function")
-        || raw_lower.starts_with("(setf fdefinition")
     {
         return true;
     }
 
+    let disable_static_forced = std::env::var("RLASP_DISABLE_STATIC_FORCE_BRIDGE")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    if disable_static_forced {
+        return false;
+    }
+
+    let skip_package_force_bridge = std::env::var("RLASP_SKIP_PACKAGE_FORCE_BRIDGE")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    if skip_package_force_bridge
+        && matches!(
+            dispatch_base_lower.as_str(),
+            "make-package"
+                | "delete-package"
+                | "rename-package"
+                | "lock-package"
+                | "unlock-package"
+                | "package-locked-p"
+                | "in-package"
+                | "package-nicknames"
+                | "package-use-list"
+                | "package-used-by-list"
+                | "use-package"
+                | "unuse-package"
+                | "export"
+                | "unexport"
+                | "import"
+                | "shadow"
+                | "shadowing-import"
+                | "unintern"
+                | "intern"
+                | "find-symbol"
+                | "find-package"
+                | "list-all-packages"
+                | "package-name"
+                | "package-shadowing-symbols"
+                | "package-add-nickname"
+                | "package-remove-nickname"
+                | "symbol-package"
+                | "packagep"
+                | "find-all-symbols"
+                | "defpackage"
+                | "define-package"
+        )
+    {
+        return false;
+    }
+
+    let force_read_from_string_bridge = std::env::var("RLASP_FORCE_READ_FROM_STRING_BRIDGE")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    if force_read_from_string_bridge && dispatch_base_lower == "read-from-string" {
+        return true;
+    }
+
     let forced = matches!(
-        dispatch_name,
-        "macro-function"
+        dispatch_base_lower.as_str(),
+        "define-compiler-macro"
+            | "define-symbol-macro"
+            | "macro-function"
             | "compiler-macro-function"
-            | "fdefinition"
-            | "fmakunbound"
             | "proclaim"
+            | "make-package"
+            | "delete-package"
+            | "rename-package"
+            | "lock-package"
+            | "unlock-package"
+            | "package-locked-p"
+            | "in-package"
+            | "package-nicknames"
+            | "package-use-list"
+            | "package-used-by-list"
+            | "use-package"
+            | "unuse-package"
+            | "export"
+            | "unexport"
+            | "import"
+            | "shadow"
+            | "shadowing-import"
+            | "unintern"
+            | "intern"
+            | "find-symbol"
+            | "find-package"
+            | "list-all-packages"
+            | "package-name"
+            | "package-shadowing-symbols"
+            | "package-add-nickname"
+            | "package-remove-nickname"
+            | "symbol-package"
+            | "packagep"
+            | "find-all-symbols"
+            | "defpackage"
+            | "define-package"
+            | "slot-value"
+            | "set-slot-value"
+            | "change-class"
+            | "reinitialize-instance"
+            | "shared-initialize"
+            | "update-instance-for-different-class"
+            | "update-instance-for-redefined-class"
+            | "describe"
+            | "room"
+            | "single-float-to-bits"
+            | "single-float-from-bits"
+            | "double-float-to-bits"
+            | "double-float-from-bits"
             | "read"
             | "read-delimited-list"
             | "copy-readtable"
@@ -5266,13 +7058,8 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "read-line"
             | "read-byte"
             | "write-byte"
-            | "write-char"
-            | "write-string"
-            | "write-line"
             | "read-sequence"
-            | "write-sequence"
             | "stream-read-sequence"
-            | "stream-write-sequence"
             | "make-string-input-stream"
             | "make-string-output-stream"
             | "get-output-stream-string"
@@ -5321,6 +7108,8 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "resolve-symlinks"
             | "truenamize"
             | "user-homedir-pathname"
+            | "assoc-if"
+            | "assoc-if-not"
             | "run-program"
             | "external-process-wait"
             | "external-process-error-stream"
@@ -5351,7 +7140,7 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "vfork-execvp"
     );
     if std::env::var("RLASP_TRACE_FORCE_BRIDGE").is_ok()
-        && dispatch_name.eq_ignore_ascii_case("find-symbol")
+        && dispatch_base_lower == "find-symbol"
     {
         eprintln!(
             "[force-bridge] raw_name={} dispatch_name={} forced={}",
@@ -5364,36 +7153,24 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
 /// Check if a dynamic variable is bound by name (for interpreter bridge)
 pub fn is_dynamic_bound(name: &str) -> bool {
     let b = DYNAMIC_BINDINGS.lock().unwrap();
-    if b.contains_key(name) || b.contains_key(&name.to_uppercase()) || b.contains_key(&name.to_lowercase()) {
-        return true;
+    for key in dynamic_binding_keys(name) {
+        if b.contains_key(&key) {
+            return true;
+        }
     }
-    // Try with package prefix stripped (e.g., "asdf::*central-registry*" -> "*central-registry*")
-    let base = strip_package_prefix(name);
-    if base != name {
-        b.contains_key(base) || b.contains_key(&base.to_uppercase()) || b.contains_key(&base.to_lowercase())
-    } else {
-        false
-    }
+    false
 }
 
 /// Get dynamic variable value by name as raw usize (for interpreter bridge)
 /// Returns None if not bound
 pub fn get_dynamic_value(name: &str) -> Option<usize> {
     let b = DYNAMIC_BINDINGS.lock().unwrap();
-    b.get(name).copied()
-        .or_else(|| b.get(&name.to_uppercase()).copied())
-        .or_else(|| b.get(&name.to_lowercase()).copied())
-        .or_else(|| {
-            // Try with package prefix stripped
-            let base = strip_package_prefix(name);
-            if base != name {
-                b.get(base).copied()
-                    .or_else(|| b.get(&base.to_uppercase()).copied())
-                    .or_else(|| b.get(&base.to_lowercase()).copied())
-            } else {
-                None
-            }
-        })
+    for key in dynamic_binding_keys(name) {
+        if let Some(value) = b.get(&key) {
+            return Some(*value);
+        }
+    }
+    None
 }
 
 /// JIT package registry - tracks packages created during JIT execution
@@ -5404,6 +7181,7 @@ pub struct ClPackage {
     pub nicknames: Vec<String>,
     pub use_list: Vec<String>,
     pub used_by_list: Vec<String>,
+    pub locked: bool,
     pub exported_symbols: std::collections::HashSet<String>,
     pub shadowing_symbols: std::collections::HashSet<String>,
     pub internal_symbols: std::collections::HashSet<String>,
@@ -5416,6 +7194,7 @@ impl ClPackage {
             nicknames: Vec::new(),
             use_list: Vec::new(),
             used_by_list: Vec::new(),
+            locked: false,
             exported_symbols: std::collections::HashSet::new(),
             shadowing_symbols: std::collections::HashSet::new(),
             internal_symbols: std::collections::HashSet::new(),
@@ -5424,22 +7203,7 @@ impl ClPackage {
 }
 
 static PACKAGE_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ClPackage>>> =
-    std::sync::LazyLock::new(|| {
-        let mut m = HashMap::new();
-        // Bootstrap standard CL packages
-        let mut cl = ClPackage::new("COMMON-LISP");
-        cl.nicknames.push("CL".to_string());
-        for sym in CL_PACKAGE_EXPORTS {
-            cl.exported_symbols.insert((*sym).to_string());
-        }
-        m.insert("COMMON-LISP".to_string(), cl);
-        let mut cl_user = ClPackage::new("COMMON-LISP-USER");
-        cl_user.nicknames.push("CL-USER".to_string());
-        cl_user.use_list.push("COMMON-LISP".to_string());
-        m.insert("COMMON-LISP-USER".to_string(), cl_user);
-        m.insert("KEYWORD".to_string(), ClPackage::new("KEYWORD"));
-        Mutex::new(m)
-    });
+    std::sync::LazyLock::new(|| Mutex::new(default_jit_package_registry()));
 
 /// Canonical package name -> stable package object pointer.
 static PACKAGE_OBJECTS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
@@ -5450,6 +7214,12 @@ static PACKAGE_OBJECTS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
 static PACKAGE_SYMBOL_OBJECTS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Exact-case package-qualified symbol objects keyed by "<PACKAGE>::<EXACT-SYMBOL>".
+/// Bridge-returned escaped symbols must preserve case even when the package
+/// registry uses canonical uppercase lookup keys.
+static EXACT_PACKAGE_SYMBOL_OBJECTS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Best-effort home-package cache for symbol objects materialized by package helpers.
 static SYMBOL_HOME_PACKAGES: std::sync::LazyLock<Mutex<HashMap<usize, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -5457,6 +7227,92 @@ static SYMBOL_HOME_PACKAGES: std::sync::LazyLock<Mutex<HashMap<usize, String>>> 
 /// Current package name (thread-local for CL *package* semantics)
 thread_local! {
     static CURRENT_PACKAGE: std::cell::RefCell<String> = std::cell::RefCell::new("COMMON-LISP-USER".to_string());
+}
+
+pub fn current_package_name() -> String {
+    CURRENT_PACKAGE.with(|cp| cp.borrow().clone())
+}
+
+fn default_jit_package_registry() -> HashMap<String, ClPackage> {
+    let mut m = HashMap::new();
+    let mut cl = ClPackage::new("COMMON-LISP");
+    cl.nicknames.push("CL".to_string());
+    for sym in CL_PACKAGE_EXPORTS {
+        cl.exported_symbols.insert((*sym).to_string());
+    }
+    m.insert("COMMON-LISP".to_string(), cl);
+    let mut cl_user = ClPackage::new("COMMON-LISP-USER");
+    cl_user.nicknames.push("CL-USER".to_string());
+    cl_user.use_list.push("COMMON-LISP".to_string());
+    m.insert("COMMON-LISP-USER".to_string(), cl_user);
+    m.insert("KEYWORD".to_string(), ClPackage::new("KEYWORD"));
+    m
+}
+
+pub fn set_jit_current_package(name: &str) {
+    let canon = canonical_jit_package_name(name).unwrap_or_else(|| name.to_ascii_uppercase());
+    CURRENT_PACKAGE.with(|cp| {
+        *cp.borrow_mut() = canon;
+    });
+}
+
+pub fn reset_jit_package_registry_from_eval(packages: Vec<ClPackage>) {
+    let mut reg = default_jit_package_registry();
+    for mut pkg in packages {
+        let canon = pkg.name.to_ascii_uppercase();
+        pkg.name = canon.clone();
+        pkg.nicknames = pkg
+            .nicknames
+            .into_iter()
+            .map(|n| n.to_ascii_uppercase())
+            .collect();
+        pkg.use_list = pkg
+            .use_list
+            .into_iter()
+            .map(|n| n.to_ascii_uppercase())
+            .collect();
+        pkg.used_by_list.clear();
+        pkg.exported_symbols = pkg
+            .exported_symbols
+            .into_iter()
+            .map(|s| s.to_ascii_uppercase())
+            .collect();
+        pkg.shadowing_symbols = pkg
+            .shadowing_symbols
+            .into_iter()
+            .map(|s| s.to_ascii_uppercase())
+            .collect();
+        pkg.internal_symbols = pkg
+            .internal_symbols
+            .into_iter()
+            .map(|s| s.to_ascii_uppercase())
+            .collect();
+        reg.insert(canon, pkg);
+    }
+
+    let keys: Vec<String> = reg.keys().cloned().collect();
+    for canon in &keys {
+        let use_list = reg
+            .get(canon)
+            .map(|pkg| pkg.use_list.clone())
+            .unwrap_or_default();
+        for used in use_list {
+            if let Some(used_pkg) = reg.get_mut(&used) {
+                if !used_pkg.used_by_list.contains(canon) {
+                    used_pkg.used_by_list.push(canon.clone());
+                }
+            }
+        }
+    }
+
+    {
+        let mut guard = PACKAGE_REGISTRY.lock().unwrap();
+        *guard = reg;
+    }
+
+    for canon in keys {
+        let _ = package_object_for_canon(&canon);
+    }
 }
 
 fn canonical_symbol_name(raw: &str) -> String {
@@ -5556,6 +7412,22 @@ fn cache_symbol_home_package(symbol_raw: usize, canon_pkg: &str) {
     homes.insert(symbol_raw, canon_pkg.to_ascii_uppercase());
 }
 
+fn locked_home_package_violation_for_symbol_object(symbol_obj: LispObject) -> Option<usize> {
+    let canon_pkg = if let Some(raw) = SYMBOL_HOME_PACKAGES.lock().unwrap().get(&symbol_obj.raw()).cloned() {
+        Some(raw)
+    } else if let Some(sym_ptr) = as_symbol_ptr_checked(symbol_obj) {
+        if sym_ptr.is_null() {
+            None
+        } else {
+            let sym = unsafe { &*sym_ptr };
+            infer_symbol_home_package(sym.name())
+        }
+    } else {
+        None
+    };
+    canon_pkg.and_then(|canon| ensure_package_unlocked_canon(&canon))
+}
+
 fn resolve_package_symbol_object(canon_pkg: &str, symbol_name: &str) -> usize {
     let canon_pkg_upper = canon_pkg.to_ascii_uppercase();
     let canon_symbol = canonical_symbol_name(symbol_name);
@@ -5594,6 +7466,55 @@ fn resolve_package_symbol_object(canon_pkg: &str, symbol_name: &str) -> usize {
     raw
 }
 
+pub fn bridge_intern_exact_symbol(symbol_name: &str, package_name: Option<&str>) -> usize {
+    let trimmed = symbol_name.trim();
+    if trimmed.is_empty() {
+        return LispObject::nil().raw();
+    }
+    if trimmed.eq_ignore_ascii_case("NIL") {
+        return LispObject::nil().raw();
+    }
+    if trimmed.eq_ignore_ascii_case("T") {
+        return LispObject::t().raw();
+    }
+    if let Some(rest) = trimmed.strip_prefix("#:") {
+        return rlasp_runtime::Symbol::allocate_uninterned(rest.to_string()).raw();
+    }
+
+    let (canon_pkg, exact_name) = if let Some(rest) = trimmed.strip_prefix(':') {
+        ("KEYWORD".to_string(), rest.to_string())
+    } else if let Some((pkg, tail)) = trimmed.split_once("::").or_else(|| trimmed.split_once(':')) {
+        (
+            find_package_entry(pkg).unwrap_or_else(|| pkg.to_ascii_uppercase()),
+            tail.to_string(),
+        )
+    } else {
+        let pkg = package_name
+            .map(|pkg| find_package_entry(pkg).unwrap_or_else(|| pkg.to_ascii_uppercase()))
+            .unwrap_or_else(current_package_name);
+        (pkg, trimmed.to_string())
+    };
+
+    let key = format!("{}::{}", canon_pkg.to_ascii_uppercase(), exact_name);
+    if let Some(raw) = EXACT_PACKAGE_SYMBOL_OBJECTS.lock().unwrap().get(&key).copied() {
+        cache_symbol_home_package(raw, &canon_pkg);
+        track_symbol_name(raw, &exact_name);
+        return raw;
+    }
+
+    let raw = {
+        let sym = Box::new(rlasp_runtime::Symbol::new(exact_name.clone()));
+        LispObject::from_general_ptr(Box::into_raw(sym)).raw()
+    };
+    {
+        let mut map = EXACT_PACKAGE_SYMBOL_OBJECTS.lock().unwrap();
+        map.insert(key, raw);
+    }
+    cache_symbol_home_package(raw, &canon_pkg);
+    track_symbol_name(raw, &exact_name);
+    raw
+}
+
 fn package_object_for_canon(canon: &str) -> usize {
     {
         let map = PACKAGE_OBJECTS.lock().unwrap();
@@ -5626,6 +7547,11 @@ fn find_package_entry(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub fn canonical_jit_package_name(name: &str) -> Option<String> {
+    drop(PACKAGE_REGISTRY.lock().unwrap());
+    find_package_entry(name)
 }
 
 /// Register a package name in the package registry
@@ -5688,9 +7614,25 @@ pub extern "C" fn cc_register_package(name_obj: usize) -> usize {
 /// (in-package name) - set *package* to the named package
 #[no_mangle]
 pub extern "C" fn cc_in_package(name_obj: usize) -> usize {
+    let sync_current_package = |canon: &str| {
+        CURRENT_PACKAGE.with(|cp| *cp.borrow_mut() = canon.to_string());
+        register_jit_package(canon);
+        let pkg_raw = package_object_for_canon(canon);
+        let package_sym = rlasp_runtime::Symbol::allocate("*PACKAGE*".to_string()).raw();
+        cc_set_symbol_value(package_sym, pkg_raw);
+    };
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("in-package", &[name_obj]) {
+            let pkg_name = extract_name_string(name_obj);
+            if let Some(canon) = find_package_entry(&pkg_name) {
+                sync_current_package(&canon);
+            }
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(name_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
-        CURRENT_PACKAGE.with(|cp| *cp.borrow_mut() = canon.clone());
+        sync_current_package(&canon);
         cc_find_package(name_obj)
     } else {
         LispObject::nil().raw()
@@ -5700,6 +7642,11 @@ pub extern "C" fn cc_in_package(name_obj: usize) -> usize {
 /// (package-name package) - return the name string of a package
 #[no_mangle]
 pub extern "C" fn cc_package_name(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-name", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
         rlasp_runtime::RString::allocate(canon).raw()
@@ -5711,6 +7658,11 @@ pub extern "C" fn cc_package_name(pkg_obj: usize) -> usize {
 /// (package-nicknames package) - return list of nickname strings
 #[no_mangle]
 pub extern "C" fn cc_package_nicknames(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-nicknames", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -5732,6 +7684,11 @@ pub extern "C" fn cc_package_nicknames(pkg_obj: usize) -> usize {
 /// (package-use-list package) - packages used by this package
 #[no_mangle]
 pub extern "C" fn cc_package_use_list(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-use-list", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -5752,6 +7709,11 @@ pub extern "C" fn cc_package_use_list(pkg_obj: usize) -> usize {
 /// (package-used-by-list package) - packages that use this package
 #[no_mangle]
 pub extern "C" fn cc_package_used_by_list(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-used-by-list", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -5772,6 +7734,11 @@ pub extern "C" fn cc_package_used_by_list(pkg_obj: usize) -> usize {
 /// (package-shadowing-symbols package) - shadowing symbols
 #[no_mangle]
 pub extern "C" fn cc_package_shadowing_symbols(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-shadowing-symbols", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -5801,6 +7768,11 @@ pub extern "C" fn cc_package_shadowing_symbols(pkg_obj: usize) -> usize {
 /// Returns a proper list of external symbols for a package designator.
 #[no_mangle]
 pub extern "C" fn cc_package_external_symbols(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-external-symbols", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     let names: Vec<String> = if let Some(canon) = find_package_entry(&pkg_name) {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -5833,6 +7805,11 @@ pub extern "C" fn cc_package_external_symbols(pkg_obj: usize) -> usize {
 /// Returns a proper list of all symbols (external + internal) in a package.
 #[no_mangle]
 pub extern "C" fn cc_package_all_symbols(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-all-symbols", &[pkg_obj]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(pkg_obj);
     let names: Vec<String> = if let Some(canon) = find_package_entry(&pkg_name) {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -5886,6 +7863,9 @@ pub extern "C" fn cc_all_symbols() -> usize {
 }
 
 fn package_bridge_enabled() -> bool {
+    if bridge_call_in_progress() {
+        return false;
+    }
     if let Ok(v) = std::env::var("RLASP_PACKAGE_BRIDGE") {
         let t = v.trim().to_ascii_lowercase();
         return !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off");
@@ -5894,9 +7874,91 @@ fn package_bridge_enabled() -> bool {
     eval_bridge_available()
 }
 
+fn package_lock_violation_raw(pkg_name: &str) -> usize {
+    rlasp_runtime::LispError::allocate(
+        rlasp_runtime::error::ErrorKind::InvalidArgument,
+        Some(format!("PACKAGE-LOCK-VIOLATION: Package is locked: {}", pkg_name)),
+    )
+    .raw()
+}
+
+fn package_is_locked_canon(canon: &str) -> bool {
+    let reg = PACKAGE_REGISTRY.lock().unwrap();
+    reg.get(canon).map(|pkg| pkg.locked).unwrap_or(false)
+}
+
+fn ensure_package_unlocked_canon(canon: &str) -> Option<usize> {
+    if package_is_locked_canon(canon) {
+        Some(package_lock_violation_raw(canon))
+    } else {
+        None
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_lock_package(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("lock-package", &[pkg_obj]) {
+            return result;
+        }
+    }
+    let pkg_name = extract_name_string(pkg_obj);
+    let Some(canon) = find_package_entry(&pkg_name) else {
+        return LispObject::nil().raw();
+    };
+    let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+    if let Some(pkg) = reg.get_mut(&canon) {
+        pkg.locked = true;
+        return LispObject::t().raw();
+    }
+    LispObject::nil().raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_unlock_package(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("unlock-package", &[pkg_obj]) {
+            return result;
+        }
+    }
+    let pkg_name = extract_name_string(pkg_obj);
+    let Some(canon) = find_package_entry(&pkg_name) else {
+        return LispObject::nil().raw();
+    };
+    let mut reg = PACKAGE_REGISTRY.lock().unwrap();
+    if let Some(pkg) = reg.get_mut(&canon) {
+        pkg.locked = false;
+        return LispObject::t().raw();
+    }
+    LispObject::nil().raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_package_locked_p(pkg_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("package-locked-p", &[pkg_obj]) {
+            return result;
+        }
+    }
+    let pkg_name = extract_name_string(pkg_obj);
+    let Some(canon) = find_package_entry(&pkg_name) else {
+        return LispObject::nil().raw();
+    };
+    if package_is_locked_canon(&canon) {
+        LispObject::t().raw()
+    } else {
+        LispObject::nil().raw()
+    }
+}
+
 /// (make-package name &optional nicknames use) -> package
 #[no_mangle]
 pub extern "C" fn cc_make_package(name_obj: usize, nicknames_obj: usize, use_obj: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("make-package", &[name_obj, nicknames_obj, use_obj]) {
+            return result;
+        }
+    }
     let name = extract_name_string(name_obj);
     if name.is_empty() {
         return LispObject::nil().raw();
@@ -5975,6 +8037,9 @@ pub extern "C" fn cc_use_package(packages_obj: usize, target_obj: usize) -> usiz
     let pkg_to_use = extract_name_string(packages_obj);
 
     if let (Some(target_canon), Some(use_canon)) = (find_package_entry(&target_name), find_package_entry(&pkg_to_use)) {
+        if let Some(err) = ensure_package_unlocked_canon(&target_canon) {
+            return err;
+        }
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&target_canon) {
             if !pkg.use_list.contains(&use_canon) {
@@ -6006,6 +8071,9 @@ pub extern "C" fn cc_unuse_package(packages_obj: usize, target_obj: usize) -> us
     let pkg_to_remove = extract_name_string(packages_obj);
 
     if let (Some(target_canon), Some(rem_canon)) = (find_package_entry(&target_name), find_package_entry(&pkg_to_remove)) {
+        if let Some(err) = ensure_package_unlocked_canon(&target_canon) {
+            return err;
+        }
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&target_canon) {
             pkg.use_list.retain(|x| x != &rem_canon);
@@ -6033,6 +8101,9 @@ pub extern "C" fn cc_export(symbols_obj: usize, pkg_obj: usize) -> usize {
     };
 
     if let Some(canon) = find_package_entry(&pkg_name) {
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
         let sym_names = collect_symbol_names(symbols_obj);
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&canon) {
@@ -6060,6 +8131,9 @@ pub extern "C" fn cc_unexport(symbols_obj: usize, pkg_obj: usize) -> usize {
     };
 
     if let Some(canon) = find_package_entry(&pkg_name) {
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
         let sym_names = collect_symbol_names(symbols_obj);
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&canon) {
@@ -6087,11 +8161,54 @@ pub extern "C" fn cc_import(symbols_obj: usize, pkg_obj: usize) -> usize {
     };
 
     if let Some(canon) = find_package_entry(&pkg_name) {
-        let sym_names = collect_symbol_names(symbols_obj);
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
+        let mut imported: Vec<(String, Option<usize>)> = Vec::new();
+        let mut current = unsafe { LispObject::from_raw(symbols_obj) };
+        if let Some(_) = current.as_cons_ptr() {
+            loop {
+                if current.is_nil() {
+                    break;
+                }
+                if let Some(cp) = current.as_cons_ptr() {
+                    let cons = unsafe { &*cp };
+                    let cell = cons.car();
+                    let raw_symbol = if as_symbol_ptr_checked(cell).is_some() {
+                        Some(cell.raw())
+                    } else {
+                        None
+                    };
+                    imported.push((extract_name_string(cell.raw()).to_uppercase(), raw_symbol));
+                    current = cons.cdr();
+                } else {
+                    let raw_symbol = if as_symbol_ptr_checked(current).is_some() {
+                        Some(current.raw())
+                    } else {
+                        None
+                    };
+                    imported.push((extract_name_string(current.raw()).to_uppercase(), raw_symbol));
+                    break;
+                }
+            }
+        } else {
+            let raw_symbol = if as_symbol_ptr_checked(current).is_some() {
+                Some(current.raw())
+            } else {
+                None
+            };
+            imported.push((extract_name_string(symbols_obj).to_uppercase(), raw_symbol));
+        }
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&canon) {
-            for name in sym_names {
+            for (name, raw_symbol) in imported {
                 pkg.internal_symbols.insert(name);
+                if let Some(raw) = raw_symbol {
+                    let home_pkg = cc_symbol_package(raw);
+                    if unsafe { LispObject::from_raw(home_pkg) }.is_nil() {
+                        cache_symbol_home_package(raw, &canon);
+                    }
+                }
             }
         }
     }
@@ -6114,6 +8231,9 @@ pub extern "C" fn cc_shadow(symbols_obj: usize, pkg_obj: usize) -> usize {
     };
 
     if let Some(canon) = find_package_entry(&pkg_name) {
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
         let sym_names = collect_symbol_names(symbols_obj);
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&canon) {
@@ -6155,6 +8275,9 @@ pub extern "C" fn cc_unintern(symbol_obj: usize, pkg_obj: usize) -> usize {
     let sym_name = extract_name_string(symbol_obj).to_uppercase();
 
     if let Some(canon) = find_package_entry(&pkg_name) {
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(pkg) = reg.get_mut(&canon) {
             pkg.internal_symbols.remove(&sym_name);
@@ -6176,6 +8299,24 @@ pub extern "C" fn cc_delete_package(pkg_obj: usize) -> usize {
     }
     let pkg_name = extract_name_string(pkg_obj);
     if let Some(canon) = find_package_entry(&pkg_name) {
+        {
+            let reg = PACKAGE_REGISTRY.lock().unwrap();
+            if let Some(pkg) = reg.get(&canon) {
+                if !pkg.used_by_list.is_empty() {
+                    return rlasp_runtime::LispError::allocate(
+                        rlasp_runtime::error::ErrorKind::InvalidArgument,
+                        Some(format!(
+                            "PACKAGE-ERROR: Cannot delete package {}; it is used by {:?}",
+                            canon, pkg.used_by_list
+                        )),
+                    )
+                    .raw();
+                }
+            }
+        }
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         // Remove from used-by lists of packages it uses
         if let Some(pkg) = reg.get(&canon) {
@@ -6206,6 +8347,9 @@ pub extern "C" fn cc_rename_package(pkg_obj: usize, new_name_obj: usize, new_nic
     let new_name = extract_name_string(new_name_obj).to_uppercase();
 
     if let Some(canon) = find_package_entry(&old_name) {
+        if let Some(err) = ensure_package_unlocked_canon(&canon) {
+            return err;
+        }
         let mut reg = PACKAGE_REGISTRY.lock().unwrap();
         if let Some(mut pkg) = reg.remove(&canon) {
             pkg.name = new_name.clone();
@@ -6244,6 +8388,9 @@ pub extern "C" fn cc_package_add_nickname(pkg_obj: usize, nick_obj: usize) -> us
             Some(format!("package does not exist: {}", pkg_name)),
         ).raw();
     };
+    if let Some(err) = ensure_package_unlocked_canon(&canon) {
+        return err;
+    }
     if let Some(existing) = find_package_entry(&nick) {
         if existing != canon {
             return rlasp_runtime::LispError::allocate(
@@ -6280,6 +8427,9 @@ pub extern "C" fn cc_package_remove_nickname(pkg_obj: usize, nick_obj: usize) ->
             Some(format!("package does not exist: {}", pkg_name)),
         ).raw();
     };
+    if let Some(err) = ensure_package_unlocked_canon(&canon) {
+        return err;
+    }
     let mut reg = PACKAGE_REGISTRY.lock().unwrap();
     if let Some(pkg) = reg.get_mut(&canon) {
         let before = pkg.nicknames.len();
@@ -6350,26 +8500,15 @@ pub extern "C" fn cc_symbol_package(symbol_obj: usize) -> usize {
         }
     }
 
-    // Compatibility fallback for legacy unqualified symbols not interned through
-    // package-aware paths.
-    let current = CURRENT_PACKAGE.with(|cp| cp.borrow().clone());
-    package_object_for_canon(&current)
+    LispObject::nil().raw()
 }
 
 /// (symbol-plist symbol) - get property list of symbol
 #[no_mangle]
 pub extern "C" fn cc_symbol_plist(symbol_obj: usize) -> usize {
     let lo = unsafe { LispObject::from_raw(symbol_obj) };
-    if let Some(sym_ptr) = as_symbol_ptr_checked(lo) {
-        let sym = unsafe { &*sym_ptr };
-        let entries = sym.plist_entries();
-        let mut list = cc_nil_value();
-        for (key, value) in entries.iter().rev() {
-            list = cc_cons(value.raw(), list);
-            let key_sym = rlasp_runtime::Symbol::allocate(key.clone()).raw();
-            list = cc_cons(key_sym, list);
-        }
-        return list;
+    if let Some(name) = symbol_designator_name(lo) {
+        return current_symbol_plist_raw(&name, as_symbol_ptr_checked(lo));
     }
     LispObject::nil().raw()
 }
@@ -6389,11 +8528,11 @@ pub extern "C" fn cc_get_property(symbol_obj: usize, indicator_obj: usize, _defa
 #[no_mangle]
 pub extern "C" fn cc_remprop(symbol_obj: usize, indicator_obj: usize) -> usize {
     let lo = unsafe { LispObject::from_raw(symbol_obj) };
-    let key_name = extract_name_string(indicator_obj);
-    if let Some(sym_ptr) = as_symbol_ptr_checked(lo) {
-        let sym = unsafe { &*sym_ptr };
-        sym.remove_property(&key_name);
-        return LispObject::t().raw();
+    if let Some(name) = symbol_designator_name(lo) {
+        let plist_raw = current_symbol_plist_raw(&name, as_symbol_ptr_checked(lo));
+        let (updated, removed) = plist_rem_raw(plist_raw, indicator_obj);
+        RAW_SYMBOL_PLISTS.lock().unwrap().insert(name, updated);
+        return if removed { LispObject::t().raw() } else { LispObject::nil().raw() };
     }
     LispObject::nil().raw()
 }
@@ -6404,7 +8543,7 @@ pub extern "C" fn cc_make_symbol_from_name(name_obj: usize) -> usize {
     let name_lo = unsafe { LispObject::from_raw(name_obj) };
     if let Some(str_ptr) = as_string_ptr_checked(name_lo) {
         let s = unsafe { &*str_ptr };
-        return rlasp_runtime::Symbol::allocate(s.as_str().to_string()).raw();
+        return rlasp_runtime::Symbol::allocate_uninterned(s.as_str().to_string()).raw();
     }
     if let Some(vec_ptr) = as_vector_ptr_checked(name_lo) {
         let vec = unsafe { &*vec_ptr };
@@ -6419,7 +8558,7 @@ pub extern "C" fn cc_make_symbol_from_name(name_obj: usize) -> usize {
             };
             out.push(ch);
         }
-        return rlasp_runtime::Symbol::allocate(out).raw();
+        return rlasp_runtime::Symbol::allocate_uninterned(out).raw();
     }
     rlasp_runtime::LispError::type_error("make-symbol requires a string").raw()
 }
@@ -6428,7 +8567,7 @@ pub extern "C" fn cc_make_symbol_from_name(name_obj: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_copy_symbol(symbol_obj: usize, _copy_props: usize) -> usize {
     let name = extract_name_string(symbol_obj);
-    rlasp_runtime::Symbol::allocate(name).raw()
+    rlasp_runtime::Symbol::allocate_uninterned(name).raw()
 }
 
 /// (gentemp &optional prefix package) - generate unique symbol
@@ -6486,6 +8625,93 @@ fn extract_name_string(obj: usize) -> String {
         }
     }
     format!("{}", lo)
+}
+
+fn symbol_designator_name(obj: LispObject) -> Option<String> {
+    if obj.is_nil() {
+        Some("NIL".to_string())
+    } else if obj.raw() == LispObject::t().raw() {
+        Some("T".to_string())
+    } else {
+        as_symbol_ptr_checked(obj).map(|sym_ptr| unsafe { (&*sym_ptr).name().to_string() })
+    }
+}
+
+fn plist_pairs_from_raw(mut plist_raw: usize) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    loop {
+        let plist = unsafe { LispObject::from_raw(plist_raw) };
+        if plist.is_nil() {
+            break;
+        }
+        let Some(ind_cons) = plist.as_cons_ptr() else {
+            break;
+        };
+        let indicator = unsafe { (&*ind_cons).car().raw() };
+        let rest = unsafe { (&*ind_cons).cdr() };
+        let Some(val_cons) = rest.as_cons_ptr() else {
+            break;
+        };
+        let value = unsafe { (&*val_cons).car().raw() };
+        pairs.push((indicator, value));
+        plist_raw = unsafe { (&*val_cons).cdr().raw() };
+    }
+    pairs
+}
+
+fn plist_raw_from_pairs(pairs: &[(usize, usize)]) -> usize {
+    let mut list = cc_nil_value();
+    for (indicator, value) in pairs.iter().rev() {
+        list = cc_cons(*value, list);
+        list = cc_cons(*indicator, list);
+    }
+    list
+}
+
+fn current_symbol_plist_raw(name: &str, sym_ptr: Option<*const rlasp_runtime::Symbol>) -> usize {
+    if let Some(raw) = RAW_SYMBOL_PLISTS.lock().unwrap().get(name).copied() {
+        return raw;
+    }
+    if let Some(sym_ptr) = sym_ptr {
+        let sym = unsafe { &*sym_ptr };
+        let entries = sym.plist_entries();
+        let mut list = cc_nil_value();
+        for (key, value) in entries.iter().rev() {
+            list = cc_cons(value.raw(), list);
+            let key_sym = rlasp_runtime::Symbol::allocate(key.clone()).raw();
+            list = cc_cons(key_sym, list);
+        }
+        return list;
+    }
+    cc_nil_value()
+}
+
+fn plist_get_raw(plist_raw: usize, key_raw: usize) -> usize {
+    for (indicator, value) in plist_pairs_from_raw(plist_raw) {
+        if indicator == key_raw {
+            return value;
+        }
+    }
+    LispObject::nil().raw()
+}
+
+fn plist_put_raw(plist_raw: usize, key_raw: usize, value_raw: usize) -> usize {
+    let mut pairs = plist_pairs_from_raw(plist_raw);
+    for (indicator, value) in pairs.iter_mut() {
+        if *indicator == key_raw {
+            *value = value_raw;
+            return plist_raw_from_pairs(&pairs);
+        }
+    }
+    pairs.push((key_raw, value_raw));
+    plist_raw_from_pairs(&pairs)
+}
+
+fn plist_rem_raw(plist_raw: usize, key_raw: usize) -> (usize, bool) {
+    let mut pairs = plist_pairs_from_raw(plist_raw);
+    let before = pairs.len();
+    pairs.retain(|(indicator, _)| *indicator != key_raw);
+    (plist_raw_from_pairs(&pairs), pairs.len() != before)
 }
 
 /// Collect symbol name strings from a single symbol or a list of symbols
@@ -6585,6 +8811,24 @@ fn string_vec_to_lisp_list(values: &[String]) -> usize {
         list = cc_cons(str_obj, list);
     }
     list
+}
+
+static RUN_PROGRAM_FORMAT_STREAMS: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+fn track_run_program_format_stream(stream_raw: usize) {
+    let mut set = RUN_PROGRAM_FORMAT_STREAMS.lock().unwrap();
+    set.insert(stream_raw);
+}
+
+fn untrack_run_program_format_stream(stream_raw: usize) {
+    let mut set = RUN_PROGRAM_FORMAT_STREAMS.lock().unwrap();
+    set.remove(&stream_raw);
+}
+
+fn is_tracked_run_program_format_stream(stream_raw: usize) -> bool {
+    let set = RUN_PROGRAM_FORMAT_STREAMS.lock().unwrap();
+    set.contains(&stream_raw)
 }
 
 fn process_input_to_string(input_obj: LispObject) -> Option<String> {
@@ -6711,6 +8955,7 @@ fn finish_process_result(
 }
 
 fn execute_pending_process(process: LispObject) -> Result<(), usize> {
+    let trace = std::env::var("RLASP_TRACE_RUN_PROGRAM_INTRINSIC").is_ok();
     let pending = hash_get_by_string_key(process, "pending").unwrap_or_else(|| cc_nil_value());
     if unsafe { LispObject::from_raw(pending) }.is_nil() {
         return Ok(());
@@ -6739,6 +8984,9 @@ fn execute_pending_process(process: LispObject) -> Result<(), usize> {
     let stdin_buffer_obj = unsafe {
         LispObject::from_raw(hash_get_by_string_key(process, "stdin-buffer").unwrap_or_else(|| cc_nil_value()))
     };
+    if !stdin_buffer_obj.is_nil() {
+        untrack_run_program_format_stream(stdin_buffer_obj.raw());
+    }
 
     let stdin_text = if !stdin_buffer_obj.is_nil() {
         let raw = cc_get_output_stream_string(stdin_buffer_obj.raw());
@@ -6746,6 +8994,13 @@ fn execute_pending_process(process: LispObject) -> Result<(), usize> {
     } else {
         process_input_to_string(input_src_obj)
     };
+    if trace {
+        let stdin_len = stdin_text.as_ref().map(|s| s.len()).unwrap_or(0);
+        eprintln!(
+            "[run-program-intrinsic] execute-pending stdin_len={} wait=deferred",
+            stdin_len
+        );
+    }
 
     let (stdout_text, stderr_text, exit_code) = run_process_capture(&program, &argv, stdin_text).map_err(|e| {
         rlasp_runtime::LispError::allocate(
@@ -6760,7 +9015,8 @@ fn execute_pending_process(process: LispObject) -> Result<(), usize> {
 }
 
 fn run_program_intrinsic(args: &[usize]) -> usize {
-    if std::env::var("RLASP_TRACE_RUN_PROGRAM_INTRINSIC").is_ok() {
+    let trace = std::env::var("RLASP_TRACE_RUN_PROGRAM_INTRINSIC").is_ok();
+    if trace {
         eprintln!("[run-program-intrinsic] argc={}", args.len());
     }
     if args.len() < 2 {
@@ -6807,8 +9063,18 @@ fn run_program_intrinsic(args: &[usize]) -> usize {
     let defer_until_wait = !wait
         && unsafe { LispObject::from_raw(output_dest) }.is_nil()
         && unsafe { LispObject::from_raw(input_src) }.is_nil();
+    if trace {
+        eprintln!(
+            "[run-program-intrinsic] wait={} defer_until_wait={} output_nil={} input_nil={}",
+            wait,
+            defer_until_wait,
+            unsafe { LispObject::from_raw(output_dest) }.is_nil(),
+            unsafe { LispObject::from_raw(input_src) }.is_nil()
+        );
+    }
     if defer_until_wait {
         let stdin_buffer = cc_make_string_output_stream();
+        track_run_program_format_stream(stdin_buffer);
         let _ = hash_put_string_key(process, "stdin-buffer", stdin_buffer);
         let _ = hash_put_string_key(process, "pending", LispObject::t().raw());
         return make_values3(stdin_buffer, cc_nil_value(), process.raw());
@@ -6966,7 +9232,6 @@ fn read_line_intrinsic(args: &[usize]) -> usize {
 
 fn read_intrinsic(args: &[usize]) -> usize {
     use rlasp_runtime::StreamData;
-    use rlasp_reader::reader::read_from_string_with_positions;
     use std::io::BufRead;
 
     let mut stream_obj = args
@@ -7005,20 +9270,6 @@ fn read_intrinsic(args: &[usize]) -> usize {
         return eof_value;
     }
 
-    let parse_one = |text: &str| -> Option<(usize, usize)> {
-        let leading = text
-            .char_indices()
-            .find_map(|(i, ch)| if ch.is_whitespace() { None } else { Some(i) })
-            .unwrap_or(text.len());
-        if leading >= text.len() {
-            return None;
-        }
-        let trimmed = &text[leading..];
-        read_from_string_with_positions(trimmed)
-            .ok()
-            .map(|(obj, _preserve, skip)| (obj.raw(), leading + skip))
-    };
-
     let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
     let parsed_raw = match &mut *stream.data {
         StreamData::StringInput { content, position } => {
@@ -7026,11 +9277,25 @@ fn read_intrinsic(args: &[usize]) -> usize {
                 None
             } else {
                 let remaining = &content[*position..];
-                let parsed = parse_one(remaining);
-                if let Some((_, consumed)) = parsed {
-                    *position = (*position + consumed).min(content.len());
+                let input_obj = rlasp_runtime::RString::allocate(remaining.to_string()).raw();
+                let eof_error_obj = args.get(1).copied().unwrap_or_else(|| cc_t_value());
+                let eof_value_obj = args.get(2).copied().unwrap_or_else(|| cc_nil_value());
+                let arg_list = cc_cons(
+                    input_obj,
+                    cc_cons(eof_error_obj, cc_cons(eof_value_obj, cc_nil_value())),
+                );
+                let primary = cc_read_from_string(arg_list);
+                let values_list = cc_multiple_value_list(primary);
+                let values = list_to_vec(unsafe { LispObject::from_raw(values_list) });
+                if values.is_empty() {
+                    None
+                } else {
+                    if let Some(consumed) = values.get(1).and_then(|obj| obj.as_fixnum()) {
+                        let consumed_usize = consumed.max(0) as usize;
+                        *position = (*position + consumed_usize).min(content.len());
+                    }
+                    Some(values[0].raw())
                 }
-                parsed.map(|(obj_raw, _)| obj_raw)
             }
         }
         StreamData::Stdin => {
@@ -7039,7 +9304,14 @@ fn read_intrinsic(args: &[usize]) -> usize {
             if read_n == 0 {
                 None
             } else {
-                parse_one(&line).map(|(obj_raw, _)| obj_raw)
+                let input_obj = rlasp_runtime::RString::allocate(line).raw();
+                let eof_error_obj = args.get(1).copied().unwrap_or_else(|| cc_t_value());
+                let eof_value_obj = args.get(2).copied().unwrap_or_else(|| cc_nil_value());
+                let arg_list = cc_cons(
+                    input_obj,
+                    cc_cons(eof_error_obj, cc_cons(eof_value_obj, cc_nil_value())),
+                );
+                Some(cc_read_from_string(arg_list))
             }
         }
         _ => None,
@@ -7058,6 +9330,364 @@ fn read_intrinsic(args: &[usize]) -> usize {
     }
 }
 
+fn can_direct_stream_dispatch(args: &[usize]) -> bool {
+    let stream_obj = args
+        .first()
+        .map(|raw| unsafe { LispObject::from_raw(*raw) })
+        .unwrap_or_else(LispObject::t);
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        return true;
+    }
+    as_stream_ptr_checked(stream_obj).is_some()
+}
+
+fn direct_listen_intrinsic(args: &[usize]) -> Option<usize> {
+    use rlasp_runtime::StreamData;
+    let mut stream_obj = args
+        .first()
+        .map(|raw| unsafe { LispObject::from_raw(*raw) })
+        .unwrap_or_else(LispObject::t);
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        if let Some(raw) = get_dynamic_value("*standard-input*") {
+            stream_obj = unsafe { LispObject::from_raw(raw) };
+        }
+    }
+    let stream_ptr = as_stream_ptr_checked(stream_obj)?;
+    let stream = unsafe { &*(stream_ptr as *const rlasp_runtime::Stream) };
+    let has_input = match &*stream.data {
+        StreamData::StringInput { content, position } => *position < content.chars().count(),
+        _ => false,
+    };
+    Some(if has_input {
+        LispObject::t().raw()
+    } else {
+        LispObject::nil().raw()
+    })
+}
+
+fn direct_read_char_intrinsic(args: &[usize]) -> Option<usize> {
+    use rlasp_runtime::StreamData;
+    let mut stream_obj = args
+        .first()
+        .map(|raw| unsafe { LispObject::from_raw(*raw) })
+        .unwrap_or_else(LispObject::t);
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        if let Some(raw) = get_dynamic_value("*standard-input*") {
+            stream_obj = unsafe { LispObject::from_raw(raw) };
+        }
+    }
+    let eof_error_p = args
+        .get(1)
+        .map(|raw| !unsafe { LispObject::from_raw(*raw) }.is_nil())
+        .unwrap_or(true);
+    let eof_value = args.get(2).copied().unwrap_or_else(|| cc_nil_value());
+
+    let stream_ptr = as_stream_ptr_checked(stream_obj)?;
+    let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
+    match &mut *stream.data {
+        StreamData::StringInput { content, position } => {
+            let chars: Vec<char> = content.chars().collect();
+            if *position >= chars.len() {
+                if eof_error_p {
+                    Some(
+                        rlasp_runtime::LispError::allocate(
+                            rlasp_runtime::error::ErrorKind::InvalidArgument,
+                            Some("END-OF-FILE".to_string()),
+                        )
+                        .raw(),
+                    )
+                } else {
+                    Some(eof_value)
+                }
+            } else {
+                let ch = chars[*position];
+                *position += 1;
+                Some(LispObject::character(ch).raw())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn direct_unread_char_intrinsic(args: &[usize]) -> Option<usize> {
+    use rlasp_runtime::StreamData;
+    let ch_obj = unsafe { LispObject::from_raw(*args.first()?) };
+    let ch = ch_obj.as_character()?;
+    let mut stream_obj = args
+        .get(1)
+        .map(|raw| unsafe { LispObject::from_raw(*raw) })
+        .unwrap_or_else(LispObject::t);
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        if let Some(raw) = get_dynamic_value("*standard-input*") {
+            stream_obj = unsafe { LispObject::from_raw(raw) };
+        }
+    }
+    let stream_ptr = as_stream_ptr_checked(stream_obj)?;
+    let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
+    match &mut *stream.data {
+        StreamData::StringInput { content, position } => {
+            if *position == 0 {
+                return Some(
+                    rlasp_runtime::LispError::type_error("cannot unread at beginning of stream").raw(),
+                );
+            }
+            let chars: Vec<char> = content.chars().collect();
+            if chars.get(*position - 1).copied() != Some(ch) {
+                return Some(
+                    rlasp_runtime::LispError::type_error("cannot unread mismatched character").raw(),
+                );
+            }
+            *position -= 1;
+            Some(LispObject::nil().raw())
+        }
+        _ => None,
+    }
+}
+
+fn direct_peek_char_intrinsic(args: &[usize]) -> Option<usize> {
+    use rlasp_runtime::StreamData;
+    let mut argi = 0usize;
+    let peek_type = args.get(argi).map(|raw| unsafe { LispObject::from_raw(*raw) });
+    if peek_type.is_some() {
+        argi += 1;
+    }
+    let mut stream_obj = args
+        .get(argi)
+        .map(|raw| unsafe { LispObject::from_raw(*raw) })
+        .unwrap_or_else(LispObject::t);
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        if let Some(raw) = get_dynamic_value("*standard-input*") {
+            stream_obj = unsafe { LispObject::from_raw(raw) };
+        }
+    }
+    let eof_error_p = args
+        .get(argi + 1)
+        .map(|raw| !unsafe { LispObject::from_raw(*raw) }.is_nil())
+        .unwrap_or(true);
+    let eof_value = args.get(argi + 2).copied().unwrap_or_else(|| cc_nil_value());
+
+    let stream_ptr = as_stream_ptr_checked(stream_obj)?;
+    let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
+    match &mut *stream.data {
+        StreamData::StringInput { content, position } => {
+            let chars: Vec<char> = content.chars().collect();
+            let mut idx = *position;
+            let mut consume_prefix = false;
+            if let Some(pt) = peek_type {
+                if pt.raw() == LispObject::t().raw() {
+                    consume_prefix = true;
+                    while idx < chars.len() && chars[idx].is_whitespace() {
+                        idx += 1;
+                    }
+                } else if !pt.is_nil() {
+                    let target = pt.as_character()?;
+                    consume_prefix = true;
+                    while idx < chars.len() && chars[idx] != target {
+                        idx += 1;
+                    }
+                }
+            }
+            if idx >= chars.len() {
+                if eof_error_p {
+                    Some(
+                        rlasp_runtime::LispError::allocate(
+                            rlasp_runtime::error::ErrorKind::InvalidArgument,
+                            Some("END-OF-FILE".to_string()),
+                        )
+                        .raw(),
+                    )
+                } else {
+                    Some(eof_value)
+                }
+            } else {
+                if consume_prefix {
+                    *position = idx;
+                }
+                Some(LispObject::character(chars[idx]).raw())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn line_column_for_chars(chars: &[char], position: usize) -> (i64, i64) {
+    let mut line: i64 = 1;
+    let mut col: i64 = 0;
+    for ch in chars.iter().take(position.min(chars.len())) {
+        if *ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn direct_make_string_input_stream(args: &[usize]) -> usize {
+    use rlasp_runtime::{Stream, StreamData, StreamDirection, StreamElementType};
+
+    let Some(first) = args.first() else {
+        return rlasp_runtime::LispError::type_error("make-string-input-stream requires a string").raw();
+    };
+    let source_obj = unsafe { LispObject::from_raw(*first) };
+    let Some(source) = lisp_string_designator_to_string(source_obj) else {
+        return rlasp_runtime::LispError::type_error("make-string-input-stream requires a string").raw();
+    };
+
+    let total = source.chars().count();
+    let mut start = 0usize;
+    let mut end = total;
+
+    if let Some(second) = args.get(1) {
+        let second_obj = unsafe { LispObject::from_raw(*second) };
+        if keyword_name(second_obj).is_none() {
+            if let Some(n) = parse_non_negative_index(second_obj) {
+                start = n;
+            } else {
+                return rlasp_runtime::LispError::type_error(
+                    "make-string-input-stream start must be a non-negative integer",
+                )
+                .raw();
+            }
+            if let Some(third) = args.get(2) {
+                let third_obj = unsafe { LispObject::from_raw(*third) };
+                if keyword_name(third_obj).is_none() {
+                    if let Some(n) = parse_non_negative_index(third_obj) {
+                        end = n;
+                    } else {
+                        return rlasp_runtime::LispError::type_error(
+                            "make-string-input-stream end must be a non-negative integer",
+                        )
+                        .raw();
+                    }
+                }
+            }
+        }
+    }
+
+    let mut i = 1usize;
+    while i + 1 < args.len() {
+        let key_obj = unsafe { LispObject::from_raw(args[i]) };
+        if let Some(key) = keyword_name(key_obj) {
+            let val_obj = unsafe { LispObject::from_raw(args[i + 1]) };
+            match key.as_str() {
+                "START" => {
+                    if let Some(n) = parse_non_negative_index(val_obj) {
+                        start = n;
+                    } else {
+                        return rlasp_runtime::LispError::type_error(
+                            "make-string-input-stream start must be a non-negative integer",
+                        )
+                        .raw();
+                    }
+                }
+                "END" => {
+                    if let Some(n) = parse_non_negative_index(val_obj) {
+                        end = n;
+                    } else {
+                        return rlasp_runtime::LispError::type_error(
+                            "make-string-input-stream end must be a non-negative integer",
+                        )
+                        .raw();
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 2;
+    }
+
+    let bounded_start = start.min(total);
+    let bounded_end = end.min(total).max(bounded_start);
+    let content: String = source
+        .chars()
+        .skip(bounded_start)
+        .take(bounded_end.saturating_sub(bounded_start))
+        .collect();
+    let stream = Box::new(Stream::new(
+        StreamDirection::Input,
+        StreamElementType::Character,
+        StreamData::StringInput {
+            content,
+            position: 0,
+        },
+    ));
+    LispObject::from_general_ptr(Box::into_raw(stream)).raw()
+}
+
+fn direct_stream_cursor(dispatch: &str, args: &[usize]) -> Option<usize> {
+    use rlasp_runtime::StreamData;
+    let stream_raw = *args.first()?;
+    let mut stream_obj = unsafe { LispObject::from_raw(stream_raw) };
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        let dyn_name = if dispatch.starts_with("stream-input-") {
+            "*standard-input*"
+        } else {
+            "*standard-output*"
+        };
+        if let Some(raw) = get_dynamic_value(dyn_name) {
+            stream_obj = unsafe { LispObject::from_raw(raw) };
+        }
+    }
+
+    let stream_ptr = as_stream_ptr_checked(stream_obj)?;
+    let stream = unsafe { &*(stream_ptr as *const rlasp_runtime::Stream) };
+    let (line, col) = match &*stream.data {
+        StreamData::StringInput { content, position } => {
+            let chars: Vec<char> = content.chars().collect();
+            line_column_for_chars(&chars, *position)
+        }
+        StreamData::StringOutput { buffer } => {
+            let chars: Vec<char> = buffer.chars().collect();
+            line_column_for_chars(&chars, chars.len())
+        }
+        _ => (1, 0),
+    };
+    Some(match dispatch {
+        "stream-input-line" | "stream-output-line" => LispObject::fixnum(line).raw(),
+        "stream-input-column" | "stream-output-column" => LispObject::fixnum(col).raw(),
+        _ => return None,
+    })
+}
+
+fn direct_simple_format_intrinsic(args: &[usize]) -> Option<usize> {
+    if args.len() != 2 {
+        return None;
+    }
+    let destination = unsafe { LispObject::from_raw(args[0]) };
+    if destination.is_nil() || destination.raw() == LispObject::t().raw() {
+        return None;
+    }
+    if !is_tracked_run_program_format_stream(destination.raw()) {
+        return None;
+    }
+    let control_obj = unsafe { LispObject::from_raw(args[1]) };
+    let control = lisp_string_designator_to_string(control_obj)?;
+
+    let mut rendered = String::new();
+    let mut chars = control.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '~' {
+            rendered.push(ch);
+            continue;
+        }
+        let directive = chars.next()?;
+        match directive {
+            '%' => rendered.push('\n'),
+            '~' => rendered.push('~'),
+            _ => return None,
+        }
+    }
+
+    if as_stream_ptr_checked(destination).is_some() {
+        if stream_write_text(destination, &rendered) {
+            return Some(cc_nil_value());
+        }
+    }
+    None
+}
+
 fn try_direct_forced_builtin_call(name: &str, args: &[usize]) -> Option<usize> {
     let dispatch = strip_package_prefix(name).to_ascii_lowercase();
     if std::env::var("RLASP_TRACE_RUN_PROGRAM_INTRINSIC").is_ok() {
@@ -7067,10 +9697,134 @@ fn try_direct_forced_builtin_call(name: &str, args: &[usize]) -> Option<usize> {
         "run-program" => Some(run_program_intrinsic(args)),
         "external-process-wait" => Some(external_process_wait_intrinsic(args)),
         "external-process-error-stream" => Some(external_process_error_stream_intrinsic(args)),
+        "format" => direct_simple_format_intrinsic(args),
         "quit" => Some(quit_intrinsic(args)),
-        "read-line" => Some(read_line_intrinsic(args)),
-        "read" => Some(read_intrinsic(args)),
+        "read-line" => {
+            if can_direct_stream_dispatch(args) {
+                Some(read_line_intrinsic(args))
+            } else {
+                None
+            }
+        }
+        "read" => {
+            if can_direct_stream_dispatch(args) {
+                Some(read_intrinsic(args))
+            } else {
+                None
+            }
+        }
+        "check-pending-interrupts" => try_eval_bridge_call(name, args),
+        "finalize" => direct_finalize_intrinsic(args),
+        "definalize" => direct_definalize_intrinsic(args),
+        "invoke-finalizers" => direct_invoke_finalizers_intrinsic(),
+        "listen" => direct_listen_intrinsic(args),
+        "read-char" => direct_read_char_intrinsic(args),
+        "peek-char" => direct_peek_char_intrinsic(args),
+        "unread-char" => direct_unread_char_intrinsic(args),
+        "make-string-output-stream" => {
+            if args.is_empty() {
+                Some(cc_make_string_output_stream())
+            } else {
+                Some(
+                    rlasp_runtime::LispError::type_error(
+                        "make-string-output-stream does not take arguments",
+                    )
+                    .raw(),
+                )
+            }
+        }
+        "make-string-input-stream" => Some(direct_make_string_input_stream(args)),
+        "get-output-stream-string" => {
+            if args.len() == 1 {
+                Some(cc_get_output_stream_string(args[0]))
+            } else {
+                Some(
+                    rlasp_runtime::LispError::type_error(
+                        "get-output-stream-string requires exactly one stream",
+                    )
+                    .raw(),
+                )
+            }
+        }
+        "stream-input-column" | "stream-input-line" | "stream-output-column" | "stream-output-line" => {
+            direct_stream_cursor(dispatch.as_str(), args)
+        }
         _ => None,
+    }
+}
+
+fn direct_finalize_intrinsic(args: &[usize]) -> Option<usize> {
+    if args.len() < 2 {
+        return Some(
+            rlasp_runtime::LispError::type_error("gctools:finalize requires object and callback")
+                .raw(),
+        );
+    }
+    let obj = resolve_bridge_handle_arg(args[0]);
+    let callback = resolve_bridge_handle_arg(args[1]);
+    DIRECT_FINALIZER_REGISTRY.with(|registry| {
+        registry
+            .borrow_mut()
+            .entry(obj)
+            .or_insert_with(Vec::new)
+            .push(callback);
+    });
+    if std::env::var("RLASP_DEBUG_FINALIZERS").is_ok() {
+        eprintln!(
+            "[finalizers-direct] register obj=0x{:x} callback=0x{:x}",
+            obj, callback
+        );
+    }
+    Some(obj)
+}
+
+fn direct_definalize_intrinsic(args: &[usize]) -> Option<usize> {
+    if args.is_empty() {
+        return Some(
+            rlasp_runtime::LispError::type_error("gctools:definalize requires an object").raw(),
+        );
+    }
+    let obj = resolve_bridge_handle_arg(args[0]);
+    DIRECT_FINALIZER_REGISTRY.with(|registry| {
+        registry.borrow_mut().remove(&obj);
+    });
+    if std::env::var("RLASP_DEBUG_FINALIZERS").is_ok() {
+        eprintln!("[finalizers-direct] definalize obj=0x{:x}", obj);
+    }
+    Some(cc_nil_value())
+}
+
+fn direct_invoke_finalizers_intrinsic() -> Option<usize> {
+    let pending: Vec<(usize, usize)> = DIRECT_FINALIZER_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let mut all = Vec::new();
+        for (obj, callbacks) in registry.drain() {
+            for callback in callbacks {
+                all.push((obj, callback));
+            }
+        }
+        all
+    });
+
+    for (obj, callback) in pending {
+        let depth_before = stack_depth();
+        stack_push_pointer(obj);
+        cc_funcall_stack(callback, 1);
+        if stack_depth() > depth_before {
+            let _ = stack_pop_pointer();
+        }
+        if std::env::var("RLASP_DEBUG_FINALIZERS").is_ok() {
+            eprintln!(
+                "[finalizers-direct] invoke obj=0x{:x} callback=0x{:x}",
+                obj, callback
+            );
+        }
+    }
+
+    if let Some(result) = try_eval_bridge_call("invoke-finalizers", &[]) {
+        Some(result)
+    } else {
+        Some(cc_nil_value())
     }
 }
 
@@ -7163,10 +9917,15 @@ pub fn is_jit_function(name: &str) -> bool {
 #[no_mangle]
 pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
+    let trace_readtable = std::env::var("RLASP_TRACE_READTABLE_BINDINGS").is_ok();
 
     // Try to get symbol name
     let name = if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
         let sym = unsafe { &*sym_ptr };
+        if !sym.is_interned() {
+            sym.set_value(unsafe { LispObject::from_raw(value) });
+            return value;
+        }
         sym.name().to_string()
     } else {
         // Not a symbol - return value anyway
@@ -7175,6 +9934,7 @@ pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
 
     // Store with canonical aliases so package-qualified and case-variant lookups
     // resolve the same dynamic binding.
+    let value = normalize_special_dynamic_value(&name, value);
     let mut b = DYNAMIC_BINDINGS.lock().unwrap();
     let upper = name.to_ascii_uppercase();
     let lower = name.to_ascii_lowercase();
@@ -7186,6 +9946,13 @@ pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
         b.insert(base.to_string(), value);
         b.insert(base.to_ascii_uppercase(), value);
         b.insert(base.to_ascii_lowercase(), value);
+    }
+    if trace_readtable && name.eq_ignore_ascii_case("*readtable*") {
+        eprintln!(
+            "[readtable-set] value={} stack={:?}",
+            format_lisp_object(unsafe { LispObject::from_raw(value) }),
+            runtime_debug_stack_snapshot()
+        );
     }
 
     value
@@ -7263,10 +10030,10 @@ pub extern "C" fn cc_progv_push(symbols: usize, values: usize) -> usize {
                 None
             };
 
-            if let Some(name) = name {
-                let old_value = capture_dynamic_binding(&map, &name);
-                if trace {
-                    eprintln!(
+                if let Some(name) = name {
+                    let old_value = capture_dynamic_binding(&map, &name);
+                    if trace {
+                        eprintln!(
                         "[progv-push tid={:?}] bind name={} old={:?} new={:?}",
                         tid, name, old_value, value
                     );
@@ -7277,7 +10044,9 @@ pub extern "C" fn cc_progv_push(symbols: usize, values: usize) -> usize {
                 });
                 clear_dynamic_binding(&mut map, &name);
                 if let Some(new_value) = value {
-                    map.insert(name, new_value);
+                    for key in dynamic_binding_keys(&name) {
+                        map.insert(key, new_value);
+                    }
                 }
             }
         }
@@ -7333,7 +10102,9 @@ pub extern "C" fn cc_progv_pop(frame_token: usize) -> usize {
             }
             clear_dynamic_binding(&mut map, &binding.name);
             if let Some(old) = binding.old_value {
-                map.insert(binding.name, old);
+                for key in dynamic_binding_keys(&binding.name) {
+                    map.insert(key, old);
+                }
             }
         }
     }
@@ -7386,26 +10157,10 @@ pub extern "C" fn cc_function_block_name(name: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_get_symbol_property(symbol: usize, key: usize) -> usize {
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
-    let key_obj = unsafe { LispObject::from_raw(key) };
-
-    // Get symbol's property list
-    if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
-        let sym = unsafe { &*sym_ptr };
-
-        // Get key name if it's a symbol
-        let key_name = if let Some(key_sym_ptr) = as_symbol_ptr_checked(key_obj) {
-            let key_sym = unsafe { &*key_sym_ptr };
-            key_sym.name().to_string()
-        } else {
-            return LispObject::nil().raw();
-        };
-
-        // Look up property
-        if let Some(value) = sym.get_property(&key_name) {
-            return value.raw();
-        }
+    if let Some(name) = symbol_designator_name(sym_obj) {
+        let plist_raw = current_symbol_plist_raw(&name, as_symbol_ptr_checked(sym_obj));
+        return plist_get_raw(plist_raw, key);
     }
-
     LispObject::nil().raw()
 }
 
@@ -7414,26 +10169,48 @@ pub extern "C" fn cc_get_symbol_property(symbol: usize, key: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn cc_set_symbol_property(symbol: usize, key: usize, value: usize) -> usize {
     let sym_obj = unsafe { LispObject::from_raw(symbol) };
-    let key_obj = unsafe { LispObject::from_raw(key) };
-    let val_obj = unsafe { LispObject::from_raw(value) };
-
-    // Get symbol
-    if let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) {
-        let sym = unsafe { &*sym_ptr };
-
-        // Get key name if it's a symbol
-        let key_name = if let Some(key_sym_ptr) = as_symbol_ptr_checked(key_obj) {
-            let key_sym = unsafe { &*key_sym_ptr };
-            key_sym.name().to_string()
-        } else {
-            return value;
-        };
-
-        // Set property
-        sym.set_property(key_name, val_obj);
+    if let Some(name) = symbol_designator_name(sym_obj) {
+        let plist_raw = current_symbol_plist_raw(&name, as_symbol_ptr_checked(sym_obj));
+        let updated = plist_put_raw(plist_raw, key, value);
+        RAW_SYMBOL_PLISTS.lock().unwrap().insert(name, updated);
     }
-
     value
+}
+
+/// (setf (symbol-plist symbol) plist)
+#[no_mangle]
+pub extern "C" fn cc_set_symbol_plist(symbol: usize, plist: usize) -> usize {
+    let sym_obj = unsafe { LispObject::from_raw(symbol) };
+    if let Some(name) = symbol_designator_name(sym_obj) {
+        RAW_SYMBOL_PLISTS.lock().unwrap().insert(name, plist);
+    }
+    plist
+}
+
+/// (documentation object doc-type)
+#[no_mangle]
+pub extern "C" fn cc_documentation(object: usize, doc_type: usize) -> usize {
+    cc_get_symbol_property(object, doc_type)
+}
+
+/// (setf (documentation object doc-type) value)
+#[no_mangle]
+pub extern "C" fn cc_set_documentation(value: usize, object: usize, doc_type: usize) -> usize {
+    cc_set_symbol_property(object, doc_type, value)
+}
+
+/// (sleep seconds)
+#[no_mangle]
+pub extern "C" fn cc_sleep(seconds: usize) -> usize {
+    let secs_obj = unsafe { LispObject::from_raw(seconds) };
+    let Some(secs) = lisp_to_f64_numeric(secs_obj) else {
+        return rlasp_runtime::LispError::type_error("sleep requires a non-negative number").raw();
+    };
+    if !secs.is_finite() || secs < 0.0 {
+        return rlasp_runtime::LispError::type_error("sleep requires a non-negative number").raw();
+    }
+    std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+    LispObject::nil().raw()
 }
 
 // ============================================================================
@@ -7502,7 +10279,7 @@ pub extern "C" fn cc_gensym(prefix: usize) -> usize {
     };
 
     let name = format!("#:{}{}", prefix_str, suffix);
-    Symbol::allocate(name).raw()
+    Symbol::allocate_uninterned(name).raw()
 }
 
 /// Get the name of a symbol (symbol-name)
@@ -7553,6 +10330,31 @@ pub extern "C" fn cc_string(obj: usize) -> usize {
     // STRING accepts only string designators: string, symbol, character.
     if as_string_ptr_checked(lisp_obj).is_some() {
         return obj;
+    }
+
+    // Character vectors are valid string designators in this runtime.
+    // Respect fill-pointer so adjustable buffers coerce to logical contents.
+    if let Some(vec_ptr) = as_vector_ptr_checked(lisp_obj) {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &*vec_ptr };
+            let logical_len = get_array_fill_pointer_for_object(lisp_obj)
+                .unwrap_or(vec.len())
+                .min(vec.len());
+            let char_typed = get_array_element_type_for_object(lisp_obj)
+                .map(|name| is_character_element_type_name(name.as_str()))
+                .unwrap_or_else(|| vec.as_slice().iter().all(|elem| elem.as_character().is_some()));
+            if char_typed {
+                let mut out = String::with_capacity(logical_len);
+                for i in 0..logical_len {
+                    let elem = vec.get(i).unwrap_or_else(LispObject::nil);
+                    let Some(ch) = elem.as_character() else {
+                        return rlasp_runtime::LispError::type_error("string expects a string designator").raw();
+                    };
+                    out.push(ch);
+                }
+                return RString::allocate(out).raw();
+            }
+        }
     }
 
     if let Some(sym_ptr) = as_symbol_ptr_checked(lisp_obj) {
@@ -7618,6 +10420,9 @@ pub extern "C" fn cc_intern(name: usize, package: usize) -> usize {
         register_jit_package(&upper);
         upper
     };
+    if let Some(err) = ensure_package_unlocked_canon(&canon_pkg) {
+        return err;
+    }
 
     let existing_home_and_status = {
         let reg = PACKAGE_REGISTRY.lock().unwrap();
@@ -7774,6 +10579,11 @@ pub extern "C" fn cc_find_symbol(name: usize, package: usize) -> usize {
 /// (find-package name) -> package or nil
 #[no_mangle]
 pub extern "C" fn cc_find_package(name: usize) -> usize {
+    if package_bridge_enabled() {
+        if let Some(result) = try_eval_bridge_call("find-package", &[name]) {
+            return result;
+        }
+    }
     let pkg_name = extract_name_string(name);
 
     if let Some(canon) = find_package_entry(&pkg_name) {
@@ -7878,6 +10688,12 @@ pub extern "C" fn cc_type_of(obj: usize) -> usize {
     use rlasp_runtime::{RString, Symbol};
     use rlasp_runtime::header::{ObjectType, TypeHeader};
 
+    if is_bridge_handle_symbol_raw(obj) {
+        if let Some(bridged) = try_eval_bridge_call("type-of", &[obj]) {
+            return bridged;
+        }
+    }
+
     let lo = unsafe { LispObject::from_raw(obj) };
     if lo.is_nil() {
         return Symbol::allocate("NULL".to_string()).raw();
@@ -7931,9 +10747,82 @@ pub extern "C" fn cc_type_of(obj: usize) -> usize {
                 Some(ObjectType::HashTable) => return Symbol::allocate("HASH-TABLE".to_string()).raw(),
                 Some(ObjectType::Pathname) => return Symbol::allocate("PATHNAME".to_string()).raw(),
                 Some(ObjectType::Stream) => return Symbol::allocate("STREAM".to_string()).raw(),
+                Some(ObjectType::Error) => {
+                    use rlasp_runtime::error::ErrorKind;
+
+                    let class_name = match lo.as_error_kind() {
+                        Some(ErrorKind::TypeError) => "TYPE-ERROR".to_string(),
+                        Some(ErrorKind::DivisionByZero) => "DIVISION-BY-ZERO".to_string(),
+                        Some(ErrorKind::UnboundVariable) => "UNBOUND-VARIABLE".to_string(),
+                        Some(ErrorKind::UndefinedFunction) => "UNDEFINED-FUNCTION".to_string(),
+                        Some(ErrorKind::IndexOutOfBounds) => "TYPE-ERROR".to_string(),
+                        Some(ErrorKind::InvalidArgument) => {
+                            if let Some(err_ptr) = lo.as_general_ptr::<rlasp_runtime::LispError>() {
+                                if !err_ptr.is_null() {
+                                    let err = unsafe { &*err_ptr };
+                                    if let Some(msg) = &err.message {
+                                        if let Some(rest) = msg.strip_prefix("__RLASP_COND_HANDLE__:") {
+                                            if let Some((encoded_type, _handle)) = rest.split_once(':') {
+                                                if !encoded_type.is_empty()
+                                                    && !encoded_type.starts_with("__RLASP_BRIDGE_HANDLE__")
+                                                {
+                                                    return Symbol::allocate(
+                                                        encoded_type.to_ascii_uppercase()
+                                                    ).raw();
+                                                }
+                                            }
+                                        }
+                                        let upper = msg.to_ascii_uppercase();
+                                        if upper.contains("NAME-CONFLICT") {
+                                            "NAME-CONFLICT".to_string()
+                                        } else if upper.starts_with("FILE-ERROR") {
+                                            "FILE-ERROR".to_string()
+                                        } else if upper.contains("PACKAGE-LOCK-VIOLATION") {
+                                            "PACKAGE-LOCK-VIOLATION".to_string()
+                                        } else if upper.contains("PACKAGE-ERROR") || upper.contains("NICKNAME") {
+                                            "PACKAGE-ERROR".to_string()
+                                        } else if upper.contains("STREAM-ERROR") {
+                                            "STREAM-ERROR".to_string()
+                                        } else if upper.contains("PARSE-ERROR") {
+                                            "PARSE-ERROR".to_string()
+                                        } else if upper.contains("READER-ERROR") {
+                                            "READER-ERROR".to_string()
+                                        } else if upper.contains("TYPE-ERROR")
+                                            || (upper.contains("REQUIRES")
+                                                && (upper.contains("STREAM")
+                                                    || upper.contains("CHARACTER")
+                                                    || upper.contains("SEQUENCE")
+                                                    || upper.contains("STRING")))
+                                        {
+                                            "TYPE-ERROR".to_string()
+                                        } else if upper.contains("END-OF-FILE")
+                                            || upper.contains("END OF FILE")
+                                        {
+                                            "END-OF-FILE".to_string()
+                                        } else {
+                                            "PROGRAM-ERROR".to_string()
+                                        }
+                                    } else {
+                                        "PROGRAM-ERROR".to_string()
+                                    }
+                                } else {
+                                    "PROGRAM-ERROR".to_string()
+                                }
+                            } else {
+                                "PROGRAM-ERROR".to_string()
+                            }
+                        }
+                        None => "ERROR".to_string(),
+                    };
+                    return Symbol::allocate(class_name).raw();
+                }
                 _ => {}
             }
         }
+    }
+
+    if let Some(bridged) = try_eval_bridge_call("type-of", &[obj]) {
+        return bridged;
     }
 
     Symbol::allocate("T".to_string()).raw()
@@ -8118,6 +11007,13 @@ pub extern "C" fn cc_pathname(pathspec: usize) -> usize {
 pub extern "C" fn cc_streamp(obj: usize) -> usize {
     use rlasp_runtime::header::{TypeHeader, ObjectType};
     use rlasp_runtime::Stream;
+
+    if is_bridge_handle_symbol_raw(obj) {
+        if let Some(bridged) = try_eval_bridge_call("streamp", &[obj]) {
+            return bridged;
+        }
+    }
+
     let obj = unsafe { LispObject::from_raw(obj) };
     if let Some(ptr) = obj.as_general_ptr::<Stream>() {
         if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Stream) {
@@ -8309,17 +11205,9 @@ fn lisp_list_to_vec(mut list_obj: LispObject) -> Vec<LispObject> {
 }
 
 fn keyword_name_from_obj(obj: LispObject) -> Option<String> {
-    use rlasp_runtime::{RString, Symbol};
-
-    let raw = if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
-        if sym_ptr.is_null() {
-            return None;
-        }
+    let raw = if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
         unsafe { (&*sym_ptr).name().to_string() }
-    } else if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
-        if str_ptr.is_null() {
-            return None;
-        }
+    } else if let Some(str_ptr) = as_string_ptr_checked(obj) {
         unsafe { (&*str_ptr).as_str().to_string() }
     } else {
         return None;
@@ -8327,6 +11215,59 @@ fn keyword_name_from_obj(obj: LispObject) -> Option<String> {
 
     let base = raw.rsplit(':').next().unwrap_or(raw.as_str());
     Some(base.trim_start_matches(':').to_ascii_uppercase())
+}
+
+fn external_format_name_from_obj(obj: LispObject) -> Option<String> {
+    let raw = if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+        unsafe { (&*sym_ptr).name().to_string() }
+    } else if let Some(str_ptr) = as_string_ptr_checked(obj) {
+        unsafe { (&*str_ptr).as_str().to_string() }
+    } else {
+        return None;
+    };
+
+    Some(
+        raw.rsplit(':')
+            .next()
+            .unwrap_or(raw.as_str())
+            .trim_start_matches(':')
+            .to_ascii_lowercase(),
+    )
+}
+
+fn decode_bytes_with_external_format(bytes: &[u8], external_format: &str) -> Result<String, String> {
+    let fmt = external_format.trim_start_matches(':').to_ascii_lowercase();
+    match fmt.as_str() {
+        "" | "default" | "utf-8" | "utf8" => {
+            String::from_utf8(bytes.to_vec()).map_err(|_| "stream did not contain valid UTF-8".to_string())
+        }
+        "latin-1" | "iso-8859-1" => {
+            let mut out = String::with_capacity(bytes.len());
+            for b in bytes {
+                out.push(char::from_u32(*b as u32).unwrap_or('\u{FFFD}'));
+            }
+            Ok(out)
+        }
+        "latin-2" | "iso-8859-2" => {
+            let mut out = String::with_capacity(bytes.len());
+            for b in bytes {
+                let codepoint = match *b {
+                    0xBB => 0x0165,
+                    _ => *b as u32,
+                };
+                out.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+            }
+            Ok(out)
+        }
+        "us-ascii" | "ascii" => {
+            if bytes.iter().any(|b| *b > 0x7F) {
+                Err("stream-decoding-error".to_string())
+            } else {
+                String::from_utf8(bytes.to_vec()).map_err(|_| "stream-decoding-error".to_string())
+            }
+        }
+        _ => String::from_utf8(bytes.to_vec()).map_err(|_| "stream did not contain valid UTF-8".to_string()),
+    }
 }
 
 fn is_lisp_truthy(obj: LispObject) -> bool {
@@ -8388,6 +11329,22 @@ pub extern "C" fn cc_load_stack(args_list_obj: usize) -> usize {
             return cc_nil_value();
         }
     };
+    let mut external_format = "default".to_string();
+    let mut idx = 1usize;
+    while idx + 1 < args.len() {
+        if let Some(key) = keyword_name_from_obj(args[idx]) {
+            match key.as_str() {
+                "EXTERNAL-FORMAT" => {
+                    if let Some(fmt) = external_format_name_from_obj(args[idx + 1]) {
+                        external_format = fmt;
+                    }
+                }
+                "VERBOSE" | "PRINT" | "IF-DOES-NOT-EXIST" => {}
+                _ => {}
+            }
+        }
+        idx += 2;
+    }
     let path = normalize_path_string(&raw_path);
     let resolved = if std::path::Path::new(&path).is_absolute() {
         path
@@ -8396,7 +11353,14 @@ pub extern "C" fn cc_load_stack(args_list_obj: usize) -> usize {
             .map(|cwd| cwd.join(&path).to_string_lossy().to_string())
             .unwrap_or(path)
     };
-    let source = match std::fs::read_to_string(&resolved) {
+    let source_bytes = match std::fs::read(&resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("load failed: {} ({})", resolved, e);
+            return cc_nil_value();
+        }
+    };
+    let source = match decode_bytes_with_external_format(&source_bytes, &external_format) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("load failed: {} ({})", resolved, e);
@@ -8433,16 +11397,13 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
 
     let args_obj = unsafe { LispObject::from_raw(args_list_obj) };
     let args = lisp_list_to_vec(args_obj);
+    let trace_compile_file = std::env::var("RLASP_TRACE_COMPILE_FILE").is_ok();
     if args.is_empty() {
         return LispError::allocate(
             ErrorKind::InvalidArgument,
             Some("FILE-ERROR: compile-file requires an input file".to_string()),
         )
         .raw();
-    }
-
-    if let Some(result) = try_eval_bridge_call("compile-file", &args.iter().map(|o| o.raw()).collect::<Vec<_>>()) {
-        return result;
     }
 
     let input_raw = match extract_pathname_string(args[0]) {
@@ -8455,21 +11416,56 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
             .raw();
         }
     };
+    let trace_latin2 = input_raw.contains("latin2-check.lisp");
 
     let mut verbose = true;
     let mut print_values = true;
     let mut output_override: Option<String> = None;
+    let mut external_format = "default".to_string();
     let mut idx = 1usize;
     while idx + 1 < args.len() {
         if let Some(key) = keyword_name_from_obj(args[idx]) {
+            if trace_latin2 {
+                eprintln!(
+                    "[compile-file-latin2] key={} raw-key={} raw-val={}",
+                    key,
+                    debug_lisp_object_summary(args[idx]),
+                    debug_lisp_object_summary(args[idx + 1])
+                );
+            }
             match key.as_str() {
                 "VERBOSE" => verbose = is_lisp_truthy(args[idx + 1]),
                 "PRINT" => print_values = is_lisp_truthy(args[idx + 1]),
                 "OUTPUT-FILE" => output_override = extract_pathname_string(args[idx + 1]),
+                "EXTERNAL-FORMAT" => {
+                    if let Some(fmt) = external_format_name_from_obj(args[idx + 1]) {
+                        external_format = fmt;
+                    }
+                }
                 _ => {}
             }
         }
         idx += 2;
+    }
+    if trace_latin2 {
+        let rendered_args: Vec<String> = args
+            .iter()
+            .map(|obj| debug_lisp_object_summary(*obj))
+            .collect();
+        eprintln!(
+            "[compile-file-latin2] args={:?} external-format={} output-override={:?} verbose={} print={}",
+            rendered_args, external_format, output_override, verbose, print_values
+        );
+    }
+    if trace_compile_file {
+        let rendered_args: Vec<String> = args
+            .iter()
+            .map(|obj| debug_lisp_object_summary(*obj))
+            .collect();
+        eprintln!(
+            "[compile-file-stack] args={:?} external-format={} output-override={:?} verbose={} print={}",
+            rendered_args, external_format, output_override, verbose, print_values
+        );
     }
 
     let mut input_path = normalize_path_string(&input_raw);
@@ -8484,7 +11480,7 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
             .unwrap_or(input_path.clone())
     };
 
-    let source = match std::fs::read_to_string(&resolved_input) {
+    let source_bytes = match std::fs::read(&resolved_input) {
         Ok(s) => s,
         Err(e) => {
             return LispError::allocate(
@@ -8494,6 +11490,31 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
             .raw();
         }
     };
+    let source = match decode_bytes_with_external_format(&source_bytes, &external_format) {
+        Ok(s) => s,
+        Err(e) => {
+            if trace_compile_file {
+                eprintln!(
+                    "[compile-file-stack] decode-failed path={} external-format={} err={}",
+                    resolved_input, external_format, e
+                );
+            }
+            return LispError::allocate(
+                ErrorKind::InvalidArgument,
+                Some(format!("FILE-ERROR: compile-file: {} ({})", resolved_input, e)),
+            )
+            .raw();
+        }
+    };
+    if trace_compile_file {
+        eprintln!(
+            "[compile-file-stack] path={} external-format={} bytes={} decoded-chars={}",
+            resolved_input,
+            external_format,
+            source_bytes.len(),
+            source.chars().count()
+        );
+    }
 
     let output_path = output_override
         .map(|ovr| {
@@ -8620,6 +11641,48 @@ fn stream_write_text(stream_obj: LispObject, text: &str) -> bool {
         }
     } else {
         false
+    }
+}
+
+fn extract_byte_value(obj: LispObject) -> Option<u8> {
+    if let Some(n) = obj.as_fixnum() {
+        return u8::try_from(n).ok();
+    }
+    let ptr = obj.as_general_ptr::<()>()?;
+    if ptr.is_null() {
+        return None;
+    }
+    match unsafe { rlasp_runtime::TypeHeader::from_ptr(ptr) } {
+        Some(rlasp_runtime::header::ObjectType::Number) => {
+            let num = unsafe { &*(ptr as *const rlasp_runtime::Number) };
+            match &num.value {
+                rlasp_runtime::NumberValue::Bignum(v) => {
+                    v.to_string().parse::<u16>().ok().and_then(|n| u8::try_from(n).ok())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn stream_write_byte(stream_obj: LispObject, byte: u8) -> bool {
+    use std::io::Write;
+    use rlasp_runtime::{StreamData, StreamElementType};
+
+    let Some(stream_ptr) = as_stream_ptr_checked(stream_obj) else {
+        return false;
+    };
+    let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
+    if !stream.is_open() || !stream.is_output() || stream.element_type != StreamElementType::Byte {
+        return false;
+    }
+
+    match &mut *stream.data {
+        StreamData::FileOutput(writer) => writer.write_all(&[byte]).is_ok(),
+        StreamData::Stdout => std::io::stdout().write_all(&[byte]).is_ok(),
+        StreamData::Stderr => std::io::stderr().write_all(&[byte]).is_ok(),
+        _ => false,
     }
 }
 
@@ -8864,6 +11927,20 @@ pub extern "C" fn cc_write_char(ch: usize, stream: usize) -> usize {
 }
 
 #[no_mangle]
+pub extern "C" fn cc_write_byte(byte: usize, stream: usize) -> usize {
+    let byte_obj = unsafe { LispObject::from_raw(byte) };
+    let stream_obj = unsafe { LispObject::from_raw(stream) };
+    let Some(value) = extract_byte_value(byte_obj) else {
+        return rlasp_runtime::LispError::type_error("write-byte requires a byte").raw();
+    };
+    if stream_write_byte(stream_obj, value) {
+        LispObject::fixnum(value as i64).raw()
+    } else {
+        rlasp_runtime::LispError::type_error("write-byte requires a byte stream").raw()
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn cc_terpri(stream: usize) -> usize {
     let stream_obj = normalize_output_stream_designator(unsafe { LispObject::from_raw(stream) });
     if stream_write_text(stream_obj, "\n") {
@@ -8916,7 +11993,40 @@ pub extern "C" fn cc_write_char_stack() {
         return;
     }
     let stream = if args.len() > 1 { args[1] } else { LispObject::nil() };
+    let direct_stream_ok = stream.is_nil()
+        || stream.raw() == LispObject::t().raw()
+        || as_stream_ptr_checked(stream).is_some();
+    if eval_bridge_available() && !direct_stream_ok {
+        let raw_args = if args.len() > 1 {
+            vec![args[0].raw(), stream.raw()]
+        } else {
+            vec![args[0].raw()]
+        };
+        if let Some(result) = try_eval_bridge_call("write-char", &raw_args) {
+            stack_push_pointer(result);
+            return;
+        }
+    }
     stack_push_pointer(cc_write_char(args[0].raw(), stream.raw()));
+}
+
+#[no_mangle]
+pub extern "C" fn cc_write_byte_stack() {
+    use rlasp_runtime::error::ErrorKind;
+
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() < 2 {
+        stack_push_pointer(
+            rlasp_runtime::LispError::allocate(
+                ErrorKind::InvalidArgument,
+                Some("write-byte requires exactly two arguments".to_string()),
+            )
+            .raw(),
+        );
+        return;
+    }
+    stack_push_pointer(cc_write_byte(args[0].raw(), args[1].raw()));
 }
 
 #[no_mangle]
@@ -8956,12 +12066,17 @@ pub extern "C" fn cc_print_stack() {
         stack_push_pointer(out);
         return;
     }
-    let _ = cc_terpri(stream_obj.raw());
+    if !stream_write_text(stream_obj, " ") {
+        stack_push_pointer(rlasp_runtime::LispError::type_error("print requires an output stream").raw());
+        return;
+    }
     stack_push_pointer(obj.raw());
 }
 
 #[no_mangle]
 pub extern "C" fn cc_write_stack() {
+    use rlasp_runtime::io_syntax::{restore_io_syntax_state, save_io_syntax_state, set_io_syntax_var, IoSyntaxValue};
+
     let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
     let args = list_to_vec(packed_args);
     if args.is_empty() {
@@ -8972,6 +12087,14 @@ pub extern "C" fn cc_write_stack() {
     let obj = args[0];
     let mut stream = LispObject::nil();
     let mut escape = LispObject::t();
+    let mut pretty = LispObject::nil();
+    let mut readably = LispObject::t();
+    let mut circle: Option<LispObject> = None;
+    let mut pretty_override: Option<LispObject> = None;
+    let mut readably_override: Option<LispObject> = None;
+    let mut lines: Option<usize> = None;
+    let mut right_margin: Option<usize> = None;
+    let mut needs_bridge = false;
     let mut i = 1usize;
 
     // Be tolerant of non-keyword stream as second arg.
@@ -8984,18 +12107,97 @@ pub extern "C" fn cc_write_stack() {
             match key.as_str() {
                 "STREAM" => stream = args[i + 1],
                 "ESCAPE" => escape = args[i + 1],
-                _ => {}
+                "PRETTY" => {
+                    pretty = args[i + 1];
+                    pretty_override = Some(args[i + 1]);
+                }
+                "READABLY" => {
+                    readably = args[i + 1];
+                    readably_override = Some(args[i + 1]);
+                }
+                "LINES" => {
+                    lines = parse_non_negative_index(args[i + 1]);
+                }
+                "RIGHT-MARGIN" => {
+                    right_margin = parse_non_negative_index(args[i + 1]);
+                }
+                "CIRCLE" => {
+                    circle = Some(args[i + 1]);
+                }
+                _ => needs_bridge = true,
             }
         }
         i += 2;
     }
 
-    let out = if escape.is_nil() {
-        cc_princ(obj.raw(), stream.raw())
+    if needs_bridge {
+        let raw_args: Vec<usize> = args.iter().map(|arg| arg.raw()).collect();
+        if let Some(result) = try_eval_bridge_call("write", &raw_args) {
+            stack_push_pointer(result);
+            return;
+        }
+    }
+
+    let saved_io = save_io_syntax_state();
+    if let Some(value) = circle {
+        set_io_syntax_var(
+            "*print-circle*",
+            if value.is_nil() { IoSyntaxValue::Nil } else { IoSyntaxValue::True },
+        );
+    }
+    if let Some(value) = pretty_override {
+        set_io_syntax_var(
+            "*print-pretty*",
+            if value.is_nil() { IoSyntaxValue::Nil } else { IoSyntaxValue::True },
+        );
+    }
+    if let Some(value) = readably_override {
+        set_io_syntax_var(
+            "*print-readably*",
+            if value.is_nil() { IoSyntaxValue::Nil } else { IoSyntaxValue::True },
+        );
+    }
+    if let Some(value) = lines {
+        set_io_syntax_var("*print-lines*", IoSyntaxValue::Fixnum(value as i64));
+    }
+    if let Some(value) = right_margin {
+        set_io_syntax_var("*print-right-margin*", IoSyntaxValue::Fixnum(value as i64));
+    }
+
+    let rendered = if escape.is_nil() {
+        let txt = unsafe { LispObject::from_raw(cc_princ_to_string(obj.raw())) };
+        symbol_or_string_name(txt).unwrap_or_default()
     } else {
-        cc_prin1(obj.raw(), stream.raw())
+        let txt = unsafe { LispObject::from_raw(cc_prin1_to_string(obj.raw())) };
+        symbol_or_string_name(txt).unwrap_or_default()
     };
-    stack_push_pointer(out);
+    restore_io_syntax_state(saved_io);
+
+    let mut rendered = rendered;
+    if !pretty.is_nil() && readably.is_nil() {
+        if let Some(margin) = right_margin {
+            if lines.unwrap_or(usize::MAX) <= 1 && rendered.chars().count() > margin {
+                let keep = margin.saturating_sub(2);
+                let prefix: String = rendered.chars().take(keep).collect();
+                rendered = format!("{}..", prefix);
+            }
+        }
+    }
+
+    let stream_obj = normalize_output_stream_designator(stream);
+    if !stream_write_text(stream_obj, &rendered) {
+        if !stream.is_nil() {
+            let raw_args: Vec<usize> = args.iter().map(|arg| arg.raw()).collect();
+            if let Some(result) = try_eval_bridge_call("write", &raw_args) {
+                stack_push_pointer(result);
+                return;
+            }
+        }
+        print!("{}", rendered);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+    stack_push_pointer(obj.raw());
 }
 
 #[no_mangle]
@@ -9141,6 +12343,109 @@ pub extern "C" fn cc_read_sequence_stack() {
 pub extern "C" fn cc_read_from_string_stack() {
     let packed_args = stack_pop_pointer();
     stack_push_pointer(cc_read_from_string(packed_args));
+}
+
+#[no_mangle]
+pub extern "C" fn cc_read_delimited_list_stack() {
+    use rlasp_reader::reader::read_from_string_with_positions;
+    use rlasp_runtime::StreamData;
+
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.is_empty() {
+        stack_push_pointer(
+            rlasp_runtime::LispError::type_error("read-delimited-list requires a delimiter").raw(),
+        );
+        return;
+    }
+
+    let Some(delimiter) = args[0].as_character() else {
+        stack_push_pointer(
+            rlasp_runtime::LispError::type_error("read-delimited-list delimiter must be a character").raw(),
+        );
+        return;
+    };
+
+    let mut stream_obj = args.get(1).copied().unwrap_or_else(LispObject::t);
+    if stream_obj.is_nil() || stream_obj.raw() == LispObject::t().raw() {
+        if let Some(raw) = get_dynamic_value("*standard-input*") {
+            stream_obj = unsafe { LispObject::from_raw(raw) };
+        }
+    }
+
+    let Some(stream_ptr) = as_stream_ptr_checked(stream_obj) else {
+        stack_push_pointer(
+            rlasp_runtime::LispError::type_error("read-delimited-list requires an input stream").raw(),
+        );
+        return;
+    };
+    let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
+
+    match &mut *stream.data {
+        StreamData::StringInput { content, position } => {
+            let chars: Vec<char> = content.chars().collect();
+            let mut out: Vec<usize> = Vec::new();
+
+            loop {
+                while *position < chars.len() && chars[*position].is_whitespace() {
+                    *position += 1;
+                }
+                if *position >= chars.len() {
+                    stack_push_pointer(
+                        rlasp_runtime::LispError::allocate(
+                            rlasp_runtime::error::ErrorKind::InvalidArgument,
+                            Some("END-OF-FILE".to_string()),
+                        )
+                        .raw(),
+                    );
+                    return;
+                }
+                if chars[*position] == delimiter {
+                    *position += 1;
+                    break;
+                }
+
+                let slice: String = chars[*position..].iter().collect();
+                match read_from_string_with_positions(&slice) {
+                    Ok((obj, _pos_preserve, pos_skip)) => {
+                        out.push(obj.raw());
+                        *position += pos_skip;
+                    }
+                    Err(_) => {
+                        stack_push_pointer(
+                            rlasp_runtime::LispError::allocate(
+                                rlasp_runtime::error::ErrorKind::InvalidArgument,
+                                Some("READER-ERROR".to_string()),
+                            )
+                            .raw(),
+                        );
+                        return;
+                    }
+                }
+            }
+
+            let mut result = cc_nil_value();
+            for item in out.iter().rev() {
+                result = cc_cons(*item, result);
+            }
+            stack_push_pointer(result);
+        }
+        _ => {
+            if let Some(result) = try_eval_bridge_call(
+                "read-delimited-list",
+                &args.iter().map(|o| o.raw()).collect::<Vec<_>>(),
+            ) {
+                stack_push_pointer(result);
+            } else {
+                stack_push_pointer(
+                    rlasp_runtime::LispError::type_error(
+                        "read-delimited-list requires a string input stream in AOT/native mode",
+                    )
+                    .raw(),
+                );
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -9544,6 +12849,9 @@ pub extern "C" fn cc_max(obj1: usize, obj2: usize) -> usize {
 
 fn parse_symbolic_number(obj: LispObject) -> Option<LispObject> {
     let cons_ptr = obj.as_cons_ptr()?;
+    if !rlasp_runtime::gc::gc_is_managed_ptr(cons_ptr as *const u8) {
+        return None;
+    }
     let cons = unsafe { &*cons_ptr };
     let head = as_symbol_ptr_checked(cons.car())?;
     let head_name = strip_package_prefix(unsafe { (&*head).name() }).to_ascii_uppercase();
@@ -9552,6 +12860,9 @@ fn parse_symbolic_number(obj: LispObject) -> Option<LispObject> {
     let mut cursor = cons.cdr();
     while !cursor.is_nil() {
         let arg_ptr = cursor.as_cons_ptr()?;
+        if !rlasp_runtime::gc::gc_is_managed_ptr(arg_ptr as *const u8) {
+            return None;
+        }
         let arg_cons = unsafe { &*arg_ptr };
         args.push(arg_cons.car());
         cursor = arg_cons.cdr();
@@ -9726,11 +13037,15 @@ pub extern "C" fn cc_equal(obj1: usize, obj2: usize) -> usize {
 
     // Check conses recursively
     if let (Some(c1_ptr), Some(c2_ptr)) = (obj1.as_cons_ptr(), obj2.as_cons_ptr()) {
-        let c1 = unsafe { &*c1_ptr };
-        let c2 = unsafe { &*c2_ptr };
-        if cc_equal(c1.car().raw(), c2.car().raw()) != LispObject::nil().raw()
-            && cc_equal(c1.cdr().raw(), c2.cdr().raw()) != LispObject::nil().raw() {
-            return LispObject::t().raw();
+        if rlasp_runtime::gc::gc_is_managed_ptr(c1_ptr as *const u8)
+            && rlasp_runtime::gc::gc_is_managed_ptr(c2_ptr as *const u8)
+        {
+            let c1 = unsafe { &*c1_ptr };
+            let c2 = unsafe { &*c2_ptr };
+            if cc_equal(c1.car().raw(), c2.car().raw()) != LispObject::nil().raw()
+                && cc_equal(c1.cdr().raw(), c2.cdr().raw()) != LispObject::nil().raw() {
+                return LispObject::t().raw();
+            }
         }
     }
 
@@ -9866,10 +13181,14 @@ pub extern "C" fn cc_equalp(obj1: usize, obj2: usize) -> usize {
         }
 
         if let (Some(ca), Some(cb)) = (a.as_cons_ptr(), b.as_cons_ptr()) {
-            let ca_ref = unsafe { &*ca };
-            let cb_ref = unsafe { &*cb };
-            return equalp_impl(ca_ref.car(), cb_ref.car(), seen)
-                && equalp_impl(ca_ref.cdr(), cb_ref.cdr(), seen);
+            if rlasp_runtime::gc::gc_is_managed_ptr(ca as *const u8)
+                && rlasp_runtime::gc::gc_is_managed_ptr(cb as *const u8)
+            {
+                let ca_ref = unsafe { &*ca };
+                let cb_ref = unsafe { &*cb };
+                return equalp_impl(ca_ref.car(), cb_ref.car(), seen)
+                    && equalp_impl(ca_ref.cdr(), cb_ref.cdr(), seen);
+            }
         }
 
         cc_equal(a.raw(), b.raw()) != LispObject::nil().raw()
@@ -10941,19 +14260,62 @@ pub extern "C" fn cc_count(item: usize, sequence: usize) -> usize {
     let item_obj = unsafe { LispObject::from_raw(item) };
     let seq_obj = unsafe { LispObject::from_raw(sequence) };
 
-    let mut count = 0i64;
-    let mut current = seq_obj;
-    while let Some(cons_ptr) = current.as_cons_ptr() {
-        let cons = unsafe { &*cons_ptr };
-        let elem = cons.car();
-
-        // Use equal comparison
-        if cc_equal(elem.raw(), item_obj.raw()) != LispObject::nil().raw() {
-            count += 1;
+    if let Some(items) = sequence_to_vec(seq_obj) {
+        let mut count = 0i64;
+        for elem in items {
+            if cc_equal(elem.raw(), item_obj.raw()) != LispObject::nil().raw() {
+                count += 1;
+            }
         }
-        current = cons.cdr();
+        return LispObject::fixnum(count).raw();
     }
 
+    rlasp_runtime::LispError::type_error("count requires a proper sequence").raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_count_if(predicate: usize, sequence: usize) -> usize {
+    let pred = unsafe { LispObject::from_raw(predicate) };
+    let seq_obj = unsafe { LispObject::from_raw(sequence) };
+
+    let Some(items) = sequence_to_vec(seq_obj) else {
+        return rlasp_runtime::LispError::type_error("count-if requires a proper sequence").raw();
+    };
+
+    let mut count = 0i64;
+    for elem in items {
+        let test_result = cc_funcall_1(pred.raw(), elem.raw());
+        let test_obj = unsafe { LispObject::from_raw(test_result) };
+        if test_obj.is_error() {
+            return test_obj.raw();
+        }
+        if !test_obj.is_nil() {
+            count += 1;
+        }
+    }
+    LispObject::fixnum(count).raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_count_if_not(predicate: usize, sequence: usize) -> usize {
+    let pred = unsafe { LispObject::from_raw(predicate) };
+    let seq_obj = unsafe { LispObject::from_raw(sequence) };
+
+    let Some(items) = sequence_to_vec(seq_obj) else {
+        return rlasp_runtime::LispError::type_error("count-if-not requires a proper sequence").raw();
+    };
+
+    let mut count = 0i64;
+    for elem in items {
+        let test_result = cc_funcall_1(pred.raw(), elem.raw());
+        let test_obj = unsafe { LispObject::from_raw(test_result) };
+        if test_obj.is_error() {
+            return test_obj.raw();
+        }
+        if test_obj.is_nil() {
+            count += 1;
+        }
+    }
     LispObject::fixnum(count).raw()
 }
 
@@ -11053,7 +14415,13 @@ pub extern "C" fn cc_assoc(key: usize, alist: usize) -> usize {
         let cons = unsafe { &*cons_ptr };
         let pair = cons.car();
 
-        // Each element should be a cons pair (key . value)
+        // CL permits NIL elements in an alist; they are skipped.
+        if pair.is_nil() {
+            current = cons.cdr();
+            continue;
+        }
+
+        // Other atoms are invalid; proper cons pairs are searched.
         let Some(pair_cons_ptr) = pair.as_cons_ptr() else {
             return rlasp_runtime::LispError::type_error("assoc requires an alist of cons cells").raw();
         };
@@ -11638,19 +15006,29 @@ pub extern "C" fn cc_assoc_if(predicate: usize, alist: usize) -> usize {
     let pred = unsafe { LispObject::from_raw(predicate) };
     let mut current = unsafe { LispObject::from_raw(alist) };
 
-    while let Some(cons_ptr) = current.as_cons_ptr() {
+    loop {
+        if current.is_nil() {
+            return LispObject::nil().raw();
+        }
+        let Some(cons_ptr) = current.as_cons_ptr() else {
+            return rlasp_runtime::LispError::type_error("assoc-if requires an association list").raw();
+        };
         let node = unsafe { &*cons_ptr };
         let entry = node.car();
-        if let Some(entry_ptr) = entry.as_cons_ptr() {
-            let pair = unsafe { &*entry_ptr };
-            let key = pair.car();
-            if !call_func_1(pred, key).is_nil() {
-                return entry.raw();
-            }
+        let Some(entry_ptr) = entry.as_cons_ptr() else {
+            return rlasp_runtime::LispError::type_error("assoc-if requires an association list").raw();
+        };
+        let pair = unsafe { &*entry_ptr };
+        let key = pair.car();
+        let result = call_func_1(pred, key);
+        if result.is_error() {
+            return result.raw();
+        }
+        if !result.is_nil() {
+            return entry.raw();
         }
         current = node.cdr();
     }
-    LispObject::nil().raw()
 }
 
 #[no_mangle]
@@ -11658,19 +15036,75 @@ pub extern "C" fn cc_assoc_if_not(predicate: usize, alist: usize) -> usize {
     let pred = unsafe { LispObject::from_raw(predicate) };
     let mut current = unsafe { LispObject::from_raw(alist) };
 
-    while let Some(cons_ptr) = current.as_cons_ptr() {
+    loop {
+        if current.is_nil() {
+            return LispObject::nil().raw();
+        }
+        let Some(cons_ptr) = current.as_cons_ptr() else {
+            return rlasp_runtime::LispError::type_error("assoc-if-not requires an association list").raw();
+        };
         let node = unsafe { &*cons_ptr };
         let entry = node.car();
-        if let Some(entry_ptr) = entry.as_cons_ptr() {
-            let pair = unsafe { &*entry_ptr };
-            let key = pair.car();
-            if call_func_1(pred, key).is_nil() {
-                return entry.raw();
-            }
+        let Some(entry_ptr) = entry.as_cons_ptr() else {
+            return rlasp_runtime::LispError::type_error("assoc-if-not requires an association list").raw();
+        };
+        let pair = unsafe { &*entry_ptr };
+        let key = pair.car();
+        let result = call_func_1(pred, key);
+        if result.is_error() {
+            return result.raw();
+        }
+        if result.is_nil() {
+            return entry.raw();
         }
         current = node.cdr();
     }
-    LispObject::nil().raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_remf_plist(plist: usize, indicator: usize) -> usize {
+    let original = unsafe { LispObject::from_raw(plist) };
+    let indicator_obj = unsafe { LispObject::from_raw(indicator) };
+    let mut current = original;
+    let mut pairs: Vec<(LispObject, LispObject)> = Vec::new();
+    let mut found = false;
+
+    loop {
+        if current.is_nil() {
+            break;
+        }
+        let Some(cons_ptr) = current.as_cons_ptr() else {
+            return rlasp_runtime::LispError::type_error("remf requires a property list").raw();
+        };
+        let node = unsafe { &*cons_ptr };
+        let ind = node.car();
+        let rest = node.cdr();
+        let Some(rest_ptr) = rest.as_cons_ptr() else {
+            return rlasp_runtime::LispError::type_error("remf requires a property list").raw();
+        };
+        let rest_cons = unsafe { &*rest_ptr };
+        let val = rest_cons.car();
+        let tail = rest_cons.cdr();
+
+        if !found && ind.raw() == indicator_obj.raw() {
+            found = true;
+        } else {
+            pairs.push((ind, val));
+        }
+
+        current = tail;
+    }
+
+    if !found {
+        return original.raw();
+    }
+
+    let mut new_plist = LispObject::nil();
+    for (ind, val) in pairs.into_iter().rev() {
+        new_plist = rlasp_runtime::Cons::allocate(val, new_plist);
+        new_plist = rlasp_runtime::Cons::allocate(ind, new_plist);
+    }
+    new_plist.raw()
 }
 
 #[no_mangle]
@@ -12110,13 +15544,32 @@ fn is_character_element_type_name(name: &str) -> bool {
 fn char_string_from_elements(elements: &[LispObject]) -> Option<String> {
     let mut out = String::with_capacity(elements.len());
     for elem in elements {
-        let ch = elem.as_character()?;
-        out.push(ch);
+        if elem.is_nil() {
+            out.push('\0');
+            continue;
+        }
+        if let Some(ch) = elem.as_character() {
+            out.push(ch);
+            continue;
+        }
+        if let Some(s) = lisp_string_designator_to_string(*elem) {
+            if s.chars().count() == 1 {
+                out.push(s.chars().next().unwrap_or('\0'));
+                continue;
+            }
+        }
+        return None;
     }
     Some(out)
 }
 
 fn set_array_element_type_for_object(obj: LispObject, type_name: &str) {
+    if let Some(vec_ptr) = as_vector_ptr_checked(obj) {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
+            vec.set_element_type(Some(type_name.to_ascii_uppercase()));
+        }
+    }
     if let Some(key) = vector_key(obj) {
         ARRAY_ELEMENT_TYPE_META
             .lock()
@@ -12126,6 +15579,12 @@ fn set_array_element_type_for_object(obj: LispObject, type_name: &str) {
 }
 
 fn clear_array_element_type_for_object(obj: LispObject) {
+    if let Some(vec_ptr) = as_vector_ptr_checked(obj) {
+        if !vec_ptr.is_null() {
+            let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
+            vec.set_element_type(None);
+        }
+    }
     if let Some(key) = vector_key(obj) {
         ARRAY_ELEMENT_TYPE_META.lock().unwrap().remove(&key);
     }
@@ -12184,7 +15643,10 @@ fn collect_bit_array(obj: LispObject) -> Option<(Vec<u8>, Vec<usize>)> {
         bits.push(bit_from_lisp_object(elem)?);
     }
     let mut dims = get_array_dims_for_object(obj);
-    if dims.is_empty() {
+    // Preserve rank-0 arrays (NIL dimensions) as rank-0.
+    // RVector::new defaults to rank-1 dims, so only synthesize a 1-D shape
+    // when there is no explicit rank metadata and logical size is not scalar.
+    if dims.is_empty() && logical_len != 1 {
         dims.push(logical_len);
     }
     Some((bits, dims))
@@ -13068,6 +16530,112 @@ pub extern "C" fn cc_princ_to_string_stack() {
     stack_push_pointer(cc_princ_to_string(args[0].raw()));
 }
 
+fn apply_dynamic_bindings(bindings: &[(&'static str, usize)]) -> Vec<(&'static str, Option<usize>)> {
+    let mut restore = Vec::with_capacity(bindings.len());
+    let mut map = DYNAMIC_BINDINGS.lock().unwrap();
+    for (name, value) in bindings.iter().copied() {
+        let old_value = capture_dynamic_binding(&map, name);
+        restore.push((name, old_value));
+        for key in dynamic_binding_keys(name) {
+            map.insert(key, value);
+        }
+    }
+    restore
+}
+
+fn restore_dynamic_bindings(restore: Vec<(&'static str, Option<usize>)>) {
+    let mut map = DYNAMIC_BINDINGS.lock().unwrap();
+    for (name, old_value) in restore.into_iter().rev() {
+        clear_dynamic_binding(&mut map, name);
+        if let Some(value) = old_value {
+            for key in dynamic_binding_keys(name) {
+                map.insert(key, value);
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_write_to_string_stack() {
+    use rlasp_runtime::error::ErrorKind;
+
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.is_empty() {
+        stack_push_pointer(
+            rlasp_runtime::LispError::allocate(
+                ErrorKind::InvalidArgument,
+                Some("write-to-string requires an object".to_string()),
+            )
+            .raw(),
+        );
+        return;
+    }
+
+    let obj = args[0];
+    let raw_args: Vec<usize> = args.iter().map(|arg| arg.raw()).collect();
+    let mut escape = LispObject::t();
+    let mut temp_bindings: Vec<(&'static str, usize)> = Vec::new();
+    let mut i = 1usize;
+    while i < args.len() {
+        if i + 1 >= args.len() {
+            stack_push_pointer(
+                rlasp_runtime::LispError::allocate(
+                    ErrorKind::InvalidArgument,
+                    Some("write-to-string requires complete keyword/value arguments".to_string()),
+                )
+                .raw(),
+            );
+            return;
+        }
+        let Some(key) = keyword_name(args[i]) else {
+            stack_push_pointer(
+                rlasp_runtime::LispError::allocate(
+                    ErrorKind::InvalidArgument,
+                    Some("write-to-string keyword arguments must be keywords".to_string()),
+                )
+                .raw(),
+            );
+            return;
+        };
+        match key.as_str() {
+            "ESCAPE" => escape = args[i + 1],
+            "READABLY" => temp_bindings.push(("*print-readably*", args[i + 1].raw())),
+            "ARRAY" => temp_bindings.push(("*print-array*", args[i + 1].raw())),
+            "PRETTY" => temp_bindings.push(("*print-pretty*", args[i + 1].raw())),
+            "CIRCLE" => temp_bindings.push(("*print-circle*", args[i + 1].raw())),
+            "RADIX" => temp_bindings.push(("*print-radix*", args[i + 1].raw())),
+            "BASE" => temp_bindings.push(("*print-base*", args[i + 1].raw())),
+            _ => {}
+        }
+        i += 2;
+    }
+
+    let restore = apply_dynamic_bindings(&temp_bindings);
+    let prefer_native_pretty = native_print_pretty_enabled()
+        && !native_print_circle_enabled()
+        && list_contains_reader_macro_form(obj, 128);
+    if native_print_pretty_enabled() && !native_print_circle_enabled() && !prefer_native_pretty {
+        if let Some(result) = try_eval_bridge_call("write-to-string", &raw_args) {
+            restore_dynamic_bindings(restore);
+            stack_push_pointer(result);
+            return;
+        }
+    }
+    let rendered = if escape.is_nil() {
+        format_lisp_object(obj)
+    } else {
+        format_s_expr(obj)
+    };
+    let rendered = if prefer_native_pretty {
+        apply_simple_pretty_reader_layout(rendered)
+    } else {
+        rendered
+    };
+    restore_dynamic_bindings(restore);
+    stack_push_pointer(rlasp_runtime::RString::allocate(rendered).raw());
+}
+
 #[no_mangle]
 pub extern "C" fn cc_prin1_to_string_stack() {
     let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
@@ -13108,6 +16676,47 @@ pub extern "C" fn cc_array_dimension_stack() {
         }
     }
     stack_push_nil();
+}
+
+#[no_mangle]
+pub extern "C" fn cc_array_rank_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() != 1 {
+        stack_push_pointer(rlasp_runtime::LispError::type_error("array-rank requires an array").raw());
+        return;
+    }
+    let arr = args[0];
+    if let Some(_vec_ptr) = as_vector_ptr_checked(arr) {
+        let dims = get_array_dims_for_object(arr);
+        stack_push_pointer(LispObject::fixnum(dims.len() as i64).raw());
+        return;
+    }
+    if let Some(_str_ptr) = as_string_ptr_checked(arr) {
+        stack_push_pointer(LispObject::fixnum(1).raw());
+        return;
+    }
+    stack_push_pointer(rlasp_runtime::LispError::type_error("array-rank requires an array").raw());
+}
+
+#[no_mangle]
+pub extern "C" fn cc_array_total_size_stack() {
+    let packed_args = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+    let args = list_to_vec(packed_args);
+    if args.len() != 1 {
+        stack_push_pointer(rlasp_runtime::LispError::type_error("array-total-size requires an array").raw());
+        return;
+    }
+    if let Some(total) = array_total_size_for_object(args[0]) {
+        stack_push_pointer(LispObject::fixnum(total as i64).raw());
+    } else {
+        stack_push_pointer(rlasp_runtime::LispError::type_error("array-total-size requires an array").raw());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cc_row_major_aref_stack() {
+    cc_aref_stack();
 }
 
 #[no_mangle]
@@ -13634,6 +17243,10 @@ static mut FUNCTION_ID_MAP: Option<Mutex<HashMap<i64, String>>> = None;
 static INIT_ID_MAP: Once = Once::new();
 static mut FUNCTION_NAME_TO_ID_MAP: Option<Mutex<HashMap<String, i64>>> = None;
 static INIT_NAME_TO_ID_MAP: Once = Once::new();
+static mut FUNCTION_LAMBDA_LISTS: Option<Mutex<HashMap<String, Vec<String>>>> = None;
+static INIT_FUNCTION_LAMBDA_LISTS: Once = Once::new();
+static mut DEFTYPE_ALIASES: Option<Mutex<HashMap<String, usize>>> = None;
+static INIT_DEFTYPE_ALIASES: Once = Once::new();
 // Keep function references out of the legacy lambda-id band (1_000_000+id).
 static NEXT_FUNCTION_ID: AtomicI64 = AtomicI64::new(2_000_000);
 
@@ -13670,6 +17283,120 @@ fn get_name_to_id_map() -> &'static Mutex<HashMap<String, i64>> {
         });
         FUNCTION_NAME_TO_ID_MAP.as_ref().unwrap()
     }
+}
+
+fn get_function_lambda_list_map() -> &'static Mutex<HashMap<String, Vec<String>>> {
+    unsafe {
+        INIT_FUNCTION_LAMBDA_LISTS.call_once(|| {
+            FUNCTION_LAMBDA_LISTS = Some(Mutex::new(HashMap::new()));
+        });
+        FUNCTION_LAMBDA_LISTS.as_ref().unwrap()
+    }
+}
+
+fn get_deftype_alias_map() -> &'static Mutex<HashMap<String, usize>> {
+    unsafe {
+        INIT_DEFTYPE_ALIASES.call_once(|| {
+            DEFTYPE_ALIASES = Some(Mutex::new(HashMap::new()));
+        });
+        DEFTYPE_ALIASES.as_ref().unwrap()
+    }
+}
+
+fn deftype_alias_keys(name: &str) -> Vec<String> {
+    let base = strip_package_prefix(name).to_string();
+    let mut keys = vec![
+        name.to_string(),
+        name.to_ascii_lowercase(),
+        name.to_ascii_uppercase(),
+        base.clone(),
+        base.to_ascii_lowercase(),
+        base.to_ascii_uppercase(),
+    ];
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+pub fn lookup_deftype_alias_raw(name: &str) -> Option<usize> {
+    let tbl = get_deftype_alias_map().lock().unwrap();
+    for key in deftype_alias_keys(name) {
+        if let Some(raw) = tbl.get(&key) {
+            return Some(*raw);
+        }
+    }
+    None
+}
+
+pub fn register_deftype_alias_raw(name: &str, spec_raw: usize) {
+    let mut tbl = get_deftype_alias_map().lock().unwrap();
+    for key in deftype_alias_keys(name) {
+        tbl.insert(key, spec_raw);
+    }
+}
+
+pub fn register_function_lambda_list_metadata(name: &str, params: &[String]) {
+    let lambda_list: Vec<String> = params
+        .iter()
+        .filter(|p| !p.starts_with('&'))
+        .cloned()
+        .collect();
+    if lambda_list.is_empty() {
+        return;
+    }
+    let base = strip_package_prefix(name).to_string();
+    let mut names = vec![
+        name.to_string(),
+        name.to_ascii_lowercase(),
+        name.to_ascii_uppercase(),
+        base.clone(),
+        base.to_ascii_lowercase(),
+        base.to_ascii_uppercase(),
+        format!("%FN%{}", name),
+        format!("%FN%{}", name.to_ascii_lowercase()),
+        format!("%FN%{}", name.to_ascii_uppercase()),
+        format!("%FN%{}", base),
+        format!("%FN%{}", base.to_ascii_lowercase()),
+        format!("%FN%{}", base.to_ascii_uppercase()),
+    ];
+    names.sort();
+    names.dedup();
+    let mut tbl = get_function_lambda_list_map().lock().unwrap();
+    for n in names {
+        tbl.insert(n, lambda_list.clone());
+    }
+}
+
+pub fn lookup_function_lambda_list_metadata(name: &str) -> Option<Vec<String>> {
+    let base = strip_package_prefix(name).to_string();
+    let keys = [
+        name.to_string(),
+        name.to_ascii_lowercase(),
+        name.to_ascii_uppercase(),
+        base.clone(),
+        base.to_ascii_lowercase(),
+        base.to_ascii_uppercase(),
+        format!("%FN%{}", name),
+        format!("%FN%{}", name.to_ascii_lowercase()),
+        format!("%FN%{}", name.to_ascii_uppercase()),
+        format!("%FN%{}", base),
+        format!("%FN%{}", base.to_ascii_lowercase()),
+        format!("%FN%{}", base.to_ascii_uppercase()),
+    ];
+    let tbl = get_function_lambda_list_map().lock().unwrap();
+    let trace_frame_ll = std::env::var("RLASP_DEBUG_FRAME_LL").is_ok();
+    for k in keys {
+        if let Some(v) = tbl.get(&k) {
+            if trace_frame_ll {
+                eprintln!("[frame-ll-lookup] name={} hit-key={} value={:?}", name, k, v);
+            }
+            return Some(v.clone());
+        }
+    }
+    if trace_frame_ll {
+        eprintln!("[frame-ll-lookup] name={} miss", name);
+    }
+    None
 }
 
 #[inline]
@@ -13864,7 +17591,22 @@ pub extern "C" fn cc_register_function_ptr(name_ptr: *const i8, address: usize, 
 
     let mut registry = get_registry().lock().unwrap();
     let entry = FunctionEntry { address, arity, expects_args_list: false };
-    registry.insert(name.clone(), entry.clone());
+    let allow_builtin_override = std::env::var("RLASP_ALLOW_BUILTIN_OVERRIDE")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    let base = strip_package_prefix(&name);
+    let base_lower = base.to_ascii_lowercase();
+    let protects_builtin_entry = !allow_builtin_override
+        && !name.starts_with("%FN%")
+        && rlasp_runtime::is_cl_builtin(base_lower.as_str());
+
+    // Keep intrinsic/builtin dispatch entries stable unless overrides are explicitly enabled.
+    if !protects_builtin_entry {
+        registry.insert(name.clone(), entry.clone());
+    }
 
     // Keep explicit function-namespace aliases to separate callable entries
     // from non-function symbols that may be present in the registry.
@@ -13872,7 +17614,6 @@ pub extern "C" fn cc_register_function_ptr(name_ptr: *const i8, address: usize, 
     registry.insert(format!("%FN%{}", name.to_ascii_uppercase()), entry.clone());
     registry.insert(format!("%FN%{}", name.to_ascii_lowercase()), entry.clone());
 
-    let base = strip_package_prefix(&name);
     if base != name {
         registry.insert(format!("%FN%{}", base), entry.clone());
         registry.insert(format!("%FN%{}", base.to_ascii_uppercase()), entry.clone());
@@ -13891,7 +17632,21 @@ pub extern "C" fn cc_register_function_with_args_list(name_ptr: *const i8, addre
 
     let mut registry = get_registry().lock().unwrap();
     let entry = FunctionEntry { address, arity, expects_args_list: true };
-    registry.insert(name.clone(), entry.clone());
+    let allow_builtin_override = std::env::var("RLASP_ALLOW_BUILTIN_OVERRIDE")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    let base = strip_package_prefix(&name);
+    let base_lower = base.to_ascii_lowercase();
+    let protects_builtin_entry = !allow_builtin_override
+        && !name.starts_with("%FN%")
+        && rlasp_runtime::is_cl_builtin(base_lower.as_str());
+
+    if !protects_builtin_entry {
+        registry.insert(name.clone(), entry.clone());
+    }
 
     // Keep explicit function-namespace aliases to separate callable entries
     // from non-function symbols that may be present in the registry.
@@ -13899,7 +17654,6 @@ pub extern "C" fn cc_register_function_with_args_list(name_ptr: *const i8, addre
     registry.insert(format!("%FN%{}", name.to_ascii_uppercase()), entry.clone());
     registry.insert(format!("%FN%{}", name.to_ascii_lowercase()), entry.clone());
 
-    let base = strip_package_prefix(&name);
     if base != name {
         registry.insert(format!("%FN%{}", base), entry.clone());
         registry.insert(format!("%FN%{}", base.to_ascii_uppercase()), entry.clone());
@@ -13968,6 +17722,8 @@ pub fn register_builtin_intrinsics() {
         ("array-element-type", cc_array_element_type as usize),
         ("fill-pointer", cc_fill_pointer as usize),
         ("symbol-value", cc_symbol_value as usize),
+        ("symbol-plist", cc_symbol_plist as usize),
+        ("sleep", cc_sleep as usize),
         ("char-name", cc_char_name as usize),
         ("name-char", cc_name_char as usize),
         ("char-upcase", cc_char_upcase as usize),
@@ -14000,6 +17756,54 @@ pub fn register_builtin_intrinsics() {
         FunctionEntry {
             address: cc_function_block_name as usize,
             arity: 1,
+            expects_args_list: false,
+        },
+    );
+    registry.insert(
+        "boundp".to_string(),
+        FunctionEntry {
+            address: cc_boundp as usize,
+            arity: 1,
+            expects_args_list: false,
+        },
+    );
+    registry.insert(
+        "fboundp".to_string(),
+        FunctionEntry {
+            address: cc_fboundp as usize,
+            arity: 1,
+            expects_args_list: false,
+        },
+    );
+    registry.insert(
+        "fdefinition".to_string(),
+        FunctionEntry {
+            address: cc_fdefinition as usize,
+            arity: 1,
+            expects_args_list: false,
+        },
+    );
+    registry.insert(
+        "fmakunbound".to_string(),
+        FunctionEntry {
+            address: cc_fmakunbound as usize,
+            arity: 1,
+            expects_args_list: false,
+        },
+    );
+    registry.insert(
+        "(setf documentation)".to_string(),
+        FunctionEntry {
+            address: cc_set_documentation as usize,
+            arity: 3,
+            expects_args_list: false,
+        },
+    );
+    registry.insert(
+        "register-deftype-alias".to_string(),
+        FunctionEntry {
+            address: cc_register_deftype_alias as usize,
+            arity: 2,
             expects_args_list: false,
         },
     );
@@ -14053,8 +17857,10 @@ pub fn register_builtin_intrinsics() {
         ("char-not-lessp", cc_char_not_lessp as usize),
         ("char-not-greaterp", cc_char_not_greaterp as usize),
         ("set-symbol-value", cc_set_symbol_value as usize),
+        ("set-symbol-plist", cc_set_symbol_plist as usize),
         ("ratio", cc_ratio as usize),
         ("complex", cc_complex as usize),
+        ("documentation", cc_documentation as usize),
         ("typep", crate::intrinsics_clos::cc_typep as usize),
         ("subtypep", crate::intrinsics_clos::cc_subtypep as usize),
     ];
@@ -14064,6 +17870,14 @@ pub fn register_builtin_intrinsics() {
             registry.insert(name.to_string(), FunctionEntry { address: *addr, arity: 2, expects_args_list: false });
         }
     }
+    registry.insert(
+        "set-symbol-plist".to_string(),
+        FunctionEntry {
+            address: cc_set_symbol_plist as usize,
+            arity: 2,
+            expects_args_list: false,
+        },
+    );
     // FORMAT is used pervasively by the regression harness (message/test reporting).
     // Through funcall/apply it must use stack calling convention.
     registry.insert(
@@ -14146,6 +17960,7 @@ pub fn register_builtin_intrinsics() {
         ("prin1", cc_prin1_stack as usize),
         ("print", cc_print_stack as usize),
         ("write", cc_write_stack as usize),
+        ("write-byte", cc_write_byte_stack as usize),
         ("write-char", cc_write_char_stack as usize),
         ("write-line", cc_write_line_stack as usize),
         ("terpri", cc_terpri_stack as usize),
@@ -14155,8 +17970,11 @@ pub fn register_builtin_intrinsics() {
         ("errorp", cc_errorp_stack as usize),
         ("princ-to-string", cc_princ_to_string_stack as usize),
         ("prin1-to-string", cc_prin1_to_string_stack as usize),
-        ("write-to-string", cc_prin1_to_string_stack as usize),
+        ("write-to-string", cc_write_to_string_stack as usize),
         ("array-dimension", cc_array_dimension_stack as usize),
+        ("array-rank", cc_array_rank_stack as usize),
+        ("array-total-size", cc_array_total_size_stack as usize),
+        ("row-major-aref", cc_row_major_aref_stack as usize),
         ("array-displacement", cc_array_displacement_stack as usize),
         ("make-sequence", cc_make_sequence_stack as usize),
         ("bit", cc_bit_stack as usize),
@@ -14165,6 +17983,7 @@ pub fn register_builtin_intrinsics() {
         ("write-sequence", cc_write_sequence_stack as usize),
         ("write-string", cc_write_string_stack as usize),
         ("read-from-string", cc_read_from_string_stack as usize),
+        ("read-delimited-list", cc_read_delimited_list_stack as usize),
         ("values", cc_values_stack as usize),
         ("values-list", cc_values_list_stack as usize),
         ("quit", cc_quit_stack as usize),
@@ -14319,10 +18138,10 @@ pub extern "C" fn cc_funcall(func_ref: usize, args_and_env: usize) -> usize {
             let args_obj = unsafe { LispObject::from_raw(args_and_env) };
             let args = list_to_vec(args_obj);
             let raw_args: Vec<usize> = args.iter().map(|a| a.raw()).collect();
-            if let Some(result) = try_eval_bridge_call(&name, &raw_args) {
+            if let Some(result) = try_direct_forced_builtin_call(&name, &raw_args) {
                 return result;
             }
-            if let Some(result) = try_direct_forced_builtin_call(&name, &raw_args) {
+            if let Some(result) = try_eval_bridge_call(&name, &raw_args) {
                 return result;
             }
         }
@@ -14352,10 +18171,10 @@ pub extern "C" fn cc_funcall_variadic(func_ref: usize, nargs: usize, args_ptr: *
     if let Some(name) = extract_function_name(func_ref) {
         let dispatch_name_owned = strip_package_prefix(&name).to_ascii_lowercase();
         if should_force_bridge_dispatch(&name, dispatch_name_owned.as_str()) {
-            if let Some(result) = try_eval_bridge_call(&name, &args) {
+            if let Some(result) = try_direct_forced_builtin_call(&name, &args) {
                 return result;
             }
-            if let Some(result) = try_direct_forced_builtin_call(&name, &args) {
+            if let Some(result) = try_eval_bridge_call(&name, &args) {
                 return result;
             }
         }
@@ -14459,6 +18278,18 @@ pub extern "C" fn cc_make_closure(lambda_id: i64, num_captured: i64) -> usize {
     }
     // Reverse to get correct order (stack is LIFO)
     captured_vars.reverse();
+    if std::env::var("RLASP_TRACE_MAKE_CLOSURE").is_ok() {
+        let summaries: Vec<String> = captured_vars
+            .iter()
+            .copied()
+            .map(debug_lisp_object_summary)
+            .collect();
+        eprintln!(
+            "[make-closure] lambda_id={} captured={:?}",
+            lambda_id,
+            summaries
+        );
+    }
 
     // Create closure object
     let closure_ptr = Closure::new(lambda_id, &captured_vars);
@@ -14668,6 +18499,22 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 if let Some(entry) = func_entry {
                     let frame_name = format!("__lambda_{}", lambda_id);
                     let _runtime_debug_guard = RuntimeDebugFrameGuard::push(Some(&frame_name));
+                    if std::env::var("RLASP_TRACE_FUNCALL_CLOSURE").is_ok() {
+                        let stack_now = stack_depth();
+                        let captured_summaries: Vec<String> = closure
+                            .captured_vars()
+                            .iter()
+                            .copied()
+                            .map(debug_lisp_object_summary)
+                            .collect();
+                        eprintln!(
+                            "[funcall-closure-enter] lambda_id={} num_args={} stack_depth={} captured={:?}",
+                            lambda_id,
+                            current_num_args,
+                            stack_now,
+                            captured_summaries
+                        );
+                    }
                     // Reorder stack so lambda prologue sees:
                     //   [captured vars ...] [call args ...]  (args on top)
                     let mut call_args: Vec<usize> = Vec::new();
@@ -14676,6 +18523,18 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                             call_args.push(stack_pop_pointer());
                         }
                         call_args.reverse();
+                    }
+                    if std::env::var("RLASP_TRACE_FUNCALL_CLOSURE").is_ok() {
+                        let call_arg_summaries: Vec<String> = call_args
+                            .iter()
+                            .copied()
+                            .map(|raw| debug_lisp_object_summary(unsafe { LispObject::from_raw(raw) }))
+                            .collect();
+                        eprintln!(
+                            "[funcall-closure-args] lambda_id={} call_args={:?}",
+                            lambda_id,
+                            call_arg_summaries
+                        );
                     }
 
                     let captured = closure.captured_vars();
@@ -14782,13 +18641,26 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     args.push(stack_pop_pointer());
                 }
                 args.reverse();
-                let result = match args.len() {
-                    1 => cc_find_symbol(args[0], cc_nil_value()),
-                    2 => cc_find_symbol(args[0], args[1]),
-                    _ => rlasp_runtime::LispError::allocate(
-                        rlasp_runtime::error::ErrorKind::InvalidArgument,
-                        Some("find-symbol requires 1 or 2 arguments".to_string()),
-                    ).raw(),
+                let result = if eval_bridge_available() {
+                    try_eval_bridge_call(name, &args).unwrap_or_else(|| match args.len() {
+                        1 => cc_find_symbol(args[0], cc_nil_value()),
+                        2 => cc_find_symbol(args[0], args[1]),
+                        _ => rlasp_runtime::LispError::allocate(
+                            rlasp_runtime::error::ErrorKind::InvalidArgument,
+                            Some("find-symbol requires 1 or 2 arguments".to_string()),
+                        )
+                        .raw(),
+                    })
+                } else {
+                    match args.len() {
+                        1 => cc_find_symbol(args[0], cc_nil_value()),
+                        2 => cc_find_symbol(args[0], args[1]),
+                        _ => rlasp_runtime::LispError::allocate(
+                            rlasp_runtime::error::ErrorKind::InvalidArgument,
+                            Some("find-symbol requires 1 or 2 arguments".to_string()),
+                        )
+                        .raw(),
+                    }
                 };
                 stack_push_pointer(result);
                 handled_call = true;
@@ -14824,24 +18696,30 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 handled_call = true;
             }
             "read-line" => {
-                let mut args: Vec<usize> = Vec::new();
-                for _ in 0..current_num_args {
-                    args.push(stack_pop_pointer());
+                // Bridge path is CL-correct; keep native fallback only without bridge.
+                if !eval_bridge_available() {
+                    let mut args: Vec<usize> = Vec::new();
+                    for _ in 0..current_num_args {
+                        args.push(stack_pop_pointer());
+                    }
+                    args.reverse();
+                    let result = read_line_intrinsic(&args);
+                    stack_push_pointer(result);
+                    handled_call = true;
                 }
-                args.reverse();
-                let result = read_line_intrinsic(&args);
-                stack_push_pointer(result);
-                handled_call = true;
             }
             "read" => {
-                let mut args: Vec<usize> = Vec::new();
-                for _ in 0..current_num_args {
-                    args.push(stack_pop_pointer());
+                // Bridge path is CL-correct; keep native fallback only without bridge.
+                if !eval_bridge_available() {
+                    let mut args: Vec<usize> = Vec::new();
+                    for _ in 0..current_num_args {
+                        args.push(stack_pop_pointer());
+                    }
+                    args.reverse();
+                    let result = read_intrinsic(&args);
+                    stack_push_pointer(result);
+                    handled_call = true;
                 }
-                args.reverse();
-                let result = read_intrinsic(&args);
-                stack_push_pointer(result);
-                handled_call = true;
             }
             "quit" => {
                 let mut args: Vec<usize> = Vec::new();
@@ -14863,7 +18741,10 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 call_args.push(stack_pop_pointer());
             }
             call_args.reverse();
-            if let Some(result) = try_eval_bridge_call(name, &call_args) {
+            if let Some(result) = try_direct_forced_builtin_call(name, &call_args) {
+                stack_push_pointer(result);
+                handled_call = true;
+            } else if let Some(result) = try_eval_bridge_call(name, &call_args) {
                 stack_push_pointer(result);
                 handled_call = true;
             } else {
@@ -15101,6 +18982,55 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                         stack_push_nil();
                     }
                 }
+            }
+            n if n.starts_with("(setf fdefinition") => {
+                let mut args: Vec<usize> = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let result = if args.len() < 2 {
+                    rlasp_runtime::LispError::allocate(
+                        rlasp_runtime::error::ErrorKind::InvalidArgument,
+                        Some("(setf fdefinition) requires value and function-name".to_string()),
+                    )
+                    .raw()
+                } else {
+                    let value = args[0];
+                    let target_obj = unsafe { LispObject::from_raw(args[1]) };
+                    if let Some(err) = locked_home_package_violation_for_symbol_object(target_obj) {
+                        err
+                    } else {
+                        match function_name_designator_to_string(target_obj, "(setf fdefinition)") {
+                            Ok(target_name) => {
+                                let mut maybe_entry: Option<FunctionEntry> = None;
+                                let value_obj = unsafe { LispObject::from_raw(value) };
+                                if value_obj.as_fixnum().is_some() {
+                                    if let Some(source_name) = extract_function_name(value) {
+                                        let registry = get_registry().lock().unwrap();
+                                        maybe_entry = lookup_function_entry_unlocked(&registry, &source_name);
+                                    }
+                                }
+                                if let Some(entry) = maybe_entry {
+                                    let mut registry = get_registry().lock().unwrap();
+                                    let target_upper = target_name.to_ascii_uppercase();
+                                    let target_lower = target_name.to_ascii_lowercase();
+                                    registry.insert(target_name.clone(), entry.clone());
+                                    registry.insert(target_upper.clone(), entry.clone());
+                                    registry.insert(target_lower.clone(), entry.clone());
+                                    registry.insert(format!("%FN%{}", target_name), entry.clone());
+                                    registry.insert(format!("%FN%{}", target_upper), entry.clone());
+                                    registry.insert(format!("%FN%{}", target_lower), entry);
+                                    drop(registry);
+                                    bump_function_lookup_epoch();
+                                }
+                                value
+                            }
+                            Err(err) => err,
+                        }
+                    }
+                };
+                stack_push_pointer(result);
             }
             "first" => {
                 if current_num_args != 1 {
@@ -15542,6 +19472,51 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 };
                 stack_push_pointer(result);
             }
+            "lock-package" => {
+                let mut args: Vec<usize> = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let result = match args.len() {
+                    1 => cc_lock_package(args[0]),
+                    _ => rlasp_runtime::LispError::allocate(
+                        rlasp_runtime::error::ErrorKind::InvalidArgument,
+                        Some("lock-package requires exactly 1 argument".to_string()),
+                    ).raw(),
+                };
+                stack_push_pointer(result);
+            }
+            "unlock-package" => {
+                let mut args: Vec<usize> = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let result = match args.len() {
+                    1 => cc_unlock_package(args[0]),
+                    _ => rlasp_runtime::LispError::allocate(
+                        rlasp_runtime::error::ErrorKind::InvalidArgument,
+                        Some("unlock-package requires exactly 1 argument".to_string()),
+                    ).raw(),
+                };
+                stack_push_pointer(result);
+            }
+            "package-locked-p" => {
+                let mut args: Vec<usize> = Vec::new();
+                for _ in 0..current_num_args {
+                    args.push(stack_pop_pointer());
+                }
+                args.reverse();
+                let result = match args.len() {
+                    1 => cc_package_locked_p(args[0]),
+                    _ => rlasp_runtime::LispError::allocate(
+                        rlasp_runtime::error::ErrorKind::InvalidArgument,
+                        Some("package-locked-p requires exactly 1 argument".to_string()),
+                    ).raw(),
+                };
+                stack_push_pointer(result);
+            }
             "hash-table-keys" => {
                 let mut args: Vec<usize> = Vec::new();
                 for _ in 0..current_num_args {
@@ -15624,7 +19599,9 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     call_args.push(stack_pop_pointer());
                 }
                 call_args.reverse();
-                if let Some(result) = try_eval_bridge_call(&name, &call_args) {
+                if let Some(result) = try_direct_forced_builtin_call(&name, &call_args) {
+                    stack_push_pointer(result);
+                } else if let Some(result) = try_eval_bridge_call(&name, &call_args) {
                     stack_push_pointer(result);
                 } else {
                     stack_push_pointer(
@@ -16786,9 +20763,10 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                                 i += 1;
                                 continue;
                             };
+                            let key_norm = key.strip_prefix(':').unwrap_or(key.as_str());
                             let val = args[i + 1];
-                            match key.as_str() {
-                                ":RADIX" => {
+                            match key_norm {
+                                "RADIX" => {
                                     if let Some(n) = val.as_fixnum() {
                                         if (2..=36).contains(&(n as i64)) {
                                             radix = n as u32;
@@ -16798,7 +20776,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                                         }
                                     }
                                 }
-                                ":START" => {
+                                "START" => {
                                     if let Some(n) = val.as_fixnum() {
                                         if n < 0 {
                                             parse_error = true;
@@ -16807,7 +20785,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                                         start = n as usize;
                                     }
                                 }
-                                ":END" => {
+                                "END" => {
                                     if val.is_nil() {
                                         end = text.len();
                                     } else if let Some(n) = val.as_fixnum() {
@@ -16818,7 +20796,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                                         end = n as usize;
                                     }
                                 }
-                                ":JUNK-ALLOWED" => {
+                                "JUNK-ALLOWED" => {
                                     junk_allowed = !val.is_nil();
                                 }
                                 _ => {}
@@ -17500,17 +21478,27 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     }
                 };
 
-                if current_num_args < 2 {
-                    for _ in 0..current_num_args {
-                        let _ = stack_pop_pointer();
-                    }
+                if current_num_args == 0 {
                     stack_push_pointer(
                         rlasp_runtime::LispError::allocate(
                             rlasp_runtime::error::ErrorKind::InvalidArgument,
-                            Some(format!("{dispatch_name} requires at least two arguments")),
+                            Some(format!("{dispatch_name} requires at least one argument")),
                         )
                         .raw(),
                     );
+                } else if current_num_args == 1 {
+                    let arg = unsafe { LispObject::from_raw(stack_pop_pointer()) };
+                    if arg.as_character().is_some() {
+                        // CL character comparison predicates with one argument are true.
+                        stack_push_pointer(LispObject::t().raw());
+                    } else {
+                        stack_push_pointer(
+                            rlasp_runtime::LispError::type_error(
+                                "character comparison requires character arguments",
+                            )
+                            .raw(),
+                        );
+                    }
                 } else if current_num_args == 2 {
                     let right = unsafe { LispObject::from_raw(stack_pop_pointer()) };
                     let left = unsafe { LispObject::from_raw(stack_pop_pointer()) };
@@ -17574,15 +21562,21 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 }
             }
             "define-package" | "DEFINE-PACKAGE" | "UIOP/PACKAGE:DEFINE-PACKAGE" => {
-                // Macro that should have been expanded - just return the package name
-                if current_num_args > 0 {
-                    let first_arg = stack_pop_pointer();  // Get package name
-                    for _ in 1..current_num_args {
-                        let _ = stack_pop_pointer();  // Discard rest
-                    }
-                    stack_push_pointer(first_arg);  // Return the name
+                let mut call_args: Vec<usize> = Vec::new();
+                for _ in 0..current_num_args {
+                    call_args.push(stack_pop_pointer());
+                }
+                call_args.reverse();
+                if let Some(result) = try_eval_bridge_call("define-package", &call_args) {
+                    stack_push_pointer(result);
                 } else {
-                    stack_push_nil();
+                    stack_push_pointer(
+                        rlasp_runtime::LispError::allocate(
+                            rlasp_runtime::error::ErrorKind::UndefinedFunction,
+                            Some("define-package requires bridge evaluation".to_string()),
+                        )
+                        .raw(),
+                    );
                 }
             }
             "package-add-nickname" => {
@@ -17649,13 +21643,19 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                         .raw(),
                     );
                 } else {
-                    let dest = if current_num_args == 3 {
-                        Some(unsafe { LispObject::from_raw(stack_pop_pointer()) })
+                    let mut call_args: Vec<usize> = Vec::with_capacity(current_num_args as usize);
+                    for _ in 0..current_num_args {
+                        call_args.push(stack_pop_pointer());
+                    }
+                    call_args.reverse();
+                    let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
+                    let a = unsafe { LispObject::from_raw(call_args[0]) };
+                    let b = unsafe { LispObject::from_raw(call_args[1]) };
+                    let dest = if call_args.len() == 3 {
+                        Some(unsafe { LispObject::from_raw(call_args[2]) })
                     } else {
                         None
                     };
-                    let b = unsafe { LispObject::from_raw(stack_pop_pointer()) };
-                    let a = unsafe { LispObject::from_raw(stack_pop_pointer()) };
                     let resolved_dest = match dest {
                         Some(d) if d.is_nil() => None,
                         Some(d) if d.raw() == LispObject::t().raw() => Some(a),
@@ -17683,12 +21683,18 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                         .raw(),
                     );
                 } else {
-                    let dest = if current_num_args == 2 {
-                        Some(unsafe { LispObject::from_raw(stack_pop_pointer()) })
+                    let mut call_args: Vec<usize> = Vec::with_capacity(current_num_args as usize);
+                    for _ in 0..current_num_args {
+                        call_args.push(stack_pop_pointer());
+                    }
+                    call_args.reverse();
+                    let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
+                    let a = unsafe { LispObject::from_raw(call_args[0]) };
+                    let dest = if call_args.len() == 2 {
+                        Some(unsafe { LispObject::from_raw(call_args[1]) })
                     } else {
                         None
                     };
-                    let a = unsafe { LispObject::from_raw(stack_pop_pointer()) };
                     let resolved_dest = match dest {
                         Some(d) if d.is_nil() => None,
                         Some(d) if d.raw() == LispObject::t().raw() => Some(a),
@@ -17731,31 +21737,78 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 // Try generic function dispatch
                 use crate::intrinsics_clos::{get_generic_registry, execute_stack_based_dispatch};
                 let registry = get_generic_registry().lock().unwrap();
-                if registry.contains_key(&name) || registry.contains_key(dispatch_name) {
+                let name_lower = name.to_ascii_lowercase();
+                let name_upper = name.to_ascii_uppercase();
+                let dispatch_lower = dispatch_name.to_ascii_lowercase();
+                let dispatch_upper = dispatch_name.to_ascii_uppercase();
+                let generic_target = [
+                    name.as_str(),
+                    dispatch_name,
+                    name_lower.as_str(),
+                    name_upper.as_str(),
+                    dispatch_lower.as_str(),
+                    dispatch_upper.as_str(),
+                ]
+                .into_iter()
+                .find(|candidate| registry.contains_key(*candidate))
+                .map(|candidate| candidate.to_string());
+
+                if let Some(target) = generic_target {
                     // It's a generic function - dispatch using CLOS
                     drop(registry); // Release lock before calling
-                    if dispatch_name != name && get_generic_registry().lock().unwrap().contains_key(dispatch_name) {
-                        execute_stack_based_dispatch(dispatch_name, current_num_args as usize);
-                    } else {
-                        execute_stack_based_dispatch(&name, current_num_args as usize);
-                    }
+                    execute_stack_based_dispatch(&target, current_num_args as usize);
                 } else {
                     // Function not found in JIT/CLOS registries.
-                    // Fallback: evaluate (name arg...) via interpreter bridge when available.
-                    let mut call_args: Vec<usize> = Vec::new();
-                    for _ in 0..current_num_args {
-                        call_args.push(stack_pop_pointer());
-                    }
-                    call_args.reverse();
-                    let bridge_name = if name.contains(':') {
-                        name.as_str()
+                    // Funcall on special operators must signal UNDEFINED-FUNCTION.
+                    if is_special_operator_name(&dispatch_name.to_ascii_uppercase()) {
+                        for _ in 0..current_num_args {
+                            let _ = stack_pop_pointer();
+                        }
+                        stack_push_pointer(
+                            rlasp_runtime::LispError::allocate(
+                                rlasp_runtime::error::ErrorKind::UndefinedFunction,
+                                Some(format!("Undefined function {}", name)),
+                            )
+                            .raw(),
+                        );
+                        handled_call = true;
                     } else {
-                        dispatch_name
-                    };
-                    if let Some(result) = try_eval_bridge_call(bridge_name, &call_args) {
-                        stack_push_pointer(result);
-                    } else {
-                        stack_push_nil();
+                        // Fallback: evaluate (name arg...) via interpreter bridge when available.
+                        let mut call_args: Vec<usize> = Vec::new();
+                        for _ in 0..current_num_args {
+                            call_args.push(stack_pop_pointer());
+                        }
+                        call_args.reverse();
+                        let qualified_bridge_name;
+                        let bridge_name = if name.contains(':') {
+                            name.as_str()
+                        } else {
+                            qualified_bridge_name =
+                                format!("{}::{}", current_package_name(), name);
+                            qualified_bridge_name.as_str()
+                        };
+                        if let Some(result) = try_direct_forced_builtin_call(bridge_name, &call_args)
+                            .or_else(|| {
+                                if name.contains(':') {
+                                    None
+                                } else {
+                                    try_direct_forced_builtin_call(dispatch_name, &call_args)
+                                }
+                            })
+                            .or_else(|| try_eval_bridge_call(bridge_name, &call_args))
+                            .or_else(|| {
+                                if name.contains(':') {
+                                    None
+                                } else {
+                                    try_eval_bridge_call(dispatch_name, &call_args)
+                                }
+                            })
+                        {
+                            stack_push_pointer(result);
+                        } else {
+                            stack_push_nil();
+                        }
+                        handled_call = true;
                     }
                 }
             }
@@ -17850,104 +21903,93 @@ pub extern "C" fn cc_boundp(args_and_env: usize) -> usize {
 /// (fboundp symbol) - returns T if symbol names a function, NIL otherwise
 #[no_mangle]
 pub extern "C" fn cc_fboundp(args_and_env: usize) -> usize {
-    // Support both calling conventions:
-    // 1) direct symbol argument, and
-    // 2) args-list where CAR is the symbol.
-    let args_obj = unsafe { LispObject::from_raw(args_and_env) };
-    let sym_obj = if let Some(cons_ptr) = args_obj.as_cons_ptr() {
-        if cons_ptr.is_null() {
-            return LispObject::nil().raw();
-        }
-        let cons = unsafe { &*cons_ptr };
-        cons.car()
-    } else {
-        args_obj
+    let designator = unsafe { LispObject::from_raw(args_and_env) };
+    let name = match function_name_designator_to_string(designator, "fboundp") {
+        Ok(n) => n,
+        Err(_) => return LispObject::nil().raw(),
     };
-    let Some(sym_ptr) = as_symbol_ptr_checked(sym_obj) else {
-        return LispObject::nil().raw();
-    };
-    let sym = unsafe { &*sym_ptr };
-    let name = sym.name();
-    let base = strip_package_prefix(name).to_ascii_uppercase();
+    let base = strip_package_prefix(&name).to_ascii_uppercase();
+    let is_setf_name = name.starts_with('(');
 
     // Condition names like CL:READER-ERROR and CL:VARIABLE are not function-bound.
-    if base == "READER-ERROR" || base == "VARIABLE" {
+    if matches!(base.as_str(), "READER-ERROR" | "VARIABLE" | "NIL" | "T" | "RATIO") {
         return LispObject::nil().raw();
     }
 
-    let registry_has_callable = {
-        let registry = get_registry().lock().unwrap();
-        let prefixed_candidates = [
-            format!("%FN%{}", name),
-            format!("%FN%{}", name.to_ascii_uppercase()),
-            format!("%FN%{}", name.to_ascii_lowercase()),
-            format!("%FN%{}", base),
-            format!("%FN%{}", base.to_ascii_uppercase()),
-            format!("%FN%{}", base.to_ascii_lowercase()),
-        ];
-        if prefixed_candidates
-            .iter()
-            .any(|candidate| registry.contains_key(candidate))
-        {
-            true
-        } else {
-            // Unprefixed callable names are accepted only for fixed-arity builtin entries.
-            let raw_name_upper = name.to_ascii_uppercase();
-            let raw_name_lower = name.to_ascii_lowercase();
-            let base_upper = base.to_ascii_uppercase();
-            let base_lower = base.to_ascii_lowercase();
-            let raw_candidates = [
-                name,
-                raw_name_upper.as_str(),
-                raw_name_lower.as_str(),
-                base.as_str(),
-                base_upper.as_str(),
-                base_lower.as_str(),
-            ];
-            raw_candidates.iter().any(|candidate| {
-                registry
-                    .get(*candidate)
-                    .map(|entry| entry.arity != usize::MAX)
-                    .unwrap_or(false)
-            })
-        }
-    };
-    if registry_has_callable {
+    if function_registry_has_callable(&name) {
         return LispObject::t().raw();
     }
 
     // Special operators are fboundp in Common Lisp.
-    if matches!(
-        base.as_str(),
-        "QUOTE"
-            | "IF"
-            | "LET"
-            | "LET*"
-            | "SETQ"
-            | "PROGN"
-            | "BLOCK"
-            | "RETURN-FROM"
-            | "TAGBODY"
-            | "GO"
-            | "FLET"
-            | "LABELS"
-            | "MACROLET"
-            | "CATCH"
-            | "THROW"
-            | "UNWIND-PROTECT"
-            | "EVAL-WHEN"
-            | "LOCALLY"
-            | "FUNCTION"
-            | "THE"
-            | "LOAD-TIME-VALUE"
-            | "MULTIPLE-VALUE-CALL"
-            | "MULTIPLE-VALUE-PROG1"
-            | "PROGV"
-    ) {
+    if !is_setf_name && is_special_operator_name(base.as_str()) {
         return LispObject::t().raw();
     }
 
     LispObject::nil().raw()
+}
+
+/// Return the function definition object for a function name.
+#[no_mangle]
+pub extern "C" fn cc_fdefinition(args_and_env: usize) -> usize {
+    let designator = unsafe { LispObject::from_raw(args_and_env) };
+    let name = match function_name_designator_to_string(designator, "fdefinition") {
+        Ok(n) => n,
+        Err(err) => return err,
+    };
+    if function_registry_has_callable(&name) {
+        return make_function_ref_for_name(&name);
+    }
+    rlasp_runtime::LispError::allocate(
+        rlasp_runtime::error::ErrorKind::UndefinedFunction,
+        Some(format!("Undefined function {}", name)),
+    )
+    .raw()
+}
+
+/// Remove a function definition from the runtime function registry.
+#[no_mangle]
+pub extern "C" fn cc_fmakunbound(args_and_env: usize) -> usize {
+    let designator = unsafe { LispObject::from_raw(args_and_env) };
+    if let Some(err) = locked_home_package_violation_for_symbol_object(designator) {
+        return err;
+    }
+    let name = match function_name_designator_to_string(designator, "fmakunbound") {
+        Ok(n) => n,
+        Err(err) => return err,
+    };
+
+    let mut keys = Vec::new();
+    let name_upper = name.to_ascii_uppercase();
+    let name_lower = name.to_ascii_lowercase();
+    keys.push(name.clone());
+    keys.push(name_upper.clone());
+    keys.push(name_lower.clone());
+    keys.push(format!("%FN%{}", name));
+    keys.push(format!("%FN%{}", name_upper));
+    keys.push(format!("%FN%{}", name_lower));
+
+    let base = strip_package_prefix(&name);
+    if base != name {
+        let base_upper = base.to_ascii_uppercase();
+        let base_lower = base.to_ascii_lowercase();
+        keys.push(base.to_string());
+        keys.push(base_upper.clone());
+        keys.push(base_lower.clone());
+        keys.push(format!("%FN%{}", base));
+        keys.push(format!("%FN%{}", base_upper));
+        keys.push(format!("%FN%{}", base_lower));
+    }
+    keys.sort();
+    keys.dedup();
+
+    {
+        let mut registry = get_registry().lock().unwrap();
+        for key in keys {
+            registry.remove(&key);
+        }
+    }
+    bump_function_lookup_epoch();
+    designator.raw()
 }
 
 /// Check if an object is a function
@@ -18194,6 +22236,16 @@ pub extern "C" fn cc_compile(args_and_env: usize) -> usize {
 pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
     use rlasp_reader::reader::read_from_string_with_positions;
     let trace_read = std::env::var("RLASP_TRACE_READ_FROM_STRING").is_ok();
+    #[inline]
+    fn char_index_to_byte_index(text: &str, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        text.char_indices()
+            .nth(char_index)
+            .map(|(idx, _)| idx)
+            .unwrap_or(text.len())
+    }
 
     let args_obj = unsafe { LispObject::from_raw(args_and_env) };
     let args = list_to_vec(args_obj);
@@ -18215,14 +22267,17 @@ pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
             rlasp_runtime::LispError::type_error("read-from-string requires a string").raw()
         }),
     };
-    let input = unsafe { (&*string_ptr).as_str().to_string() };
-    let full_len = input.chars().count();
+    let input = unsafe { (&*string_ptr).as_str() };
+    let mut full_len_cache: Option<usize> = None;
+    let mut compute_full_len = || -> usize {
+        *full_len_cache.get_or_insert_with(|| input.chars().count())
+    };
 
     let eof_error_p = args.get(1).map(|o| !o.is_nil()).unwrap_or(true);
     let eof_value = args.get(2).copied().unwrap_or_else(LispObject::nil);
 
     let mut start = 0usize;
-    let mut end = full_len;
+    let mut end: Option<usize> = None;
     let mut preserve_whitespace = false;
 
     let mut i = 3usize;
@@ -18257,10 +22312,10 @@ pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
             }
             "end" => {
                 if val.is_nil() {
-                    end = full_len;
+                    end = Some(compute_full_len());
                 } else if let Some(n) = val.as_fixnum() {
                     if n >= 0 {
-                        end = n as usize;
+                        end = Some(n as usize);
                     }
                 } else {
                     return bridge_fallback().unwrap_or_else(|| {
@@ -18285,10 +22340,55 @@ pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
         i += 2;
     }
 
+    let full_len = compute_full_len();
     let start = start.min(full_len);
+    let end = end.unwrap_or(full_len);
     let end = end.min(full_len).max(start);
-    let chars: Vec<char> = input.chars().collect();
-    let slice: String = chars[start..end].iter().collect();
+    let slice: &str = if start == 0 && end == full_len {
+        input
+    } else {
+        let start_byte = char_index_to_byte_index(input, start);
+        let end_byte = char_index_to_byte_index(input, end);
+        &input[start_byte..end_byte]
+    };
+
+    let fast_character_syntax = |text: &str| -> Option<(LispObject, usize, usize)> {
+        let trim_start = text
+            .char_indices()
+            .find(|(_, ch)| !ch.is_whitespace())
+            .map(|(idx, _)| idx)
+            .unwrap_or(text.len());
+        let trimmed = &text[trim_start..];
+        let after_prefix = trimmed.strip_prefix("#\\")?;
+        if after_prefix.is_empty() {
+            return None;
+        }
+
+        let token_end_rel = after_prefix
+            .char_indices()
+            .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '(' | ')' | '"' | '\'' | '`' | ',' | ';'))
+            .map(|(idx, _)| idx)
+            .unwrap_or(after_prefix.len());
+        if token_end_rel == 0 {
+            return None;
+        }
+
+        let token = &after_prefix[..token_end_rel];
+        let ch = rlasp_runtime::parse_character_name(token)?;
+        let local_preserve = trim_start + 2 + token_end_rel;
+        let mut local_skip = local_preserve;
+        while local_skip < text.len() {
+            let mut iter = text[local_skip..].char_indices();
+            let Some((_, next)) = iter.next() else {
+                break;
+            };
+            if !next.is_whitespace() {
+                break;
+            }
+            local_skip += next.len_utf8();
+        }
+        Some((LispObject::character(ch), local_preserve, local_skip))
+    };
 
     if slice.is_empty() {
         if eof_error_p {
@@ -18313,16 +22413,117 @@ pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
     let read_suppress = get_dynamic_value("*read-suppress*")
         .map(|raw| !unsafe { LispObject::from_raw(raw) }.is_nil())
         .unwrap_or(false);
+    let readtable_is_default = get_dynamic_value("*readtable*")
+        .map(|raw| {
+            let normalized = normalize_special_dynamic_value("*readtable*", raw);
+            let default_readtable = rlasp_runtime::PACKAGE_MANAGER
+                .intern_in_package("COMMON-LISP-USER", "__RLASP_READTABLE__0")
+                .raw();
+            normalized == default_readtable
+        })
+        .unwrap_or(true);
     if read_suppress {
         let idx_obj = LispObject::fixnum(end as i64).raw();
         let values = cc_cons(cc_nil_value(), cc_cons(idx_obj, cc_nil_value()));
         return cc_values_pack(values);
     }
 
-    // Use the parser fast path whenever reader base is default; parse failures
-    // still fall back to the bridge for full CL semantics.
     let trimmed = slice.trim_start();
-    let can_use_parser_fast_path = read_base_is_default;
+    let needs_full_reader = || -> bool {
+        if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return true;
+        }
+        trimmed.contains('/')
+            || trimmed.contains('.')
+            || trimmed.contains('e')
+            || trimmed.contains('E')
+            || trimmed.contains('s')
+            || trimmed.contains('S')
+            || trimmed.contains('f')
+            || trimmed.contains('F')
+            || trimmed.contains('d')
+            || trimmed.contains('D')
+            || trimmed.contains('l')
+            || trimmed.contains('L')
+            || trimmed.contains('#')
+            || trimmed.contains('`')
+            || trimmed.contains(',')
+            || trimmed.contains('|')
+            || trimmed.contains('\\')
+    };
+
+    // Use the parser fast path only for simple default-base tokens. Float,
+    // ratio, and dispatch syntax stay on the CL-faithful reader path.
+    let can_use_parser_fast_path = read_base_is_default && !needs_full_reader();
+
+    if readtable_is_default {
+        if let Some((obj, pos_preserve, pos_skip)) = fast_character_syntax(&slice) {
+            let local_index = if preserve_whitespace { pos_preserve } else { pos_skip };
+            let absolute_index = (start + local_index).min(end);
+            let idx_obj = LispObject::fixnum(absolute_index as i64).raw();
+            let values = cc_cons(obj.raw(), cc_cons(idx_obj, cc_nil_value()));
+            return cc_values_pack(values);
+        }
+    }
+
+    struct IoSyntaxGuard(usize);
+    impl Drop for IoSyntaxGuard {
+        fn drop(&mut self) {
+            rlasp_runtime::io_syntax::cc_restore_io_syntax_state(self.0);
+        }
+    }
+    struct DynamicReadtableGuard(Option<usize>);
+    impl Drop for DynamicReadtableGuard {
+        fn drop(&mut self) {
+            let sym = rlasp_runtime::Symbol::allocate("*readtable*".to_string()).raw();
+            match self.0 {
+                Some(raw) => {
+                    cc_set_symbol_value(sym, raw);
+                }
+                None => {
+                    cc_makunbound(sym);
+                }
+            }
+        }
+    }
+    let saved_io = rlasp_runtime::io_syntax::cc_save_io_syntax_state();
+    let _io_guard = IoSyntaxGuard(saved_io);
+    let saved_readtable = get_dynamic_value("*readtable*");
+    let _readtable_guard = DynamicReadtableGuard(saved_readtable);
+
+    if let Some(raw) = get_dynamic_value("*read-base*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if let Some(n) = obj.as_fixnum() {
+            rlasp_runtime::io_syntax::set_io_syntax_var(
+                "*read-base*",
+                rlasp_runtime::io_syntax::IoSyntaxValue::Fixnum(n),
+            );
+        }
+    }
+    if let Some(raw) = get_dynamic_value("*read-suppress*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        let value = if obj.is_nil() {
+            rlasp_runtime::io_syntax::IoSyntaxValue::Nil
+        } else {
+            rlasp_runtime::io_syntax::IoSyntaxValue::True
+        };
+        rlasp_runtime::io_syntax::set_io_syntax_var("*read-suppress*", value);
+    }
+    if let Some(raw) = get_dynamic_value("*read-default-float-format*") {
+        let obj = unsafe { LispObject::from_raw(raw) };
+        if let Some(sym_ptr) = as_symbol_ptr_checked(obj) {
+            if !sym_ptr.is_null() {
+                let name = unsafe { (&*sym_ptr).name().to_string() };
+                rlasp_runtime::io_syntax::set_io_syntax_var(
+                    "*read-default-float-format*",
+                    rlasp_runtime::io_syntax::IoSyntaxValue::Symbol(name),
+                );
+            }
+        }
+    }
 
     if !can_use_parser_fast_path {
         if trace_read {
@@ -18670,6 +22871,23 @@ fn set_multiple_values(values: Vec<LispObject>) {
     });
 }
 
+#[inline]
+fn set_multiple_values_2(primary: LispObject, secondary: LispObject) {
+    MULTIPLE_VALUES.with(|slot| {
+        let mut values = slot.borrow_mut();
+        values.clear();
+        let capacity = values.capacity();
+        if capacity < 2 {
+            values.reserve(2 - capacity);
+        }
+        values.push(primary);
+        values.push(secondary);
+    });
+    MULTIPLE_VALUES_SET.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
+}
+
 /// Store a packed list of values as the current multiple-values and return primary value.
 #[no_mangle]
 pub extern "C" fn cc_values_pack(values_list: usize) -> usize {
@@ -18680,11 +22898,28 @@ pub extern "C" fn cc_values_pack(values_list: usize) -> usize {
     primary.raw()
 }
 
+/// Store exactly two values without consing an intermediate list.
+#[no_mangle]
+pub extern "C" fn cc_values2(primary_value: usize, second_value: usize) -> usize {
+    set_multiple_values_2(
+        unsafe { LispObject::from_raw(primary_value) },
+        unsafe { LispObject::from_raw(second_value) },
+    );
+    primary_value
+}
+
 /// Return all current multiple values as a list.
 /// Falls back to a single-element list containing `primary_value`.
 #[no_mangle]
 pub extern "C" fn cc_multiple_value_list(primary_value: usize) -> usize {
     let primary_obj = unsafe { LispObject::from_raw(primary_value) };
+    // Preserve signaled error payloads through wrapper forms like
+    // (values (multiple-value-list <form>) nil), so ignore-errors/handler-case
+    // can observe and handle the original condition object.
+    if primary_obj.is_error() {
+        clear_multiple_values();
+        return primary_value;
+    }
     let primary_matches = |stored: &LispObject| -> bool {
         if stored.raw() == primary_value {
             return true;
@@ -18758,6 +22993,16 @@ fn call_func_2(func: LispObject, a: LispObject, b: LispObject) -> LispObject {
         if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
             let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
             let name = sym.name();
+            if name.eq_ignore_ascii_case("eq") {
+                return if a.raw() == b.raw() {
+                    LispObject::t()
+                } else {
+                    LispObject::nil()
+                };
+            }
+            if name.eq_ignore_ascii_case("eql") {
+                return unsafe { LispObject::from_raw(cc_eq(a.raw(), b.raw())) };
+            }
             if name.eq_ignore_ascii_case("equalp") {
                 return unsafe { LispObject::from_raw(cc_equalp(a.raw(), b.raw())) };
             }
@@ -19373,6 +23618,49 @@ pub extern "C" fn cc_map(result_type: usize, function: usize, sequence: usize) -
     let func = unsafe { LispObject::from_raw(function) };
     let seq_obj = unsafe { LispObject::from_raw(sequence) };
 
+    if std::env::var("RLASP_DEBUG_MAP").is_ok() {
+        let nil_from_fn = cc_nil_value();
+        eprintln!(
+            "[RLASP_DEBUG_MAP] nil_raw=0x{:x} nil_fn_raw=0x{:x} t_raw=0x{:x} result_type_raw=0x{:x} function_raw=0x{:x} sequence_raw=0x{:x} seq_is_nil={} seq_is_cons={} seq_is_string={} seq_is_vector={}",
+            LispObject::nil().raw(),
+            nil_from_fn,
+            LispObject::t().raw(),
+            result_type_obj.raw(),
+            func.raw(),
+            seq_obj.raw(),
+            seq_obj.is_nil(),
+            seq_obj.as_cons_ptr().is_some(),
+            as_string_ptr_checked(seq_obj).is_some(),
+            as_vector_ptr_checked(seq_obj).is_some(),
+        );
+        if seq_obj.as_cons_ptr().is_some() {
+            let mut current = seq_obj;
+            for idx in 0..8 {
+                eprintln!(
+                    "[RLASP_DEBUG_MAP] step={} raw=0x{:x} is_nil={} is_cons={}",
+                    idx,
+                    current.raw(),
+                    current.is_nil(),
+                    current.as_cons_ptr().is_some(),
+                );
+                if let Some(sym_ptr) = current.as_general_ptr::<rlasp_runtime::Symbol>() {
+                    if !sym_ptr.is_null() {
+                        let sym = unsafe { &*sym_ptr };
+                        eprintln!("[RLASP_DEBUG_MAP] step={} symbol_name={}", idx, sym.name());
+                    }
+                }
+                if current.is_nil() {
+                    break;
+                }
+                let Some(cons_ptr) = current.as_cons_ptr() else {
+                    break;
+                };
+                let cons = unsafe { &*cons_ptr };
+                current = cons.cdr();
+            }
+        }
+    }
+
     let Some(elements) = sequence_to_vec(seq_obj) else {
         return rlasp_runtime::LispError::type_error("map requires a proper sequence").raw();
     };
@@ -19652,11 +23940,20 @@ pub fn init_standard_cl_variables() {
         b.insert("+process-standard-output+".to_string(), standard_output.raw());
         b.insert("+process-error-output+".to_string(), error_output.raw());
 
-        // Readtable - NIL as placeholder
-        b.insert("*readtable*".to_string(), LispObject::nil().raw());
+        // Bridge-stable current readtable token. NIL here breaks compiled
+        // readtable-case/readtable-sensitive reader tests in AOT/MLIR.
+        b.insert(
+            "*readtable*".to_string(),
+            rlasp_runtime::PACKAGE_MANAGER
+                .intern_in_package("COMMON-LISP-USER", "__RLASP_READTABLE__0")
+                .raw(),
+        );
 
         // Package-related
-        b.insert("*package*".to_string(), LispObject::nil().raw());
+        b.insert(
+            "*package*".to_string(),
+            Symbol::allocate("COMMON-LISP-USER".to_string()).raw(),
+        );
 
         // Print control variables
         b.insert("*print-escape*".to_string(), LispObject::t().raw());

@@ -9,9 +9,13 @@
 (defparameter *expected-passed-tests* nil)
 (defparameter *unexpected-passed-tests* nil)
 (defparameter *expected-failures* nil)
+(defparameter *trace-test-progress* nil)
 (defparameter *files-failed-to-compile* nil)
 (defparameter *test-marker-table* (make-hash-table))
 (defparameter *duplicate-tests* nil)
+;; Bridge seeding loads regression files to populate definitions. In that phase
+;; tests must not execute, otherwise stateful suites run twice.
+(defparameter *seed-no-run* nil)
 
 (defun message (level control-string &rest args)
   "Display a message using ANSI highlighting if possible. LEVEL should be NIL, :ERR,
@@ -92,6 +96,10 @@ Successes: ~d"
   (message :info "Passed ~s" name))
 
 (defun %test (name form thunk expected &key description (test 'equalp))
+  (when *trace-test-progress*
+    (format *error-output* "TRACE-TEST-BEGIN ~s~%" name))
+  (when *seed-no-run*
+    (return-from %test nil))
   (note-test name)
   (multiple-value-bind (results error)
       (ignore-errors (values (multiple-value-list (funcall thunk)) nil))

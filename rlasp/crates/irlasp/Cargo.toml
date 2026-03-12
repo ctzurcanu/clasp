@@ -24,6 +24,11 @@ num-complex = { workspace = true }
 [build-dependencies]
 # No dependencies needed for build script
 
+[lib]
+name = "irlasp"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
 [[bin]]
 name = "irlasp"
 path = "src/main.rs"

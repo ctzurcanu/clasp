@@ -16,6 +16,69 @@ pub fn class_supers_key(class_name: &str) -> String {
     format!("*class-supers-{}*", class_name.to_uppercase())
 }
 
+fn class_name_candidates(class_name: &str) -> Vec<String> {
+    let mut out = vec![class_name.to_string()];
+    let base = class_name.rsplit(':').next().unwrap_or(class_name);
+    if !base.eq_ignore_ascii_case(class_name) {
+        out.push(base.to_string());
+    }
+    out
+}
+
+fn lookup_class_slots(
+    env: &HashMap<String, EvalResult>,
+    class_name: &str,
+) -> Option<EvalResult> {
+    for candidate in class_name_candidates(class_name) {
+        let key = class_slots_key(&candidate);
+        if let Some(v) = env.get(&key).cloned() {
+            return Some(v);
+        }
+        if let Some(v) = super::eval_core::lookup_global_variable_binding(&key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn lookup_class_initargs(
+    env: &HashMap<String, EvalResult>,
+    class_name: &str,
+) -> Option<EvalResult> {
+    for candidate in class_name_candidates(class_name) {
+        let key = class_initargs_key(&candidate);
+        if let Some(v) = env.get(&key).cloned() {
+            return Some(v);
+        }
+        if let Some(v) = super::eval_core::lookup_global_variable_binding(&key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn lookup_class_supers(
+    env: &HashMap<String, EvalResult>,
+    class_name: &str,
+) -> Option<EvalResult> {
+    for candidate in class_name_candidates(class_name) {
+        let key = class_supers_key(&candidate);
+        if let Some(v) = env.get(&key).cloned() {
+            return Some(v);
+        }
+        if let Some(v) = super::eval_core::lookup_global_variable_binding(&key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn has_class_metadata(env: &HashMap<String, EvalResult>, class_name: &str) -> bool {
+    lookup_class_slots(env, class_name).is_some()
+        || lookup_class_initargs(env, class_name).is_some()
+        || lookup_class_supers(env, class_name).is_some()
+}
+
 fn normalize_slot_name(raw: &str) -> String {
     let base = raw.rsplit(':').next().unwrap_or(raw);
     let stripped = base.strip_prefix(':').unwrap_or(base);
@@ -75,6 +138,9 @@ fn lookup_function_binding(env: &HashMap<String, EvalResult>, name: &str) -> Opt
         if let Some(v) = env.get(&candidate).cloned() {
             return Some(v);
         }
+        if let Some(v) = super::eval_core::lookup_global_function_binding(&candidate) {
+            return Some(v);
+        }
     }
     None
 }
@@ -89,7 +155,7 @@ fn collect_class_lineage(
     if !visiting.insert(key) {
         return;
     }
-    if let Some(EvalResult::Array(supers)) = env.get(&class_supers_key(class_name)) {
+    if let Some(EvalResult::Array(supers)) = lookup_class_supers(env, class_name) {
         let supers_vec = supers.borrow().clone();
         for sup in supers_vec {
             if let EvalResult::Symbol(sup_name) = sup {
@@ -115,6 +181,133 @@ fn quoted(item: EvalResult) -> EvalResult {
     list_from_items(vec![EvalResult::Symbol("quote".to_string()), item])
 }
 
+fn debug_init_protocol_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("initialize-instance")
+        || name.eq_ignore_ascii_case("reinitialize-instance")
+        || name.eq_ignore_ascii_case("shared-initialize")
+}
+
+pub(super) fn initialize_instance_slots_from_initargs(args: &[EvalResult]) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+            eprintln!("[init-instance] fallback args=[]");
+        }
+        return Err("initialize-instance requires an instance".to_string());
+    }
+    if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+        eprintln!(
+            "[init-instance] fallback args={:?} stack=[{}]",
+            args,
+            super::eval_core::debug_call_stack_summary()
+        );
+    }
+    let inst = match &args[0] {
+        EvalResult::Instance(i) => i.clone(),
+        other => {
+            if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+                eprintln!(
+                    "[init-instance] bad-first-arg={:?} stack=[{}]",
+                    other,
+                    super::eval_core::debug_call_stack_summary()
+                );
+            }
+            return Err("initialize-instance: first argument must be an instance".to_string());
+        }
+    };
+    let mut i = 1usize;
+    while i + 1 < args.len() {
+        if let EvalResult::Symbol(key) = &args[i] {
+            let slot_name = normalize_slot_name(key);
+            inst.slots.borrow_mut().insert(slot_name, args[i + 1].clone());
+        }
+        i += 2;
+    }
+    Ok(EvalResult::Instance(inst))
+}
+
+pub(super) fn shared_initialize_slots_from_initargs(args: &[EvalResult]) -> Result<EvalResult, String> {
+    if args.len() < 2 {
+        if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+            eprintln!("[shared-init] fallback args={:?}", args);
+        }
+        return Err("shared-initialize requires an instance and slot-names".to_string());
+    }
+    let inst = match &args[0] {
+        EvalResult::Instance(i) => i.clone(),
+        other => {
+            if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+                eprintln!("[shared-init] bad-first-arg={:?}", other);
+            }
+            return Err("shared-initialize: first argument must be an instance".to_string());
+        }
+    };
+    let mut i = 2usize;
+    while i + 1 < args.len() {
+        if let EvalResult::Symbol(key) = &args[i] {
+            let slot_name = normalize_slot_name(key);
+            inst.slots.borrow_mut().insert(slot_name, args[i + 1].clone());
+        }
+        i += 2;
+    }
+    Ok(EvalResult::Instance(inst))
+}
+
+fn try_call_generic_function(
+    env: &mut HashMap<String, EvalResult>,
+    generic_name: &str,
+    generic_args: &[EvalResult],
+) -> Result<Option<EvalResult>, String> {
+    if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok()
+        && debug_init_protocol_name(generic_name)
+    {
+        eprintln!(
+            "[init-instance] try-generic name={} args={:?} stack=[{}]",
+            generic_name,
+            generic_args,
+            super::eval_core::debug_call_stack_summary()
+        );
+    }
+    let Some(func) = lookup_function_binding(env, generic_name) else {
+        if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok()
+            && debug_init_protocol_name(generic_name)
+        {
+            eprintln!("[init-instance] generic-missing name={}", generic_name);
+        }
+        return Ok(None);
+    };
+    match func {
+        EvalResult::GenericFunction(_) | EvalResult::Lambda { .. } => {
+            match super::eval_system::call_function_with_values(func, generic_args, env) {
+                Ok(v) => {
+                    if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok()
+                        && debug_init_protocol_name(generic_name)
+                    {
+                        eprintln!("[init-instance] generic-ok result={:?}", v);
+                    }
+                    Ok(Some(primary_value(v)))
+                }
+                Err(e) if e.to_ascii_lowercase().contains("no applicable method") => {
+                    if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok()
+                        && debug_init_protocol_name(generic_name)
+                    {
+                        eprintln!("[init-instance] generic-no-method err={}", e);
+                    }
+                    Ok(None)
+                }
+                Err(e) => {
+                    if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok()
+                        && debug_init_protocol_name(generic_name)
+                    {
+                        eprintln!("[init-instance] generic-err err={}", e);
+                    }
+                    Err(e)
+                }
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 pub fn call_clos_builtin(
     name: &str,
     args: &[EvalResult],
@@ -135,18 +328,42 @@ pub fn call_clos_builtin(
                 _ => return Err("make-instance: first argument must be a class name".to_string()),
             };
 
-            // DEFSTRUCT instances are represented with make-<name> constructors; if
-            // no class metadata exists, prefer that constructor path.
-            let has_class_metadata = env.contains_key(&class_slots_key(&class_name))
-                || env.contains_key(&class_initargs_key(&class_name))
-                || env.contains_key(&class_supers_key(&class_name));
-            if !has_class_metadata {
-                let ctor_name = format!("make-{}", class_name);
-                if let Some(ctor_fn) = lookup_function_binding(env, &ctor_name) {
-                    let ctor_args: Vec<EvalResult> = args.iter().skip(1).cloned().collect();
-                    let constructed = super::eval_system::call_function_with_values(ctor_fn, &ctor_args, env)?;
-                    return Ok(primary_value(constructed));
+            // DEFSTRUCT instances are represented with make-<name> constructors. Some
+            // compiled loads preserve only partial class metadata, so prefer the
+            // constructor path when there is no slot/initarg metadata but the struct
+            // constructor/predicate pair exists.
+            let ctor_name = format!("make-{}", class_name);
+            let pred_name = format!("{}-p", class_name);
+            let struct_constructor = lookup_function_binding(env, &ctor_name);
+            let looks_like_defstruct =
+                struct_constructor.is_some() && lookup_function_binding(env, &pred_name).is_some();
+            if std::env::var("RLASP_DEBUG_STRUCT_CLOS_MAKE").is_ok()
+                && class_name.eq_ignore_ascii_case("struct-clos")
+            {
+                eprintln!(
+                    "[struct-clos-make] looks_like_defstruct={} ctor={} pred={} slots_meta={} initargs_meta={} supers_meta={} stack=[{}]",
+                    looks_like_defstruct,
+                    struct_constructor.is_some(),
+                    lookup_function_binding(env, &pred_name).is_some(),
+                    lookup_class_slots(env, &class_name).is_some(),
+                    lookup_class_initargs(env, &class_name).is_some(),
+                    lookup_class_supers(env, &class_name).is_some(),
+                    super::eval_core::debug_call_stack_summary()
+                );
+            }
+            if looks_like_defstruct {
+                let ctor_args: Vec<EvalResult> = args.iter().skip(1).cloned().collect();
+                let constructed = super::eval_system::call_function_with_values(
+                    struct_constructor.unwrap(),
+                    &ctor_args,
+                    env,
+                )?;
+                if std::env::var("RLASP_DEBUG_STRUCT_CLOS_MAKE").is_ok()
+                    && class_name.eq_ignore_ascii_case("struct-clos")
+                {
+                    eprintln!("[struct-clos-make] result={:?}", constructed);
                 }
+                return Ok(primary_value(constructed));
             }
 
             // Start with defaults from class metadata (including inherited slots).
@@ -158,14 +375,29 @@ pub fn call_clos_builtin(
             collect_class_lineage(&class_name, env, &mut lineage, &mut visiting);
 
             for cls in &lineage {
-                if let Some(EvalResult::HashTable(slot_defaults)) = env.get(&class_slots_key(cls)) {
-                    for (slot_name, default_val) in slot_defaults.borrow().iter() {
-                        if !matches!(default_val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case(":unbound")) {
-                            slots.insert(normalize_slot_name(slot_name), default_val.clone());
-                        }
+                let default_entries: Vec<(String, EvalResult)> =
+                    if let Some(EvalResult::HashTable(slot_defaults)) = lookup_class_slots(env, cls) {
+                        slot_defaults
+                            .borrow()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                for (slot_name, default_val) in default_entries {
+                    if matches!(default_val, EvalResult::Symbol(ref s) if s.eq_ignore_ascii_case(":unbound")) {
+                        continue;
                     }
+                    let evaluated_default = match default_val {
+                        EvalResult::InitForm(ast) => {
+                            primary_value(super::eval_core::eval_with_env(&ast, env)?)
+                        }
+                        other => other,
+                    };
+                    slots.insert(normalize_slot_name(&slot_name), evaluated_default);
                 }
-                if let Some(EvalResult::HashTable(initargs_map)) = env.get(&class_initargs_key(cls)) {
+                if let Some(EvalResult::HashTable(initargs_map)) = lookup_class_initargs(env, cls) {
                     for (initarg_name, slot_name_val) in initargs_map.borrow().iter() {
                         if let EvalResult::Symbol(slot_name) = slot_name_val {
                             initarg_to_slot.insert(
@@ -200,16 +432,33 @@ pub fn call_clos_builtin(
             }
 
             // Return a proper Instance with class metadata
-            Ok(EvalResult::Instance(Instance {
+            let instance = EvalResult::Instance(Instance {
+                id: super::eval_types::next_instance_id(),
                 class_name,
                 slots: Rc::new(RefCell::new(slots)),
-            }))
+            });
+
+            // CL make-instance must invoke initialize-instance generic functions/methods
+            // so user-defined :after/:before methods run.
+            let mut init_call_args = Vec::with_capacity(args.len());
+            init_call_args.push(instance.clone());
+            init_call_args.extend(args.iter().skip(1).cloned());
+            if let Some(result) = try_call_generic_function(env, "initialize-instance", &init_call_args)? {
+                return match primary_value(result) {
+                    EvalResult::Instance(updated) => Ok(EvalResult::Instance(updated)),
+                    _ => Ok(instance),
+                };
+            }
+
+            Ok(instance)
         }
 
         "class-name" => {
             // Return the name of a class or instance
             match args.get(0) {
-                Some(EvalResult::Instance(inst)) => Ok(EvalResult::Symbol(inst.class_name.clone())),
+                Some(EvalResult::Instance(inst)) => {
+                    Ok(EvalResult::Symbol(effective_instance_class_name(inst)))
+                }
                 Some(EvalResult::Symbol(s)) => Ok(EvalResult::Symbol(s.clone())),
                 _ => Ok(EvalResult::Symbol("T".to_string())),
             }
@@ -227,6 +476,7 @@ pub fn call_clos_builtin(
         "ensure-class-using-class" => {
             // Minimal CLOS/MOP support: create a STANDARD-CLASS metaobject.
             Ok(EvalResult::Instance(Instance {
+                id: super::eval_types::next_instance_id(),
                 class_name: "STANDARD-CLASS".to_string(),
                 slots: Rc::new(RefCell::new(HashMap::new())),
             }))
@@ -421,17 +671,46 @@ pub fn call_clos_builtin(
                     let mut visiting = std::collections::HashSet::new();
                     let effective_class_name = effective_instance_class_name(inst);
                     collect_class_lineage(&effective_class_name, env, &mut lineage, &mut visiting);
-                    for cls in lineage {
-                        if let Some(EvalResult::HashTable(slot_defaults)) = env.get(&class_slots_key(&cls)) {
-                            if let Some(default_val) = slot_defaults.borrow().get(&slot_name).cloned() {
+                    for cls in &lineage {
+                        let class_default = if let Some(EvalResult::HashTable(slot_defaults)) =
+                            lookup_class_slots(env, cls)
+                        {
+                            slot_defaults.borrow().get(&slot_name).cloned()
+                        } else {
+                            None
+                        };
+                        if let Some(default_val) = class_default {
                                 if !matches!(default_val, EvalResult::Symbol(ref s) if s.eq_ignore_ascii_case(":unbound")) {
-                                    inst.slots.borrow_mut().insert(slot_name.clone(), default_val.clone());
-                                    return Ok(default_val);
+                                    let realized_default = match default_val {
+                                        EvalResult::InitForm(ast) => {
+                                            primary_value(super::eval_core::eval_with_env(&ast, env)?)
+                                        }
+                                        other => other,
+                                    };
+                                    inst.slots
+                                        .borrow_mut()
+                                        .insert(slot_name.clone(), realized_default.clone());
+                                    return Ok(realized_default);
                                 }
                             }
-                        }
                     }
 
+                    if std::env::var("RLASP_DEBUG_SLOT_UNBOUND").is_ok() {
+                        let available_keys: Vec<String> = env
+                            .keys()
+                            .filter(|k| k.starts_with("*class-slots-"))
+                            .take(24)
+                            .cloned()
+                            .collect();
+                        eprintln!(
+                            "[slot-unbound] slot={} class={} lineage={:?} keys={:?} stack=[{}]",
+                            slot_name,
+                            effective_class_name,
+                            lineage,
+                            available_keys,
+                            super::eval_core::debug_call_stack_summary()
+                        );
+                    }
                     Err(format!("Slot {} is unbound", slot_name))
                 }
                 EvalResult::HashTable(ht) => {
@@ -440,6 +719,20 @@ pub fn call_clos_builtin(
                     if let Some(v) = hash.get(&slot_name).cloned() {
                         Ok(v)
                     } else if let Some((_, v)) = hash.iter().find(|(k, _)| hash_slot_key_matches(k, &slot_name)) {
+                        Ok(v.clone())
+                    } else {
+                        Err(format!("Slot {} is unbound", slot_name))
+                    }
+                }
+                EvalResult::Condition(cond) => {
+                    let cond_ref = cond.borrow();
+                    if let Some(v) = cond_ref.slots.get(&slot_name).cloned() {
+                        Ok(v)
+                    } else if let Some((_, v)) = cond_ref
+                        .slots
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(&slot_name))
+                    {
                         Ok(v.clone())
                     } else {
                         Err(format!("Slot {} is unbound", slot_name))
@@ -468,6 +761,10 @@ pub fn call_clos_builtin(
             match object {
                 EvalResult::Instance(inst) => {
                     inst.slots.borrow_mut().insert(slot_name, new_value.clone());
+                    Ok(new_value)
+                }
+                EvalResult::Condition(cond) => {
+                    cond.borrow_mut().slots.insert(slot_name, new_value.clone());
                     Ok(new_value)
                 }
                 EvalResult::HashTable(ht) => {
@@ -501,14 +798,39 @@ pub fn call_clos_builtin(
 
             match object {
                 EvalResult::Instance(inst) => {
-                    let slots = inst.slots.borrow();
-                    Ok(EvalResult::Boolean(slots.contains_key(&slot_name)))
+                    if inst.slots.borrow().contains_key(&slot_name) {
+                        return Ok(EvalResult::Boolean(true));
+                    }
+                    let mut lineage = Vec::new();
+                    let mut visiting = std::collections::HashSet::new();
+                    let effective_class_name = effective_instance_class_name(inst);
+                    collect_class_lineage(&effective_class_name, env, &mut lineage, &mut visiting);
+                    for cls in lineage {
+                        if let Some(EvalResult::HashTable(slot_defaults)) = lookup_class_slots(env, &cls) {
+                            if let Some(default_val) = slot_defaults.borrow().get(&slot_name) {
+                                if !matches!(default_val, EvalResult::Symbol(ref s) if s.eq_ignore_ascii_case(":unbound")) {
+                                    return Ok(EvalResult::Boolean(true));
+                                }
+                            }
+                        }
+                    }
+                    Ok(EvalResult::Boolean(false))
                 }
                 EvalResult::HashTable(ht) => {
                     let hash = ht.borrow();
                     let bound = hash.contains_key(&slot_name)
                         || hash.keys().any(|k| hash_slot_key_matches(k, &slot_name));
                     Ok(EvalResult::Boolean(bound))
+                }
+                EvalResult::Condition(cond) => {
+                    let cond_ref = cond.borrow();
+                    Ok(EvalResult::Boolean(
+                        cond_ref.slots.contains_key(&slot_name)
+                            || cond_ref
+                                .slots
+                                .keys()
+                                .any(|k| k.eq_ignore_ascii_case(&slot_name)),
+                    ))
                 }
                 _ => Ok(EvalResult::Boolean(false)),
             }
@@ -584,6 +906,13 @@ pub fn call_clos_builtin(
             if args.len() < 2 {
                 return Err("change-class requires at least instance and new-class".to_string());
             }
+            if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+                eprintln!(
+                    "[init-instance] change-class args={:?} stack=[{}]",
+                    args,
+                    super::eval_core::debug_call_stack_summary()
+                );
+            }
 
             let inst = match &args[0] {
                 EvalResult::Instance(i) => i.clone(),
@@ -602,16 +931,32 @@ pub fn call_clos_builtin(
             let mut visiting = std::collections::HashSet::new();
             collect_class_lineage(&new_class_name, env, &mut lineage, &mut visiting);
             for cls in &lineage {
-                if let Some(EvalResult::HashTable(slot_defaults)) = env.get(&class_slots_key(cls)) {
-                    for (slot_name, default_val) in slot_defaults.borrow().iter() {
-                        if !matches!(default_val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case(":unbound")) {
-                            new_slots
-                                .entry(normalize_slot_name(slot_name))
-                                .or_insert_with(|| default_val.clone());
-                        }
+                let default_entries: Vec<(String, EvalResult)> =
+                    if let Some(EvalResult::HashTable(slot_defaults)) = lookup_class_slots(env, cls) {
+                        slot_defaults
+                            .borrow()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                for (slot_name, default_val) in default_entries {
+                    if matches!(default_val, EvalResult::Symbol(ref s) if s.eq_ignore_ascii_case(":unbound")) {
+                        continue;
+                    }
+                    let slot_key = normalize_slot_name(&slot_name);
+                    if !new_slots.contains_key(&slot_key) {
+                        let evaluated_default = match default_val {
+                            EvalResult::InitForm(ast) => {
+                                primary_value(super::eval_core::eval_with_env(&ast, env)?)
+                            }
+                            other => other,
+                        };
+                        new_slots.insert(slot_key, evaluated_default);
                     }
                 }
-                if let Some(EvalResult::HashTable(initargs_map)) = env.get(&class_initargs_key(cls)) {
+                if let Some(EvalResult::HashTable(initargs_map)) = lookup_class_initargs(env, cls) {
                     for (initarg_name, slot_name_val) in initargs_map.borrow().iter() {
                         if let EvalResult::Symbol(slot_name) = slot_name_val {
                             initarg_to_slot.insert(
@@ -639,6 +984,7 @@ pub fn call_clos_builtin(
             }
 
             let prospective = EvalResult::Instance(Instance {
+                id: super::eval_types::next_instance_id(),
                 class_name: new_class_name.clone(),
                 slots: Rc::new(RefCell::new(new_slots.clone())),
             });
@@ -665,6 +1011,7 @@ pub fn call_clos_builtin(
             }
 
             Ok(EvalResult::Instance(Instance {
+                id: inst.id,
                 class_name: new_class_name,
                 slots: inst.slots.clone(),
             }))
@@ -686,33 +1033,39 @@ pub fn call_clos_builtin(
         }
 
         "initialize-instance" => {
-            // Initialize instance slots from initargs.
-            if args.is_empty() {
-                return Err("initialize-instance requires an instance".to_string());
+            // Prefer user-defined generic methods for full CLOS behavior.
+            if let Some(result) = try_call_generic_function(env, "initialize-instance", args)? {
+                return Ok(result);
             }
-            let inst = match &args[0] {
-                EvalResult::Instance(i) => i.clone(),
-                _ => return Err("initialize-instance: first argument must be an instance".to_string()),
-            };
-            let mut i = 1usize;
-            while i + 1 < args.len() {
-                if let EvalResult::Symbol(key) = &args[i] {
-                    let slot_name = normalize_slot_name(key);
-                    inst.slots.borrow_mut().insert(slot_name, args[i + 1].clone());
-                }
-                i += 2;
-            }
-            Ok(EvalResult::Instance(inst))
+            initialize_instance_slots_from_initargs(args)
         }
 
         "reinitialize-instance" => {
-            // Reinitialize instance by reusing initialize-instance behavior.
-            call_clos_builtin("initialize-instance", args, env)
+            if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+                eprintln!(
+                    "[init-instance] builtin-reinitialize args={:?} stack=[{}]",
+                    args,
+                    super::eval_core::debug_call_stack_summary()
+                );
+            }
+            if let Some(result) = try_call_generic_function(env, "reinitialize-instance", args)? {
+                return Ok(result);
+            }
+            initialize_instance_slots_from_initargs(args)
         }
 
         "shared-initialize" => {
-            // Shared initialization protocol; currently equivalent to initialize-instance.
-            call_clos_builtin("initialize-instance", args, env)
+            if std::env::var("RLASP_DEBUG_INIT_INSTANCE").is_ok() {
+                eprintln!(
+                    "[init-instance] builtin-shared args={:?} stack=[{}]",
+                    args,
+                    super::eval_core::debug_call_stack_summary()
+                );
+            }
+            if let Some(result) = try_call_generic_function(env, "shared-initialize", args)? {
+                return Ok(result);
+            }
+            shared_initialize_slots_from_initargs(args)
         }
 
         "update-instance-for-different-class" => {

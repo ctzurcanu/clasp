@@ -53,6 +53,7 @@ pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
     let merged_mlir = merge_with_runtime_decls(mlir_text);
 
     let input_path = unique_temp_path("mlirbc_input", "mlir");
+    let output_tmp = unique_temp_path("mlirbc_output", "mlirbc");
     std::fs::write(&input_path, &merged_mlir)?;
 
     let mlir_opt_paths = [
@@ -68,7 +69,7 @@ pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
     let output = Command::new(mlir_opt)
         .arg("--emit-bytecode")
         .arg("-o")
-        .arg(output_path)
+        .arg(output_tmp.to_str().unwrap())
         .arg(input_path.to_str().unwrap())
         .output()?;
 
@@ -76,10 +77,15 @@ pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(anyhow::anyhow!("mlir-opt --emit=bytecode failed: {}", stderr))
     } else {
+        if let Some(parent) = std::path::Path::new(output_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&output_tmp, output_path)?;
         Ok(())
     };
 
     let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_tmp);
     result
 }
 
@@ -420,6 +426,7 @@ declare i64 @cc_if(i64, i64, i64)
 declare i64 @cc_funcall(...)
 declare i64 @cc_boundp(i64)
 declare i64 @cc_fboundp(i64)
+declare i64 @cc_set_symbol_plist(i64, i64)
 declare i64 @cc_make_array(...)
 declare i64 @cc_set_aref(i64, i64, i64)
 declare i64 @cc_make_hash_table()

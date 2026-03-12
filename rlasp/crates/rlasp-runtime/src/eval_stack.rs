@@ -120,7 +120,7 @@ impl EvalStack {
         let (tag, data) = self.pop()?;
 
         match tag {
-            TypeTag::Nil => Some(crate::symbol::NIL_SYMBOL.raw()),
+            TypeTag::Nil => Some(crate::LispObject::nil().raw()),
             TypeTag::Fixnum if data.len() == 8 => {
                 // Box the raw fixnum into a LispObject
                 let val = i64::from_le_bytes(data.try_into().ok()?);
@@ -258,11 +258,11 @@ pub extern "C" fn stack_pop_pointer() -> usize {
             if std::env::var("RLASP_STACK_ERROR_BACKTRACE").is_ok() {
                 eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
             }
-            return crate::symbol::NIL_SYMBOL.raw();
+            return crate::LispObject::nil().raw();
         }
         s.pop_pointer().unwrap_or_else(|| {
             eprintln!("[STACK ERROR] stack_pop_pointer failed to pop (depth was {})", depth);
-            crate::symbol::NIL_SYMBOL.raw()
+            crate::LispObject::nil().raw()
         })
     })
 }

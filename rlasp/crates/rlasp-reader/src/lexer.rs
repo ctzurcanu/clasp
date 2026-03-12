@@ -8,6 +8,7 @@ use rlasp_runtime::FloatFormat;
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
+    suppress_reader_errors: bool,
 }
 
 impl Lexer {
@@ -16,7 +17,16 @@ impl Lexer {
         Lexer {
             input: input.chars().collect(),
             pos: 0,
+            suppress_reader_errors: false,
         }
+    }
+
+    /// Enable/disable permissive tokenization used for read-suppressed forms
+    /// (e.g. skipped #+ / #- branches). Returns the previous state.
+    pub fn set_reader_error_suppressed(&mut self, suppress: bool) -> bool {
+        let previous = self.suppress_reader_errors;
+        self.suppress_reader_errors = suppress;
+        previous
     }
 
     /// Get the next token
@@ -524,6 +534,9 @@ impl Lexer {
         if name.is_empty() {
             let ch = self.current_char();
             if ch == '\0' {
+                if self.suppress_reader_errors {
+                    return Ok(Token::new(TokenKind::Character('\0'), start_pos));
+                }
                 return Err(ReaderError::InvalidCharacter {
                     text: String::new(),
                     pos: start_pos,
@@ -533,48 +546,31 @@ impl Lexer {
             return Ok(Token::new(TokenKind::Character(ch), start_pos));
         }
 
-        // Handle Unicode notation: u followed by hex digits (e.g., u80, u0041)
-        if name.starts_with('u') || name.starts_with('U') {
-            let hex_part = &name[1..];
-            if let Ok(code_point) = u32::from_str_radix(hex_part, 16) {
-                if let Some(ch) = char::from_u32(code_point) {
-                    return Ok(Token::new(TokenKind::Character(ch), start_pos));
-                }
-            }
-            // If it doesn't parse as Unicode, fall through to named character handling
+        if let Some(ch) = rlasp_runtime::parse_character_name(&name) {
+            Ok(Token::new(TokenKind::Character(ch), start_pos))
+        } else if self.suppress_reader_errors {
+            Ok(Token::new(TokenKind::Character('\0'), start_pos))
+        } else {
+            Err(ReaderError::InvalidCharacter {
+                text: name,
+                pos: start_pos,
+            })
         }
-
-        // Handle named characters
-        let lower_name = name.to_lowercase();
-        let ch = match lower_name.as_str() {
-            "newline" => '\n',
-            "space" => ' ',
-            "tab" => '\t',
-            "return" => '\r',
-            "linefeed" => '\n',
-            "page" => '\x0C',
-            "null" => '\0',
-            "backspace" => '\x08',
-            "rubout" | "delete" | "del" => '\x7F',
-            // Control characters
-            "nul" => '\x00',
-            "sub" => '\x1A',
-            "esc" | "escape" => '\x1B',
-            // For unsupported Unicode character names or long names, return a placeholder space
-            _ if name.contains('_') || name.len() > 15 => ' ',
-            _ if name.chars().count() == 1 => name.chars().next().unwrap(),
-            _ => {
-                // For unrecognized names, return a space instead of erroring
-                // This allows more files to parse even if they use non-standard character names
-                ' '
-            }
-        };
-
-        Ok(Token::new(TokenKind::Character(ch), start_pos))
     }
 
     fn read_number_or_symbol(&mut self, start_pos: usize) -> ReaderResult<Token> {
         let text = self.read_atom_text();
+        let raw_token_contains_escape = self.input[start_pos..self.pos].iter().any(|c| *c == '\\');
+
+        if !raw_token_contains_escape
+            && text.chars().count() > 1
+            && text.chars().all(|c| c == '.')
+        {
+            return Err(ReaderError::InvalidSyntax {
+                msg: "A token consisting only of dots is not valid Common Lisp syntax".to_string(),
+                pos: start_pos,
+            });
+        }
 
         // Try to parse as number
         // First check if it looks like an integer (all digits, possibly with leading sign)
@@ -653,7 +649,20 @@ impl Lexer {
         }
 
         if parsed_float.is_none() && text.contains('.') {
-            parsed_float = text.parse::<f64>().ok().map(|v| (v, FloatFormat::Double));
+            let default_single = std::env::var("RLASP_READ_DEFAULT_FLOAT_SINGLE")
+                .map(|v| {
+                    let t = v.trim().to_ascii_lowercase();
+                    !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+                })
+                .unwrap_or_else(|_| rlasp_runtime::io_syntax::current_read_default_float_single());
+            if default_single {
+                parsed_float = text
+                    .parse::<f32>()
+                    .ok()
+                    .map(|v| (v as f64, FloatFormat::Single));
+            } else {
+                parsed_float = text.parse::<f64>().ok().map(|v| (v, FloatFormat::Double));
+            }
         }
 
         if let Some((f, format)) = parsed_float {

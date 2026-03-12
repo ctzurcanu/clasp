@@ -118,10 +118,22 @@ impl Symbol {
         self.plist.read().iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 
-    /// Allocate a symbol and return LispObject pointer
-    pub fn allocate(name: impl Into<Arc<str>>) -> LispObject {
+    fn allocate_interned_raw(name: impl Into<Arc<str>>) -> LispObject {
         let ptr = unsafe { crate::gc::gc_allocate_value(Symbol::new(name)).as_ptr() };
         LispObject::from_general_ptr(ptr)
+    }
+
+    /// Allocate an interned symbol and return LispObject pointer.
+    /// Canonicalize CL boolean/list constants so all interned NIL/T identities are stable.
+    pub fn allocate(name: impl Into<Arc<str>>) -> LispObject {
+        let name: Arc<str> = name.into();
+        if name.eq_ignore_ascii_case("NIL") {
+            return *NIL_SYMBOL;
+        }
+        if name.eq_ignore_ascii_case("T") {
+            return *T_SYMBOL;
+        }
+        Self::allocate_interned_raw(name)
     }
 
     /// Allocate an uninterned symbol (not in any package's symbol table)
@@ -210,12 +222,12 @@ use lazy_static::lazy_static;
 lazy_static! {
     /// The NIL symbol - represents both the empty list and the boolean false value
     pub static ref NIL_SYMBOL: LispObject = {
-        Symbol::allocate("NIL")
+        Symbol::allocate_interned_raw("NIL")
     };
 
     /// The T symbol - represents the boolean true value
     pub static ref T_SYMBOL: LispObject = {
-        Symbol::allocate("T")
+        Symbol::allocate_interned_raw("T")
     };
 }
 

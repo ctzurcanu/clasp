@@ -22,6 +22,8 @@ func.func private @cc_box_single_float(f64) -> i64
 func.func private @cc_unbox_float(i64) -> f64
 func.func private @cc_box_character(i64) -> i64
 func.func private @cc_unbox_character(i64) -> i64
+func.func private @cc_char_name(i64) -> i64
+func.func private @cc_name_char(i64) -> i64
 func.func private @cc_parse_bignum(!llvm.ptr, i64) -> i64
 
 // ==============================================================================
@@ -112,6 +114,12 @@ func.func private @cc_magnitude(i64) -> i64
 
 // I/O
 func.func private @cc_print(i64) -> i64
+func.func private @cc_print_stack()
+func.func private @cc_write_stack()
+func.func private @cc_write_sequence_stack()
+func.func private @cc_stream_write_sequence_stack()
+func.func private @cc_read_sequence_stack()
+func.func private @cc_stream_read_sequence_stack()
 func.func private @cc_format(i64, i64) -> i64
 func.func private @cc_load(i64) -> i64
 func.func private @cc_load_stack(i64) -> i64
@@ -124,7 +132,9 @@ func.func private @cc_make_string_input_stream(i64) -> i64
 func.func private @cc_make_array(i64) -> i64
 func.func private @cc_make_array_with_contents(i64, i64) -> i64
 func.func private @cc_make_array_with_initial_element(i64, i64) -> i64
+func.func private @cc_make_array_stack()
 func.func private @cc_aref(i64, i64) -> i64
+func.func private @cc_aref_stack()
 func.func private @cc_set_aref(i64, i64, i64) -> i64
 
 // Vectors
@@ -154,6 +164,7 @@ func.func private @cc_sort(i64, i64) -> i64
 func.func private @cc_nconc(i64, i64) -> i64
 func.func private @cc_acons(i64, i64, i64) -> i64
 func.func private @cc_getf(i64, i64, i64) -> i64
+func.func private @cc_remf_plist(i64, i64) -> i64
 func.func private @cc_map_nil(i64, i64) -> i64
 func.func private @cc_map(i64, i64, i64) -> i64
 func.func private @cc_clrhash(i64) -> i64
@@ -171,6 +182,9 @@ func.func private @cc_butlast(i64) -> i64
 func.func private @cc_is_cons(i64) -> i32
 func.func private @cc_nil_value() -> i64
 func.func private @cc_t_value() -> i64
+func.func private @cc_register_function_lambda_list_metadata_raw(i64, i64) -> i64
+func.func private @cc_runtime_debug_stack_push_name(i64)
+func.func private @cc_runtime_debug_stack_pop_name()
 
 // Hash tables
 func.func private @cc_make_hash_table() -> i64
@@ -228,6 +242,7 @@ func.func private @cc_symbol_value(i64) -> i64
 func.func private @cc_set_symbol_value(i64, i64) -> i64
 func.func private @cc_get_symbol_property(i64, i64) -> i64
 func.func private @cc_set_symbol_property(i64, i64, i64) -> i64
+func.func private @cc_set_symbol_plist(i64, i64) -> i64
 func.func private @cc_gensym(i64) -> i64
 func.func private @cc_gentemp(i64, i64) -> i64
 func.func private @cc_symbol_name(i64) -> i64
@@ -277,12 +292,16 @@ func.func private @cc_build_range(i64, i64, i64) -> i64
 
 // Introspection
 func.func private @cc_fboundp(i64) -> i64
+func.func private @cc_fdefinition(i64) -> i64
+func.func private @cc_fmakunbound(i64) -> i64
 func.func private @cc_boundp(i64) -> i64
 func.func private @cc_functionp(i64) -> i64
 func.func private @cc_valid_function_name_p(i64) -> i64
 func.func private @cc_function_block_name(i64) -> i64
 func.func private @cc_progv_push(i64, i64) -> i64
 func.func private @cc_progv_pop(i64) -> i64
+func.func private @cc_push_float_trap_mask(i64) -> i64
+func.func private @cc_restore_float_trap_mask(i64) -> i64
 
 // Evaluation
 func.func private @cc_read_from_string(i64) -> i64

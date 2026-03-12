@@ -5,6 +5,7 @@ pub mod libffi_bridge;
 pub mod cpp_shims;
 pub mod cpp_ast;
 pub mod cpp_codegen;
+#[cfg(feature = "cxx-bridge")]
 pub mod cxx_bridge;
 pub mod vector_wrapper;
 pub mod vector_managed;
@@ -20,6 +21,7 @@ pub use libffi_bridge::*;
 pub use cpp_shims::*;
 pub use cpp_ast::*;
 pub use cpp_codegen::*;
+#[cfg(feature = "cxx-bridge")]
 pub use cxx_bridge::*;
 pub use vector_wrapper::*;
 pub use cpp_lifecycle::*;

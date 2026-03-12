@@ -340,44 +340,46 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             if args.is_empty() {
                 return Err("max requires at least 1 argument".to_string());
             }
-            let mut max_val = match args[0] {
-                EvalResult::Float(n) => n,
-                EvalResult::Fixnum(i) => i as f64,
-                _ => return Err("max requires numeric arguments".to_string()),
-            };
+            let mut best = args[0].clone();
             for arg in &args[1..] {
-                let val = match arg {
+                let best_val = match &best {
                     EvalResult::Float(n) => *n,
                     EvalResult::Fixnum(i) => *i as f64,
                     _ => return Err("max requires numeric arguments".to_string()),
                 };
-                if val > max_val {
-                    max_val = val;
+                let arg_val = match arg {
+                    EvalResult::Float(n) => *n,
+                    EvalResult::Fixnum(i) => *i as f64,
+                    _ => return Err("max requires numeric arguments".to_string()),
+                };
+                if arg_val > best_val {
+                    best = arg.clone();
                 }
             }
-            Ok(EvalResult::Float(max_val))
+            Ok(best)
         }
 
         "min" => {
             if args.is_empty() {
                 return Err("min requires at least 1 argument".to_string());
             }
-            let mut min_val = match args[0] {
-                EvalResult::Float(n) => n,
-                EvalResult::Fixnum(i) => i as f64,
-                _ => return Err("min requires numeric arguments".to_string()),
-            };
+            let mut best = args[0].clone();
             for arg in &args[1..] {
-                let val = match arg {
+                let best_val = match &best {
                     EvalResult::Float(n) => *n,
                     EvalResult::Fixnum(i) => *i as f64,
                     _ => return Err("min requires numeric arguments".to_string()),
                 };
-                if val < min_val {
-                    min_val = val;
+                let arg_val = match arg {
+                    EvalResult::Float(n) => *n,
+                    EvalResult::Fixnum(i) => *i as f64,
+                    _ => return Err("min requires numeric arguments".to_string()),
+                };
+                if arg_val < best_val {
+                    best = arg.clone();
                 }
             }
-            Ok(EvalResult::Float(min_val))
+            Ok(best)
         }
 
         "expt" => {

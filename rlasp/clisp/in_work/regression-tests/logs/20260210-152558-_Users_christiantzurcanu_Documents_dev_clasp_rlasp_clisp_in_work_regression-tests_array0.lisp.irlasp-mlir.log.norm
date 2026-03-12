@@ -1,4 +1,0 @@
-[Warning: Could not compile top-level forms: aref requires exactly 2 arguments]
-
-thread 'main' panicked at crates/irlasp/src/main.rs:78:10:
-Main thread panicked: Any { .. }

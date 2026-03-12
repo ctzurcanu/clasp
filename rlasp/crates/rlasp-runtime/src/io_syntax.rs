@@ -4,9 +4,9 @@
 //! by `with-standard-io-syntax`. It's in rlasp-runtime so both the
 //! interpreter and JIT can access the same state.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use crate::FloatFormat;
 
 /// IO syntax variable value - a simple enum that can be converted to/from usize for JIT
 #[derive(Clone, Debug, PartialEq)]
@@ -93,7 +93,13 @@ fn create_default_io_syntax() -> HashMap<String, IoSyntaxValue> {
     vars.insert("*read-default-float-format*".to_string(), IoSyntaxValue::Symbol("SINGLE-FLOAT".to_string()));
     vars.insert("*read-eval*".to_string(), IoSyntaxValue::True);
     vars.insert("*read-suppress*".to_string(), IoSyntaxValue::Nil);
-    vars.insert("*readtable*".to_string(), IoSyntaxValue::Symbol("*standard-readtable*".to_string()));
+    // Use the same bridge-stable token as the evaluator/JIT instead of a
+    // variable-name symbol. Compiled code expects *READTABLE* to already be a
+    // readtable designator, not the name of one.
+    vars.insert(
+        "*readtable*".to_string(),
+        IoSyntaxValue::Symbol("__RLASP_READTABLE__0".to_string()),
+    );
 
     vars
 }
@@ -138,6 +144,28 @@ pub fn restore_io_syntax_state(state: HashMap<String, IoSyntaxValue>) {
 pub fn set_standard_io_syntax() {
     let mut vars = IO_SYNTAX_VARS.lock().unwrap();
     *vars = create_default_io_syntax();
+}
+
+pub fn current_read_default_float_format() -> FloatFormat {
+    match get_io_syntax_var("*read-default-float-format*") {
+        Some(IoSyntaxValue::Symbol(name)) => {
+            let base = name
+                .rsplit(':')
+                .next()
+                .unwrap_or(name.as_str())
+                .to_ascii_lowercase();
+            match base.as_str() {
+                "short-float" | "single-float" => FloatFormat::Single,
+                "double-float" | "long-float" => FloatFormat::Double,
+                _ => FloatFormat::Single,
+            }
+        }
+        _ => FloatFormat::Single,
+    }
+}
+
+pub fn current_read_default_float_single() -> bool {
+    matches!(current_read_default_float_format(), FloatFormat::Single)
 }
 
 /// List of all IO syntax variable names for iteration

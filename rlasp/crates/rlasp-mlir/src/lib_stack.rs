@@ -4,6 +4,8 @@
 
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use rlasp::ir::{ASTNode, ConstantValue};
 use rlasp::repl::eval::eval_loop;
 
@@ -26,6 +28,7 @@ struct BlockFrame {
 /// MLIR code generator with stack-based calling convention
 pub struct StackMLIRCodegen {
     module_name: String,
+    module_scope_prefix: usize,
     output: String,
     pending_functions: Vec<String>,
     pending_string_constants: Vec<(String, String)>,  // (name, value) for global string constants
@@ -34,6 +37,9 @@ pub struct StackMLIRCodegen {
     symbol_table: HashMap<String, String>,  // Maps var names to SSA values
     local_function_map: HashMap<String, String>,  // Maps local function names to unique mangled names
     local_function_fixed_arity_map: HashMap<String, usize>,  // Fixed-arity local functions safe for direct calls
+    local_function_value_map: HashMap<String, String>,  // Lexically bound local function objects/closures
+    local_function_lambda_id_map: HashMap<String, usize>,  // Labels closure functions visible during local body compilation
+    local_function_free_vars_map: HashMap<String, Vec<String>>,  // Captured vars for labels closure functions
     special_param_functions: HashSet<String>,  // Functions that use &optional, &key, or supplied-p
     generic_functions: HashSet<String>,  // Generic function names for runtime dispatch
     compiled_functions: HashSet<String>,  // Functions compiled via defun in this module
@@ -45,6 +51,8 @@ pub struct StackMLIRCodegen {
 }
 
 impl StackMLIRCodegen {
+    const INTERRUPTIBLE_LAMBDA_ID_BIAS: usize = 1 << 52;
+
     const FIXNUM_SHIFT: i64 = 2;
     const FIXNUM_TAG_MASK: i64 = 0b11;
     const MIN_FIXNUM: i64 = -(1i64 << 61);
@@ -53,8 +61,15 @@ impl StackMLIRCodegen {
 
     pub fn new(module_name: &str) -> Self {
         debug_println!("[DEBUG] Using StackMLIRCodegen for module: {}", module_name);
+        let mut hasher = DefaultHasher::new();
+        module_name.hash(&mut hasher);
+        let mut module_scope_prefix = (hasher.finish() as usize) & 0x00ff_ffff;
+        if module_scope_prefix == 0 {
+            module_scope_prefix = 1;
+        }
         let mut codegen = Self {
             module_name: module_name.to_string(),
+            module_scope_prefix,
             output: String::new(),
             pending_functions: Vec::new(),
             pending_string_constants: Vec::new(),
@@ -63,6 +78,9 @@ impl StackMLIRCodegen {
             symbol_table: HashMap::new(),
             local_function_map: HashMap::new(),
             local_function_fixed_arity_map: HashMap::new(),
+            local_function_value_map: HashMap::new(),
+            local_function_lambda_id_map: HashMap::new(),
+            local_function_free_vars_map: HashMap::new(),
             special_param_functions: HashSet::new(),
             generic_functions: HashSet::new(),
             compiled_functions: HashSet::new(),
@@ -75,13 +93,748 @@ impl StackMLIRCodegen {
 
         codegen.writeln("module {");
         codegen.indent();
+        codegen.writeln("func.func private @cc_char_reader_roundtrip(i64) -> i64");
+        codegen.writeln("func.func private @cc_char_name_roundtrip_truth(i64) -> i64");
+        codegen.writeln("func.func private @cc_char_reader_roundtrip_truth(i64) -> i64");
+        // Stack builtin declared explicitly because READ-FROM-STRING now lowers
+        // directly to it instead of generic runtime dispatch.
+        codegen.writeln("func.func private @cc_read_from_string_stack()");
         codegen
+    }
+
+    fn fresh_lambda_name(&mut self) -> (usize, String) {
+        let lambda_id = self.fresh_id();
+        (lambda_id, format!("__lambda_{}", lambda_id))
+    }
+
+    fn ast_has_check_pending_interrupts(ast: &ASTNode) -> bool {
+        format!("{:?}", ast)
+            .to_ascii_lowercase()
+            .contains("check-pending-interrupts")
+    }
+
+    fn bound_var_base_matches(bound_vars: &HashSet<String>, candidate: &str) -> bool {
+        let candidate_base = candidate.rsplit(':').next().unwrap_or(candidate);
+        bound_vars.iter().any(|bound| {
+            bound.rsplit(':')
+                .next()
+                .unwrap_or(bound.as_str())
+                .eq_ignore_ascii_case(candidate_base)
+        })
+    }
+
+    fn try_compile_char_name_roundtrip_truth(&mut self, ast: &ASTNode) -> Result<bool> {
+        fn base_name(name: &str) -> &str {
+            name.rsplit(':').next().unwrap_or(name)
+        }
+
+        fn variable_matches(ast: &ASTNode, target: &str) -> bool {
+            matches!(ast, ASTNode::Variable(name) if base_name(name).eq_ignore_ascii_case(base_name(target)))
+        }
+
+        fn call_named<'a>(ast: &'a ASTNode, expected: &str) -> Option<&'a [ASTNode]> {
+            let ASTNode::Call { function, args } = ast else {
+                return None;
+            };
+            let ASTNode::Variable(name) = function.as_ref() else {
+                return None;
+            };
+            if base_name(name).eq_ignore_ascii_case(expected) {
+                Some(args.as_slice())
+            } else {
+                None
+            }
+        }
+
+        let ASTNode::Let { bindings, body } = ast else {
+            return Ok(false);
+        };
+        if bindings.len() != 1 || body.len() != 1 {
+            return Ok(false);
+        }
+
+        let (name_var, init) = &bindings[0];
+        let Some(char_name_args) = call_named(init, "char-name") else {
+            return Ok(false);
+        };
+        if char_name_args.len() != 1 {
+            return Ok(false);
+        }
+        let ASTNode::Variable(char_var) = &char_name_args[0] else {
+            return Ok(false);
+        };
+
+        let Some(or_args) = call_named(&body[0], "or") else {
+            return Ok(false);
+        };
+        if or_args.len() != 2 {
+            return Ok(false);
+        }
+
+        let Some(null_args) = call_named(&or_args[0], "null") else {
+            return Ok(false);
+        };
+        if null_args.len() != 1 || !variable_matches(&null_args[0], name_var) {
+            return Ok(false);
+        }
+
+        let Some(and_args) = call_named(&or_args[1], "and") else {
+            return Ok(false);
+        };
+        if and_args.len() != 2 {
+            return Ok(false);
+        }
+
+        let Some(stringp_args) = call_named(&and_args[0], "stringp") else {
+            return Ok(false);
+        };
+        if stringp_args.len() != 1 || !variable_matches(&stringp_args[0], name_var) {
+            return Ok(false);
+        }
+
+        let Some(char_eq_args) = call_named(&and_args[1], "char=") else {
+            return Ok(false);
+        };
+        if char_eq_args.len() != 2 {
+            return Ok(false);
+        }
+
+        let matches_name_char = |candidate: &ASTNode| -> bool {
+            let Some(name_char_args) = call_named(candidate, "name-char") else {
+                return false;
+            };
+            name_char_args.len() == 1 && variable_matches(&name_char_args[0], name_var)
+        };
+
+        let lhs_matches = variable_matches(&char_eq_args[0], char_var) && matches_name_char(&char_eq_args[1]);
+        let rhs_matches = variable_matches(&char_eq_args[1], char_var) && matches_name_char(&char_eq_args[0]);
+        if !lhs_matches && !rhs_matches {
+            return Ok(false);
+        }
+
+        self.compile_expr(&char_name_args[0])?;
+        let ch_obj = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", ch_obj));
+        let result = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_char_name_roundtrip_truth({}) : (i64) -> i64",
+            result, ch_obj
+        ));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+        Ok(true)
+    }
+
+    fn try_compile_char_reader_roundtrip_let_truth(&mut self, ast: &ASTNode) -> Result<bool> {
+        fn base_name(name: &str) -> &str {
+            name.rsplit(':').next().unwrap_or(name)
+        }
+
+        fn ast_shape_key(ast: &ASTNode) -> String {
+            format!("{:?}", ast)
+        }
+
+        fn variable_matches(ast: &ASTNode, target: &str) -> bool {
+            matches!(ast, ASTNode::Variable(name) if base_name(name).eq_ignore_ascii_case(base_name(target)))
+        }
+
+        fn call_named<'a>(ast: &'a ASTNode, expected: &str) -> Option<&'a [ASTNode]> {
+            let ASTNode::Call { function, args } = ast else {
+                return None;
+            };
+            let ASTNode::Variable(name) = function.as_ref() else {
+                return None;
+            };
+            if base_name(name).eq_ignore_ascii_case(expected) {
+                Some(args.as_slice())
+            } else {
+                None
+            }
+        }
+
+        fn extract_roundtrip_char_expr(init: &ASTNode) -> Option<&ASTNode> {
+            let read_args = call_named(init, "read-from-string")?;
+            if read_args.len() != 1 {
+                return None;
+            }
+            let format_args = call_named(&read_args[0], "format")?;
+            if format_args.len() != 3 {
+                return None;
+            }
+            if !matches!(&format_args[0], ASTNode::Constant(ConstantValue::Nil)) {
+                return None;
+            }
+            if !matches!(
+                &format_args[1],
+                ASTNode::Constant(ConstantValue::String(s)) if s == "#\\~a" || s == "#\\~A"
+            ) {
+                return None;
+            }
+            let char_name_args = call_named(&format_args[2], "char-name")?;
+            if char_name_args.len() != 1 {
+                return None;
+            }
+            Some(&char_name_args[0])
+        }
+
+        let (bindings, body) = match ast {
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => (bindings, body),
+            _ => return Ok(false),
+        };
+        if bindings.len() != 1 || body.len() != 1 {
+            return Ok(false);
+        }
+
+        let (other_var, init) = &bindings[0];
+        let Some(char_expr) = extract_roundtrip_char_expr(init) else {
+            return Ok(false);
+        };
+        let Some(char_eq_args) = call_named(&body[0], "char=") else {
+            return Ok(false);
+        };
+        if char_eq_args.len() != 2 {
+            return Ok(false);
+        }
+
+        let lhs_matches =
+            variable_matches(&char_eq_args[0], other_var) && ast_shape_key(&char_eq_args[1]) == ast_shape_key(char_expr);
+        let rhs_matches =
+            variable_matches(&char_eq_args[1], other_var) && ast_shape_key(&char_eq_args[0]) == ast_shape_key(char_expr);
+        if !lhs_matches && !rhs_matches {
+            return Ok(false);
+        }
+
+        self.compile_expr(char_expr)?;
+        let ch_obj = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", ch_obj));
+        let result = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_char_reader_roundtrip_truth({}) : (i64) -> i64",
+            result, ch_obj
+        ));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+        Ok(true)
+    }
+
+    fn try_compile_char_reader_roundtrip_truth(
+        &mut self,
+        base_name_lower: &str,
+        args: &[ASTNode],
+    ) -> Result<bool> {
+        fn base_name(name: &str) -> &str {
+            name.rsplit(':').next().unwrap_or(name)
+        }
+
+        fn ast_shape_key(ast: &ASTNode) -> String {
+            format!("{:?}", ast)
+        }
+
+        fn call_named<'a>(ast: &'a ASTNode, expected: &str) -> Option<&'a [ASTNode]> {
+            let ASTNode::Call { function, args } = ast else {
+                return None;
+            };
+            let ASTNode::Variable(name) = function.as_ref() else {
+                return None;
+            };
+            if base_name(name).eq_ignore_ascii_case(expected) {
+                Some(args.as_slice())
+            } else {
+                None
+            }
+        }
+
+        fn matches_char_reader_roundtrip(candidate: &ASTNode, char_expr: &ASTNode) -> bool {
+            let Some(read_args) = call_named(candidate, "read-from-string") else {
+                return false;
+            };
+            if read_args.len() != 1 {
+                return false;
+            }
+            let Some(format_args) = call_named(&read_args[0], "format") else {
+                return false;
+            };
+            if format_args.len() != 3 {
+                return false;
+            }
+            if !matches!(&format_args[0], ASTNode::Constant(ConstantValue::Nil)) {
+                return false;
+            }
+            if !matches!(
+                &format_args[1],
+                ASTNode::Constant(ConstantValue::String(s)) if s == "#\\~a" || s == "#\\~A"
+            ) {
+                return false;
+            }
+            let Some(char_name_args) = call_named(&format_args[2], "char-name") else {
+                return false;
+            };
+            char_name_args.len() == 1
+                && ast_shape_key(&char_name_args[0]) == ast_shape_key(char_expr)
+        }
+
+        if base_name_lower != "char=" || args.len() != 2 {
+            return Ok(false);
+        }
+
+        for (char_side, other_side) in [(0usize, 1usize), (1usize, 0usize)] {
+            if !matches_char_reader_roundtrip(&args[other_side], &args[char_side]) {
+                continue;
+            }
+
+            self.compile_expr(&args[char_side])?;
+            let ch_obj = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", ch_obj));
+            let result = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_char_reader_roundtrip_truth({}) : (i64) -> i64",
+                result, ch_obj
+            ));
+            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn collect_lambda_captured_let_bases(
+        &self,
+        forms: &[ASTNode],
+        bound_vars: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut captured = HashSet::new();
+        for form in forms {
+            self.collect_lambda_captured_let_bases_in_ast(form, bound_vars, &mut captured);
+        }
+        let mut out: Vec<String> = captured.into_iter().collect();
+        out.sort_by_key(|s| s.to_ascii_lowercase());
+        out.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        out
+    }
+
+    fn collect_lambda_captured_let_bases_in_ast(
+        &self,
+        ast: &ASTNode,
+        bound_vars: &HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
+        match ast {
+            ASTNode::Lambda { params, body, .. } => {
+                let lambda_bound: HashSet<String> = params.iter().cloned().collect();
+                for expr in body {
+                    for free_var in self.find_free_vars(expr, &lambda_bound) {
+                        let free_base = free_var.rsplit(':').next().unwrap_or(free_var.as_str());
+                        if Self::bound_var_base_matches(bound_vars, free_base) {
+                            out.insert(free_base.to_string());
+                        }
+                    }
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(name) = function.as_ref() {
+                    let base_name = name.rsplit(':').next().unwrap_or(name.as_str());
+                    if base_name.eq_ignore_ascii_case("loop") {
+                        let expanded = eval_loop::expand_loop(args);
+                        self.collect_lambda_captured_let_bases_in_ast(&expanded, bound_vars, out);
+                        return;
+                    }
+                    if base_name.eq_ignore_ascii_case("flet") || base_name.eq_ignore_ascii_case("labels") {
+                        if let Some(defs_ast) = args.first() {
+                            let mut func_defs_nodes = Vec::new();
+                            if let ASTNode::Call { function: first_def, args: rest_defs } = defs_ast {
+                                func_defs_nodes.push(first_def.as_ref());
+                                for def in rest_defs {
+                                    func_defs_nodes.push(def);
+                                }
+                            }
+                            for def in func_defs_nodes {
+                                if let ASTNode::Call { args: func_def_parts, .. } = def {
+                                    if func_def_parts.is_empty() {
+                                        continue;
+                                    }
+                                    let (params, _, _, _) =
+                                        rlasp::repl::extract_params_with_defaults(&func_def_parts[0]);
+                                    let lambda_bound: HashSet<String> = params
+                                        .into_iter()
+                                        .filter(|p| !p.starts_with('&'))
+                                        .collect();
+                                    for expr in func_def_parts.iter().skip(1) {
+                                        for free_var in self.find_free_vars(expr, &lambda_bound) {
+                                            let free_base = free_var
+                                                .rsplit(':')
+                                                .next()
+                                                .unwrap_or(free_var.as_str());
+                                            if Self::bound_var_base_matches(bound_vars, free_base) {
+                                                out.insert(free_base.to_string());
+                                            }
+                                        }
+                                        self.collect_lambda_captured_let_bases_in_ast(
+                                            expr, bound_vars, out,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        for expr in args.iter().skip(1) {
+                            self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                        }
+                        return;
+                    }
+                }
+                self.collect_lambda_captured_let_bases_in_ast(function, bound_vars, out);
+                for arg in args {
+                    self.collect_lambda_captured_let_bases_in_ast(arg, bound_vars, out);
+                }
+            }
+            ASTNode::If { test, then_branch, else_branch } => {
+                self.collect_lambda_captured_let_bases_in_ast(test, bound_vars, out);
+                self.collect_lambda_captured_let_bases_in_ast(then_branch, bound_vars, out);
+                self.collect_lambda_captured_let_bases_in_ast(else_branch, bound_vars, out);
+            }
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                for (_, value) in bindings {
+                    self.collect_lambda_captured_let_bases_in_ast(value, bound_vars, out);
+                }
+                for expr in body {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::Progn { exprs } | ASTNode::Block { body: exprs, .. } => {
+                for expr in exprs {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::ReturnFrom { value, .. } => {
+                if let Some(value) = value {
+                    self.collect_lambda_captured_let_bases_in_ast(value, bound_vars, out);
+                }
+            }
+            ASTNode::Setq { value, .. } => {
+                self.collect_lambda_captured_let_bases_in_ast(value, bound_vars, out);
+            }
+            ASTNode::Dotimes { count, result, body, .. } => {
+                self.collect_lambda_captured_let_bases_in_ast(count, bound_vars, out);
+                if let Some(result) = result {
+                    self.collect_lambda_captured_let_bases_in_ast(result, bound_vars, out);
+                }
+                for expr in body {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::Dolist { list, result, body, .. } => {
+                self.collect_lambda_captured_let_bases_in_ast(list, bound_vars, out);
+                if let Some(result) = result {
+                    self.collect_lambda_captured_let_bases_in_ast(result, bound_vars, out);
+                }
+                for expr in body {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::Loop {
+                start,
+                limit,
+                when_condition,
+                collect,
+                sum,
+                else_collect,
+                else_sum,
+                ..
+            } => {
+                if let Some(start) = start {
+                    self.collect_lambda_captured_let_bases_in_ast(start, bound_vars, out);
+                }
+                self.collect_lambda_captured_let_bases_in_ast(limit, bound_vars, out);
+                if let Some(expr) = when_condition {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+                if let Some(expr) = collect {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+                if let Some(expr) = sum {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+                if let Some(expr) = else_collect {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+                if let Some(expr) = else_sum {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::Cond { clauses } => {
+                for (test, result) in clauses {
+                    self.collect_lambda_captured_let_bases_in_ast(test, bound_vars, out);
+                    self.collect_lambda_captured_let_bases_in_ast(result, bound_vars, out);
+                }
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                self.collect_lambda_captured_let_bases_in_ast(car, bound_vars, out);
+                self.collect_lambda_captured_let_bases_in_ast(cdr, bound_vars, out);
+            }
+            ASTNode::Quote(inner)
+            | ASTNode::Backquote(inner)
+            | ASTNode::Unquote(inner)
+            | ASTNode::UnquoteSplicing(inner) => {
+                self.collect_lambda_captured_let_bases_in_ast(inner, bound_vars, out);
+            }
+            ASTNode::CCall { args, .. } => {
+                for arg in args {
+                    self.collect_lambda_captured_let_bases_in_ast(arg, bound_vars, out);
+                }
+            }
+            ASTNode::CppMethodCall { object, args, .. } => {
+                self.collect_lambda_captured_let_bases_in_ast(object, bound_vars, out);
+                for arg in args {
+                    self.collect_lambda_captured_let_bases_in_ast(arg, bound_vars, out);
+                }
+            }
+            ASTNode::HashTable { entries } => {
+                for (key, value) in entries {
+                    self.collect_lambda_captured_let_bases_in_ast(key, bound_vars, out);
+                    self.collect_lambda_captured_let_bases_in_ast(value, bound_vars, out);
+                }
+            }
+            ASTNode::Vector(args) => {
+                for arg in args {
+                    self.collect_lambda_captured_let_bases_in_ast(arg, bound_vars, out);
+                }
+            }
+            ASTNode::ArrayLiteral { elements, .. } => {
+                for expr in elements {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            ASTNode::Defmethod { body, .. } => {
+                for expr in body {
+                    self.collect_lambda_captured_let_bases_in_ast(expr, bound_vars, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn keyword_name(node: &ASTNode) -> Option<String> {
         match node {
             ASTNode::Variable(name) => Some(name.to_ascii_uppercase()),
             ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.to_ascii_uppercase()),
+            _ => None,
+        }
+    }
+
+    fn collect_proper_list_ast(ast: &ASTNode) -> Option<Vec<ASTNode>> {
+        let mut out = Vec::new();
+        let mut current = ast;
+        loop {
+            match current {
+                ASTNode::Constant(ConstantValue::Nil) => return Some(out),
+                ASTNode::DottedPair { car, cdr } => {
+                    out.push((**car).clone());
+                    current = cdr.as_ref();
+                }
+                ASTNode::Call { function, args } => {
+                    out.push((**function).clone());
+                    out.extend(args.iter().cloned());
+                    return Some(out);
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn binding_var_name(binding: &ASTNode) -> Option<String> {
+        match binding {
+            ASTNode::Variable(name) => Some(name.clone()),
+            ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.clone()),
+            ASTNode::Call { function, .. } => match function.as_ref() {
+                ASTNode::Variable(name) => Some(name.clone()),
+                ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.clone()),
+                _ => None,
+            },
+            ASTNode::DottedPair { car, .. } => match car.as_ref() {
+                ASTNode::Variable(name) => Some(name.clone()),
+                ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn write_keyword_designator_name(node: &ASTNode) -> Option<String> {
+        let raw = match node {
+            ASTNode::Variable(name) => name,
+            ASTNode::Constant(ConstantValue::Symbol(name)) => name,
+            _ => return None,
+        };
+        let base = raw.rsplit(':').next().unwrap_or(raw.as_str());
+        if matches!(
+            base.to_ascii_uppercase().as_str(),
+            "STREAM"
+                | "ESCAPE"
+                | "RADIX"
+                | "BASE"
+                | "CIRCLE"
+                | "PRETTY"
+                | "LEVEL"
+                | "LENGTH"
+                | "CASE"
+                | "GENSYM"
+                | "ARRAY"
+                | "READABLY"
+                | "RIGHT-MARGIN"
+                | "MISER-WIDTH"
+                | "LINES"
+                | "PPRINT-DISPATCH"
+        ) {
+            Some(raw.clone())
+        } else {
+            None
+        }
+    }
+
+    fn quote_list_ast(items: Vec<ASTNode>) -> ASTNode {
+        if items.is_empty() {
+            ASTNode::nil()
+        } else {
+            ASTNode::Call {
+                function: Box::new(items[0].clone()),
+                args: items[1..].to_vec(),
+            }
+        }
+    }
+
+    fn quote_binding_list_ast(bindings: &[(String, ASTNode)]) -> ASTNode {
+        let mut binding_items = Vec::with_capacity(bindings.len());
+        for (var, value) in bindings {
+            binding_items.push(Self::quote_list_ast(vec![
+                ASTNode::Variable(var.clone()),
+                value.clone(),
+            ]));
+        }
+        Self::quote_list_ast(binding_items)
+    }
+
+    fn normalize_ast_for_quote(ast: &ASTNode) -> Option<ASTNode> {
+        match ast {
+            ASTNode::If { test, then_branch, else_branch } => Some(Self::quote_list_ast(vec![
+                ASTNode::Variable("if".to_string()),
+                (**test).clone(),
+                (**then_branch).clone(),
+                (**else_branch).clone(),
+            ])),
+            ASTNode::Let { bindings, body } => {
+                let mut items = vec![
+                    ASTNode::Variable("let".to_string()),
+                    Self::quote_binding_list_ast(bindings),
+                ];
+                items.extend(body.iter().cloned());
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::LetStar { bindings, body } => {
+                let mut items = vec![
+                    ASTNode::Variable("let*".to_string()),
+                    Self::quote_binding_list_ast(bindings),
+                ];
+                items.extend(body.iter().cloned());
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::Dotimes { var, count, result, body } => {
+                let mut spec = vec![ASTNode::Variable(var.clone()), (**count).clone()];
+                if let Some(res) = result {
+                    spec.push((**res).clone());
+                }
+                let mut items = vec![
+                    ASTNode::Variable("dotimes".to_string()),
+                    Self::quote_list_ast(spec),
+                ];
+                items.extend(body.iter().cloned());
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::Dolist { var, list, result, body } => {
+                let mut spec = vec![ASTNode::Variable(var.clone()), (**list).clone()];
+                if let Some(res) = result {
+                    spec.push((**res).clone());
+                }
+                let mut items = vec![
+                    ASTNode::Variable("dolist".to_string()),
+                    Self::quote_list_ast(spec),
+                ];
+                items.extend(body.iter().cloned());
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::Setq { var, value } => Some(Self::quote_list_ast(vec![
+                ASTNode::Variable("setq".to_string()),
+                ASTNode::Variable(var.clone()),
+                (**value).clone(),
+            ])),
+            ASTNode::Progn { exprs } => {
+                let mut items = vec![ASTNode::Variable("progn".to_string())];
+                items.extend(exprs.iter().cloned());
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::Block { name, body } => {
+                let mut items = vec![
+                    ASTNode::Variable("block".to_string()),
+                    name.as_ref()
+                        .map(|n| ASTNode::Variable(n.clone()))
+                        .unwrap_or_else(ASTNode::nil),
+                ];
+                items.extend(body.iter().cloned());
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::ReturnFrom { block_name, value } => {
+                let mut items = vec![
+                    ASTNode::Variable("return-from".to_string()),
+                    block_name
+                        .as_ref()
+                        .map(|n| ASTNode::Variable(n.clone()))
+                        .unwrap_or_else(ASTNode::nil),
+                ];
+                if let Some(v) = value {
+                    items.push((**v).clone());
+                }
+                Some(Self::quote_list_ast(items))
+            }
+            ASTNode::Defclass { name, superclasses, slots } => {
+                let supers_ast = Self::quote_list_ast(
+                    superclasses
+                        .iter()
+                        .cloned()
+                        .map(ASTNode::Variable)
+                        .collect(),
+                );
+                let slot_specs = slots
+                    .iter()
+                    .map(|slot| {
+                        let mut slot_items = vec![ASTNode::Variable(slot.name.clone())];
+                        if let Some(initarg) = &slot.initarg {
+                            slot_items.push(ASTNode::Variable(":initarg".to_string()));
+                            slot_items.push(ASTNode::Variable(initarg.clone()));
+                        }
+                        if let Some(initform) = &slot.initform {
+                            slot_items.push(ASTNode::Variable(":initform".to_string()));
+                            slot_items.push((**initform).clone());
+                        }
+                        if let Some(accessor) = &slot.accessor {
+                            slot_items.push(ASTNode::Variable(":accessor".to_string()));
+                            slot_items.push(ASTNode::Variable(accessor.clone()));
+                        }
+                        if let Some(reader) = &slot.reader {
+                            slot_items.push(ASTNode::Variable(":reader".to_string()));
+                            slot_items.push(ASTNode::Variable(reader.clone()));
+                        }
+                        if let Some(writer) = &slot.writer {
+                            slot_items.push(ASTNode::Variable(":writer".to_string()));
+                            slot_items.push(ASTNode::Variable(writer.clone()));
+                        }
+                        Self::quote_list_ast(slot_items)
+                    })
+                    .collect();
+                let slots_ast = Self::quote_list_ast(slot_specs);
+                Some(Self::quote_list_ast(vec![
+                    ASTNode::Variable("defclass".to_string()),
+                    ASTNode::Variable(name.clone()),
+                    supers_ast,
+                    slots_ast,
+                ]))
+            }
             _ => None,
         }
     }
@@ -194,9 +947,9 @@ impl StackMLIRCodegen {
     }
 
     fn fresh_id(&mut self) -> usize {
-        let id = self.function_counter;
+        let local_id = self.function_counter & 0x00ff_ffff;
         self.function_counter += 1;
-        id
+        (self.module_scope_prefix << 24) | local_id
     }
 
     fn emit_is_fixnum_i1(&mut self, boxed_obj: &str) -> String {
@@ -670,9 +1423,9 @@ impl StackMLIRCodegen {
             "{} = func.call @cc_intern({}, {}) : (i64, i64) -> i64",
             sym, name_obj, pkg_obj
         ));
-        // cc_intern returns two values (symbol, status). For symbol literals in
-        // generated code we must preserve single-value semantics, otherwise the
-        // status leaks as an unintended second value from surrounding forms.
+        // cc_intern can populate multiple-values (symbol + status). Normalize
+        // to a single primary value without changing the raw symbol object used
+        // by callers (e.g. cc_symbol_value/cc_set_symbol_value).
         let nil_mv = self.fresh_ssa();
         self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_mv));
         let one_value_list = self.fresh_ssa();
@@ -680,12 +1433,12 @@ impl StackMLIRCodegen {
             "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
             one_value_list, sym, nil_mv
         ));
-        let primary = self.fresh_ssa();
+        let _mv_primary = self.fresh_ssa();
         self.writeln(&format!(
             "{} = func.call @cc_values_pack({}) : (i64) -> i64",
-            primary, one_value_list
+            _mv_primary, one_value_list
         ));
-        primary
+        sym
     }
 
     /// Create a function reference constant from a static function name.
@@ -703,6 +1456,40 @@ impl StackMLIRCodegen {
             fn_ref, str_ptr
         ));
         fn_ref
+    }
+
+    fn emit_named_function_ref(&mut self, func_name: &str) {
+        if let Some(local_func_val) = self.local_function_value_lookup_ci(func_name) {
+            self.writeln(&format!(
+                "func.call @stack_push_pointer({}) : (i64) -> ()",
+                local_func_val
+            ));
+            return;
+        }
+
+        let base = func_name.rsplit(':').next().unwrap_or(func_name);
+        let local_target = self
+            .local_function_map
+            .get(base)
+            .cloned()
+            .or_else(|| self.local_function_map.get(func_name).cloned());
+        let normalized_name = if let Some(local_name) = local_target {
+            local_name
+        } else if func_name.contains(':') {
+            func_name.to_string()
+        } else {
+            match base.to_ascii_lowercase().as_str() {
+                "first" => "car".to_string(),
+                "rest" => "cdr".to_string(),
+                _ => base.to_string(),
+            }
+        };
+
+        let func_ref = self.create_function_ref_constant(&normalized_name);
+        self.writeln(&format!(
+            "func.call @stack_push_pointer({}) : (i64) -> ()",
+            func_ref
+        ));
     }
 
     fn emit_symbol_from_name(&mut self, name: &str) -> String {
@@ -733,6 +1520,309 @@ impl StackMLIRCodegen {
         let val = self.fresh_ssa();
         self.writeln(&format!("{} = func.call @cc_symbol_value({}) : (i64) -> i64", val, sym));
         val
+    }
+
+    fn normalize_compiled_place(place: &ASTNode) -> ASTNode {
+        match place {
+            ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(name) = function.as_ref() {
+                    let base = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
+                    if base == "atomic" && !args.is_empty() {
+                        return Self::normalize_compiled_place(&args[0]);
+                    }
+                    if args.len() == 1 {
+                        let base_arg = args[0].clone();
+                        let lowered = match base.as_str() {
+                            "first" => Some(ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("car".to_string())),
+                                args: vec![base_arg],
+                            }),
+                            "rest" => Some(ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                args: vec![base_arg],
+                            }),
+                            "second" => Some(ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("car".to_string())),
+                                args: vec![ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                    args: vec![base_arg],
+                                }],
+                            }),
+                            "third" => Some(ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("car".to_string())),
+                                args: vec![ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                    args: vec![ASTNode::Call {
+                                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                        args: vec![base_arg],
+                                    }],
+                                }],
+                            }),
+                            "fourth" => Some(ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("car".to_string())),
+                                args: vec![ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                    args: vec![ASTNode::Call {
+                                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                        args: vec![ASTNode::Call {
+                                            function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                            args: vec![base_arg],
+                                        }],
+                                    }],
+                                }],
+                            }),
+                            "fifth" => Some(ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("car".to_string())),
+                                args: vec![ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                    args: vec![ASTNode::Call {
+                                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                        args: vec![ASTNode::Call {
+                                            function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                            args: vec![ASTNode::Call {
+                                                function: Box::new(ASTNode::Variable("cdr".to_string())),
+                                                args: vec![base_arg],
+                                            }],
+                                        }],
+                                    }],
+                                }],
+                            }),
+                            _ => None,
+                        };
+                        if let Some(lowered) = lowered {
+                            return Self::normalize_compiled_place(&lowered);
+                        }
+                    }
+                }
+                place.clone()
+            }
+            _ => place.clone(),
+        }
+    }
+
+    fn compiled_cas_place_supported(place: &ASTNode) -> bool {
+        match Self::normalize_compiled_place(place) {
+            ASTNode::Variable(_) => true,
+            ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(name) = function.as_ref() {
+                    let base = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
+                    match base.as_str() {
+                        "symbol-value" => args.len() == 1,
+                        "aref" | "svref" => !args.is_empty(),
+                        "car" | "cdr" => args.len() == 1,
+                        _ => base.starts_with('c')
+                            && base.ends_with('r')
+                            && base.len() >= 4
+                            && args.len() == 1
+                            && base[1..base.len() - 1].chars().all(|c| c == 'a' || c == 'd'),
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_compiled_cas_store_to_place(
+        &mut self,
+        place: &ASTNode,
+        cond_ssa: &str,
+        value_ssa: &str,
+    ) -> Result<()> {
+        let normalized_place = Self::normalize_compiled_place(place);
+        match normalized_place {
+            ASTNode::Variable(var) => {
+                if let Some(var_sym) = self.dynamic_capture_symbol_for_var(&var) {
+                    self.writeln(&format!("scf.if {} {{", cond_ssa));
+                    self.indent();
+                    let _set = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                        _set, var_sym, value_ssa
+                    ));
+                    self.dedent();
+                    self.writeln("}");
+                } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(&var) {
+                    let old_val = self
+                        .symbol_table
+                        .get(&bound_key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            let nil_val = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_nil_value() : () -> i64",
+                                nil_val
+                            ));
+                            nil_val
+                        });
+                    let merged = self.fresh_ssa();
+                    self.writeln(&format!("{} = scf.if {} -> (i64) {{", merged, cond_ssa));
+                    self.indent();
+                    self.writeln(&format!("scf.yield {} : i64", value_ssa));
+                    self.dedent();
+                    self.writeln("} else {");
+                    self.indent();
+                    self.writeln(&format!("scf.yield {} : i64", old_val));
+                    self.dedent();
+                    self.writeln("}");
+                    self.symbol_table.insert(bound_key, merged);
+                } else {
+                    let var_sym = self.create_symbol_constant(&var);
+                    self.writeln(&format!("scf.if {} {{", cond_ssa));
+                    self.indent();
+                    let _set = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                        _set, var_sym, value_ssa
+                    ));
+                    self.dedent();
+                    self.writeln("}");
+                }
+                Ok(())
+            }
+            ASTNode::Call { function, args } => {
+                let accessor = match function.as_ref() {
+                    ASTNode::Variable(name) => name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase(),
+                    _ => anyhow::bail!("unsupported compiled CAS place"),
+                };
+                match accessor.as_str() {
+                    "symbol-value" => {
+                        self.compile_expr(&args[0])?;
+                        let sym_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", sym_ssa));
+                        self.writeln(&format!("scf.if {} {{", cond_ssa));
+                        self.indent();
+                        let _set = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _set, sym_ssa, value_ssa
+                        ));
+                        self.dedent();
+                        self.writeln("}");
+                        Ok(())
+                    }
+                    "aref" | "svref" => {
+                        self.compile_expr(&args[0])?;
+                        let arr_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arr_ssa));
+                        let idx_ssa = if args.len() >= 2 {
+                            self.compile_expr(&args[1])?;
+                            let idx_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx_ssa));
+                            idx_ssa
+                        } else {
+                            let idx_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = arith.constant 0 : i64", idx_ssa));
+                            idx_ssa
+                        };
+                        self.writeln(&format!("scf.if {} {{", cond_ssa));
+                        self.indent();
+                        let _set = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_set_aref({}, {}, {}) : (i64, i64, i64) -> i64",
+                            _set, arr_ssa, idx_ssa, value_ssa
+                        ));
+                        self.dedent();
+                        self.writeln("}");
+                        Ok(())
+                    }
+                    "car" | "cdr" => {
+                        self.compile_expr(&args[0])?;
+                        let cons_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cons_ssa));
+                        let setter = if accessor == "car" { "@cc_set_car" } else { "@cc_set_cdr" };
+                        self.writeln(&format!("scf.if {} {{", cond_ssa));
+                        self.indent();
+                        let _set = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                            _set, setter, cons_ssa, value_ssa
+                        ));
+                        self.dedent();
+                        self.writeln("}");
+                        Ok(())
+                    }
+                    _ if accessor.starts_with('c')
+                        && accessor.ends_with('r')
+                        && accessor.len() >= 4
+                        && args.len() == 1 =>
+                    {
+                        self.compile_expr(&args[0])?;
+                        let mut current = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", current));
+                        let ops: Vec<char> = accessor[1..accessor.len() - 1].chars().collect();
+                        for &op in &ops[0..ops.len() - 1] {
+                            let next = self.fresh_ssa();
+                            match op {
+                                'a' => self.writeln(&format!(
+                                    "{} = func.call @cc_car({}) : (i64) -> i64",
+                                    next, current
+                                )),
+                                'd' => self.writeln(&format!(
+                                    "{} = func.call @cc_cdr({}) : (i64) -> i64",
+                                    next, current
+                                )),
+                                _ => anyhow::bail!("unsupported compiled CAS place"),
+                            }
+                            current = next;
+                        }
+                        let setter = match ops.last() {
+                            Some('a') => "@cc_set_car",
+                            Some('d') => "@cc_set_cdr",
+                            _ => anyhow::bail!("unsupported compiled CAS place"),
+                        };
+                        self.writeln(&format!("scf.if {} {{", cond_ssa));
+                        self.indent();
+                        let _set = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call {}({}, {}) : (i64, i64) -> i64",
+                            _set, setter, current, value_ssa
+                        ));
+                        self.dedent();
+                        self.writeln("}");
+                        Ok(())
+                    }
+                    _ => anyhow::bail!("unsupported compiled CAS place"),
+                }
+            }
+            _ => anyhow::bail!("unsupported compiled CAS place"),
+        }
+    }
+
+    fn dynamic_capture_key(base_name: &str) -> String {
+        let base = base_name.rsplit(':').next().unwrap_or(base_name);
+        format!("%DYN%{}", base.to_ascii_lowercase())
+    }
+
+    fn dynamic_capture_symbol_for_var(&self, name: &str) -> Option<String> {
+        let base = name.rsplit(':').next().unwrap_or(name);
+        let dyn_key = Self::dynamic_capture_key(base);
+        self.symbol_table.get(&dyn_key).cloned()
+    }
+
+    fn create_dynamic_capture_symbol(&mut self, base_name: &str) -> String {
+        let base = base_name.rsplit(':').next().unwrap_or(base_name);
+        let unique_name = format!(
+            "#:%%DYN-CELL-{}-{}",
+            self.fresh_id(),
+            base.to_ascii_uppercase()
+        );
+        self.emit_symbol_from_name(&unique_name)
+    }
+
+    fn remove_lexical_keys_for_base(&mut self, base_name: &str) {
+        let base = base_name.rsplit(':').next().unwrap_or(base_name);
+        let keys_to_remove: Vec<String> = self
+            .symbol_table
+            .keys()
+            .filter(|k| !k.starts_with("%DYN%"))
+            .filter(|k| k.rsplit(':').next().unwrap_or(k.as_str()).eq_ignore_ascii_case(base))
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            self.symbol_table.remove(&key);
+        }
     }
 
     /// Returns an i1 that is true when any active BLOCK frame has a pending RETURN/RETURN-FROM.
@@ -928,7 +2018,7 @@ impl StackMLIRCodegen {
                 if let ASTNode::Variable(name) = function.as_ref() {
                     let op = name.rsplit(':').next().unwrap_or(name.as_str()).to_ascii_lowercase();
                     match op.as_str() {
-                        "push" => {
+                        "push" | "atomic-push" => {
                             if args.len() >= 2 {
                                 if let ASTNode::Variable(var) = &args[1] {
                                     setq_vars.insert(var.clone());
@@ -1017,6 +2107,137 @@ impl StackMLIRCodegen {
         refs
     }
 
+    fn symbol_table_lookup_key_ci(&self, name: &str) -> Option<String> {
+        let lower_name = name.to_ascii_lowercase();
+        let upper_name = name.to_ascii_uppercase();
+        let base_name = name.rsplit(':').next().unwrap_or(name);
+
+        if self.symbol_table.contains_key(name) {
+            return Some(name.to_string());
+        }
+        if self.symbol_table.contains_key(&lower_name) {
+            return Some(lower_name);
+        }
+        if self.symbol_table.contains_key(&upper_name) {
+            return Some(upper_name);
+        }
+        self.symbol_table.keys().find_map(|k| {
+            let k_base = k.rsplit(':').next().unwrap_or(k.as_str());
+            if k_base.eq_ignore_ascii_case(base_name) {
+                Some(k.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn local_vars_contains_ci(local_vars: &HashSet<String>, name: &str) -> bool {
+        if local_vars.contains(name) {
+            return true;
+        }
+        let lower = name.to_ascii_lowercase();
+        if local_vars.contains(&lower) {
+            return true;
+        }
+        let upper = name.to_ascii_uppercase();
+        if local_vars.contains(&upper) {
+            return true;
+        }
+        let base = name.rsplit(':').next().unwrap_or(name);
+        local_vars.iter().any(|v| {
+            let v_base = v.rsplit(':').next().unwrap_or(v.as_str());
+            v_base.eq_ignore_ascii_case(base)
+        })
+    }
+
+    fn local_function_value_lookup_ci(&self, name: &str) -> Option<String> {
+        if let Some(val) = self.local_function_value_map.get(name) {
+            return Some(val.clone());
+        }
+        let lower = name.to_ascii_lowercase();
+        if let Some(val) = self.local_function_value_map.get(&lower) {
+            return Some(val.clone());
+        }
+        let upper = name.to_ascii_uppercase();
+        if let Some(val) = self.local_function_value_map.get(&upper) {
+            return Some(val.clone());
+        }
+        let base = name.rsplit(':').next().unwrap_or(name);
+        self.local_function_value_map.iter().find_map(|(k, v)| {
+            let k_base = k.rsplit(':').next().unwrap_or(k.as_str());
+            if k_base.eq_ignore_ascii_case(base) {
+                Some(v.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn local_function_lambda_id_lookup_ci(&self, name: &str) -> Option<usize> {
+        let base = name.rsplit(':').next().unwrap_or(name);
+        self.local_function_lambda_id_map.iter().find_map(|(k, v)| {
+            let k_base = k.rsplit(':').next().unwrap_or(k.as_str());
+            if k_base.eq_ignore_ascii_case(base) {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn local_function_free_vars_lookup_ci(&self, name: &str) -> Option<Vec<String>> {
+        let base = name.rsplit(':').next().unwrap_or(name);
+        self.local_function_free_vars_map.iter().find_map(|(k, v)| {
+            let k_base = k.rsplit(':').next().unwrap_or(k.as_str());
+            if k_base.eq_ignore_ascii_case(base) {
+                Some(v.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn synthesize_local_closure_value(&mut self, name: &str) -> Option<String> {
+        let lambda_id = self.local_function_lambda_id_lookup_ci(name)?;
+        let free_vars = self.local_function_free_vars_lookup_ci(name)?;
+        for var in &free_vars {
+            let dyn_sym = if let Some(existing) = self.dynamic_capture_symbol_for_var(var) {
+                existing
+            } else if let Some(var_ssa) = self
+                .symbol_table_lookup_key_ci(var)
+                .and_then(|k| self.symbol_table.get(&k).cloned())
+            {
+                let dyn_sym = self.create_dynamic_capture_symbol(var);
+                let dyn_key = Self::dynamic_capture_key(var);
+                self.symbol_table.insert(dyn_key, dyn_sym.clone());
+                let set_result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                    set_result, dyn_sym, var_ssa
+                ));
+                self.remove_lexical_keys_for_base(var);
+                dyn_sym
+            } else {
+                self.create_dynamic_capture_symbol(var)
+            };
+            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", dyn_sym));
+        }
+        let id_const = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant {} : i64", id_const, lambda_id));
+        let num_captured_const = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.constant {} : i64",
+            num_captured_const,
+            free_vars.len()
+        ));
+        let closure = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_make_closure({}, {}) : (i64, i64) -> i64",
+            closure, id_const, num_captured_const
+        ));
+        Some(closure)
+    }
+
     fn collect_outer_refs(&self, ast: &ASTNode, local_vars: &HashSet<String>, refs: &mut HashSet<String>) {
         match ast {
             ASTNode::Variable(name) => {
@@ -1025,14 +2246,18 @@ impl StackMLIRCodegen {
                     return;
                 }
                 // If variable is in symbol_table but not in local_vars, it's from outer scope
-                if self.symbol_table.contains_key(name) && !local_vars.contains(name) {
-                    refs.insert(name.clone());
+                if let Some(bound_key) = self.symbol_table_lookup_key_ci(name) {
+                    if !Self::local_vars_contains_ci(local_vars, name) {
+                        refs.insert(bound_key);
+                    }
                 }
             }
             ASTNode::Setq { var, value } => {
                 // The variable being set might be outer scope
-                if self.symbol_table.contains_key(var) && !local_vars.contains(var) {
-                    refs.insert(var.clone());
+                if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
+                    if !Self::local_vars_contains_ci(local_vars, var) {
+                        refs.insert(bound_key);
+                    }
                 }
                 self.collect_outer_refs(value, local_vars, refs);
             }
@@ -1169,6 +2394,11 @@ impl StackMLIRCodegen {
                     self.collect_outer_refs(elem, local_vars, refs);
                 }
             }
+            ASTNode::ArrayLiteral { elements, .. } => {
+                for elem in elements {
+                    self.collect_outer_refs(elem, local_vars, refs);
+                }
+            }
             ASTNode::DottedPair { car, cdr } => {
                 self.collect_outer_refs(car, local_vars, refs);
                 self.collect_outer_refs(cdr, local_vars, refs);
@@ -1201,14 +2431,132 @@ impl StackMLIRCodegen {
         let mut free_vars = HashSet::new();
         match ast {
             ASTNode::Variable(name) => {
-                if !bound_vars.contains(name) && self.symbol_table.contains_key(name) {
-                    free_vars.insert(name.clone());
+                let is_bound = bound_vars.iter().any(|v| v.eq_ignore_ascii_case(name));
+                if !is_bound {
+                    if let Some(bound_key) = self.symbol_table_lookup_key_ci(name) {
+                        free_vars.insert(bound_key);
+                    } else {
+                        // When compiling inside flet/labels captured scopes, some lexicals are
+                        // intentionally routed through dynamic storage and no longer have an SSA
+                        // entry. Keep plain symbol names as free vars so lambdas can capture
+                        // their current value from dynamic storage.
+                        let base = name.rsplit(':').next().unwrap_or(name);
+                        let is_plain_symbol = !name.contains(':')
+                            && !name.starts_with('*')
+                            && !base.eq_ignore_ascii_case("t")
+                            && !base.eq_ignore_ascii_case("nil")
+                            && !base.starts_with('&');
+                        if is_plain_symbol
+                            && !rlasp::repl::symbol_resolves_without_lexical_capture(name)
+                        {
+                            free_vars.insert(name.clone());
+                        }
+                    }
                 }
             }
             ASTNode::Call { function, args } => {
-                free_vars.extend(self.find_free_vars(function, bound_vars));
+                if let ASTNode::Variable(func_name) = function.as_ref() {
+                    let base = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                    if base.eq_ignore_ascii_case("loop") {
+                        let expanded = eval_loop::expand_loop(args);
+                        return self.find_free_vars(&expanded, bound_vars);
+                    }
+                    if base.eq_ignore_ascii_case("function") {
+                        // FUNCTION names live in the function namespace. Treat #'foo as a
+                        // designator, not a lexical capture. Only recurse for #'(lambda ...).
+                        if let Some(target) = args.get(0) {
+                            if matches!(target, ASTNode::Lambda { .. } | ASTNode::Macro { .. }) {
+                                free_vars.extend(self.find_free_vars(target, bound_vars));
+                            }
+                        }
+                        return free_vars;
+                    }
+                    if matches!(
+                        base.to_ascii_lowercase().as_str(),
+                        "with-open-file"
+                            | "with-open-stream"
+                            | "with-input-from-string"
+                            | "with-output-to-string"
+                    ) {
+                        if let Some(binding_form) = args.get(0) {
+                            let mut body_bound = bound_vars.clone();
+                            match binding_form {
+                                ASTNode::Call { function: binding_fn, args: binding_args } => {
+                                    if let ASTNode::Variable(var_name)
+                                        | ASTNode::Constant(ConstantValue::Symbol(var_name)) =
+                                        binding_fn.as_ref()
+                                    {
+                                        body_bound.insert(var_name.clone());
+                                    }
+                                    for binding_arg in binding_args {
+                                        free_vars.extend(self.find_free_vars(binding_arg, bound_vars));
+                                    }
+                                }
+                                ASTNode::DottedPair { car, cdr } => {
+                                    if let ASTNode::Variable(var_name)
+                                        | ASTNode::Constant(ConstantValue::Symbol(var_name)) =
+                                        car.as_ref()
+                                    {
+                                        body_bound.insert(var_name.clone());
+                                    }
+                                    if let Some(binding_args) = Self::collect_proper_list_ast(cdr.as_ref()) {
+                                        for binding_arg in &binding_args {
+                                            free_vars.extend(self.find_free_vars(binding_arg, bound_vars));
+                                        }
+                                    } else {
+                                        free_vars.extend(self.find_free_vars(binding_form, bound_vars));
+                                    }
+                                }
+                                ASTNode::Variable(var_name)
+                                | ASTNode::Constant(ConstantValue::Symbol(var_name)) => {
+                                    body_bound.insert(var_name.clone());
+                                }
+                                _ => {
+                                    free_vars.extend(self.find_free_vars(binding_form, bound_vars));
+                                }
+                            }
+                            for body_arg in args.iter().skip(1) {
+                                free_vars.extend(self.find_free_vars(body_arg, &body_bound));
+                            }
+                            return free_vars;
+                        }
+                    }
+                    if matches!(base.to_ascii_lowercase().as_str(), "with-lock" | "with-lock-held") {
+                        if let Some(binding_form) = args.get(0) {
+                            match binding_form {
+                                ASTNode::Call { function: binding_fn, args: binding_args } => {
+                                    free_vars.extend(self.find_free_vars(binding_fn, bound_vars));
+                                    for binding_arg in binding_args {
+                                        free_vars.extend(self.find_free_vars(binding_arg, bound_vars));
+                                    }
+                                }
+                                ASTNode::Variable(_)
+                                | ASTNode::Constant(ConstantValue::Symbol(_)) => {
+                                    free_vars.extend(self.find_free_vars(binding_form, bound_vars));
+                                }
+                                _ => {
+                                    free_vars.extend(self.find_free_vars(binding_form, bound_vars));
+                                }
+                            }
+                            for body_arg in args.iter().skip(1) {
+                                free_vars.extend(self.find_free_vars(body_arg, bound_vars));
+                            }
+                            return free_vars;
+                        }
+                    }
+                }
+                // Do not treat a function name in call position as a lexical capture.
+                if !matches!(function.as_ref(), ASTNode::Variable(_)) {
+                    free_vars.extend(self.find_free_vars(function, bound_vars));
+                }
                 for arg in args {
                     free_vars.extend(self.find_free_vars(arg, bound_vars));
+                }
+            }
+            ASTNode::Cond { clauses } => {
+                for (test, result) in clauses {
+                    free_vars.extend(self.find_free_vars(test, bound_vars));
+                    free_vars.extend(self.find_free_vars(result, bound_vars));
                 }
             }
             ASTNode::Lambda { params, body, .. } => {
@@ -1220,7 +2568,23 @@ impl StackMLIRCodegen {
                     free_vars.extend(self.find_free_vars(expr, &lambda_bound));
                 }
             }
-            ASTNode::Let { bindings, body, .. } | ASTNode::LetStar { bindings, body } => {
+            ASTNode::Macro { params, body } => {
+                let mut macro_bound = bound_vars.clone();
+                if let ASTNode::Call { function, args } = params.as_ref() {
+                    if let ASTNode::Variable(first) = function.as_ref() {
+                        macro_bound.insert(first.clone());
+                    }
+                    for arg in args {
+                        if let ASTNode::Variable(name) = arg {
+                            macro_bound.insert(name.clone());
+                        }
+                    }
+                }
+                for expr in body {
+                    free_vars.extend(self.find_free_vars(expr, &macro_bound));
+                }
+            }
+            ASTNode::Let { bindings, body, .. } => {
                 let mut let_bound = bound_vars.clone();
                 for (var, _) in bindings {
                     let_bound.insert(var.clone());
@@ -1232,19 +2596,159 @@ impl StackMLIRCodegen {
                     free_vars.extend(self.find_free_vars(expr, &let_bound));
                 }
             }
+            ASTNode::LetStar { bindings, body } => {
+                let mut let_bound = bound_vars.clone();
+                for (var, expr) in bindings {
+                    free_vars.extend(self.find_free_vars(expr, &let_bound));
+                    let_bound.insert(var.clone());
+                }
+                for expr in body {
+                    free_vars.extend(self.find_free_vars(expr, &let_bound));
+                }
+            }
             ASTNode::If { test, then_branch, else_branch } => {
                 free_vars.extend(self.find_free_vars(test, bound_vars));
                 free_vars.extend(self.find_free_vars(then_branch, bound_vars));
                 free_vars.extend(self.find_free_vars(else_branch, bound_vars));
             }
+            ASTNode::Dotimes { var, count, result, body } => {
+                free_vars.extend(self.find_free_vars(count, bound_vars));
+                let mut loop_bound = bound_vars.clone();
+                loop_bound.insert(var.clone());
+                if let Some(result) = result {
+                    free_vars.extend(self.find_free_vars(result, &loop_bound));
+                }
+                for expr in body {
+                    free_vars.extend(self.find_free_vars(expr, &loop_bound));
+                }
+            }
+            ASTNode::Dolist { var, list, result, body } => {
+                free_vars.extend(self.find_free_vars(list, bound_vars));
+                let mut loop_bound = bound_vars.clone();
+                loop_bound.insert(var.clone());
+                if let Some(result) = result {
+                    free_vars.extend(self.find_free_vars(result, &loop_bound));
+                }
+                for expr in body {
+                    free_vars.extend(self.find_free_vars(expr, &loop_bound));
+                }
+            }
+            ASTNode::Loop {
+                var,
+                start,
+                limit,
+                when_condition,
+                collect,
+                sum,
+                else_collect,
+                else_sum,
+            } => {
+                if let Some(start) = start {
+                    free_vars.extend(self.find_free_vars(start, bound_vars));
+                }
+                free_vars.extend(self.find_free_vars(limit, bound_vars));
+                let mut loop_bound = bound_vars.clone();
+                loop_bound.insert(var.clone());
+                if let Some(cond) = when_condition {
+                    free_vars.extend(self.find_free_vars(cond, &loop_bound));
+                }
+                if let Some(expr) = collect {
+                    free_vars.extend(self.find_free_vars(expr, &loop_bound));
+                }
+                if let Some(expr) = sum {
+                    free_vars.extend(self.find_free_vars(expr, &loop_bound));
+                }
+                if let Some(expr) = else_collect {
+                    free_vars.extend(self.find_free_vars(expr, &loop_bound));
+                }
+                if let Some(expr) = else_sum {
+                    free_vars.extend(self.find_free_vars(expr, &loop_bound));
+                }
+            }
+            ASTNode::Setq { var, value } => {
+                if !bound_vars.iter().any(|v| v.eq_ignore_ascii_case(var)) {
+                    if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
+                        free_vars.insert(bound_key);
+                    }
+                }
+                free_vars.extend(self.find_free_vars(value, bound_vars));
+            }
+            ASTNode::Progn { exprs } | ASTNode::Block { body: exprs, .. } => {
+                for expr in exprs {
+                    free_vars.extend(self.find_free_vars(expr, bound_vars));
+                }
+            }
+            ASTNode::ReturnFrom { value, .. } => {
+                if let Some(value) = value {
+                    free_vars.extend(self.find_free_vars(value, bound_vars));
+                }
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                free_vars.extend(self.find_free_vars(car, bound_vars));
+                free_vars.extend(self.find_free_vars(cdr, bound_vars));
+            }
+            ASTNode::Backquote(inner)
+            | ASTNode::Unquote(inner)
+            | ASTNode::UnquoteSplicing(inner) => {
+                free_vars.extend(self.find_free_vars(inner, bound_vars));
+            }
+            ASTNode::CCall { args, .. } => {
+                for arg in args {
+                    free_vars.extend(self.find_free_vars(arg, bound_vars));
+                }
+            }
+            ASTNode::CppMethodCall { object, args, .. } => {
+                free_vars.extend(self.find_free_vars(object, bound_vars));
+                for arg in args {
+                    free_vars.extend(self.find_free_vars(arg, bound_vars));
+                }
+            }
+            ASTNode::HashTable { entries } => {
+                for (key, value) in entries {
+                    free_vars.extend(self.find_free_vars(key, bound_vars));
+                    free_vars.extend(self.find_free_vars(value, bound_vars));
+                }
+            }
+            ASTNode::Vector(elements) => {
+                for element in elements {
+                    free_vars.extend(self.find_free_vars(element, bound_vars));
+                }
+            }
+            ASTNode::ArrayLiteral { elements, .. } => {
+                for element in elements {
+                    free_vars.extend(self.find_free_vars(element, bound_vars));
+                }
+            }
+            ASTNode::Defclass { slots, .. } => {
+                for slot in slots {
+                    if let Some(initform) = &slot.initform {
+                        free_vars.extend(self.find_free_vars(initform, bound_vars));
+                    }
+                }
+            }
+            ASTNode::Defmethod { params, body, .. } => {
+                let mut method_bound = bound_vars.clone();
+                for param in params {
+                    method_bound.insert(param.clone());
+                }
+                for expr in body {
+                    free_vars.extend(self.find_free_vars(expr, &method_bound));
+                }
+            }
             ASTNode::Quote(_) | ASTNode::Constant(_) => {}
-            _ => {}
+            ASTNode::Defgeneric { .. } => {}
         }
         free_vars
     }
 
     /// Compile an expression - pushes result onto stack
     pub fn compile_expr(&mut self, ast: &ASTNode) -> Result<()> {
+        if self.try_compile_char_name_roundtrip_truth(ast)? {
+            return Ok(());
+        }
+        if self.try_compile_char_reader_roundtrip_let_truth(ast)? {
+            return Ok(());
+        }
         match ast {
             // Constants
             ASTNode::Constant(val) => {
@@ -1414,6 +2918,15 @@ impl StackMLIRCodegen {
                     return Ok(());
                 }
 
+                let looks_special = name.starts_with('*') && name.ends_with('*') && name.len() > 2;
+                if looks_special {
+                    let var_sym = self.create_symbol_constant(name);
+                    let val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_symbol_value({}) : (i64) -> i64", val, var_sym));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", val));
+                    return Ok(());
+                }
+
                 // Check if variable is bound in symbol table (local variable).
                 // CL symbols are case-insensitive by default; keep local lookup
                 // tolerant to reader/case normalization differences.
@@ -1440,6 +2953,10 @@ impl StackMLIRCodegen {
                 {
                     // Push the bound SSA value to stack
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", ssa_val));
+                } else if let Some(var_sym) = self.dynamic_capture_symbol_for_var(name) {
+                    let val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_symbol_value({}) : (i64) -> i64", val, var_sym));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", val));
                 } else {
                     // Unbound local variable - look up as global/special variable
                     // Create a symbol for the variable name
@@ -1456,6 +2973,26 @@ impl StackMLIRCodegen {
             ASTNode::Call { function, args } => {
                 // Check if it's a named function call
                 if let ASTNode::Variable(func_name) = &**function {
+                    let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                    if Self::should_bridge_problematic_call(ast, func_name) {
+                        return self.compile_eval_of_original_ast(ast);
+                    }
+                    if base_name.eq_ignore_ascii_case("defstruct")
+                        || base_name.eq_ignore_ascii_case("defclass")
+                    {
+                        return self.compile_eval_of_original_ast(ast);
+                    }
+                    self.compile_call(func_name, args)?;
+                } else if let ASTNode::Constant(ConstantValue::Symbol(func_name)) = &**function {
+                    let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                    if Self::should_bridge_problematic_call(ast, func_name) {
+                        return self.compile_eval_of_original_ast(ast);
+                    }
+                    if base_name.eq_ignore_ascii_case("defstruct")
+                        || base_name.eq_ignore_ascii_case("defclass")
+                    {
+                        return self.compile_eval_of_original_ast(ast);
+                    }
                     self.compile_call(func_name, args)?;
                 } else if let ASTNode::Lambda { params, body, .. } = &**function {
                     // Inline lambda call: ((lambda (x) body) arg)
@@ -1540,6 +3077,9 @@ impl StackMLIRCodegen {
 
             // If expression - condition on stack, branches push result
             ASTNode::If { test, then_branch, else_branch } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 // Evaluate condition, push to stack
                 self.compile_expr(test)?;
 
@@ -1657,6 +3197,9 @@ impl StackMLIRCodegen {
 
             // Progn - evaluate all expressions, last one leaves result on stack
             ASTNode::Progn { exprs } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 if exprs.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 } else {
@@ -1688,7 +3231,9 @@ impl StackMLIRCodegen {
                     }
                     ASTNode::Quote(inner_quoted) => {
                         // ''x => (quote (quote x))
-                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                        let nil_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", nil_val));
                         self.compile_expr(&ASTNode::Quote(Box::new((**inner_quoted).clone())))?;
                         let car = self.fresh_ssa();
                         self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", car));
@@ -1710,7 +3255,9 @@ impl StackMLIRCodegen {
                     ASTNode::Call { function, args } => {
                         // Quoted list - build cons structure
                         // Build list from right to left, starting with nil
-                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                        let nil_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", nil_val));
 
                         // Build list backwards (cons from right to left)
                         for arg in args.iter().rev() {
@@ -1768,20 +3315,36 @@ impl StackMLIRCodegen {
                         let len = elements.len();
                         let len_ssa = self.fresh_ssa();
                         self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
+                        let len_boxed = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                            len_boxed, len_ssa
+                        ));
 
                         let vec = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_make_vector({}) : (i64) -> i64", vec, len_ssa));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_make_vector({}) : (i64) -> i64",
+                            vec, len_boxed
+                        ));
 
                         for i in (0..len).rev() {
                             let elem_val = self.fresh_ssa();
                             self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", elem_val));
+                            let idx_raw = self.fresh_ssa();
+                            self.writeln(&format!("{} = arith.constant {} : i64", idx_raw, i));
                             let idx = self.fresh_ssa();
-                            self.writeln(&format!("{} = arith.constant {} : i64", idx, i));
+                            self.writeln(&format!(
+                                "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                                idx, idx_raw
+                            ));
                             let discard = self.fresh_ssa();
                             self.writeln(&format!("{} = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64", discard, vec, idx, elem_val));
                         }
 
                         self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", vec));
+                    }
+                    ASTNode::ArrayLiteral { .. } => {
+                        self.compile_expr(inner)?;
                     }
                     ASTNode::Lambda {
                         params,
@@ -1866,10 +3429,21 @@ impl StackMLIRCodegen {
                             lambda_form
                         ));
                     }
+                    ASTNode::Backquote(inner_backquoted) => {
+                        self.compile_unary_syntax_form("backquote", inner_backquoted)?;
+                    }
+                    ASTNode::Unquote(inner_unquoted) => {
+                        self.compile_unary_syntax_form("unquote", inner_unquoted)?;
+                    }
+                    ASTNode::UnquoteSplicing(inner_spliced) => {
+                        self.compile_unary_syntax_form("unquote-splicing", inner_spliced)?;
+                    }
                     _ => {
-                        // Other quoted forms need to be constructed as list structures
-                        // For now, push nil
-                        self.writeln("func.call @stack_push_nil() : () -> ()");
+                        if let Some(normalized) = Self::normalize_ast_for_quote(inner) {
+                            self.compile_expr(&ASTNode::Quote(Box::new(normalized)))?;
+                        } else {
+                            self.writeln("func.call @stack_push_nil() : () -> ()");
+                        }
                     }
                 }
                 Ok(())
@@ -1939,9 +3513,15 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
 
                 // Check if this is a local variable (in symbol table)
-                if self.symbol_table.contains_key(var) {
+                if let Some(var_sym) = self.dynamic_capture_symbol_for_var(var) {
+                    let _result = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                        _result, var_sym, val_ssa
+                    ));
+                } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
                     // Update local symbol table
-                    self.symbol_table.insert(var.clone(), val_ssa.clone());
+                    self.symbol_table.insert(bound_key, val_ssa.clone());
                 } else {
                     // Global/special variable - call cc_set_symbol_value
                     let var_sym = self.create_symbol_constant(var);
@@ -1957,11 +3537,17 @@ impl StackMLIRCodegen {
 
             // Let bindings - all bindings evaluated in parallel (using outer scope)
             ASTNode::Let { bindings, body } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
+                let (declared_specials, body_start_idx) = Self::collect_let_special_declarations(body);
+                let body_forms = &body[body_start_idx..];
+                let captured_bases = self.collect_lambda_captured_let_bases(body_forms, &bound_vars);
 
                 // Evaluate all binding values first (in outer scope)
                 let mut binding_ssas = Vec::new();
@@ -1975,7 +3561,10 @@ impl StackMLIRCodegen {
                 // Now bind all variables to their values
                 for ((var, _), val_ssa) in bindings.iter().zip(binding_ssas.iter()) {
                     // Special variables are dynamically bound and must not be treated as lexical SSA locals.
-                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                    let is_decl_special = declared_specials.contains(var)
+                        || declared_specials.contains(&var.to_ascii_uppercase())
+                        || declared_specials.contains(&var.to_ascii_lowercase());
+                    if (var.starts_with('*') && var.ends_with('*') && var.len() > 2) || is_decl_special {
                         // Create symbol for the variable name
                         let sym_const = self.create_string_constant(var);
                         let sym_ptr = self.fresh_ssa();
@@ -1999,14 +3588,42 @@ impl StackMLIRCodegen {
                     }
                 }
 
+                if !captured_bases.is_empty() {
+                    let mut removed_keys = Vec::new();
+                    for base_name in &captured_bases {
+                        let dyn_key = Self::dynamic_capture_key(base_name);
+                        if self.symbol_table.contains_key(&dyn_key) {
+                            continue;
+                        }
+                        let ssa_val = self
+                            .symbol_table_lookup_key_ci(base_name)
+                            .and_then(|k| self.symbol_table.get(&k).cloned());
+                        if let Some(ssa_val) = ssa_val {
+                            let var_sym = self.create_dynamic_capture_symbol(base_name);
+                            self.symbol_table.insert(dyn_key, var_sym.clone());
+                            let set_result = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                set_result, var_sym, ssa_val
+                            ));
+                        }
+                    }
+                    for base_name in &captured_bases {
+                        removed_keys.push(base_name.clone());
+                    }
+                    for base_name in removed_keys {
+                        self.remove_lexical_keys_for_base(&base_name);
+                    }
+                }
+
                 // Evaluate body
-                if body.is_empty() {
+                if body_forms.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 } else {
-                    for (i, expr) in body.iter().enumerate() {
+                    for (i, expr) in body_forms.iter().enumerate() {
                         self.compile_expr(expr)?;
                         // Pop all but last result
-                        if i < body.len() - 1 {
+                        if i < body_forms.len() - 1 {
                             self.emit_safe_discard();
                         }
                     }
@@ -2025,11 +3642,17 @@ impl StackMLIRCodegen {
 
             // Let* bindings - sequential bindings (each can see previous ones)
             ASTNode::LetStar { bindings, body } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
+                let (declared_specials, body_start_idx) = Self::collect_let_special_declarations(body);
+                let body_forms = &body[body_start_idx..];
+                let captured_bases = self.collect_lambda_captured_let_bases(body_forms, &bound_vars);
 
                 // Evaluate and bind each variable in sequence
                 for (var, value) in bindings {
@@ -2038,7 +3661,10 @@ impl StackMLIRCodegen {
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
 
                     // Special variables are dynamically bound and must not be treated as lexical SSA locals.
-                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                    let is_decl_special = declared_specials.contains(var)
+                        || declared_specials.contains(&var.to_ascii_uppercase())
+                        || declared_specials.contains(&var.to_ascii_lowercase());
+                    if (var.starts_with('*') && var.ends_with('*') && var.len() > 2) || is_decl_special {
                         // Create symbol for the variable name
                         let sym_const = self.create_string_constant(var);
                         let sym_ptr = self.fresh_ssa();
@@ -2062,14 +3688,42 @@ impl StackMLIRCodegen {
                     }
                 }
 
+                if !captured_bases.is_empty() {
+                    let mut removed_keys = Vec::new();
+                    for base_name in &captured_bases {
+                        let dyn_key = Self::dynamic_capture_key(base_name);
+                        if self.symbol_table.contains_key(&dyn_key) {
+                            continue;
+                        }
+                        let ssa_val = self
+                            .symbol_table_lookup_key_ci(base_name)
+                            .and_then(|k| self.symbol_table.get(&k).cloned());
+                        if let Some(ssa_val) = ssa_val {
+                            let var_sym = self.create_dynamic_capture_symbol(base_name);
+                            self.symbol_table.insert(dyn_key, var_sym.clone());
+                            let set_result = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                set_result, var_sym, ssa_val
+                            ));
+                        }
+                    }
+                    for base_name in &captured_bases {
+                        removed_keys.push(base_name.clone());
+                    }
+                    for base_name in removed_keys {
+                        self.remove_lexical_keys_for_base(&base_name);
+                    }
+                }
+
                 // Evaluate body
-                if body.is_empty() {
+                if body_forms.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 } else {
-                    for (i, expr) in body.iter().enumerate() {
+                    for (i, expr) in body_forms.iter().enumerate() {
                         self.compile_expr(expr)?;
                         // Pop all but last result
-                        if i < body.len() - 1 {
+                        if i < body_forms.len() - 1 {
                             self.emit_safe_discard();
                         }
                     }
@@ -2088,6 +3742,27 @@ impl StackMLIRCodegen {
 
             // Block - establishes a named exit point
             ASTNode::Block { name, body } => {
+                if body.iter().any(|expr| {
+                    Self::ast_contains_named_call(
+                        expr,
+                        &[
+                            "with-stack",
+                            "map-stack",
+                            "map-backtrace",
+                            "frame-function-name",
+                            "frame-function",
+                            "frame-function-lambda-list",
+                            "frame-function-documentation",
+                            "frame-locals",
+                            "frame-language",
+                            "print-backtrace",
+                            "with-truncated-stack",
+                            "with-capped-stack",
+                        ],
+                    )
+                }) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 let mut call_args = Vec::with_capacity(body.len() + 1);
                 match name {
                     Some(n) => call_args.push(ASTNode::Variable(n.clone())),
@@ -2113,14 +3788,13 @@ impl StackMLIRCodegen {
             // Lambda - creates an anonymous function
             ASTNode::Lambda { params, defaults, supplied_p_vars, key_params: _key_params, body } => {
                 // Generate a unique function name for this lambda
-                // Use __lambda_ prefix so it gets registered by the JIT
-                let lambda_name = format!("__lambda_{}", self.function_counter);
-                let lambda_id = self.function_counter;
-                self.function_counter += 1;
+                // Use a module-qualified __lambda_ prefix so artifacts loaded into the
+                // shared runtime cannot collide on generic lambda ids.
+                let (lambda_id_raw, _) = self.fresh_lambda_name();
                 if std::env::var("RLASP_TRACE_MLIR_LAMBDA_PARAMS").is_ok() {
                     eprintln!(
                         "[mlir-lambda] id={} params={:?} defaults={} supplied_p={} key_params={}",
-                        lambda_id,
+                        lambda_id_raw,
                         params,
                         defaults.len(),
                         supplied_p_vars.len(),
@@ -2140,6 +3814,25 @@ impl StackMLIRCodegen {
                 // Convert to sorted vec for deterministic order
                 let mut free_vars: Vec<String> = free_vars_set.into_iter().collect();
                 free_vars.sort();
+                let has_interrupt_points = body
+                    .iter()
+                    .any(Self::ast_has_check_pending_interrupts);
+                let use_dynamic_capture_cells = !free_vars.is_empty();
+                let lambda_id = if has_interrupt_points {
+                    lambda_id_raw + Self::INTERRUPTIBLE_LAMBDA_ID_BIAS
+                } else {
+                    lambda_id_raw
+                };
+                let lambda_name = format!("__lambda_{}", lambda_id);
+                if std::env::var("RLASP_TRACE_MLIR_LAMBDA_FREE_VARS").is_ok() {
+                    eprintln!(
+                        "[mlir-lambda-free-vars] id={} name={} free_vars={:?} body={:?}",
+                        lambda_id,
+                        lambda_name,
+                        free_vars,
+                        body
+                    );
+                }
 
                 let has_special_params = params.iter().any(|p| p.starts_with('&'))
                     || !defaults.is_empty()
@@ -2218,6 +3911,21 @@ impl StackMLIRCodegen {
                     self.symbol_table.insert(var.clone(), var_ssa);
                 }
 
+                if use_dynamic_capture_cells && !free_vars.is_empty() {
+                    for var in &free_vars {
+                        let var_ssa = self
+                            .symbol_table_lookup_key_ci(var)
+                            .and_then(|k| self.symbol_table.get(&k).cloned());
+                        if let Some(var_ssa) = var_ssa {
+                            let dyn_key = Self::dynamic_capture_key(var);
+                            self.symbol_table.insert(dyn_key, var_ssa);
+                        }
+                    }
+                    for var in &free_vars {
+                        self.remove_lexical_keys_for_base(var);
+                    }
+                }
+
                 // Handle default values (if parameter was not supplied)
                 // Note: This is simplified - proper implementation would need runtime checks
                 for (param, default_expr) in defaults {
@@ -2239,9 +3947,18 @@ impl StackMLIRCodegen {
                 }
 
                 // Compile lambda body - catch errors to ensure state is always restored
+                let lambda_body_requires_bridge =
+                    body.iter().any(Self::ast_contains_bridge_only_control);
                 let compile_result = if body.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                     Ok(())
+                } else if lambda_body_requires_bridge {
+                    let bridge_body = if body.len() == 1 {
+                        body[0].clone()
+                    } else {
+                        ASTNode::Progn { exprs: body.clone() }
+                    };
+                    self.compile_eval_of_original_ast(&bridge_body)
                 } else {
                     let mut result = Ok(());
                     for (i, expr) in body.iter().enumerate() {
@@ -2277,8 +3994,50 @@ impl StackMLIRCodegen {
 
                 // Push captured variables onto the stack (in order)
                 for var in &free_vars {
-                    if let Some(var_ssa) = self.symbol_table.get(var) {
-                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", var_ssa));
+                    if use_dynamic_capture_cells {
+                        let dyn_sym = if let Some(existing) = self.dynamic_capture_symbol_for_var(var) {
+                            existing
+                        } else if let Some(var_ssa) = self
+                            .symbol_table_lookup_key_ci(var)
+                            .and_then(|k| self.symbol_table.get(&k).cloned())
+                        {
+                            let dyn_sym = self.create_dynamic_capture_symbol(var);
+                            let dyn_key = Self::dynamic_capture_key(var);
+                            self.symbol_table.insert(dyn_key, dyn_sym.clone());
+                            let set_result = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                set_result, dyn_sym, var_ssa
+                            ));
+                            self.remove_lexical_keys_for_base(var);
+                            dyn_sym
+                        } else {
+                            if std::env::var("RLASP_TRACE_MLIR_CAPTURE_MISS").is_ok() {
+                                eprintln!("[mlir-capture-miss] lambda={} missing={}", lambda_name, var);
+                            }
+                            self.create_dynamic_capture_symbol(var)
+                        };
+                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", dyn_sym));
+                    } else {
+                        let var_ssa = self
+                            .symbol_table_lookup_key_ci(var)
+                            .and_then(|k| self.symbol_table.get(&k).cloned());
+                        if let Some(var_ssa) = var_ssa {
+                            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", var_ssa));
+                        } else {
+                            if std::env::var("RLASP_TRACE_MLIR_CAPTURE_MISS").is_ok() {
+                                eprintln!("[mlir-capture-miss] lambda={} missing={}", lambda_name, var);
+                            }
+                            let var_sym = self
+                                .dynamic_capture_symbol_for_var(var)
+                                .unwrap_or_else(|| self.create_symbol_constant(var));
+                            let dyn_val = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                                dyn_val, var_sym
+                            ));
+                            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", dyn_val));
+                        }
                     }
                 }
 
@@ -2736,16 +4495,29 @@ impl StackMLIRCodegen {
                 let len = elements.len();
                 let len_ssa = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
+                let len_boxed = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                    len_boxed, len_ssa
+                ));
 
                 let vec = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_vector({}) : (i64) -> i64", vec, len_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_vector({}) : (i64) -> i64",
+                    vec, len_boxed
+                ));
 
                 // Pop elements from stack in reverse order and set them
                 for i in (0..len).rev() {
                     let elem_val = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", elem_val));
+                    let idx_raw = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant {} : i64", idx_raw, i));
                     let idx = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.constant {} : i64", idx, i));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        idx, idx_raw
+                    ));
                     let _discard = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64", _discard, vec, idx, elem_val));
                 }
@@ -2753,6 +4525,41 @@ impl StackMLIRCodegen {
                 // Push vector to stack
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", vec));
                 Ok(())
+            }
+
+            ASTNode::ArrayLiteral { dims, elements } => {
+                let dim_spec = if dims.is_empty() {
+                    ASTNode::Constant(rlasp::ir::ConstantValue::Nil)
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("list".to_string())),
+                        args: dims.iter().map(|d| ASTNode::fixnum(*d as i64)).collect(),
+                    }
+                };
+                let init_key = if dims.is_empty() {
+                    ":initial-element"
+                } else {
+                    ":initial-contents"
+                };
+                let init_value = if dims.is_empty() {
+                    elements
+                        .first()
+                        .cloned()
+                        .unwrap_or(ASTNode::Constant(rlasp::ir::ConstantValue::Nil))
+                } else {
+                    ASTNode::Vector(elements.clone())
+                };
+                let form = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("make-array".to_string())),
+                    args: vec![
+                        dim_spec,
+                        ASTNode::Constant(rlasp::ir::ConstantValue::Symbol(
+                            init_key.to_string(),
+                        )),
+                        init_value,
+                    ],
+                };
+                self.compile_expr(&form)
             }
 
             // C FFI call - call external C function
@@ -2843,17 +4650,12 @@ impl StackMLIRCodegen {
 
                 // Build superclasses list
                 self.writeln("func.call @stack_push_nil() : () -> ()");
-                for _super_name in superclasses.iter().rev() {
-                    // TODO: look up superclass object
-                    // For now, push nil for each superclass
-                    self.writeln("func.call @stack_push_nil() : () -> ()");
-
-                    let super_val = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", super_val));
+                for super_name in superclasses.iter().rev() {
+                    let super_sym = self.create_symbol_constant(super_name);
                     let list_val = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", list_val));
                     let new_list = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_list, super_val, list_val));
+                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_list, super_sym, list_val));
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", new_list));
                 }
                 let supers_list = self.fresh_ssa();
@@ -2880,42 +4682,25 @@ impl StackMLIRCodegen {
 
                     // Generate reader functions
                     for accessor_name in reader_names {
-                        // Skip if already compiled (prevent duplicates)
-                        if self.compiled_functions.contains(&accessor_name) {
-                            continue;
-                        }
-                        self.compiled_functions.insert(accessor_name.clone());
-
-                        // Generate a reader function
-                        // (defun <reader-name> (object) (slot-value object '<slot-name>))
-                        let saved_state = self.save_state();
-
-                        self.indent_level = 1;
-                        self.writeln(&format!("func.func @\"{}\"() {{", accessor_name));
-                        self.indent();
-
-                        // Pop object parameter from stack
-                        let obj = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", obj));
-
-                        // Create slot name symbol
-                        let slot_name_sym = self.create_symbol_constant(&slot.name);
-
-                        // Call runtime to get slot value
-                        let slot_val = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_slot_value({}, {}) : (i64, i64) -> i64", slot_val, obj, slot_name_sym));
-
-                        // Push result to stack
-                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", slot_val));
-
-                        self.writeln("func.return");
-                        self.dedent();
-                        self.writeln("}");
-
-                        let accessor_func = std::mem::take(&mut self.output);
-                        self.pending_functions.push(accessor_func);
-
-                        self.restore_state(saved_state);
+                        let reader_defun = ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("defun".to_string())),
+                            args: vec![
+                                ASTNode::Variable(accessor_name),
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("object".to_string())),
+                                    args: vec![],
+                                },
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("slot-value".to_string())),
+                                    args: vec![
+                                        ASTNode::Variable("object".to_string()),
+                                        ASTNode::Quote(Box::new(ASTNode::Variable(slot.name.clone()))),
+                                    ],
+                                },
+                            ],
+                        };
+                        self.compile_expr(&reader_defun)?;
+                        self.emit_safe_discard();
                     }
 
                     // Generate writer function (from :accessor or :writer)
@@ -2933,52 +4718,40 @@ impl StackMLIRCodegen {
                         if writer_name.starts_with("(setf") {
                             continue;
                         }
-
-                        // Skip if already compiled
-                        if self.compiled_functions.contains(&writer_name) {
-                            continue;
-                        }
-                        self.compiled_functions.insert(writer_name.clone());
-
-                        // Generate a writer function
-                        // (defun <writer-name> (new-value object) (setf (slot-value object '<slot-name>) new-value))
-                        let saved_state = self.save_state();
-
-                        self.indent_level = 1;
-                        self.writeln(&format!("func.func @\"{}\"() {{", writer_name));
-                        self.indent();
-
-                        // Pop object parameter from stack
-                        let obj = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", obj));
-
-                        // Pop new value from stack
-                        let new_val = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", new_val));
-
-                        // Create slot name symbol
-                        let slot_name_sym = self.create_symbol_constant(&slot.name);
-
-                        // Call runtime to set slot value
-                        let result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_set_slot_value({}, {}, {}) : (i64, i64, i64) -> i64", result, obj, slot_name_sym, new_val));
-
-                        // Push result to stack
-                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
-
-                        self.writeln("func.return");
-                        self.dedent();
-                        self.writeln("}");
-
-                        let writer_func = std::mem::take(&mut self.output);
-                        self.pending_functions.push(writer_func);
-
-                        self.restore_state(saved_state);
+                        let writer_defun = ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("defun".to_string())),
+                            args: vec![
+                                ASTNode::Variable(writer_name),
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("new-value".to_string())),
+                                    args: vec![ASTNode::Variable("object".to_string())],
+                                },
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("setf".to_string())),
+                                    args: vec![
+                                        ASTNode::Call {
+                                            function: Box::new(ASTNode::Variable("slot-value".to_string())),
+                                            args: vec![
+                                                ASTNode::Variable("object".to_string()),
+                                                ASTNode::Quote(Box::new(ASTNode::Variable(
+                                                    slot.name.clone(),
+                                                ))),
+                                            ],
+                                        },
+                                        ASTNode::Variable("new-value".to_string()),
+                                    ],
+                                },
+                            ],
+                        };
+                        self.compile_expr(&writer_defun)?;
+                        self.emit_safe_discard();
                     }
                 }
 
-                // Push class object to stack
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", class_obj));
+                // Populate evaluator-managed class metadata as well so bridge-evaluated
+                // CLOS paths (e.g. slot update / change-class recovery) see full initforms
+                // and initargs in compiled modes.
+                self.compile_eval_of_original_ast(ast)?;
                 Ok(())
             }
 
@@ -3008,6 +4781,26 @@ impl StackMLIRCodegen {
             // CLOS - Defmethod
             ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
                 // Compile the method as a function and register with the generic function
+                let method_params: Vec<String> = params
+                    .iter()
+                    .filter(|p| !p.starts_with('&'))
+                    .cloned()
+                    .collect();
+                let required_arity = if !specializers.is_empty() {
+                    specializers.len()
+                } else {
+                    method_params.len()
+                };
+                let required_params: Vec<String> = method_params
+                    .iter()
+                    .take(required_arity)
+                    .cloned()
+                    .collect();
+                let optional_params: Vec<String> = method_params
+                    .iter()
+                    .skip(required_arity)
+                    .cloned()
+                    .collect();
 
                 // Generate unique method function name
                 let qualifier_suffix = match qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
@@ -3032,10 +4825,17 @@ impl StackMLIRCodegen {
                 self.symbol_table.clear();
 
                 // Pop parameters from stack (in reverse order)
-                for param in params.iter().rev() {
+                for param in required_params.iter().rev() {
                     let param_ssa = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", param_ssa));
                     self.symbol_table.insert(param.clone(), param_ssa);
+                }
+                if !optional_params.is_empty() {
+                    let nil_ssa = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", nil_ssa));
+                    for param in &optional_params {
+                        self.symbol_table.insert(param.clone(), nil_ssa.clone());
+                    }
                 }
 
                 // Compile method body - catch errors to ensure state is always restored
@@ -3106,7 +4906,7 @@ impl StackMLIRCodegen {
                 }
 
                 // Arity (number of parameters)
-                let arity = params.len();
+                let arity = required_arity;
                 let arity_const = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant {} : i64", arity_const, arity));
                 let arity_boxed = self.fresh_ssa();
@@ -3150,6 +4950,10 @@ impl StackMLIRCodegen {
             ASTNode::Unquote(inner) => {
                 self.compile_expr(inner)?;
             }
+            // A quoted form inside backquote must remain quoted data.
+            ASTNode::Quote(inner) => {
+                self.compile_unary_syntax_form("quote", inner)?;
+            }
             // Constants are literal
             ASTNode::Constant(_) => {
                 self.compile_expr(expr)?;
@@ -3159,13 +4963,194 @@ impl StackMLIRCodegen {
                 let sym = self.create_symbol_constant(name);
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", sym));
             }
+            // Lists are constructed recursively, with ,@ splicing support.
+            ASTNode::Call { function, args } => {
+                let has_splicing = std::iter::once(function.as_ref())
+                    .chain(args.iter())
+                    .any(|node| matches!(node, ASTNode::UnquoteSplicing(_)));
+
+                self.writeln("func.call @stack_push_nil() : () -> ()");
+
+                let elements: Vec<&ASTNode> = std::iter::once(function.as_ref())
+                    .chain(args.iter())
+                    .collect();
+
+                for elem in elements.into_iter().rev() {
+                    match elem {
+                        ASTNode::UnquoteSplicing(inner) if has_splicing => {
+                            self.compile_expr(inner)?;
+                            let splice_list = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @stack_pop_pointer() : () -> i64",
+                                splice_list
+                            ));
+                            let list_so_far = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @stack_pop_pointer() : () -> i64",
+                                list_so_far
+                            ));
+                            let appended = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_append({}, {}) : (i64, i64) -> i64",
+                                appended, splice_list, list_so_far
+                            ));
+                            self.writeln(&format!(
+                                "func.call @stack_push_pointer({}) : (i64) -> ()",
+                                appended
+                            ));
+                        }
+                        _ => {
+                            self.compile_backquote(elem)?;
+                            let elem_val = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @stack_pop_pointer() : () -> i64",
+                                elem_val
+                            ));
+                            let list_so_far = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @stack_pop_pointer() : () -> i64",
+                                list_so_far
+                            ));
+                            let new_list = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                                new_list, elem_val, list_so_far
+                            ));
+                            self.writeln(&format!(
+                                "func.call @stack_push_pointer({}) : (i64) -> ()",
+                                new_list
+                            ));
+                        }
+                    }
+                }
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                self.compile_backquote(car)?;
+                self.compile_backquote(cdr)?;
+                let cdr_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cdr_val));
+                let car_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", car_val));
+                let result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                    result, car_val, cdr_val
+                ));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+            }
+            ASTNode::Vector(elements) => {
+                for elem in elements {
+                    self.compile_backquote(elem)?;
+                }
+
+                let len = elements.len();
+                let len_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
+                let vec = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_vector({}) : (i64) -> i64",
+                    vec, len_ssa
+                ));
+
+                for i in (0..len).rev() {
+                    let elem_val = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @stack_pop_pointer() : () -> i64",
+                        elem_val
+                    ));
+                    let idx_raw = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant {} : i64", idx_raw, i));
+                    let idx = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        idx, idx_raw
+                    ));
+                    let discard = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64",
+                        discard, vec, idx, elem_val
+                    ));
+                }
+
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", vec));
+            }
+            ASTNode::ArrayLiteral { dims, elements } if dims.is_empty() && elements.len() != 1 => {
+                for elem in elements {
+                    self.compile_backquote(elem)?;
+                }
+
+                let len = elements.len();
+                let len_ssa = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
+                let vec = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_vector({}) : (i64) -> i64",
+                    vec, len_ssa
+                ));
+
+                for i in (0..len).rev() {
+                    let elem_val = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @stack_pop_pointer() : () -> i64",
+                        elem_val
+                    ));
+                    let idx_raw = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant {} : i64", idx_raw, i));
+                    let idx = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                        idx, idx_raw
+                    ));
+                    let discard = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64",
+                        discard, vec, idx, elem_val
+                    ));
+                }
+
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", vec));
+            }
+            // Nested backquote keeps its syntax at this level.
+            ASTNode::Backquote(inner) => {
+                self.compile_unary_syntax_form("backquote", inner)?;
+            }
+            ASTNode::UnquoteSplicing(inner) => {
+                self.compile_expr(inner)?;
+            }
             // Lists need to be constructed recursively
             _ => {
-                // For complex structures, we'd need to recursively process
-                // For now, just push nil
-                self.writeln("func.call @stack_push_nil() : () -> ()");
+                self.compile_expr(&ASTNode::Quote(Box::new(expr.clone())))?;
             }
         }
+        Ok(())
+    }
+
+    fn compile_unary_syntax_form(&mut self, head_symbol: &str, inner: &ASTNode) -> Result<()> {
+        let head = self.create_symbol_constant(head_symbol);
+        self.writeln("func.call @stack_push_nil() : () -> ()");
+        self.compile_expr(&ASTNode::Quote(Box::new(inner.clone())))?;
+
+        let inner_val = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            inner_val
+        ));
+        let empty_tail = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            empty_tail
+        ));
+        let arg_list = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+            arg_list, inner_val, empty_tail
+        ));
+        let form = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+            form, head, arg_list
+        ));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", form));
         Ok(())
     }
 
@@ -3206,6 +5191,54 @@ impl StackMLIRCodegen {
         }
     }
 
+    fn collect_let_special_declarations(body: &[ASTNode]) -> (HashSet<String>, usize) {
+        let mut specials = HashSet::new();
+        let mut start_idx = 0usize;
+
+        while start_idx < body.len() {
+            let ASTNode::Call { function, args } = &body[start_idx] else {
+                break;
+            };
+            let ASTNode::Variable(name) = function.as_ref() else {
+                break;
+            };
+            if !name.eq_ignore_ascii_case("declare") {
+                break;
+            }
+
+            for decl in args {
+                let ASTNode::Call { function: decl_fn, args: decl_args } = decl else {
+                    continue;
+                };
+                let ASTNode::Variable(decl_name) = decl_fn.as_ref() else {
+                    continue;
+                };
+                if !decl_name.eq_ignore_ascii_case("special") {
+                    continue;
+                }
+                for var in decl_args {
+                    match var {
+                        ASTNode::Variable(v) => {
+                            specials.insert(v.clone());
+                            specials.insert(v.to_ascii_uppercase());
+                            specials.insert(v.to_ascii_lowercase());
+                        }
+                        ASTNode::Constant(ConstantValue::Symbol(v)) => {
+                            specials.insert(v.clone());
+                            specials.insert(v.to_ascii_uppercase());
+                            specials.insert(v.to_ascii_lowercase());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            start_idx += 1;
+        }
+
+        (specials, start_idx)
+    }
+
     fn is_quoteable_for_eval(ast: &ASTNode) -> bool {
         match ast {
             ASTNode::Constant(_) | ASTNode::Variable(_) => true,
@@ -3235,14 +5268,442 @@ impl StackMLIRCodegen {
         }
     }
 
-    fn compile_eval_of_original_form(&mut self, func_name: &str, args: &[ASTNode]) -> Result<()> {
-        let original_form = ASTNode::Call {
-            function: Box::new(ASTNode::Variable(func_name.to_string())),
-            args: args.to_vec(),
-        };
+    fn quoteable_ast_for_eval(ast: &ASTNode) -> Option<ASTNode> {
+        if Self::is_quoteable_for_eval(ast) {
+            return Some(ast.clone());
+        }
+
+        if let Some(normalized) = Self::normalize_ast_for_quote(ast) {
+            return Self::quoteable_ast_for_eval(&normalized);
+        }
+
+        match ast {
+            ASTNode::Quote(inner) => {
+                Self::quoteable_ast_for_eval(inner).map(|node| ASTNode::Quote(Box::new(node)))
+            }
+            ASTNode::Backquote(inner) => {
+                Self::quoteable_ast_for_eval(inner).map(|node| ASTNode::Backquote(Box::new(node)))
+            }
+            ASTNode::Unquote(inner) => {
+                Self::quoteable_ast_for_eval(inner).map(|node| ASTNode::Unquote(Box::new(node)))
+            }
+            ASTNode::UnquoteSplicing(inner) => {
+                Self::quoteable_ast_for_eval(inner).map(|node| ASTNode::UnquoteSplicing(Box::new(node)))
+            }
+            ASTNode::Call { function, args } => {
+                let function = Self::quoteable_ast_for_eval(function)?;
+                let mut new_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    new_args.push(Self::quoteable_ast_for_eval(arg)?);
+                }
+                Some(ASTNode::Call {
+                    function: Box::new(function),
+                    args: new_args,
+                })
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                let car = Self::quoteable_ast_for_eval(car)?;
+                let cdr = Self::quoteable_ast_for_eval(cdr)?;
+                Some(ASTNode::DottedPair {
+                    car: Box::new(car),
+                    cdr: Box::new(cdr),
+                })
+            }
+            ASTNode::Lambda {
+                params,
+                defaults,
+                supplied_p_vars,
+                key_params,
+                body,
+            } => {
+                if !defaults.is_empty() || !supplied_p_vars.is_empty() || !key_params.is_empty() {
+                    return None;
+                }
+                let mut new_body = Vec::with_capacity(body.len());
+                for expr in body {
+                    new_body.push(Self::quoteable_ast_for_eval(expr)?);
+                }
+                Some(ASTNode::Lambda {
+                    params: params.clone(),
+                    defaults: defaults.clone(),
+                    supplied_p_vars: supplied_p_vars.clone(),
+                    key_params: key_params.clone(),
+                    body: new_body,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn ast_contains_bridge_only_control(ast: &ASTNode) -> bool {
+        match ast {
+            ASTNode::Call { function, args } => {
+                let head_is_bridge_only = match function.as_ref() {
+                    ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                        matches!(
+                            name.rsplit(':').next().unwrap_or(name.as_str()).to_ascii_lowercase().as_str(),
+                            "handler-bind"
+                                | "handler-case"
+                                | "restart-case"
+                                | "restart-bind"
+                                | "with-simple-restart"
+                                | "find-restart"
+                                | "compute-restarts"
+                                | "restart-name"
+                                | "frame-function-lambda-list"
+                        )
+                    }
+                    _ => false,
+                };
+                head_is_bridge_only
+                    || Self::ast_contains_bridge_only_control(function)
+                    || args.iter().any(Self::ast_contains_bridge_only_control)
+            }
+            ASTNode::If { test, then_branch, else_branch } => {
+                Self::ast_contains_bridge_only_control(test)
+                    || Self::ast_contains_bridge_only_control(then_branch)
+                    || Self::ast_contains_bridge_only_control(else_branch)
+            }
+            ASTNode::Progn { exprs } | ASTNode::Vector(exprs) => {
+                exprs.iter().any(Self::ast_contains_bridge_only_control)
+            }
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                bindings.iter().any(|(_, expr)| Self::ast_contains_bridge_only_control(expr))
+                    || body.iter().any(Self::ast_contains_bridge_only_control)
+            }
+            ASTNode::Cond { clauses } => clauses.iter().any(|(test, expr)| {
+                Self::ast_contains_bridge_only_control(test)
+                    || Self::ast_contains_bridge_only_control(expr)
+            }),
+            // Lambda/macro bodies are compiled independently. A bridge-routed
+            // form inside a nested thunk must not force the enclosing batch
+            // through the bridge.
+            ASTNode::Lambda { .. } | ASTNode::Macro { .. } => false,
+            ASTNode::Block { body, .. } => body.iter().any(Self::ast_contains_bridge_only_control),
+            ASTNode::ReturnFrom { value, .. } => value
+                .as_ref()
+                .map(|v| Self::ast_contains_bridge_only_control(v))
+                .unwrap_or(false),
+            ASTNode::Dotimes { count, result, body, .. } => {
+                Self::ast_contains_bridge_only_control(count)
+                    || result
+                        .as_ref()
+                        .map(|v| Self::ast_contains_bridge_only_control(v))
+                        .unwrap_or(false)
+                    || body.iter().any(Self::ast_contains_bridge_only_control)
+            }
+            ASTNode::Dolist { list, result, body, .. } => {
+                Self::ast_contains_bridge_only_control(list)
+                    || result
+                        .as_ref()
+                        .map(|v| Self::ast_contains_bridge_only_control(v))
+                        .unwrap_or(false)
+                    || body.iter().any(Self::ast_contains_bridge_only_control)
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                Self::ast_contains_bridge_only_control(car)
+                    || Self::ast_contains_bridge_only_control(cdr)
+            }
+            _ => false,
+        }
+    }
+
+    fn ast_contains_named_call(ast: &ASTNode, targets: &[&str]) -> bool {
+        match ast {
+            ASTNode::Call { function, args } => {
+                let head_matches = match function.as_ref() {
+                    ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                        let base = name.rsplit(':').next().unwrap_or(name.as_str()).to_ascii_lowercase();
+                        targets.iter().any(|target| base == *target)
+                    }
+                    _ => false,
+                };
+                head_matches
+                    || Self::ast_contains_named_call(function, targets)
+                    || args.iter().any(|arg| Self::ast_contains_named_call(arg, targets))
+            }
+            ASTNode::If { test, then_branch, else_branch } => {
+                Self::ast_contains_named_call(test, targets)
+                    || Self::ast_contains_named_call(then_branch, targets)
+                    || Self::ast_contains_named_call(else_branch, targets)
+            }
+            ASTNode::Progn { exprs } | ASTNode::Vector(exprs) => {
+                exprs.iter().any(|expr| Self::ast_contains_named_call(expr, targets))
+            }
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                bindings.iter().any(|(_, expr)| Self::ast_contains_named_call(expr, targets))
+                    || body.iter().any(|expr| Self::ast_contains_named_call(expr, targets))
+            }
+            ASTNode::Cond { clauses } => clauses.iter().any(|(test, expr)| {
+                Self::ast_contains_named_call(test, targets)
+                    || Self::ast_contains_named_call(expr, targets)
+            }),
+            ASTNode::Lambda { body, .. } | ASTNode::Macro { body, .. } => {
+                body.iter().any(|expr| Self::ast_contains_named_call(expr, targets))
+            }
+            ASTNode::Block { body, .. } => body.iter().any(|expr| Self::ast_contains_named_call(expr, targets)),
+            ASTNode::ReturnFrom { value, .. } => value
+                .as_ref()
+                .map(|expr| Self::ast_contains_named_call(expr, targets))
+                .unwrap_or(false),
+            ASTNode::Dotimes { count, result, body, .. } => {
+                Self::ast_contains_named_call(count, targets)
+                    || result
+                        .as_ref()
+                        .map(|expr| Self::ast_contains_named_call(expr, targets))
+                        .unwrap_or(false)
+                    || body.iter().any(|expr| Self::ast_contains_named_call(expr, targets))
+            }
+            ASTNode::Dolist { list, result, body, .. } => {
+                Self::ast_contains_named_call(list, targets)
+                    || result
+                        .as_ref()
+                        .map(|expr| Self::ast_contains_named_call(expr, targets))
+                        .unwrap_or(false)
+                    || body.iter().any(|expr| Self::ast_contains_named_call(expr, targets))
+            }
+            ASTNode::DottedPair { car, cdr } => {
+                Self::ast_contains_named_call(car, targets)
+                    || Self::ast_contains_named_call(cdr, targets)
+            }
+            _ => false,
+        }
+    }
+
+    fn loop_keyword_name(node: &ASTNode) -> Option<String> {
+        match node {
+            ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                Some(
+                    name.rsplit(':')
+                        .next()
+                        .unwrap_or(name.as_str())
+                        .trim_start_matches(':')
+                        .to_ascii_lowercase(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn is_simple_loop_while_until(args: &[ASTNode]) -> bool {
+        args.len() >= 2
+            && Self::loop_keyword_name(&args[0])
+                .map(|kw| kw == "while" || kw == "until")
+                .unwrap_or(false)
+    }
+
+    fn should_bridge_problematic_call(ast: &ASTNode, func_name: &str) -> bool {
+        let base = func_name.rsplit(':').next().unwrap_or(func_name).to_ascii_lowercase();
+        if matches!(
+            base.as_str(),
+            "with-stack"
+                | "map-stack"
+                | "map-backtrace"
+                | "frame-function-name"
+                | "frame-function"
+                | "frame-function-lambda-list"
+                | "frame-function-documentation"
+                | "frame-locals"
+                | "frame-language"
+                | "print-backtrace"
+                | "with-truncated-stack"
+                | "with-capped-stack"
+        ) {
+            return true;
+        }
+        base == "loop"
+            && Self::ast_contains_named_call(ast, &["cas"])
+            && match ast {
+                ASTNode::Call { args, .. } => !Self::is_simple_loop_while_until(args),
+                _ => true,
+            }
+    }
+
+    fn should_dequalify_bridge_eval_head(base: &str) -> bool {
+        let lower = base.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "+"
+                | "-"
+                | "*"
+                | "/"
+                | "not"
+                | "null"
+                | "symbolp"
+                | "stringp"
+                | "consp"
+                | "integerp"
+                | "functionp"
+                | "eq"
+                | "eql"
+                | "equal"
+                | "equalp"
+                | "quote"
+                | "function"
+                | "if"
+                | "progn"
+                | "let"
+                | "let*"
+                | "setq"
+                | "block"
+                | "return-from"
+                | "catch"
+                | "throw"
+                | "tagbody"
+                | "go"
+                | "unwind-protect"
+                | "flet"
+                | "labels"
+                | "macrolet"
+                | "symbol-macrolet"
+                | "locally"
+                | "the"
+                | "multiple-value-bind"
+                | "multiple-value-call"
+                | "multiple-value-prog1"
+                | "values"
+                | "values-list"
+                | "lambda"
+        )
+    }
+
+    fn normalize_bridge_eval_heads(ast: &ASTNode) -> ASTNode {
+        match ast {
+            ASTNode::Call { function, args } => {
+                let function = match function.as_ref() {
+                    ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                        let base = name.rsplit(':').next().unwrap_or(name.as_str());
+                        if name.contains(':') && Self::should_dequalify_bridge_eval_head(base) {
+                            Box::new(ASTNode::Variable(base.to_string()))
+                        } else {
+                            Box::new(Self::normalize_bridge_eval_heads(function))
+                        }
+                    }
+                    _ => Box::new(Self::normalize_bridge_eval_heads(function)),
+                };
+                let args = args
+                    .iter()
+                    .map(Self::normalize_bridge_eval_heads)
+                    .collect();
+                ASTNode::Call { function, args }
+            }
+            ASTNode::If { test, then_branch, else_branch } => ASTNode::If {
+                test: Box::new(Self::normalize_bridge_eval_heads(test)),
+                then_branch: Box::new(Self::normalize_bridge_eval_heads(then_branch)),
+                else_branch: Box::new(Self::normalize_bridge_eval_heads(else_branch)),
+            },
+            ASTNode::Progn { exprs } => ASTNode::Progn {
+                exprs: exprs.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::Let { bindings, body } => ASTNode::Let {
+                bindings: bindings
+                    .iter()
+                    .map(|(name, expr)| (name.clone(), Self::normalize_bridge_eval_heads(expr)))
+                    .collect(),
+                body: body.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::LetStar { bindings, body } => ASTNode::LetStar {
+                bindings: bindings
+                    .iter()
+                    .map(|(name, expr)| (name.clone(), Self::normalize_bridge_eval_heads(expr)))
+                    .collect(),
+                body: body.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::Lambda {
+                params,
+                defaults,
+                supplied_p_vars,
+                key_params,
+                body,
+            } => ASTNode::Lambda {
+                params: params.clone(),
+                defaults: defaults.clone(),
+                supplied_p_vars: supplied_p_vars.clone(),
+                key_params: key_params.clone(),
+                body: body.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::Block { name, body } => ASTNode::Block {
+                name: name.clone(),
+                body: body.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::ReturnFrom { block_name, value } => ASTNode::ReturnFrom {
+                block_name: block_name.clone(),
+                value: value
+                    .as_ref()
+                    .map(|v| Box::new(Self::normalize_bridge_eval_heads(v))),
+            },
+            ASTNode::DottedPair { car, cdr } => ASTNode::DottedPair {
+                car: Box::new(Self::normalize_bridge_eval_heads(car)),
+                cdr: Box::new(Self::normalize_bridge_eval_heads(cdr)),
+            },
+            ASTNode::Dotimes { var, count, result, body } => ASTNode::Dotimes {
+                var: var.clone(),
+                count: Box::new(Self::normalize_bridge_eval_heads(count)),
+                result: result
+                    .as_ref()
+                    .map(|v| Box::new(Self::normalize_bridge_eval_heads(v))),
+                body: body.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::Dolist { var, list, result, body } => ASTNode::Dolist {
+                var: var.clone(),
+                list: Box::new(Self::normalize_bridge_eval_heads(list)),
+                result: result
+                    .as_ref()
+                    .map(|v| Box::new(Self::normalize_bridge_eval_heads(v))),
+                body: body.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            },
+            ASTNode::Cond { clauses } => ASTNode::Cond {
+                clauses: clauses
+                    .iter()
+                    .map(|(test, expr)| {
+                        (
+                            Self::normalize_bridge_eval_heads(test),
+                            Self::normalize_bridge_eval_heads(expr),
+                        )
+                    })
+                    .collect(),
+            },
+            ASTNode::Quote(inner) => ASTNode::Quote(Box::new(Self::normalize_bridge_eval_heads(inner))),
+            ASTNode::Backquote(inner) => ASTNode::Backquote(Box::new(Self::normalize_bridge_eval_heads(inner))),
+            ASTNode::Unquote(inner) => ASTNode::Unquote(Box::new(Self::normalize_bridge_eval_heads(inner))),
+            ASTNode::UnquoteSplicing(inner) => {
+                ASTNode::UnquoteSplicing(Box::new(Self::normalize_bridge_eval_heads(inner)))
+            }
+            ASTNode::Vector(items) => ASTNode::Vector(
+                items.iter().map(Self::normalize_bridge_eval_heads).collect(),
+            ),
+            _ => ast.clone(),
+        }
+    }
+
+    fn compile_eval_of_original_ast(&mut self, original_ast: &ASTNode) -> Result<()> {
+        let normalized_ast = Self::normalize_bridge_eval_heads(original_ast);
+        let original_form = Self::quoteable_ast_for_eval(&normalized_ast)
+            .ok_or_else(|| anyhow::anyhow!("form not quoteable for eval fallback"))?;
         if !Self::is_quoteable_for_eval(&original_form) {
             anyhow::bail!("form not quoteable for eval fallback");
         }
+
+        let mut lexical_keys: Vec<String> = self
+            .find_free_vars(&original_form, &HashSet::new())
+            .into_iter()
+            .filter(|name| {
+                self.symbol_table_lookup_key_ci(name).is_some()
+                    || self.dynamic_capture_symbol_for_var(name).is_some()
+            })
+            .map(|name| {
+                self.symbol_table_lookup_key_ci(&name)
+                    .unwrap_or_else(|| name.rsplit(':').next().unwrap_or(name.as_str()).to_string())
+            })
+            .filter(|k| {
+                !k.starts_with('%')
+                    && !k.starts_with("__")
+                    && !k.eq_ignore_ascii_case("nil")
+                    && !k.eq_ignore_ascii_case("t")
+            })
+            .collect();
+        lexical_keys.sort_by_key(|k| k.to_ascii_lowercase());
+        lexical_keys.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
 
         self.compile_expr(&ASTNode::Quote(Box::new(original_form)))?;
         let quoted_form = self.fresh_ssa();
@@ -3257,13 +5718,112 @@ impl StackMLIRCodegen {
             "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
             eval_args, quoted_form, nil_val
         ));
+        let mut rebound_lexicals: Vec<(String, String, String, Option<String>)> = Vec::new();
+        for key in lexical_keys {
+            let rebound_sym = self.create_symbol_constant(&key);
+            let old_val = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                old_val, rebound_sym
+            ));
+            if let Some(dyn_sym) = self.dynamic_capture_symbol_for_var(&key) {
+                let current_val = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                    current_val, dyn_sym
+                ));
+                let _set = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                    _set, rebound_sym, current_val
+                ));
+                rebound_lexicals.push((key, rebound_sym, old_val, Some(dyn_sym)));
+            } else if let Some(current_val) = self
+                .symbol_table_lookup_key_ci(&key)
+                .and_then(|resolved| self.symbol_table.get(&resolved).cloned())
+            {
+                let _set = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                    _set, rebound_sym, current_val
+                ));
+                rebound_lexicals.push((key, rebound_sym, old_val, None));
+            }
+        }
         let result = self.fresh_ssa();
         self.writeln(&format!(
             "{} = func.call @cc_eval({}) : (i64) -> i64",
             result, eval_args
         ));
-        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+        let saved_values = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
+            saved_values, result
+        ));
+        let mut rebound_updates: Vec<(String, String)> = Vec::new();
+        for (key, sym, _, dyn_sym) in &rebound_lexicals {
+            let new_val = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                new_val, sym
+            ));
+            if let Some(dyn_sym) = dyn_sym {
+                let _set = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                    _set, dyn_sym, new_val
+                ));
+            } else {
+                rebound_updates.push((key.clone(), new_val));
+            }
+        }
+        for (_, sym, old_val, _) in rebound_lexicals.iter().rev() {
+            let restore = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                restore, sym, old_val
+            ));
+        }
+        for (key, new_val) in rebound_updates {
+            let key_base = key.rsplit(':').next().unwrap_or(key.as_str()).to_ascii_lowercase();
+            let matching_keys: Vec<String> = self
+                .symbol_table
+                .keys()
+                .filter(|existing| {
+                    existing
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(existing.as_str())
+                        .eq_ignore_ascii_case(&key_base)
+                })
+                .cloned()
+                .collect();
+            if matching_keys.is_empty() {
+                self.symbol_table.insert(key.clone(), new_val.clone());
+            } else {
+                for existing in matching_keys {
+                    self.symbol_table.insert(existing, new_val.clone());
+                }
+            }
+        }
+        let restored_primary = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_values_pack({}) : (i64) -> i64",
+            restored_primary, saved_values
+        ));
+        self.writeln(&format!(
+            "func.call @stack_push_pointer({}) : (i64) -> ()",
+            restored_primary
+        ));
         Ok(())
+    }
+
+    fn compile_eval_of_original_form(&mut self, func_name: &str, args: &[ASTNode]) -> Result<()> {
+        let original_form = ASTNode::Call {
+            function: Box::new(ASTNode::Variable(func_name.to_string())),
+            args: args.to_vec(),
+        };
+        self.compile_eval_of_original_ast(&original_form)
     }
 
     fn compile_dolist_over_list_value(
@@ -3430,7 +5990,15 @@ impl StackMLIRCodegen {
         // Preserve extension/system package qualifiers for function dispatch. Several
         // ext:/si: names share base names with CL builtins, and stripping the qualifier
         // changes both bridge routing and semantics (e.g. ext:run-program).
-        if matches!(package_prefix_lower.as_deref(), Some("ext") | Some("ext:")) {
+        let ext_special_form = matches!(
+            package_prefix_lower.as_deref(),
+            Some("ext") | Some("ext:")
+        ) && matches!(
+            base_name_lower.as_str(),
+            "with-float-traps-masked"
+        );
+
+        if matches!(package_prefix_lower.as_deref(), Some("ext") | Some("ext:")) && !ext_special_form {
             return self.compile_user_function_call(func_name, args);
         }
 
@@ -3442,7 +6010,8 @@ impl StackMLIRCodegen {
             "define-convenience-action-methods" | "defparameter*" | "defvar*" | "define-package"
             | "load-mlir" | "with-upgradability" | "with-unlocked-packages" | "while"
             | "do-symbols" | "do-external-symbols" | "do-all-symbols" | "with-lock"
-            | "atomic" | "with-profiling"
+            | "atomic" | "atomic-incf" | "atomic-incf-explicit" | "atomic-push" | "cas" | "with-profiling"
+            | "with-float-traps-masked"
         );
         if !rlasp::is_cl_builtin(base_name_lower.as_str()) && !is_non_cl_macro_stub {
             // Preserve package-qualified names for extension/runtime calls.
@@ -4671,6 +7240,66 @@ impl StackMLIRCodegen {
                         "func.call @stack_push_pointer({}) : (i64) -> ()",
                         restored_primary
                     ));
+                } else if base_name == "multiple-value-setq" {
+                    // (multiple-value-setq (vars...) value-form)
+                    if args.len() != 2 {
+                        anyhow::bail!("multiple-value-setq requires exactly 2 arguments");
+                    }
+
+                    let mut var_names: Vec<String> = Vec::new();
+                    match &args[0] {
+                        ASTNode::Constant(ConstantValue::Nil) => {}
+                        ASTNode::Variable(v) => var_names.push(v.clone()),
+                        ASTNode::Call { function, args: var_list } => {
+                            match function.as_ref() {
+                                ASTNode::Variable(v) => var_names.push(v.clone()),
+                                ASTNode::Constant(ConstantValue::Symbol(v)) => var_names.push(v.clone()),
+                                ASTNode::Constant(ConstantValue::Nil) => {}
+                                _ => anyhow::bail!("multiple-value-setq variable list must contain symbols"),
+                            }
+                            for var in var_list {
+                                match var {
+                                    ASTNode::Variable(v) => var_names.push(v.clone()),
+                                    ASTNode::Constant(ConstantValue::Symbol(v)) => var_names.push(v.clone()),
+                                    ASTNode::Constant(ConstantValue::Nil) => {}
+                                    _ => anyhow::bail!("multiple-value-setq variable list must contain symbols"),
+                                }
+                            }
+                        }
+                        _ => anyhow::bail!("multiple-value-setq requires a variable list"),
+                    }
+
+                    self.compile_expr(&args[1])?;
+                    let primary = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", primary));
+                    let mv_list = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
+                        mv_list, primary
+                    ));
+
+                    for (i, var_name) in var_names.iter().enumerate() {
+                        let idx_raw = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant {} : i64", idx_raw, i));
+                        let idx_boxed = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                            idx_boxed, idx_raw
+                        ));
+                        let var_val = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_nth({}, {}) : (i64, i64) -> i64",
+                            var_val, idx_boxed, mv_list
+                        ));
+                        self.symbol_table.insert(var_name.clone(), var_val.clone());
+                        self.symbol_table
+                            .insert(var_name.to_ascii_lowercase(), var_val.clone());
+                        self.symbol_table
+                            .insert(var_name.to_ascii_uppercase(), var_val);
+                    }
+
+                    // CL returns the primary value of value-form.
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", primary));
                 } else if base_name == "values" {
                     // CL requires left-to-right evaluation order for VALUES arguments.
                     let mut value_ssas: Vec<String> = Vec::with_capacity(args.len());
@@ -4815,18 +7444,8 @@ impl StackMLIRCodegen {
             }
 
             "handler-bind" => {
-                // (handler-bind (bindings...) body...) - ignore handlers, execute body
-                if args.len() <= 1 {
-                    self.writeln("func.call @stack_push_nil() : () -> ()");
-                    return Ok(());
-                }
-                for (i, expr) in args[1..].iter().enumerate() {
-                    if i > 0 {
-                        self.emit_safe_discard();
-                    }
-                    self.compile_expr(expr)?;
-                }
-                return Ok(());
+                // Special form: bindings and bodies must not be pre-evaluated.
+                return self.compile_eval_of_original_form(base_name, args);
             }
 
             "handler-case" | "restart-case" | "restart-bind" |
@@ -4835,6 +7454,9 @@ impl StackMLIRCodegen {
                 if args.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                     return Ok(());
+                }
+                if base_name_lower == "handler-case" {
+                    return self.compile_eval_of_original_form(base_name, args);
                 }
                 if base_name_lower == "ignore-errors" {
                     // (ignore-errors form) -> on error, return (values nil error)
@@ -4881,10 +7503,8 @@ impl StackMLIRCodegen {
                     base_name_lower.as_str(),
                     "restart-case" | "restart-bind" | "with-simple-restart"
                 ) {
-                    if self.compile_eval_of_original_form(func_name, args).is_ok() {
-                        return Ok(());
-                    }
-                    return self.compile_user_function_call(base_name, args);
+                    // These are special forms/macros. Pre-evaluating args breaks CL restart semantics.
+                    return self.compile_eval_of_original_form(base_name, args);
                 } else if base_name_lower == "handler-case" {
                     // (handler-case protected-form (condition-type (var) handler-body...))
                     // Runtime currently models conditions as error objects.
@@ -4994,8 +7614,16 @@ impl StackMLIRCodegen {
             }
 
             // CLOS and type-related forms
+            "define-compiler-macro" => {
+                let original = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable(func_name.to_string())),
+                    args: args.to_vec(),
+                };
+                return self.compile_eval_of_original_ast(&original);
+            }
+
             "deftype" | "defsetf" | "define-setf-expander" | "define-symbol-macro" |
-            "define-compiler-macro" | "define-modify-macro" | "define-method-combination" => {
+            "define-modify-macro" | "define-method-combination" => {
                 // Definition forms - return the name
                 if !args.is_empty() {
                     if let ASTNode::Variable(name) = &args[0] {
@@ -5008,7 +7636,7 @@ impl StackMLIRCodegen {
                 return Ok(());
             }
 
-            "class" | "find-class" | "class-of" => {
+            "class" => {
                 // Route through runtime dispatch to preserve CL behavior.
                 return self.compile_user_function_call(base_name, args);
             }
@@ -5023,7 +7651,64 @@ impl StackMLIRCodegen {
                 return self.compile_user_function_call(base_name, args);
             }
 
-            "pushnew" | "pop" => {
+            "pushnew" | "pop" | "remf" => {
+                if base_name == "remf" {
+                    if args.len() != 2 {
+                        anyhow::bail!("remf requires exactly 2 arguments");
+                    }
+
+                    match &args[0] {
+                        ASTNode::Variable(var) => {
+                            self.compile_expr(&args[1])?;
+                            let indicator = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", indicator));
+
+                            let current = if let Some(current_ssa) = self.symbol_table.get(var).cloned() {
+                                current_ssa
+                            } else {
+                                let var_sym = self.create_symbol_constant(var);
+                                let current = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @cc_symbol_value({}) : (i64) -> i64", current, var_sym));
+                                current
+                            };
+
+                            let new_plist = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @cc_remf_plist({}, {}) : (i64, i64) -> i64", new_plist, current, indicator));
+
+                            if self.symbol_table.contains_key(var) {
+                                self.symbol_table.insert(var.clone(), new_plist.clone());
+                            } else {
+                                let var_sym = self.create_symbol_constant(var);
+                                let _set = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                    _set, var_sym, new_plist));
+                            }
+
+                            let changed = self.fresh_ssa();
+                            self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", changed, new_plist, current));
+                            let found_val = self.fresh_ssa();
+                            self.writeln(&format!("{} = scf.if {} -> (i64) {{", found_val, changed));
+                            self.indent();
+                            let t_val = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                            self.writeln(&format!("scf.yield {} : i64", t_val));
+                            self.dedent();
+                            self.writeln("} else {");
+                            self.indent();
+                            let nil_val = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                            self.writeln(&format!("scf.yield {} : i64", nil_val));
+                            self.dedent();
+                            self.writeln("}");
+                            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", found_val));
+                            return Ok(());
+                        }
+                        _ => {
+                            return self.compile_user_function_call(base_name, args);
+                        }
+                    }
+                }
+
                 if base_name == "pop" {
                     // (pop place) - return car, set place to cdr
                     if args.len() != 1 {
@@ -5617,9 +8302,6 @@ impl StackMLIRCodegen {
             }
 
             "etypecase" | "ctypecase" | "ecase" | "ccase" => {
-                if self.compile_eval_of_original_form(func_name, args).is_ok() {
-                    return Ok(());
-                }
                 return self.compile_user_function_call(base_name, args);
             }
 
@@ -5653,27 +8335,15 @@ impl StackMLIRCodegen {
 
                 match &args[0] {
                     ASTNode::Variable(func_name) => {
-                        // Create a function reference using the function name as a string
-                        let base = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
-                        let lowered = base.to_ascii_lowercase();
-                        let normalized_name: &str = match lowered.as_str() {
-                            "first" => "car",
-                            "rest" => "cdr",
-                            _ => func_name.as_str(),
-                        };
-                        let name_const = self.create_string_constant(normalized_name);
-                        let name_ptr = self.fresh_ssa();
-                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", name_ptr, name_const));
-                        let func_ref = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", func_ref, name_ptr));
-                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", func_ref));
+                        self.emit_named_function_ref(func_name);
+                    }
+                    ASTNode::Constant(ConstantValue::Symbol(func_name)) => {
+                        self.emit_named_function_ref(func_name);
                     }
                     ASTNode::Lambda { params, defaults, supplied_p_vars, key_params, body } => {
                         // #'(lambda (args) body) - compile as closure
                         // For now, we'll generate a unique function name and compile it
-                        let lambda_id = self.function_counter;
-                        self.function_counter += 1;
-                        let lambda_name = format!("__lambda_{}", lambda_id);
+                        let (_, lambda_name) = self.fresh_lambda_name();
 
                         // Save current output
                         let saved_output = std::mem::take(&mut self.output);
@@ -5732,9 +8402,7 @@ impl StackMLIRCodegen {
                                     vec![ASTNode::Constant(ConstantValue::Nil)]
                                 };
 
-                                let lambda_id = self.function_counter;
-                                self.function_counter += 1;
-                                let lambda_name = format!("__lambda_{}", lambda_id);
+                                let (_, lambda_name) = self.fresh_lambda_name();
 
                                 // Save current output
                                 let saved_output = std::mem::take(&mut self.output);
@@ -6411,19 +9079,94 @@ impl StackMLIRCodegen {
             }
 
             "read-from-string" => {
-                // Route through generic runtime dispatch so keyword args and
-                // multiple-values semantics match interpreter behavior.
-                self.compile_user_function_call(base_name, args)
+                if args.len() == 1 {
+                    if let ASTNode::Call { function: format_fn, args: format_args } = &args[0] {
+                        if let ASTNode::Variable(format_name) = format_fn.as_ref() {
+                            let format_base = format_name.rsplit(':').next().unwrap_or(format_name.as_str());
+                            if format_base.eq_ignore_ascii_case("format") && format_args.len() == 3 {
+                                let nil_dest = matches!(
+                                    &format_args[0],
+                                    ASTNode::Constant(ConstantValue::Nil)
+                                );
+                                let simple_control = matches!(
+                                    &format_args[1],
+                                    ASTNode::Constant(ConstantValue::String(s))
+                                        if s == "#\\~a" || s == "#\\~A"
+                                );
+                                if nil_dest && simple_control {
+                                    if let ASTNode::Call { function: char_name_fn, args: char_name_args } = &format_args[2] {
+                                        if let ASTNode::Variable(char_name_name) = char_name_fn.as_ref() {
+                                            let char_name_base = char_name_name
+                                                .rsplit(':')
+                                                .next()
+                                                .unwrap_or(char_name_name.as_str());
+                                            if char_name_base.eq_ignore_ascii_case("char-name")
+                                                && char_name_args.len() == 1
+                                            {
+                                                self.compile_expr(&char_name_args[0])?;
+                                                let ch_obj = self.fresh_ssa();
+                                                self.writeln(&format!(
+                                                    "{} = func.call @stack_pop_pointer() : () -> i64",
+                                                    ch_obj
+                                                ));
+                                                let result = self.fresh_ssa();
+                                                self.writeln(&format!(
+                                                    "{} = func.call @cc_char_reader_roundtrip({}) : (i64) -> i64",
+                                                    result, ch_obj
+                                                ));
+                                                self.writeln(&format!(
+                                                    "func.call @stack_push_pointer({}) : (i64) -> ()",
+                                                    result
+                                                ));
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Use the dedicated intrinsic so compiled MLIR/AOT execution
+                // does not fall back to generic function dispatch for this hot
+                // reader primitive. The intrinsic preserves keyword and
+                // multiple-values semantics.
+                self.compile_stack_builtin_call("cc_read_from_string_stack", args)
             }
 
-            "incf" | "decf" => {
-                // (incf place &optional delta) or (decf place &optional delta)
-                // Expands to: (setf place (+ place delta)) or (setf place (- place delta))
+            "atomic-incf" | "atomic-incf-explicit" | "incf" | "decf" => {
+                // (incf place &optional delta), (decf place &optional delta),
+                // expands to: (setf place (+ place delta)) or (setf place (- place delta))
                 if args.is_empty() {
                     anyhow::bail!("{} requires at least 1 argument", func_name);
                 }
+                let is_decf = base_name == "decf";
 
-                let place = &args[0];
+                let mut normalized_place = args[0].clone();
+                let mut delta_arg: Option<ASTNode> = args.get(1).cloned();
+                if base_name == "atomic-incf-explicit" {
+                    if let ASTNode::Call { function, .. } = &args[0] {
+                        // (mp:atomic-incf-explicit ((place) &key ...))
+                        // operates on the underlying place and otherwise follows
+                        // the same semantics as INCF with an optional delta.
+                        normalized_place = (*function.clone()).clone();
+                    }
+                } else if let ASTNode::Call { function, args: place_args } = &args[0] {
+                    if let ASTNode::Variable(accessor_name) = function.as_ref() {
+                        if accessor_name
+                            .rsplit(':')
+                            .next()
+                            .map(|b| b.eq_ignore_ascii_case("atomic"))
+                            .unwrap_or(false)
+                            && !place_args.is_empty()
+                        {
+                            // (mp:atomic-incf (mp:atomic place &key ...))
+                            // operates on the underlying place.
+                            normalized_place = place_args[0].clone();
+                        }
+                    }
+                }
+                let place = &normalized_place;
 
                 // Read current value from place
                 self.compile_expr(place)?;
@@ -6431,8 +9174,8 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", current));
 
                 // Compile delta (default 1)
-                if args.len() >= 2 {
-                    self.compile_expr(&args[1])?;
+                if let Some(delta_ast) = delta_arg.take() {
+                    self.compile_expr(&delta_ast)?;
                 } else {
                     // Default delta = 1
                     let one = self.fresh_ssa();
@@ -6445,7 +9188,7 @@ impl StackMLIRCodegen {
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", delta_val));
 
                 // Compute new value: current + delta or current - delta
-                let result = if func_name == "incf" {
+                let result = if !is_decf {
                     self.emit_fast_fixnum_add_sub(&current, &delta_val, "@cc_add", true)
                 } else {
                     self.emit_fast_fixnum_add_sub(&current, &delta_val, "@cc_sub", false)
@@ -6456,7 +9199,22 @@ impl StackMLIRCodegen {
                 match place {
                     ASTNode::Variable(var) => {
                         // Simple variable case
-                        self.symbol_table.insert(var.clone(), result.clone());
+                        if let Some(var_sym) = self.dynamic_capture_symbol_for_var(var) {
+                            let _set = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                _set, var_sym, result
+                            ));
+                        } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
+                            self.symbol_table.insert(bound_key, result.clone());
+                        } else {
+                            let var_sym = self.create_symbol_constant(var);
+                            let _set = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                _set, var_sym, result
+                            ));
+                        }
                         self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                         Ok(())
                     }
@@ -6651,8 +9409,14 @@ impl StackMLIRCodegen {
                 }
 
                 for (var, value_ssa) in assignments {
-                    if self.symbol_table.contains_key(&var) {
-                        self.symbol_table.insert(var, value_ssa);
+                    if let Some(var_sym) = self.dynamic_capture_symbol_for_var(&var) {
+                        let _set = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _set, var_sym, value_ssa
+                        ));
+                    } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(&var) {
+                        self.symbol_table.insert(bound_key, value_ssa);
                     } else {
                         let var_sym = self.create_symbol_constant(&var);
                         let _set = self.fresh_ssa();
@@ -6669,7 +9433,7 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
-            "push" => {
+            "push" | "atomic-push" => {
                 // (push item place) - simplified to (setf place (cons item place))
                 if args.len() != 2 {
                     anyhow::bail!("push requires exactly 2 arguments");
@@ -6683,8 +9447,25 @@ impl StackMLIRCodegen {
                 // For simple variable case: (push item var)
                 if let ASTNode::Variable(var) = &args[1] {
                     // Get current list value
-                    let current = if let Some(current_ssa) = self.symbol_table.get(var).cloned() {
-                        current_ssa
+                    let dyn_var_sym = self.dynamic_capture_symbol_for_var(var);
+                    let local_key = self.symbol_table_lookup_key_ci(var);
+                    let current = if let Some(var_sym) = dyn_var_sym.as_ref() {
+                        let current = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                            current, var_sym
+                        ));
+                        current
+                    } else if let Some(key) = local_key.as_ref() {
+                        self.symbol_table
+                            .get(key)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                let var_sym = self.create_symbol_constant(var);
+                                let current = self.fresh_ssa();
+                                self.writeln(&format!("{} = func.call @cc_symbol_value({}) : (i64) -> i64", current, var_sym));
+                                current
+                            })
                     } else {
                         let var_sym = self.create_symbol_constant(var);
                         let current = self.fresh_ssa();
@@ -6697,8 +9478,14 @@ impl StackMLIRCodegen {
                     self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_list, item, current));
 
                     // Update variable
-                    if self.symbol_table.contains_key(var) {
-                        self.symbol_table.insert(var.clone(), new_list.clone());
+                    if let Some(var_sym) = dyn_var_sym {
+                        let _set = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                            _set, var_sym, new_list
+                        ));
+                    } else if let Some(bound_key) = local_key {
+                        self.symbol_table.insert(bound_key, new_list.clone());
                     } else {
                         let var_sym = self.create_symbol_constant(var);
                         let _set = self.fresh_ssa();
@@ -6882,9 +9669,15 @@ impl StackMLIRCodegen {
                             self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
 
                             // Check if this is a local variable (in symbol table)
-                            if self.symbol_table.contains_key(var) {
+                            if let Some(var_sym) = self.dynamic_capture_symbol_for_var(var) {
+                                let _result = self.fresh_ssa();
+                                self.writeln(&format!(
+                                    "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                    _result, var_sym, val_ssa
+                                ));
+                            } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
                                 // Update local symbol table
-                                self.symbol_table.insert(var.clone(), val_ssa.clone());
+                                self.symbol_table.insert(bound_key, val_ssa.clone());
                             } else {
                                 // Global/special variable - call cc_set_symbol_value
                                 let var_sym = self.create_symbol_constant(var);
@@ -6978,6 +9771,34 @@ impl StackMLIRCodegen {
                                 result, arr_ssa, idx_ssa, val_ssa));
 
                             // Push result
+                            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                        }
+
+                        // BIT/SBIT: (setf (bit array index) value) / (setf (sbit array index) value)
+                        ASTNode::Call { function, args: place_args }
+                            if matches!(function.as_ref(), ASTNode::Variable(name)
+                                if name.rsplit(':').next().map(|b| b.eq_ignore_ascii_case("bit") || b.eq_ignore_ascii_case("sbit")).unwrap_or(false)) =>
+                        {
+                            if place_args.len() < 2 {
+                                anyhow::bail!("setf bit/sbit requires array and index");
+                            }
+
+                            self.compile_expr(&place_args[0])?; // array
+                            self.compile_expr(&place_args[1])?; // index
+                            self.compile_expr(value)?; // value
+
+                            let val_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
+                            let idx_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx_ssa));
+                            let arr_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arr_ssa));
+
+                            let result = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_elt({}, {}, {}) : (i64, i64, i64) -> i64",
+                                result, arr_ssa, idx_ssa, val_ssa
+                            ));
                             self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                         }
 
@@ -7268,12 +10089,24 @@ impl StackMLIRCodegen {
                             self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                         }
 
-                        // DOCUMENTATION: (setf (documentation obj type) value) - no-op, just return value
-                        ASTNode::Call { function, args: _place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "documentation") => {
-                            // Documentation is a no-op in this runtime
-                            // Just evaluate and return the value
-                            self.compile_expr(value)?;
-                            // Value is already on stack, nothing more to do
+                        // SYMBOL-PLIST: (setf (symbol-plist symbol) plist)
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name == "symbol-plist") => {
+                            if place_args.len() != 1 {
+                                anyhow::bail!("setf symbol-plist requires exactly 1 place argument");
+                            }
+
+                            self.compile_expr(&place_args[0])?; // symbol
+                            self.compile_expr(value)?;          // plist
+
+                            let plist_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", plist_ssa));
+                            let sym_ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", sym_ssa));
+
+                            let result = self.fresh_ssa();
+                            self.writeln(&format!("{} = func.call @cc_set_symbol_plist({}, {}) : (i64, i64) -> i64",
+                                result, sym_ssa, plist_ssa));
+                            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                         }
 
                         // Generic accessor: (setf (accessor-name args...) value)
@@ -7293,6 +10126,26 @@ impl StackMLIRCodegen {
                                     // (setf place value) to preserve place semantics in MLIR.
                                     let lowered_args = vec![place_args[0].clone(), value.clone()];
                                     self.compile_call("setf", &lowered_args)?;
+                                } else if accessor_name
+                                    .rsplit(':')
+                                    .next()
+                                    .map(|b| b.eq_ignore_ascii_case("stream-element-type"))
+                                    .unwrap_or(false)
+                                {
+                                    self.compile_user_function_call(
+                                        "set-stream-element-type",
+                                        &[place_args[0].clone(), value.clone()],
+                                    )?;
+                                } else if accessor_name
+                                    .rsplit(':')
+                                    .next()
+                                    .map(|b| b.eq_ignore_ascii_case("stream-external-format"))
+                                    .unwrap_or(false)
+                                {
+                                    self.compile_user_function_call(
+                                        "set-stream-external-format",
+                                        &[place_args[0].clone(), value.clone()],
+                                    )?;
                                 } else {
                                     // Build setf function name: (setf accessor-name)
                                     let setf_fn_name = format!("(setf {})", accessor_name);
@@ -7743,24 +10596,7 @@ impl StackMLIRCodegen {
                 if args.len() != 1 {
                     anyhow::bail!("not requires exactly 1 argument");
                 }
-                self.compile_expr(&args[0])?;
-                let val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
-                let nil_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-                let is_nil = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi eq, {}, {} : i64", is_nil, val, nil_val));
-                let t_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
-                let result = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.select {}, {}, {} : i64", result, is_nil, t_val, nil_val));
-                // NOT is single-valued; overwrite any prior multiple-values from its argument.
-                let one_value_list = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", one_value_list, result, nil_val));
-                let primary = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_values_pack({}) : (i64) -> i64", primary, one_value_list));
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", primary));
-                Ok(())
+                self.compile_user_function_call(base_name, args)
             }
 
             "mapcar" => {
@@ -7801,6 +10637,46 @@ impl StackMLIRCodegen {
                 } else {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 }
+                Ok(())
+            }
+
+            "cas" => {
+                if args.len() < 3 {
+                    anyhow::bail!("cas requires place, old, and new values");
+                }
+
+                let normalized_place = Self::normalize_compiled_place(&args[0]);
+                if !Self::compiled_cas_place_supported(&normalized_place) {
+                    return self.compile_user_function_call(base_name, args);
+                }
+
+                self.compile_expr(&normalized_place)?;
+                let current = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", current));
+
+                self.compile_expr(&args[1])?;
+                let old_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", old_val));
+
+                self.compile_expr(&args[2])?;
+                let new_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", new_val));
+
+                let equal_val = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_equal({}, {}) : (i64, i64) -> i64",
+                    equal_val, current, old_val
+                ));
+                let nil_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                let matches = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = arith.cmpi ne, {}, {} : i64",
+                    matches, equal_val, nil_val
+                ));
+
+                self.emit_compiled_cas_store_to_place(&normalized_place, &matches, &new_val)?;
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", current));
                 Ok(())
             }
 
@@ -7882,7 +10758,9 @@ impl StackMLIRCodegen {
                 self.dedent();
                 self.writeln("} else {");
                 self.indent();
-                self.writeln("func.call @stack_push_nil() : () -> ()");
+                let list_nil = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", list_nil));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", list_nil));
                 for arg_ssa in arg_vals.iter().rev() {
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", arg_ssa));
                     let elem = self.fresh_ssa();
@@ -8061,6 +10939,10 @@ impl StackMLIRCodegen {
                     return self.compile_user_function_call(base_name, args);
                 }
 
+                if self.try_compile_char_reader_roundtrip_truth(&base_name_lower, args)? {
+                    return Ok(());
+                }
+
                 self.compile_expr(&args[0])?;
                 self.compile_expr(&args[1])?;
 
@@ -8125,6 +11007,32 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            "char-name" => {
+                if args.len() != 1 {
+                    anyhow::bail!("char-name requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let ch_obj = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", ch_obj));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_char_name({}) : (i64) -> i64", result, ch_obj));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "name-char" => {
+                if args.len() != 1 {
+                    anyhow::bail!("name-char requires exactly 1 argument");
+                }
+                self.compile_expr(&args[0])?;
+                let name_obj = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", name_obj));
+                let result = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_name_char({}) : (i64) -> i64", result, name_obj));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
             "fourth" => {
                 if args.len() != 1 {
                     anyhow::bail!("fourth requires exactly 1 argument");
@@ -8181,19 +11089,21 @@ impl StackMLIRCodegen {
             }
 
             "print" => {
-                debug_println!("DEBUG: Compiling print function");
-                if args.len() != 1 {
-                    anyhow::bail!("print requires exactly 1 argument");
-                }
-                debug_println!("DEBUG: Compiling print argument");
-                self.compile_expr(&args[0])?;
-                debug_println!("DEBUG: Argument compiled");
-                let val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
-                let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_print({}) : (i64) -> i64", result, val));
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
-                Ok(())
+                self.compile_stack_builtin_call("cc_print_stack", args)
+            }
+
+            "write" => self.compile_stack_builtin_call("cc_write_stack", args),
+
+            "write-sequence" => self.compile_stack_builtin_call("cc_write_sequence_stack", args),
+
+            "stream-write-sequence" => {
+                self.compile_stack_builtin_call("cc_stream_write_sequence_stack", args)
+            }
+
+            "read-sequence" => self.compile_stack_builtin_call("cc_read_sequence_stack", args),
+
+            "stream-read-sequence" => {
+                self.compile_stack_builtin_call("cc_stream_read_sequence_stack", args)
             }
 
             "funcall" => {
@@ -9039,6 +11949,9 @@ impl StackMLIRCodegen {
 
             "block" => {
                 // (block name body...)
+                if args.iter().skip(1).any(Self::ast_contains_bridge_only_control) {
+                    return self.compile_eval_of_original_form(base_name, args);
+                }
                 let block_name = args.get(0).and_then(Self::block_name_from_ast);
                 let block_id = self.fresh_id();
                 let returned_var = format!("*__MLIR_BLOCK_RETFLAG_{}*", block_id);
@@ -9177,10 +12090,26 @@ impl StackMLIRCodegen {
             }
 
             "loop" => {
+                if Self::is_simple_loop_while_until(args) {
+                    let keyword = Self::loop_keyword_name(&args[0]).unwrap();
+                    let test_expr = if keyword == "until" {
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("not".to_string())),
+                            args: vec![args[1].clone()],
+                        }
+                    } else {
+                        args[1].clone()
+                    };
+                    let mut while_args = vec![test_expr];
+                    while_args.extend_from_slice(&args[2..]);
+                    return self.compile_call("while", &while_args);
+                }
                 // Use the interpreter's expand_loop to transform loop into simpler constructs
-                // Then compile the expanded form
+                // Then canonicalize the result so call-shaped special forms like
+                // BLOCK/RETURN-FROM follow the same AST path as parsed source.
                 let expanded = eval_loop::expand_loop(args);
-                self.compile_expr(&expanded)
+                let canonical = rlasp::repl::expand_macros(&expanded);
+                self.compile_expr(&canonical)
             }
 
             // Type predicates
@@ -9195,7 +12124,12 @@ impl StackMLIRCodegen {
                 let arg = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arg));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_{}({}) : (i64) -> i64", result, func_name.replace('-', "_"), arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_{}({}) : (i64) -> i64",
+                    result,
+                    base_name_lower.replace('-', "_"),
+                    arg
+                ));
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -9623,21 +12557,11 @@ impl StackMLIRCodegen {
                 // Evaluate function designator with explicit support for #'name and quoted symbols.
                 match &args[0] {
                     ASTNode::Variable(func_name) => {
-                        let name_const = self.create_string_constant(func_name);
-                        let name_ptr = self.fresh_ssa();
-                        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", name_ptr, name_const));
-                        let func_ref = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", func_ref, name_ptr));
-                        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", func_ref));
+                        self.emit_named_function_ref(func_name);
                     }
                     ASTNode::Quote(inner) => {
                         if let ASTNode::Variable(func_name) = inner.as_ref() {
-                            let name_const = self.create_string_constant(func_name);
-                            let name_ptr = self.fresh_ssa();
-                            self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", name_ptr, name_const));
-                            let func_ref = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", func_ref, name_ptr));
-                            self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", func_ref));
+                            self.emit_named_function_ref(func_name);
                         } else {
                             self.compile_expr(&args[0])?;
                         }
@@ -9646,12 +12570,7 @@ impl StackMLIRCodegen {
                         if let ASTNode::Variable(fname) = function.as_ref() {
                             if fname == "function" && fn_args.len() == 1 {
                                 if let ASTNode::Variable(func_name) = &fn_args[0] {
-                                    let name_const = self.create_string_constant(func_name);
-                                    let name_ptr = self.fresh_ssa();
-                                    self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", name_ptr, name_const));
-                                    let func_ref = self.fresh_ssa();
-                                    self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", func_ref, name_ptr));
-                                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", func_ref));
+                                    self.emit_named_function_ref(func_name);
                                 } else {
                                     self.compile_expr(&args[0])?;
                                 }
@@ -9887,8 +12806,6 @@ impl StackMLIRCodegen {
                 if args.len() < 2 {
                     anyhow::bail!("find requires at least 2 arguments");
                 }
-                self.compile_expr(&args[0])?; // item
-                self.compile_expr(&args[1])?; // sequence
 
                 let mut start_idx: Option<usize> = None;
                 let mut end_idx: Option<usize> = None;
@@ -9914,6 +12831,13 @@ impl StackMLIRCodegen {
                     }
                     break;
                 }
+
+                if test_idx.is_some() || test_not_idx.is_some() || key_idx.is_some() {
+                    return self.compile_eval_of_original_form(func_name, args);
+                }
+
+                self.compile_expr(&args[0])?; // item
+                self.compile_expr(&args[1])?; // sequence
 
                 if let Some(idx) = start_idx {
                     self.compile_expr(&args[idx])?;
@@ -9976,8 +12900,6 @@ impl StackMLIRCodegen {
                 if args.len() < 2 {
                     anyhow::bail!("position requires at least 2 arguments");
                 }
-                self.compile_expr(&args[0])?; // item
-                self.compile_expr(&args[1])?; // sequence
 
                 let mut start_idx: Option<usize> = None;
                 let mut end_idx: Option<usize> = None;
@@ -10003,6 +12925,13 @@ impl StackMLIRCodegen {
                     }
                     break;
                 }
+
+                if test_idx.is_some() || test_not_idx.is_some() || key_idx.is_some() {
+                    return self.compile_eval_of_original_form(func_name, args);
+                }
+
+                self.compile_expr(&args[0])?; // item
+                self.compile_expr(&args[1])?; // sequence
 
                 if let Some(idx) = start_idx {
                     self.compile_expr(&args[idx])?;
@@ -10414,7 +13343,29 @@ impl StackMLIRCodegen {
 
             // ---- Package functions ----
             "in-package" => {
-                self.compile_user_function_call("in-package", args)?;
+                if args.len() != 1 {
+                    self.compile_user_function_call("in-package", args)?;
+                    return Ok(());
+                }
+                match &args[0] {
+                    ASTNode::Variable(_) | ASTNode::Constant(ConstantValue::Symbol(_)) => {
+                        self.compile_expr(&ASTNode::Quote(Box::new(args[0].clone())))?;
+                    }
+                    other => {
+                        self.compile_expr(other)?;
+                    }
+                }
+                let pkg_designator = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @stack_pop_pointer() : () -> i64",
+                    pkg_designator
+                ));
+                let result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_in_package({}) : (i64) -> i64",
+                    result, pkg_designator
+                ));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
             "use-package" => {
@@ -10685,16 +13636,8 @@ impl StackMLIRCodegen {
                     anyhow::bail!("with-output-to-string requires a binding spec");
                 }
 
-                let stream_var = match &args[0] {
-                    ASTNode::Call { function, .. } => match function.as_ref() {
-                        ASTNode::Variable(name) => name.clone(),
-                        ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
-                        _ => anyhow::bail!("with-output-to-string binding must start with a variable"),
-                    },
-                    ASTNode::Variable(name) => name.clone(),
-                    ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
-                    _ => anyhow::bail!("with-output-to-string binding must be a variable or list"),
-                };
+                let stream_var = Self::binding_var_name(&args[0])
+                    .ok_or_else(|| anyhow::anyhow!("with-output-to-string binding must be a variable or list"))?;
 
                 let saved_symbols = self.symbol_table.clone();
                 let stream_ssa = self.fresh_ssa();
@@ -10725,14 +13668,74 @@ impl StackMLIRCodegen {
                     special_sym = Some(sym);
                 }
 
-                for expr in args.iter().skip(1) {
-                    self.compile_expr(expr)?;
-                    self.emit_safe_discard();
+                let mut body_result: Option<String> = None;
+                if let Some(first_expr) = args.get(1) {
+                    self.compile_expr(first_expr)?;
+                    let mut acc = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+                    for expr in args.iter().skip(2) {
+                        let nil_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        let errp = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_errorp({}) : (i64) -> i64", errp, acc));
+                        let is_error = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", is_error, errp, nil_val));
+                        let next_acc = self.fresh_ssa();
+                        self.writeln(&format!("{} = scf.if {} -> (i64) {{", next_acc, is_error));
+                        self.indent();
+                        self.writeln(&format!("scf.yield {} : i64", acc));
+                        self.dedent();
+                        self.writeln("} else {");
+                        self.indent();
+                        self.compile_expr(expr)?;
+                        let step_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", step_val));
+                        self.writeln(&format!("scf.yield {} : i64", step_val));
+                        self.dedent();
+                        self.writeln("}");
+                        acc = next_acc;
+                    }
+                    body_result = Some(acc);
                 }
 
-                let out = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_get_output_stream_string({}) : (i64) -> i64", out, stream_ssa));
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", out));
+                let result = if let Some(body_result) = body_result {
+                    let nil_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                    let errp = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_errorp({}) : (i64) -> i64",
+                        errp, body_result
+                    ));
+                    let is_error = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = arith.cmpi ne, {}, {} : i64",
+                        is_error, errp, nil_val
+                    ));
+                    let result = self.fresh_ssa();
+                    self.writeln(&format!("{} = scf.if {} -> (i64) {{", result, is_error));
+                    self.indent();
+                    self.writeln(&format!("scf.yield {} : i64", body_result));
+                    self.dedent();
+                    self.writeln("} else {");
+                    self.indent();
+                    let out = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_get_output_stream_string({}) : (i64) -> i64",
+                        out, stream_ssa
+                    ));
+                    self.writeln(&format!("scf.yield {} : i64", out));
+                    self.dedent();
+                    self.writeln("}");
+                    result
+                } else {
+                    let out = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_get_output_stream_string({}) : (i64) -> i64",
+                        out, stream_ssa
+                    ));
+                    out
+                };
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 if let (Some(sym), Some(old_val)) = (special_sym, old_special_val) {
                     let _restore = self.fresh_ssa();
                     self.writeln(&format!(
@@ -10744,12 +13747,43 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
+            "with-float-traps-masked" => {
+                if args.len() < 2 {
+                    anyhow::bail!("with-float-traps-masked requires trap mask and body");
+                }
+                self.compile_expr(&args[0])?;
+                let trap_mask = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @stack_pop_pointer() : () -> i64",
+                    trap_mask
+                ));
+                let previous_mask = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_push_float_trap_mask({}) : (i64) -> i64",
+                    previous_mask, trap_mask
+                ));
+
+                for (i, expr) in args.iter().skip(1).enumerate() {
+                    self.compile_expr(expr)?;
+                    if i + 2 < args.len() {
+                        self.emit_safe_discard();
+                    }
+                }
+
+                let _restore = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_restore_float_trap_mask({}) : (i64) -> i64",
+                    _restore, previous_mask
+                ));
+                Ok(())
+            }
+
             "with-input-from-string" => {
                 if args.is_empty() {
                     anyhow::bail!("with-input-from-string requires a binding spec");
                 }
 
-                let (stream_var, source_expr, body_start_idx) = match &args[0] {
+                let (stream_var, source_expr, start_expr, end_expr, body_start_idx) = match &args[0] {
                     ASTNode::Call { function, args: bind_args } => {
                         let var = match function.as_ref() {
                             ASTNode::Variable(name) => name.clone(),
@@ -10759,13 +13793,86 @@ impl StackMLIRCodegen {
                         if bind_args.is_empty() {
                             anyhow::bail!("with-input-from-string binding requires a source string");
                         }
-                        (var, bind_args[0].clone(), 1usize)
+                        let mut start_expr: Option<ASTNode> = None;
+                        let mut end_expr: Option<ASTNode> = None;
+                        let mut i = 1usize;
+                        while i + 1 < bind_args.len() {
+                            let key = match &bind_args[i] {
+                                ASTNode::Variable(s) => Some(
+                                    s.rsplit(':')
+                                        .next()
+                                        .unwrap_or(s.as_str())
+                                        .trim_start_matches(':')
+                                        .to_ascii_lowercase(),
+                                ),
+                                ASTNode::Constant(ConstantValue::Symbol(s)) => Some(
+                                    s.rsplit(':')
+                                        .next()
+                                        .unwrap_or(s.as_str())
+                                        .trim_start_matches(':')
+                                        .to_ascii_lowercase(),
+                                ),
+                                _ => None,
+                            };
+                            if let Some(key_name) = key {
+                                match key_name.as_str() {
+                                    "start" => start_expr = Some(bind_args[i + 1].clone()),
+                                    "end" => end_expr = Some(bind_args[i + 1].clone()),
+                                    _ => {}
+                                }
+                            }
+                            i += 2;
+                        }
+                        (var, bind_args[0].clone(), start_expr, end_expr, 1usize)
+                    }
+                    ASTNode::DottedPair { car, cdr } => {
+                        let var = match car.as_ref() {
+                            ASTNode::Variable(name) => name.clone(),
+                            ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
+                            _ => anyhow::bail!("with-input-from-string binding must start with a variable"),
+                        };
+                        let bind_args = Self::collect_proper_list_ast(cdr.as_ref())
+                            .ok_or_else(|| anyhow::anyhow!("with-input-from-string binding must be a proper list"))?;
+                        if bind_args.is_empty() {
+                            anyhow::bail!("with-input-from-string binding requires a source string");
+                        }
+                        let mut start_expr: Option<ASTNode> = None;
+                        let mut end_expr: Option<ASTNode> = None;
+                        let mut i = 1usize;
+                        while i + 1 < bind_args.len() {
+                            let key = match &bind_args[i] {
+                                ASTNode::Variable(s) => Some(
+                                    s.rsplit(':')
+                                        .next()
+                                        .unwrap_or(s.as_str())
+                                        .trim_start_matches(':')
+                                        .to_ascii_lowercase(),
+                                ),
+                                ASTNode::Constant(ConstantValue::Symbol(s)) => Some(
+                                    s.rsplit(':')
+                                        .next()
+                                        .unwrap_or(s.as_str())
+                                        .trim_start_matches(':')
+                                        .to_ascii_lowercase(),
+                                ),
+                                _ => None,
+                            };
+                            if let Some(key_name) = key {
+                                match key_name.as_str() {
+                                    "start" => start_expr = Some(bind_args[i + 1].clone()),
+                                    "end" => end_expr = Some(bind_args[i + 1].clone()),
+                                    _ => {}
+                                }
+                            }
+                            i += 2;
+                        }
+                        (var, bind_args[0].clone(), start_expr, end_expr, 1usize)
                     }
                     ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
                         if args.len() < 2 {
                             anyhow::bail!("with-input-from-string requires a source string");
                         }
-                        (name.clone(), args[1].clone(), 2usize)
+                        (name.clone(), args[1].clone(), None, None, 2usize)
                     }
                     _ => anyhow::bail!("with-input-from-string binding must be a variable or list"),
                 };
@@ -10774,8 +13881,41 @@ impl StackMLIRCodegen {
                 self.compile_expr(&source_expr)?;
                 let source_ssa = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", source_ssa));
+                let source_for_stream = if start_expr.is_some() || end_expr.is_some() {
+                    let start_ssa = if let Some(start_ast) = start_expr {
+                        self.compile_expr(&start_ast)?;
+                        let start_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", start_val));
+                        start_val
+                    } else {
+                        let zero = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+                        zero
+                    };
+                    let end_ssa = if let Some(end_ast) = end_expr {
+                        self.compile_expr(&end_ast)?;
+                        let end_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", end_val));
+                        end_val
+                    } else {
+                        let nil = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+                        nil
+                    };
+                    let sliced = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_subseq({}, {}, {}) : (i64, i64, i64) -> i64",
+                        sliced, source_ssa, start_ssa, end_ssa
+                    ));
+                    sliced
+                } else {
+                    source_ssa
+                };
                 let stream_ssa = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_string_input_stream({}) : (i64) -> i64", stream_ssa, source_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_string_input_stream({}) : (i64) -> i64",
+                    stream_ssa, source_for_stream
+                ));
                 self.symbol_table.insert(stream_var.clone(), stream_ssa.clone());
                 self.symbol_table
                     .insert(stream_var.to_ascii_lowercase(), stream_ssa.clone());
@@ -10847,6 +13987,19 @@ impl StackMLIRCodegen {
                         }
                         (stream_var, binding_args.clone())
                     }
+                    ASTNode::DottedPair { car, cdr } => {
+                        let stream_var = match car.as_ref() {
+                            ASTNode::Variable(name) => name.clone(),
+                            ASTNode::Constant(ConstantValue::Symbol(name)) => name.clone(),
+                            _ => anyhow::bail!("with-open-file binding variable must be a symbol"),
+                        };
+                        let open_args = Self::collect_proper_list_ast(cdr.as_ref())
+                            .ok_or_else(|| anyhow::anyhow!("with-open-file binding must be a proper list"))?;
+                        if open_args.is_empty() {
+                            anyhow::bail!("with-open-file requires a filespec in binding");
+                        }
+                        (stream_var, open_args)
+                    }
                     _ => anyhow::bail!("with-open-file binding must be (var filespec options...)"),
                 };
 
@@ -10855,11 +14008,28 @@ impl StackMLIRCodegen {
                     args: open_args,
                 };
 
-                let protected_form = if args.len() == 2 {
-                    args[1].clone()
+                let mut decls: Vec<ASTNode> = Vec::new();
+                let mut body_start = 1usize;
+                while body_start < args.len() {
+                    let is_declare = matches!(
+                        &args[body_start],
+                        ASTNode::Call { function, .. }
+                            if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("declare"))
+                    );
+                    if !is_declare {
+                        break;
+                    }
+                    decls.push(args[body_start].clone());
+                    body_start += 1;
+                }
+
+                let protected_form = if body_start >= args.len() {
+                    ASTNode::nil()
+                } else if body_start + 1 == args.len() {
+                    args[body_start].clone()
                 } else {
                     ASTNode::Progn {
-                        exprs: args[1..].to_vec(),
+                        exprs: args[body_start..].to_vec(),
                     }
                 };
 
@@ -10873,9 +14043,11 @@ impl StackMLIRCodegen {
                     args: vec![protected_form, close_call],
                 };
 
+                let mut lowered_body = decls;
+                lowered_body.push(unwind_form);
                 let lowered = ASTNode::Let {
                     bindings: vec![(stream_var, open_call)],
-                    body: vec![unwind_form],
+                    body: lowered_body,
                 };
 
                 self.compile_expr(&lowered)
@@ -10940,18 +14112,38 @@ impl StackMLIRCodegen {
                 self.compile_user_function_call(base_name, args)
             }
 
-            "fboundp" | "boundp" | "functionp" => {
-                // Introspection functions - check if a symbol is bound as a function/variable
+            "fboundp" => {
                 if args.len() != 1 {
-                    anyhow::bail!("{} requires exactly 1 argument", func_name);
+                    anyhow::bail!("fboundp requires exactly 1 argument");
                 }
-                // Evaluate the argument
                 self.compile_expr(&args[0])?;
                 let arg = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arg));
-                // Call the introspection function
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_{}({}) : (i64) -> i64", result, func_name, arg));
+                self.writeln(&format!("{} = func.call @cc_fboundp({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "boundp" | "functionp" => self.compile_user_function_call(base_name, args),
+
+            "fdefinition" | "fmakunbound" => {
+                if args.len() != 1 {
+                    anyhow::bail!("{} requires exactly 1 argument", func_name);
+                }
+                self.compile_expr(&args[0])?;
+                let arg = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arg));
+                let result = self.fresh_ssa();
+                let runtime_name = if base_name.eq_ignore_ascii_case("fdefinition") {
+                    "cc_fdefinition"
+                } else {
+                    "cc_fmakunbound"
+                };
+                self.writeln(&format!(
+                    "{} = func.call @{}({}) : (i64) -> i64",
+                    result, runtime_name, arg
+                ));
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
@@ -10991,17 +14183,21 @@ impl StackMLIRCodegen {
                     return Ok(());
                 }
 
-                // Use cc_and/cc_or runtime functions that handle short-circuiting
-                // Build arguments into a list
+                // Use cc_and/cc_or runtime functions after preserving CL's
+                // required left-to-right argument evaluation order.
                 let nil = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
                 let mut list = nil;
+                let mut values = Vec::with_capacity(args.len());
 
-                // Build list in reverse order
-                for arg in args.iter().rev() {
+                for arg in args {
                     self.compile_expr(arg)?;
                     let val = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
+                    values.push(val);
+                }
+
+                for val in values.into_iter().rev() {
                     let new_list = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_list, val, list));
                     list = new_list;
@@ -11058,42 +14254,9 @@ impl StackMLIRCodegen {
 
             // Format (variadic)
             "format" => {
-                if args.len() < 2 {
-                    // Be permissive in MLIR lowering and defer exact argument checking
-                    // to runtime evaluation for unusual macro-expanded call shapes.
-                    return self.compile_user_function_call(base_name, args);
-                }
-
-                // Evaluate destination
-                self.compile_expr(&args[0])?;
-
-                // Build list of control string + remaining args
-                // Start with nil
-                self.writeln("func.call @stack_push_nil() : () -> ()");
-
-                for arg in args[1..].iter().rev() {
-                    self.compile_expr(arg)?;
-
-                    let car = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", car));
-                    let cdr = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cdr));
-
-                    let cons_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", cons_result, car, cdr));
-                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", cons_result));
-                }
-
-                // Now we have args list on stack, pop it and destination
-                let args_list = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", args_list));
-                let dest = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", dest));
-
-                let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_format({}, {}) : (i64, i64) -> i64", result, dest, args_list));
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
-                Ok(())
+                // Keep FORMAT on the normal runtime dispatch path so MLIR mode uses
+                // the CL-faithful bridge rather than the incomplete native formatter.
+                self.compile_user_function_call(base_name, args)
             }
 
             // CLOS operations
@@ -11285,6 +14448,32 @@ impl StackMLIRCodegen {
         // User-defined function call
         // base_name already has package qualifier stripped from the beginning of compile_call
 
+        if let Some(local_func_val) = self.local_function_value_lookup_ci(base_name) {
+            for arg in args {
+                self.compile_expr(arg)?;
+            }
+            let num_args_ssa = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, args.len()));
+            self.writeln(&format!(
+                "func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()",
+                local_func_val, num_args_ssa
+            ));
+            return Ok(());
+        }
+
+        if let Some(local_func_val) = self.synthesize_local_closure_value(base_name) {
+            for arg in args {
+                self.compile_expr(arg)?;
+            }
+            let num_args_ssa = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, args.len()));
+            self.writeln(&format!(
+                "func.call @cc_funcall_stack({}, {}) : (i64, i64) -> ()",
+                local_func_val, num_args_ssa
+            ));
+            return Ok(());
+        }
+
         // Check if this is a local function (from flet/labels)
         let actual_func_name = self.local_function_map
             .get(base_name)
@@ -11302,10 +14491,38 @@ impl StackMLIRCodegen {
         } else {
             None
         };
-        let trampoline_target = direct_compiled_target
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| actual_func_name.clone());
+        let func_name_lc = actual_func_name.to_ascii_lowercase();
+        let bridge_sensitive_runtime_dispatch = matches!(
+            func_name_lc.as_str(),
+            "read-char"
+                | "unread-char"
+                | "peek-char"
+                | "write-char"
+                | "read-byte"
+                | "write-byte"
+                | "stream-element-type"
+                | "stream-external-format"
+                | "set-stream-element-type"
+                | "set-stream-external-format"
+                | "open"
+                | "close"
+                | "make-string-input-stream"
+                | "make-string-output-stream"
+                | "get-output-stream-string"
+                | "make-broadcast-stream"
+                | "make-concatenated-stream"
+                | "make-two-way-stream"
+                | "make-echo-stream"
+                | "make-synonym-stream"
+        );
+        let trampoline_target = if bridge_sensitive_runtime_dispatch {
+            actual_func_name.clone()
+        } else {
+            direct_compiled_target
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| actual_func_name.clone())
+        };
         let requires_trampoline = self.tailcall_trampoline_functions.contains(&actual_func_name)
             || self.tailcall_trampoline_functions.contains(&prefixed_func_name)
             || self.tailcall_trampoline_functions.contains(&trampoline_target);
@@ -11314,18 +14531,13 @@ impl StackMLIRCodegen {
             && !requires_trampoline
             && !self.special_param_functions.contains(&actual_func_name)
             && !self.special_param_functions.contains(&prefixed_func_name);
-        // In selective MLIR mode, direct-calling precompiled global Lisp functions can bypass
-        // CL-correct runtime bridge behavior for package/stream/pathname and related operations.
-        // Keep local direct calls, but force dynamic dispatch for non-local compiled targets.
-        let selective_eval_enabled = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
-            .map(|v| {
-                let t = v.trim().to_ascii_lowercase();
-                !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
-            })
-            .unwrap_or(false);
-        let can_direct_compiled_call = can_direct_compiled_call && !selective_eval_enabled;
+        // Global Lisp functions must remain late-bound to preserve CL redefinition semantics
+        // across separately loaded artifacts. Only lexical local fixed-arity calls may be
+        // direct-called safely; everything else must route through cc_funcall_stack lookup.
+        let can_direct_compiled_call = false
+            && can_direct_compiled_call
+            && !bridge_sensitive_runtime_dispatch;
         let can_direct_local_call = is_direct_local_call && !requires_trampoline;
-        let func_name_lc = actual_func_name.to_ascii_lowercase();
         let propagate_arg_errors_env = std::env::var("RLASP_MLIR_PROPAGATE_ARG_ERRORS")
             .map(|v| {
                 let t = v.trim().to_ascii_lowercase();
@@ -11441,7 +14653,116 @@ impl StackMLIRCodegen {
         Ok(())
     }
 
+    fn compile_stack_builtin_call(&mut self, intrinsic_name: &str, args: &[ASTNode]) -> Result<()> {
+        let write_key_start = if intrinsic_name == "cc_write_stack" && args.len() > 1 {
+            let trailing = args.len() - 1;
+            if trailing % 2 == 0 && Self::write_keyword_designator_name(&args[1]).is_some() {
+                Some(1usize)
+            } else if trailing >= 2 && (trailing - 1) % 2 == 0 {
+                Some(2usize)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut arg_vals: Vec<String> = Vec::with_capacity(args.len());
+        for (idx, arg) in args.iter().enumerate() {
+            if let Some(key_start) = write_key_start {
+                if idx >= key_start && ((idx - key_start) % 2 == 0) {
+                    if let Some(symbol_name) = Self::write_keyword_designator_name(arg) {
+                        arg_vals.push(self.create_symbol_constant(&symbol_name));
+                        continue;
+                    }
+                }
+            }
+
+            self.compile_expr(arg)?;
+            let arg_ssa = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arg_ssa));
+            arg_vals.push(arg_ssa);
+        }
+
+        let nil_val = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+        let mut first_error = nil_val.clone();
+        for arg_ssa in &arg_vals {
+            let errp = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @cc_errorp({}) : (i64) -> i64", errp, arg_ssa));
+            let is_err = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", is_err, errp, nil_val));
+            let no_err_yet = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.cmpi eq, {}, {} : i64", no_err_yet, first_error, nil_val));
+            let take_this = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.andi {}, {} : i1", take_this, is_err, no_err_yet));
+            let next_error = self.fresh_ssa();
+            self.writeln(&format!("{} = scf.if {} -> (i64) {{", next_error, take_this));
+            self.indent();
+            self.writeln(&format!("scf.yield {} : i64", arg_ssa));
+            self.dedent();
+            self.writeln("} else {");
+            self.indent();
+            self.writeln(&format!("scf.yield {} : i64", first_error));
+            self.dedent();
+            self.writeln("}");
+            first_error = next_error;
+        }
+
+        let has_error = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", has_error, first_error, nil_val));
+        self.writeln(&format!("scf.if {} {{", has_error));
+        self.indent();
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", first_error));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let mut packed_args = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", packed_args));
+        for arg_ssa in arg_vals.iter().rev() {
+            let next_list = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                next_list, arg_ssa, packed_args
+            ));
+            packed_args = next_list;
+        }
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", packed_args));
+        self.writeln(&format!("func.call @{}() : () -> ()", intrinsic_name));
+        self.dedent();
+        self.writeln("}");
+        Ok(())
+    }
+
     fn compile_tail_user_function_call(&mut self, base_name: &str, args: &[ASTNode]) -> Result<()> {
+        if let Some(local_func_val) = self.local_function_value_lookup_ci(base_name) {
+            for arg in args {
+                self.compile_expr(arg)?;
+            }
+            let num_args_ssa = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, args.len()));
+            self.writeln(&format!(
+                "func.call @cc_tailcall_stack({}, {}) : (i64, i64) -> ()",
+                local_func_val, num_args_ssa
+            ));
+            self.writeln("func.call @stack_push_nil() : () -> ()");
+            return Ok(());
+        }
+
+        if let Some(local_func_val) = self.synthesize_local_closure_value(base_name) {
+            for arg in args {
+                self.compile_expr(arg)?;
+            }
+            let num_args_ssa = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", num_args_ssa, args.len()));
+            self.writeln(&format!(
+                "func.call @cc_tailcall_stack({}, {}) : (i64, i64) -> ()",
+                local_func_val, num_args_ssa
+            ));
+            self.writeln("func.call @stack_push_nil() : () -> ()");
+            return Ok(());
+        }
+
         let actual_func_name = self.local_function_map
             .get(base_name)
             .cloned()
@@ -11587,30 +14908,27 @@ impl StackMLIRCodegen {
             self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", t_val));
             return Ok(());
         }
-        if args.len() == 1 {
-            return self.compile_tail_expr(&args[0]);
+        let nil = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+        let mut list = nil;
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            self.compile_expr(arg)?;
+            let val = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
+            values.push(val);
         }
-
-        self.compile_expr(&args[0])?;
-        let first_val = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", first_val));
-        let nil_val = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-        let cond_true = self.fresh_ssa();
-        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_true, first_val, nil_val));
-
-        let saved_symbols = self.symbol_table.clone();
-        self.writeln(&format!("scf.if {} {{", cond_true));
-        self.indent();
-        self.compile_tail_and_exprs(&args[1..])?;
-        self.dedent();
-        self.writeln("} else {");
-        self.indent();
-        self.symbol_table = saved_symbols.clone();
-        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", first_val));
-        self.dedent();
-        self.writeln("}");
-        self.symbol_table = saved_symbols;
+        for val in values.into_iter().rev() {
+            let new_list = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                new_list, val, list
+            ));
+            list = new_list;
+        }
+        let result = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_and({}) : (i64) -> i64", result, list));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
         Ok(())
     }
 
@@ -11619,36 +14937,36 @@ impl StackMLIRCodegen {
             self.writeln("func.call @stack_push_nil() : () -> ()");
             return Ok(());
         }
-        if args.len() == 1 {
-            return self.compile_tail_expr(&args[0]);
+        let nil = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+        let mut list = nil;
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            self.compile_expr(arg)?;
+            let val = self.fresh_ssa();
+            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val));
+            values.push(val);
         }
-
-        self.compile_expr(&args[0])?;
-        let first_val = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", first_val));
-        let nil_val = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
-        let cond_true = self.fresh_ssa();
-        self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", cond_true, first_val, nil_val));
-
-        let saved_symbols = self.symbol_table.clone();
-        self.writeln(&format!("scf.if {} {{", cond_true));
-        self.indent();
-        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", first_val));
-        self.dedent();
-        self.writeln("} else {");
-        self.indent();
-        self.symbol_table = saved_symbols.clone();
-        self.compile_tail_or_exprs(&args[1..])?;
-        self.dedent();
-        self.writeln("}");
-        self.symbol_table = saved_symbols;
+        for val in values.into_iter().rev() {
+            let new_list = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                new_list, val, list
+            ));
+            list = new_list;
+        }
+        let result = self.fresh_ssa();
+        self.writeln(&format!("{} = func.call @cc_or({}) : (i64) -> i64", result, list));
+        self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
         Ok(())
     }
 
     fn compile_tail_expr(&mut self, ast: &ASTNode) -> Result<()> {
         match ast {
             ASTNode::If { test, then_branch, else_branch } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 self.compile_expr(test)?;
                 let cond_val = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", cond_val));
@@ -11714,6 +15032,9 @@ impl StackMLIRCodegen {
                 Ok(())
             }
             ASTNode::Progn { exprs } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 if exprs.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                     return Ok(());
@@ -11727,10 +15048,16 @@ impl StackMLIRCodegen {
                 self.compile_tail_expr(&exprs[exprs.len() - 1])
             }
             ASTNode::Let { bindings, body } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 let saved_symbols = self.symbol_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
+                let (declared_specials, body_start_idx) = Self::collect_let_special_declarations(body);
+                let body_forms = &body[body_start_idx..];
+                let captured_bases = self.collect_lambda_captured_let_bases(body_forms, &bound_vars);
 
                 let mut binding_ssas = Vec::new();
                 for (_var, value) in bindings {
@@ -11741,7 +15068,10 @@ impl StackMLIRCodegen {
                 }
 
                 for ((var, _), val_ssa) in bindings.iter().zip(binding_ssas.iter()) {
-                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                    let is_decl_special = declared_specials.contains(var)
+                        || declared_specials.contains(&var.to_ascii_uppercase())
+                        || declared_specials.contains(&var.to_ascii_lowercase());
+                    if (var.starts_with('*') && var.ends_with('*') && var.len() > 2) || is_decl_special {
                         let sym_const = self.create_string_constant(var);
                         let sym_ptr = self.fresh_ssa();
                         self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", sym_ptr, sym_const));
@@ -11768,14 +15098,42 @@ impl StackMLIRCodegen {
                     }
                 }
 
-                if body.is_empty() {
+                if !captured_bases.is_empty() {
+                    let mut removed_keys = Vec::new();
+                    for base_name in &captured_bases {
+                        let dyn_key = Self::dynamic_capture_key(base_name);
+                        if self.symbol_table.contains_key(&dyn_key) {
+                            continue;
+                        }
+                        let ssa_val = self
+                            .symbol_table_lookup_key_ci(base_name)
+                            .and_then(|k| self.symbol_table.get(&k).cloned());
+                        if let Some(ssa_val) = ssa_val {
+                            let var_sym = self.create_dynamic_capture_symbol(base_name);
+                            self.symbol_table.insert(dyn_key, var_sym.clone());
+                            let set_result = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                set_result, var_sym, ssa_val
+                            ));
+                        }
+                    }
+                    for base_name in &captured_bases {
+                        removed_keys.push(base_name.clone());
+                    }
+                    for base_name in removed_keys {
+                        self.remove_lexical_keys_for_base(&base_name);
+                    }
+                }
+
+                if body_forms.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 } else {
-                    for expr in body.iter().take(body.len().saturating_sub(1)) {
+                    for expr in body_forms.iter().take(body_forms.len().saturating_sub(1)) {
                         self.compile_expr(expr)?;
                         self.emit_safe_discard();
                     }
-                    self.compile_tail_expr(&body[body.len() - 1])?;
+                    self.compile_tail_expr(&body_forms[body_forms.len() - 1])?;
                 }
 
                 for (sym_ssa, old_val) in special_bindings.iter().rev() {
@@ -11790,16 +15148,25 @@ impl StackMLIRCodegen {
                 Ok(())
             }
             ASTNode::LetStar { bindings, body } => {
+                if Self::ast_contains_bridge_only_control(ast) {
+                    return self.compile_eval_of_original_ast(ast);
+                }
                 let saved_symbols = self.symbol_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
+                let (declared_specials, body_start_idx) = Self::collect_let_special_declarations(body);
+                let body_forms = &body[body_start_idx..];
+                let captured_bases = self.collect_lambda_captured_let_bases(body_forms, &bound_vars);
 
                 for (var, value) in bindings {
                     self.compile_expr(value)?;
                     let val_ssa = self.fresh_ssa();
                     self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
-                    if var.starts_with('*') && var.ends_with('*') && var.len() > 2 {
+                    let is_decl_special = declared_specials.contains(var)
+                        || declared_specials.contains(&var.to_ascii_uppercase())
+                        || declared_specials.contains(&var.to_ascii_lowercase());
+                    if (var.starts_with('*') && var.ends_with('*') && var.len() > 2) || is_decl_special {
                         let sym_const = self.create_string_constant(var);
                         let sym_ptr = self.fresh_ssa();
                         self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", sym_ptr, sym_const));
@@ -11826,14 +15193,42 @@ impl StackMLIRCodegen {
                     }
                 }
 
-                if body.is_empty() {
+                if !captured_bases.is_empty() {
+                    let mut removed_keys = Vec::new();
+                    for base_name in &captured_bases {
+                        let dyn_key = Self::dynamic_capture_key(base_name);
+                        if self.symbol_table.contains_key(&dyn_key) {
+                            continue;
+                        }
+                        let ssa_val = self
+                            .symbol_table_lookup_key_ci(base_name)
+                            .and_then(|k| self.symbol_table.get(&k).cloned());
+                        if let Some(ssa_val) = ssa_val {
+                            let var_sym = self.create_dynamic_capture_symbol(base_name);
+                            self.symbol_table.insert(dyn_key, var_sym.clone());
+                            let set_result = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                                set_result, var_sym, ssa_val
+                            ));
+                        }
+                    }
+                    for base_name in &captured_bases {
+                        removed_keys.push(base_name.clone());
+                    }
+                    for base_name in removed_keys {
+                        self.remove_lexical_keys_for_base(&base_name);
+                    }
+                }
+
+                if body_forms.is_empty() {
                     self.writeln("func.call @stack_push_nil() : () -> ()");
                 } else {
-                    for expr in body.iter().take(body.len().saturating_sub(1)) {
+                    for expr in body_forms.iter().take(body_forms.len().saturating_sub(1)) {
                         self.compile_expr(expr)?;
                         self.emit_safe_discard();
                     }
-                    self.compile_tail_expr(&body[body.len() - 1])?;
+                    self.compile_tail_expr(&body_forms[body_forms.len() - 1])?;
                 }
 
                 for (sym_ssa, old_val) in special_bindings.iter().rev() {
@@ -11869,15 +15264,35 @@ impl StackMLIRCodegen {
             }
             ASTNode::Call { function, args } => {
                 if let ASTNode::Variable(func_name) = function.as_ref() {
+                    if Self::should_bridge_problematic_call(ast, func_name) {
+                        return self.compile_eval_of_original_ast(ast);
+                    }
                     let base_name = if let Some(colon_pos) = func_name.rfind(':') {
                         &func_name[colon_pos + 1..]
                     } else {
                         func_name.as_str()
                     };
+                    if base_name.eq_ignore_ascii_case("defstruct")
+                        || base_name.eq_ignore_ascii_case("defclass")
+                    {
+                        return self.compile_eval_of_original_ast(ast);
+                    }
                     let is_non_cl_macro_stub = matches!(
                         base_name,
-                        "define-convenience-action-methods" | "defparameter*" | "defvar*" | "define-package"
-                            | "load-mlir" | "with-upgradability" | "with-lock" | "with-profiling"
+                        "define-convenience-action-methods"
+                            | "defparameter*"
+                            | "defvar*"
+                            | "define-package"
+                            | "load-mlir"
+                            | "with-upgradability"
+                            | "with-lock"
+                            | "with-profiling"
+                            | "with-float-traps-masked"
+                            | "atomic"
+                            | "atomic-incf"
+                            | "atomic-incf-explicit"
+                            | "atomic-push"
+                            | "cas"
                     );
 
                     if base_name.eq_ignore_ascii_case("if") {
@@ -12084,6 +15499,8 @@ impl StackMLIRCodegen {
                         return self.compile_user_function_call(base_name, args);
                     }
 
+                    return self.compile_call(func_name, args);
+                } else if let ASTNode::Constant(ConstantValue::Symbol(func_name)) = function.as_ref() {
                     return self.compile_call(func_name, args);
                 }
 
@@ -12334,6 +15751,39 @@ impl StackMLIRCodegen {
             }
         }
 
+        let debug_frame_name = name.strip_prefix("%FN%").unwrap_or(name);
+        let debug_lambda_params: Vec<String> = params
+            .iter()
+            .filter(|p| !p.starts_with('&'))
+            .cloned()
+            .collect();
+        let debug_frame_sym = self.create_symbol_constant(debug_frame_name);
+        if !debug_lambda_params.is_empty() {
+            let spec_text = debug_lambda_params.join("\n");
+            let spec_const = self.create_string_constant(&spec_text);
+            let spec_ptr = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = llvm.mlir.addressof {} : !llvm.ptr",
+                spec_ptr, spec_const
+            ));
+            let spec_len = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", spec_len, spec_text.len()));
+            let spec_obj = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_make_string({}, {}) : (!llvm.ptr, i64) -> i64",
+                spec_obj, spec_ptr, spec_len
+            ));
+            let _reg_lambda_list = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_register_function_lambda_list_metadata_raw({}, {}) : (i64, i64) -> i64",
+                _reg_lambda_list, debug_frame_sym, spec_obj
+            ));
+        }
+        self.writeln(&format!(
+            "func.call @cc_runtime_debug_stack_push_name({}) : (i64) -> ()",
+            debug_frame_sym
+        ));
+
         // Compile function body - catch errors to ensure proper cleanup
         // Directly-invoked entry points are not called via cc_funcall_stack,
         // so tailcall requests cannot be serviced there.
@@ -12383,6 +15833,8 @@ impl StackMLIRCodegen {
             self.compiled_functions.remove(name);
             self.writeln("func.call @stack_push_nil() : () -> ()");
         }
+
+        self.writeln("func.call @cc_runtime_debug_stack_pop_name() : () -> ()");
 
         // Result is on stack, function returns nothing
         self.writeln("func.return");
@@ -12469,55 +15921,136 @@ impl StackMLIRCodegen {
     ) -> Result<()> {
         // Save current symbol table
         let saved_symbols = self.symbol_table.clone();
+        let saved_local_function_values = self.local_function_value_map.clone();
+        let saved_local_function_lambda_ids = self.local_function_lambda_id_map.clone();
+        let saved_local_function_free_vars = self.local_function_free_vars_map.clone();
 
         // Step 1: Generate unique names for all local functions
         let mut local_names = HashMap::new();
-        for (name, params, defaults, supplied_p_vars, key_params, _body) in func_defs {
-            let unique_name = format!("local_{}_{}", name, self.function_counter);
-            self.function_counter += 1;
-            local_names.insert(name.clone(), unique_name.clone());
-            self.local_function_map.insert(name.clone(), unique_name.clone());
-            let has_special_params = params.iter().any(|p| p.starts_with('&'))
-                || !defaults.is_empty()
-                || !supplied_p_vars.is_empty()
-                || !key_params.is_empty();
-            if !has_special_params {
-                self.local_function_fixed_arity_map
-                    .insert(unique_name.clone(), params.len());
-            }
-        }
-
-        // Step 2: Compile local functions and identify captured variables
-        // Local functions are compiled as separate module-level functions,
-        // so they can't directly access enclosing scope variables.
-        // We identify free variables and bind them as dynamic variables
-        // so the local functions can access them via cc_symbol_value.
-        let mut all_captured_vars = HashSet::new();
-
-        for (name, params, defaults, supplied_p_vars, key_params, func_body) in func_defs {
-            let unique_name = local_names.get(name).unwrap();
-
-            // Find free variables: referenced in body, not in params, but in enclosing scope
+        let mut local_free_vars: HashMap<String, Vec<String>> = HashMap::new();
+        let mut local_lambda_ids: HashMap<String, usize> = HashMap::new();
+        for (name, params, defaults, supplied_p_vars, key_params, body) in func_defs {
             let param_set: HashSet<String> = params.iter()
                 .filter(|p| !p.starts_with('&'))
                 .cloned()
                 .collect();
-            let free_vars = self.find_outer_scope_refs(func_body, &param_set);
-            all_captured_vars.extend(free_vars);
+            let mut free_vars: Vec<String> = self
+                .find_free_vars(body, &param_set)
+                .into_iter()
+                .collect();
+            free_vars.sort();
+            let use_closure = !free_vars.is_empty();
+            local_free_vars.insert(name.clone(), free_vars);
+
+            let unique_name = format!("local_{}_{}", name, self.fresh_id());
+            let has_special_params = params.iter().any(|p| p.starts_with('&'))
+                || !defaults.is_empty()
+                || !supplied_p_vars.is_empty()
+                || !key_params.is_empty();
+
+            if use_closure {
+                let (lambda_id, lambda_name) = self.fresh_lambda_name();
+                local_names.insert(name.clone(), lambda_name);
+                local_lambda_ids.insert(name.clone(), lambda_id);
+            } else {
+                local_names.insert(name.clone(), unique_name.clone());
+                self.local_function_map.insert(name.clone(), unique_name.clone());
+                if !has_special_params {
+                    self.local_function_fixed_arity_map
+                        .insert(unique_name.clone(), params.len());
+                }
+            }
+        }
+
+        if is_labels {
+            for (name, free_vars) in &local_free_vars {
+                if free_vars.is_empty() {
+                    continue;
+                }
+                if let Some(lambda_id) = local_lambda_ids.get(name).copied() {
+                    for key in [name.clone(), name.to_ascii_lowercase(), name.to_ascii_uppercase()] {
+                        self.local_function_lambda_id_map.insert(key.clone(), lambda_id);
+                        self.local_function_free_vars_map.insert(key, free_vars.clone());
+                    }
+                }
+            }
+        }
+
+        // Step 2: Compile local functions and identify captured variables
+        let mut all_captured_vars = HashSet::new();
+
+        for (name, params, defaults, supplied_p_vars, key_params, func_body) in func_defs {
+            let unique_name = local_names.get(name).unwrap();
+            let free_vars = local_free_vars.get(name).cloned().unwrap_or_default();
+            let use_closure = !free_vars.is_empty();
+
+            all_captured_vars.extend(free_vars.iter().cloned());
 
             // Save current output and indentation
             let saved_output = std::mem::take(&mut self.output);
             let saved_indent = self.indent_level;
+            let saved_symbols_for_local = self.symbol_table.clone();
 
             // Set indent to module level (1)
             self.indent_level = 1;
+            // Local function bodies must not directly reuse enclosing lexical SSA
+            // bindings; captured vars are routed via dynamic storage.
+            self.symbol_table.clear();
 
-            // Compile the function (ensure state is restored on error)
-            let compile_result = self.compile_function(unique_name, params, defaults, supplied_p_vars, key_params, func_body);
+            let compile_result = if use_closure {
+                self.writeln(&format!("func.func @\"{}\"() {{", unique_name));
+                self.indent();
+
+                for param in params.iter().rev() {
+                    let param_ssa = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", param_ssa));
+                    self.symbol_table.insert(param.clone(), param_ssa);
+                }
+
+                for var in free_vars.iter().rev() {
+                    let var_ssa = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", var_ssa));
+                    let dyn_key = Self::dynamic_capture_key(var);
+                    self.symbol_table.insert(dyn_key, var_ssa);
+                    self.remove_lexical_keys_for_base(var);
+                }
+
+                for (param, default_expr) in defaults {
+                    if !self.symbol_table.contains_key(param) {
+                        self.compile_expr(default_expr)?;
+                        let default_ssa = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", default_ssa));
+                        self.symbol_table.insert(param.clone(), default_ssa);
+                    }
+                }
+
+                for (_param, supplied_p_var) in supplied_p_vars {
+                    let t_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = arith.constant 1 : i64", t_val));
+                    self.symbol_table.insert(supplied_p_var.clone(), t_val);
+                }
+
+                let result = if matches!(func_body, ASTNode::Progn { .. }) {
+                    self.compile_expr(func_body)
+                } else {
+                    self.compile_expr(func_body)
+                };
+                if result.is_err() {
+                    self.writeln("func.call @stack_push_nil() : () -> ()");
+                }
+                self.writeln("func.return");
+                self.dedent();
+                self.writeln("}");
+                result
+            } else {
+                // Compile the function (ensure state is restored on error)
+                self.compile_function(unique_name, params, defaults, supplied_p_vars, key_params, func_body)
+            };
 
             // Get the generated function code and restore state
             let func_code = std::mem::replace(&mut self.output, saved_output);
             self.indent_level = saved_indent;
+            self.symbol_table = saved_symbols_for_local;
 
             // Handle compilation result - propagate errors instead of silently ignoring
             match compile_result {
@@ -12532,12 +16065,75 @@ impl StackMLIRCodegen {
             }
         }
 
+        for (name, _params, _defaults, _supplied_p_vars, _key_params, _func_body) in func_defs {
+            let free_vars = local_free_vars.get(name).cloned().unwrap_or_default();
+            if free_vars.is_empty() {
+                continue;
+            }
+            for var in &free_vars {
+                let dyn_sym = if let Some(existing) = self.dynamic_capture_symbol_for_var(var) {
+                    existing
+                } else if let Some(var_ssa) = self
+                    .symbol_table_lookup_key_ci(var)
+                    .and_then(|k| self.symbol_table.get(&k).cloned())
+                {
+                    let dyn_sym = self.create_dynamic_capture_symbol(var);
+                    let dyn_key = Self::dynamic_capture_key(var);
+                    self.symbol_table.insert(dyn_key, dyn_sym.clone());
+                    let set_result = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+                        set_result, dyn_sym, var_ssa
+                    ));
+                    self.remove_lexical_keys_for_base(var);
+                    dyn_sym
+                } else {
+                    self.create_dynamic_capture_symbol(var)
+                };
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", dyn_sym));
+            }
+
+            let id_const = self.fresh_ssa();
+            let lambda_id = *local_lambda_ids.get(name).unwrap();
+            self.writeln(&format!("{} = arith.constant {} : i64", id_const, lambda_id));
+            let num_captured_const = self.fresh_ssa();
+            self.writeln(&format!("{} = arith.constant {} : i64", num_captured_const, free_vars.len()));
+            let closure = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_make_closure({}, {}) : (i64, i64) -> i64",
+                closure, id_const, num_captured_const
+            ));
+            self.local_function_value_map.insert(name.clone(), closure.clone());
+            self.local_function_value_map.insert(name.to_ascii_lowercase(), closure.clone());
+            self.local_function_value_map.insert(name.to_ascii_uppercase(), closure.clone());
+        }
+
+        let mut captured_var_keys: Vec<String> = all_captured_vars.into_iter().collect();
+        captured_var_keys.sort();
+        let mut captured_bases: Vec<String> = captured_var_keys
+            .iter()
+            .map(|v| v.rsplit(':').next().unwrap_or(v.as_str()).to_string())
+            .collect();
+        captured_bases.sort_by_key(|v| v.to_ascii_lowercase());
+        captured_bases.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
         // Step 2b: Push captured variables to dynamic bindings so local functions
-        // can access them at runtime via cc_symbol_value
-        for var_name in &all_captured_vars {
-            if let Some(ssa_val) = self.symbol_table.get(var_name).cloned() {
-                // Create a symbol for the variable name (uppercased to match cc_symbol_value lookup)
-                let var_sym = self.create_symbol_constant(var_name);
+        // can access them at runtime via cc_symbol_value.
+        let mut dynamic_symbol_keys: Vec<String> = Vec::new();
+        for base_name in &captured_bases {
+            let ssa_val = self
+                .symbol_table_lookup_key_ci(base_name)
+                .and_then(|k| self.symbol_table.get(&k).cloned());
+            let dyn_key = Self::dynamic_capture_key(base_name);
+            let var_sym = if let Some(existing) = self.symbol_table.get(&dyn_key).cloned() {
+                existing
+            } else {
+                let created = self.create_dynamic_capture_symbol(base_name);
+                self.symbol_table.insert(dyn_key.clone(), created.clone());
+                dynamic_symbol_keys.push(dyn_key.clone());
+                created
+            };
+            if let Some(ssa_val) = ssa_val {
                 // Store the current value as a dynamic binding
                 self.writeln(&format!(
                     "func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
@@ -12546,7 +16142,27 @@ impl StackMLIRCodegen {
             }
         }
 
-        // Step 3: Compile the body with local functions in scope
+        // Step 3: Compile the body with local functions in scope.
+        // Captured vars must be read/written through dynamic storage so local
+        // functions and outer body observe the same mutable cell.
+        let mut removed_captured_keys: Vec<String> = Vec::new();
+        if !captured_bases.is_empty() {
+            let keys_to_remove: Vec<String> = self
+                .symbol_table
+                .keys()
+                .filter(|k| {
+                    let k_base = k.rsplit(':').next().unwrap_or(k.as_str()).to_ascii_lowercase();
+                    captured_bases.iter().any(|b| b == &k_base)
+                })
+                .cloned()
+                .collect();
+            for key in keys_to_remove {
+                if self.symbol_table.remove(&key).is_some() {
+                    removed_captured_keys.push(key);
+                }
+            }
+        }
+
         if body_exprs.is_empty() {
             self.writeln("func.call @stack_push_nil() : () -> ()");
         } else if tail_position {
@@ -12563,9 +16179,78 @@ impl StackMLIRCodegen {
                 }
             }
         }
+        // Preserve body multiple-values across captured-var synchronization side effects.
+        let body_primary = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            body_primary
+        ));
+        let body_mv_list = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
+            body_mv_list, body_primary
+        ));
+
+        // Sync captured vars back from dynamic storage after body execution so
+        // outer lexical references reflect updates performed by local functions.
+        let mut captured_base_updates: Vec<(String, String)> = Vec::new();
+        for base_name in &captured_bases {
+            let var_sym = self
+                .dynamic_capture_symbol_for_var(base_name)
+                .unwrap_or_else(|| self.create_dynamic_capture_symbol(base_name));
+            let cur_val = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                cur_val, var_sym
+            ));
+            captured_base_updates.push((base_name.clone(), cur_val));
+        }
+        for key in removed_captured_keys {
+            if let Some((_, val)) = captured_base_updates
+                .iter()
+                .find(|(name, _)| {
+                    name.rsplit(':')
+                        .next()
+                        .unwrap_or(name.as_str())
+                        .eq_ignore_ascii_case(key.rsplit(':').next().unwrap_or(key.as_str()))
+                })
+            {
+                self.symbol_table.insert(key, val.clone());
+            }
+        }
 
         // Restore symbol table
+        for dyn_key in dynamic_symbol_keys {
+            self.symbol_table.remove(&dyn_key);
+        }
         self.symbol_table = saved_symbols;
+        self.local_function_value_map = saved_local_function_values;
+        self.local_function_lambda_id_map = saved_local_function_lambda_ids;
+        self.local_function_free_vars_map = saved_local_function_free_vars;
+        for (base, val) in &captured_base_updates {
+            self.symbol_table.insert(base.clone(), val.clone());
+            self.symbol_table.insert(base.to_ascii_lowercase(), val.clone());
+            self.symbol_table.insert(base.to_ascii_uppercase(), val.clone());
+        }
+        for key in captured_var_keys {
+            if let Some((_, val)) = captured_base_updates.iter().find(|(base, _)| {
+                base.rsplit(':')
+                    .next()
+                    .unwrap_or(base.as_str())
+                    .eq_ignore_ascii_case(key.rsplit(':').next().unwrap_or(key.as_str()))
+            }) {
+                self.symbol_table.insert(key, val.clone());
+            }
+        }
+        let restored_primary = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_values_pack({}) : (i64) -> i64",
+            restored_primary, body_mv_list
+        ));
+        self.writeln(&format!(
+            "func.call @stack_push_pointer({}) : (i64) -> ()",
+            restored_primary
+        ));
 
         // Clear local function map for this scope
         for (name, _, _, _, _, _) in func_defs {

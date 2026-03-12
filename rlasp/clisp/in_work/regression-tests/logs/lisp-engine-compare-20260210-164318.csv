@@ -1,2 +1,0 @@
-file,eligible,skip_reason,baseline_engine,sbcl_status,sbcl_time_s,sbcl_match,clasp_status,clasp_time_s,clasp_match,irlasp_interpreter_status,irlasp_interpreter_time_s,irlasp_interpreter_match,irlasp_mlir_status,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s,irlasp_mlir_match
-"/tmp/time-verify.lisp",yes,"",sbcl,0,0.310000,MATCH,132,0.300000,NA,0,0.030000,MATCH,101,0.020000,0.020000,0.000000,NA

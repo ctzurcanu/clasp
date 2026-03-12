@@ -92,7 +92,8 @@ pub fn register_string_builtins(env: &mut HashMap<String, EvalResult>) {
 }
 
 pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
-    match name {
+    let name = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
+    match name.as_str() {
         "stringp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::String(_) | EvalResult::Array(_))))),
 
         "simple-string-p" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::String(_) | EvalResult::Array(_))))),
@@ -150,7 +151,7 @@ pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult
                 i += 2;
             }
 
-            let case_sensitive = matches!(name, "string=" | "string/=" | "string<" | "string>" | "string<=" | "string>=");
+            let case_sensitive = matches!(name.as_str(), "string=" | "string/=" | "string<" | "string>" | "string<=" | "string>=");
             let a_chars: Vec<char> = a_str.chars().collect();
             let b_chars: Vec<char> = b_str.chars().collect();
             let end1 = end1.min(a_chars.len());
@@ -177,7 +178,7 @@ pub fn call_string_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult
                 mismatch_pos = Some(a_sub.len().min(b_sub.len()));
             }
 
-            let result = match name {
+            let result = match name.as_str() {
                 "string=" | "string-equal" => {
                     if mismatch_pos.is_none() { EvalResult::Bool(true) } else { EvalResult::Nil }
                 }

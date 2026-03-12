@@ -40,6 +40,7 @@ impl VectorApi for super::VectorWrapper {
     }
 }
 
+#[cfg(feature = "cxx-bridge")]
 impl VectorApi for super::VectorCxx {
     fn new(x: f64, y: f64) -> Self {
         Self::new(x, y)
@@ -66,7 +67,9 @@ pub fn create_vector<T: VectorApi>(x: f64, y: f64) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::{VectorCxx, VectorWrapper};
+    use crate::ffi::VectorWrapper;
+    #[cfg(feature = "cxx-bridge")]
+    use crate::ffi::VectorCxx;
 
     #[test]
     fn test_libffi_backend() {
@@ -75,6 +78,7 @@ mod tests {
         assert_eq!(VectorApi::length(&v), 5.0);
     }
 
+    #[cfg(feature = "cxx-bridge")]
     #[test]
     fn test_cxx_backend() {
         let v: VectorCxx = create_vector(3.0, 4.0);
@@ -82,6 +86,7 @@ mod tests {
         assert_eq!(VectorApi::length(&v), 5.0);
     }
 
+    #[cfg(feature = "cxx-bridge")]
     #[test]
     fn test_polymorphic_usage() {
         fn compute_length<T: VectorApi>(x: f64, y: f64) -> f64 {

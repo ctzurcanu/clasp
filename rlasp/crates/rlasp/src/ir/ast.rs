@@ -154,6 +154,12 @@ pub enum ASTNode {
     /// Vector: #(elem1 elem2 ...)
     Vector(Vec<ASTNode>),
 
+    /// Multi-dimensional self-evaluating array literal: #2A(...), #3A(...), ...
+    ArrayLiteral {
+        dims: Vec<usize>,
+        elements: Vec<ASTNode>,
+    },
+
     // === CLOS (Common Lisp Object System) ===
     /// Define a class: (defclass name (superclasses...) (slots...) options...)
     Defclass {

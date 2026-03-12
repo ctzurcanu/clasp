@@ -53,14 +53,18 @@ pub mod eval_loop;
 pub mod eval_conditions;
 
 // Re-export main types and functions
-pub use eval_types::EvalResult;
+pub use eval_types::{EvalResult, Instance, next_instance_id};
 pub use eval_core::{
     eval,
     eval_with_persistent_env,
     expand_macros,
     macroexpand_all_to_ast,
     extract_params_with_defaults,
+    register_function_lambda_list_metadata,
+    symbol_resolves_without_lexical_capture,
     take_pending_mp_signal_condition,
 };
 pub use eval_list::apply_function;
-pub(crate) use eval_system::{result_to_ast, result_to_data_ast};
+pub use eval_system::{result_to_ast, result_to_data_ast};
+pub use eval_system::{array_dims_for_bridge, register_array_dims_for_bridge};
+pub use eval_system::register_raw_jit_object_handle;

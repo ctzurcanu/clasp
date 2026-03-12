@@ -1,0 +1,5 @@
+(in-package #:cl-user)
+(format t "before=~s ~a~%" *readtable* (ignore-errors (readtable-case *readtable*)))
+(let ((v (read-from-string "#\\U014A")))
+  (format t "value=~s~%" v))
+(format t "after=~s ~a~%" *readtable* (ignore-errors (readtable-case *readtable*)))

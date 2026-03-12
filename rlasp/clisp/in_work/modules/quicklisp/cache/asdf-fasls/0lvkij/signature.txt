@@ -1,0 +1,4 @@
+lisp-implementation-type: rlasp
+lisp-implementation-version: rlasp-0.1.0
+machine-type: aarch64
+machine-version: unknown

@@ -67,7 +67,9 @@ pub fn call_symbol_builtin(name: &str, args: &[EvalResult], env: &HashMap<String
                     Ok(EvalResult::Nil)
                 }
                 EvalResult::Symbol(s) => {
-                    env.get(s).cloned()
+                    super::eval_core::lookup_env_binding(s, env)
+                        .or_else(|| super::eval_types::get_dynamic_var(s))
+                        .or_else(|| super::eval_core::lookup_global_variable_binding(s))
                         .ok_or_else(|| format!("Unbound variable: {}", s))
                 }
                 _ => Err("symbol-value argument must be a symbol".to_string()),
@@ -77,10 +79,21 @@ pub fn call_symbol_builtin(name: &str, args: &[EvalResult], env: &HashMap<String
         "symbol-function" => {
             match args.get(0) {
                 Some(EvalResult::Symbol(s)) => {
-                    match env.get(s) {
-                        Some(EvalResult::Lambda { .. }) | Some(EvalResult::Macro { .. }) => {
-                            Ok(env.get(s).unwrap().clone())
-                        }
+                    let fn_key = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, s);
+                    let fn_base = s.rsplit(':').next().unwrap_or(s);
+                    let fn_base_key = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, fn_base);
+                    let found = super::eval_core::lookup_env_binding(&fn_key, env)
+                        .or_else(|| super::eval_core::lookup_env_binding(&fn_base_key, env))
+                        .or_else(|| super::eval_core::lookup_global_function_binding(&fn_key))
+                        .or_else(|| super::eval_core::lookup_global_function_binding(&fn_base_key))
+                        .or_else(|| super::eval_core::lookup_global_function_binding(s))
+                        .or_else(|| super::eval_core::lookup_env_binding(s, env));
+                    match found {
+                        Some(val @ EvalResult::Lambda { .. })
+                        | Some(val @ EvalResult::Macro { .. })
+                        | Some(val @ EvalResult::BuiltinFunction(_))
+                        | Some(val @ EvalResult::GenericFunction(_))
+                        | Some(val @ EvalResult::ForeignFunction(_)) => Ok(val),
                         _ => Err(format!("Undefined function: {}", s)),
                     }
                 }

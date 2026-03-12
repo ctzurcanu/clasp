@@ -13,17 +13,23 @@ LOG_DIR="$BASE_DIR/regression-tests/logs"
 RUNNER_FILE="$BASE_DIR/regression-tests/run-all-irlasp.lisp"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
+SUITE_REPEAT_COUNT="${SUITE_REPEAT_COUNT:-10}"
 COMPARE_CL_BASELINE="${COMPARE_CL_BASELINE:-1}"
 REQUIRE_CL_BASELINE_SUCCESS="${REQUIRE_CL_BASELINE_SUCCESS:-1}"
 CL_BASELINE_ENGINE="${CL_BASELINE_ENGINE:-clasp}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
 MLIR_SELECTIVE_EVAL="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
-MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-0}"
+MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-1}"
 IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-100000}"
+FORCE_BRIDGE_BUILTINS="${RLASP_FORCE_BRIDGE_BUILTINS:-1}"
 IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
+  exit 2
+fi
+if ! [[ "$SUITE_REPEAT_COUNT" =~ ^[0-9]+$ ]] || (( SUITE_REPEAT_COUNT < 1 )); then
+  echo "Error: SUITE_REPEAT_COUNT must be an integer >= 1 (got $SUITE_REPEAT_COUNT)" >&2
   exit 2
 fi
 MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-1}"
@@ -35,6 +41,9 @@ if [[ -n "$IRLASP_MEMORY_CEILING_MB" ]]; then
   IRLASP_ENV+=("RLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB")
   IRLASP_ENV+=("RLASP_MEMORY_CEILING_ACTION=exit")
   IRLASP_ENV+=("RLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS")
+fi
+if [[ -n "$FORCE_BRIDGE_BUILTINS" ]]; then
+  IRLASP_ENV+=("RLASP_FORCE_BRIDGE_BUILTINS=$FORCE_BRIDGE_BUILTINS")
 fi
 
 # Canonical suite test inventory for run-all-irlasp (47 suites, TOTAL 1953).
@@ -88,6 +97,14 @@ EXPECTED_SUITE_TOTALS=(
   [extensions]=10
   [run-program]=7
   [snapshot]=0
+)
+typeset -a CANONICAL_SUITES=(
+  defcallback-native lowlevel fastgf array0 tests01 finalizers strings01 cons01
+  sequences01 clos mop update-instance-abort numbers ehkiller package structures
+  symbol0 string-comparison0 bit-array0 bit-array1 character0 unicode hash-tables0
+  misc read01 printer01 streams01 environment01 types01 control01 iteration loop
+  numbers-core unwind encodings environment conditions float-features debug mp
+  interrupt posix btb system-construction extensions run-program snapshot
 )
 
 mkdir -p "$LOG_DIR"
@@ -154,6 +171,8 @@ parse_suite_metrics() {
       sub(/while evaluating.*/, "", token);
       sub(/^[[:space:]]+/, "", token);
       sub(/[[:space:]]+$/, "", token);
+      sub(/^"+/, "", token);
+      sub(/"+$/, "", token);
       if (match(token, /^[A-Za-z0-9._:+*\/<>=!?%&|-]+/)) {
         name=toupper(substr(token, RSTART, RLENGTH));
         # Corrupted MLIR traces can emit fake test labels like NIL.
@@ -264,6 +283,8 @@ parse_suite_statuses() {
       sub(/while evaluating.*/, "", token);
       sub(/^[[:space:]]+/, "", token);
       sub(/[[:space:]]+$/, "", token);
+      sub(/^"+/, "", token);
+      sub(/"+$/, "", token);
       if (match(token, /^[A-Za-z0-9._:+*\/<>=!?%&|-]+/)) {
         name=toupper(substr(token, RSTART, RLENGTH));
         if (name != "" && name != "NIL" && name != "T" && name !~ /^~/) {
@@ -555,6 +576,7 @@ run_jit_suite_with_phase_timing() {
     compile_env=(
       "RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR"
       "RLASP_MLIR_SELECTIVE_EVAL=$MLIR_SELECTIVE_EVAL"
+      "RLASP_MLIR_EVAL_LOAD_FOR_COMPILE=1"
       "RLASP_MLIR_EXEC_ARTIFACT=$MLIR_EXEC_ARTIFACT"
     )
   fi
@@ -583,14 +605,12 @@ run_jit_suite_with_phase_timing() {
     compile_end="$(now_mono_ts)"
     RUN_PHASE_COMPILE="$(float_sub "$compile_end" "$compile_start")"
 
-    if [[ ! -f "$artifact_path" ]]; then
-      # In compile-only suite runners, irlasp often emits suite-named artifacts
-      # (e.g. /tmp/numbers.mlirbc) rather than runner-named artifacts.
-      if [[ -f "$suite_artifact_path_lower" ]]; then
-        artifact_path="$suite_artifact_path_lower"
-      elif [[ -f "$suite_artifact_path_upper" ]]; then
-        artifact_path="$suite_artifact_path_upper"
-      fi
+    # Prefer suite artifacts over runner artifacts. Suite artifacts execute the
+    # compiled test file directly and avoid re-running framework preload forms.
+    if [[ -f "$suite_artifact_path_lower" ]]; then
+      artifact_path="$suite_artifact_path_lower"
+    elif [[ -f "$suite_artifact_path_upper" ]]; then
+      artifact_path="$suite_artifact_path_upper"
     fi
 
     if [[ ! -f "$artifact_path" ]]; then
@@ -668,8 +688,8 @@ run_jit_suite_with_phase_timing() {
   RUN_STATUS="$rc"
   RUN_ELAPSED="$(float_sub "$end" "$start")"
   if [[ -n "$exec_mark" ]]; then
-    RUN_PHASE_COMPILE="$(float_sub "$exec_mark" "$start")"
-    RUN_PHASE_EXEC="$(float_sub "$end" "$exec_mark")"
+  RUN_PHASE_COMPILE="$(float_sub "$exec_mark" "$start")"
+  RUN_PHASE_EXEC="$(float_sub "$end" "$exec_mark")"
   else
     RUN_PHASE_COMPILE="$RUN_ELAPSED"
     RUN_PHASE_EXEC="0.000000"
@@ -688,6 +708,17 @@ run_one_suite() {
   RUN_ELAPSED="0.000000"
   RUN_PHASE_COMPILE="0.000000"
   RUN_PHASE_EXEC="0.000000"
+
+  # Avoid stale /tmp MLIR artifacts from previous binaries/runs.
+  # Each suite should compile from current sources/runtime every invocation.
+  if [[ "$mode" == "mlir" ]]; then
+    rm -f \
+      "/tmp/${suite}.mlirbc" \
+      "/tmp/${suite:l}.mlirbc" \
+      "/tmp/${suite:u}.mlirbc" \
+      "/tmp/framework.mlirbc" \
+      "/tmp/set-unexpected-failures.mlirbc"
+  fi
 
   if [[ "$mode" == "mlir" || "$mode" == "fasl" ]]; then
     runner_file="$(build_single_suite_runner "$mode" "$suite")"
@@ -719,6 +750,7 @@ run_mode() {
   local log_file="$2"
   local summary_file="${log_file%.log}.summary.txt"
   local suites=()
+  local repeated_suites=()
   typeset -A suite_baseline_logs
   typeset -A suite_baseline_rcs
   typeset -A suite_baseline_engines
@@ -733,15 +765,22 @@ run_mode() {
   if [[ -n "$SUITES" ]]; then
     IFS=',' read -rA suites <<< "$SUITES"
   else
-    while IFS= read -r s; do
-      [[ -n "$s" ]] && suites+=("$s")
-    done < <(extract_suites)
+    suites=("${CANONICAL_SUITES[@]}")
   fi
+  local unique_suite_count="${#suites[@]}"
+  local rep suite
+  for ((rep=1; rep<=SUITE_REPEAT_COUNT; rep++)); do
+    for suite in "${suites[@]}"; do
+      repeated_suites+=("$suite")
+    done
+  done
 
   : > "$log_file"
   : > "$summary_file"
   echo "Running mode=$mode log=$log_file" | tee -a "$summary_file"
   echo "SUITE_TIMEOUT_S $SUITE_TIMEOUT_S" | tee -a "$summary_file"
+  echo "SUITE_REPEAT_COUNT $SUITE_REPEAT_COUNT" | tee -a "$summary_file"
+  echo "SUITE_RUNS_TOTAL ${#repeated_suites[@]}" | tee -a "$summary_file"
   echo "TIMEOUT_BIN ${TIMEOUT_BIN:-none}" | tee -a "$summary_file"
   echo "IRLASP_MEMORY_CEILING_MB $IRLASP_MEMORY_CEILING_MB" | tee -a "$summary_file"
   echo "IRLASP_MEMORY_CEILING_CHECK_MS $IRLASP_MEMORY_CEILING_CHECK_MS" | tee -a "$summary_file"
@@ -750,6 +789,7 @@ run_mode() {
     echo "MLIR_SELECTIVE_EVAL $MLIR_SELECTIVE_EVAL" | tee -a "$summary_file"
     echo "MLIR_EXEC_ARTIFACT $MLIR_EXEC_ARTIFACT" | tee -a "$summary_file"
     echo "MLIR_SPLIT_PROCESS $MLIR_SPLIT_PROCESS" | tee -a "$summary_file"
+    echo "RLASP_FORCE_BRIDGE_BUILTINS $FORCE_BRIDGE_BUILTINS" | tee -a "$summary_file"
     echo "IRLASP_GC_FREE_SPACE_DIVISOR $IRLASP_GC_FREE_SPACE_DIVISOR" | tee -a "$summary_file"
   fi
 
@@ -802,11 +842,11 @@ run_mode() {
   fi
   mode_start="$(now_mono_ts)"
 
-  for suite in "${suites[@]}"; do
+  for suite in "${repeated_suites[@]}"; do
     idx=$((idx+1))
-    local suite_log="$LOG_DIR/irlasp-${mode}-${STAMP}-${suite}.log"
+    local suite_log="$LOG_DIR/irlasp-${mode}-${STAMP}-${idx}-${suite}.log"
     local suite_elapsed suite_compile suite_exec
-    echo "[$idx/${#suites[@]}] suite=$suite" | tee -a "$summary_file"
+    echo "[$idx/${#repeated_suites[@]}] suite=$suite" | tee -a "$summary_file"
     run_one_suite "$mode" "$suite" "$suite_log"
     local rc="$RUN_STATUS"
     suite_elapsed="$RUN_ELAPSED"
@@ -955,7 +995,7 @@ run_mode() {
     extra_total_display="NA"
   fi
   printf '[HARNESS-TIMING] mode=%s suites=%s suite_time_sum_s=%s wall_clock_s=%s\n' \
-    "$mode" "${#suites[@]}" "$suite_time_sum" "$mode_wall_s" >> "$log_file"
+    "$mode" "${#repeated_suites[@]}" "$suite_time_sum" "$mode_wall_s" >> "$log_file"
   if [[ "$mode" == "mlir" ]]; then
     echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp CORRECT: $correct_total_display EXPECTED_FROM_CL: $expected_from_cl_total_display MISMATCH: $mismatch_total_display MISSING: $missing_total_display EXTRA: $extra_total_display SUITE_TIME_SUM_S $suite_time_sum MLIR_COMPILE_SUM_S $mode_compile_sum MLIR_EXEC_SUM_S $mode_exec_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
   elif [[ "$mode" == "fasl" ]]; then
@@ -963,7 +1003,7 @@ run_mode() {
   else
     echo "TOTAL $total FAILED $tf COMPILE_ERRORS $ce RUN_ERRORS $re NON_PASSING $nonpassing PASSED $tp CORRECT: $correct_total_display EXPECTED_FROM_CL: $expected_from_cl_total_display MISMATCH: $mismatch_total_display MISSING: $missing_total_display EXTRA: $extra_total_display SUITE_TIME_SUM_S $suite_time_sum WALL_CLOCK_S $mode_wall_s" >> "$summary_file"
   fi
-  echo "SUITES_TOTAL ${#suites[@]} SUITES_TIMED_OUT $timed_out CL_BASELINE_ERRORS $baseline_errors CL_BASELINE_UNAVAILABLE $baseline_unavailable CL_BASELINE_COMPARED_SUITES $compared_suites" >> "$summary_file"
+  echo "SUITES_TOTAL $unique_suite_count SUITE_REPEAT_COUNT $SUITE_REPEAT_COUNT SUITE_RUNS_TOTAL ${#repeated_suites[@]} SUITES_TIMED_OUT $timed_out CL_BASELINE_ERRORS $baseline_errors CL_BASELINE_UNAVAILABLE $baseline_unavailable CL_BASELINE_COMPARED_SUITES $compared_suites" >> "$summary_file"
   echo "Summary ($mode):"
   cat "$summary_file"
   echo

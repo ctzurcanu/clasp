@@ -170,10 +170,22 @@ impl Package {
         self.external_symbols.keys().cloned().collect()
     }
 
+    /// Get external symbol identities (values) as CL symbol designators.
+    pub fn get_external_symbol_identities(&self) -> Vec<String> {
+        self.external_symbols.values().cloned().collect()
+    }
+
     /// Get all symbols (internal + external)
     pub fn get_all_symbols(&self) -> Vec<String> {
         let mut symbols: Vec<String> = self.external_symbols.keys().cloned().collect();
         symbols.extend(self.internal_symbols.keys().cloned());
+        symbols
+    }
+
+    /// Get all present symbol identities (internal + external values).
+    pub fn get_all_symbol_identities(&self) -> Vec<String> {
+        let mut symbols: Vec<String> = self.external_symbols.values().cloned().collect();
+        symbols.extend(self.internal_symbols.values().cloned());
         symbols
     }
 
@@ -263,6 +275,14 @@ pub fn get_current_package() -> String {
     CURRENT_PACKAGE.with(|p| p.borrow().clone())
 }
 
+pub fn set_current_package_runtime(pkg_name: &str) {
+    let pkg_name = pkg_name.to_uppercase();
+    CURRENT_PACKAGE.with(|p| {
+        *p.borrow_mut() = pkg_name.clone();
+    });
+    let _ = rlasp_runtime::PACKAGE_MANAGER.set_current_package(&pkg_name);
+}
+
 pub fn is_package_locked(pkg_name: &str) -> bool {
     let key = pkg_name.to_uppercase();
     PACKAGES.with(|p| {
@@ -284,6 +304,22 @@ pub fn is_package_locked(pkg_name: &str) -> bool {
 
 pub fn is_current_package_locked() -> bool {
     is_package_locked(&get_current_package())
+}
+
+fn ensure_eval_package_registered(pkg_name: &str) {
+    let upper = pkg_name.to_uppercase();
+    let exists = PACKAGES.with(|p| p.borrow().contains_key(&upper));
+    if exists {
+        return;
+    }
+    if let Some(canon) = rlasp_jit::intrinsics::canonical_jit_package_name(&upper) {
+        PACKAGES.with(|p| {
+            let mut packages = p.borrow_mut();
+            packages
+                .entry(canon.clone())
+                .or_insert_with(|| Package::new(&canon, vec![]));
+        });
+    }
 }
 
 fn ensure_package_unlocked(pkg_name: &str, env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
@@ -358,17 +394,34 @@ fn package_designator_key(arg: &EvalResult) -> Result<String, String> {
                 Ok(name.to_uppercase())
             }
         }
-        _ => Err("package designator must be a package, symbol, or string".to_string()),
+        _ => {
+            if std::env::var("RLASP_DEBUG_PACKAGE_DESIGNATOR").is_ok() {
+                eprintln!(
+                    "[package-designator-error] arg={:?} stack=[{}]",
+                    arg,
+                    super::eval_core::debug_call_stack_summary()
+                );
+            }
+            Err("package designator must be a package, symbol, or string".to_string())
+        }
     }
 }
 
 fn designator_to_package_name(arg: &EvalResult) -> Result<String, String> {
     let key = package_designator_key(arg)?;
+    ensure_eval_package_registered(&key);
     let canonical = PACKAGES.with(|p| {
         p.borrow()
             .get(&key)
             .map(|pkg| pkg.get_name().to_string())
     });
+    let canonical = canonical.or_else(|| rlasp_jit::intrinsics::canonical_jit_package_name(&key));
+    if std::env::var("RLASP_DEBUG_PACKAGE_OPS").is_ok() {
+        eprintln!(
+            "[pkg-op][designator->package] arg={:?} key={:?} canonical={:?}",
+            arg, key, canonical
+        );
+    }
     Ok(canonical.unwrap_or(key))
 }
 
@@ -408,7 +461,18 @@ fn symbol_identity_of(arg: &EvalResult, default_pkg: Option<&str>) -> Result<Str
                 Ok("NIL".to_string())
             }
         }
-        EvalResult::Symbol(s) => Ok(s.to_string()),
+        EvalResult::Symbol(s) => {
+            let base = symbol_base_name(s);
+            if s.contains(':')
+                || default_pkg.is_none()
+                || base.eq_ignore_ascii_case("NIL")
+                || base.eq_ignore_ascii_case("T")
+            {
+                Ok(s.to_string())
+            } else {
+                Ok(format!("{}::{}", default_pkg.unwrap(), base))
+            }
+        }
         EvalResult::String(s) => {
             let base = symbol_base_name(s);
             if s.contains(':') || default_pkg.is_none() {
@@ -492,6 +556,55 @@ fn rebind_package_aliases(packages: &mut HashMap<String, Package>, package: Pack
     }
 }
 
+fn sync_jit_package_registry_from_eval() {
+    let snapshots = PACKAGES.with(|p| {
+        let packages = p.borrow();
+        let mut unique = std::collections::BTreeMap::<String, Package>::new();
+        for pkg in packages.values() {
+            unique.insert(pkg.get_name().to_uppercase(), pkg.clone());
+        }
+        unique
+            .into_values()
+            .map(|pkg| rlasp_jit::intrinsics::ClPackage {
+                name: pkg.get_name().to_uppercase(),
+                nicknames: pkg.nicknames.clone(),
+                use_list: pkg.use_list.clone(),
+                used_by_list: Vec::new(),
+                locked: pkg.locked,
+                exported_symbols: pkg.external_symbols.keys().cloned().collect(),
+                shadowing_symbols: pkg.shadowing_symbols.iter().cloned().collect(),
+                internal_symbols: pkg.internal_symbols.keys().cloned().collect(),
+            })
+            .collect::<Vec<_>>()
+    });
+    rlasp_jit::intrinsics::reset_jit_package_registry_from_eval(snapshots);
+    let current = get_current_package();
+    rlasp_jit::intrinsics::set_jit_current_package(&current);
+}
+
+fn mutate_package_and_aliases<F>(packages: &mut HashMap<String, Package>, pkg_name: &str, mutator: F) -> bool
+where
+    F: FnOnce(&mut Package),
+{
+    let key = pkg_name.to_uppercase();
+    let snapshot = packages
+        .get(&key)
+        .cloned()
+        .or_else(|| {
+            packages
+                .values()
+                .find(|pkg| pkg.get_name().eq_ignore_ascii_case(&key))
+                .cloned()
+        });
+    if let Some(mut pkg) = snapshot {
+        mutator(&mut pkg);
+        rebind_package_aliases(packages, pkg);
+        true
+    } else {
+        false
+    }
+}
+
 fn signal_condition_with_restart(
     condition: EvalResult,
     restart_name: Option<&str>,
@@ -571,6 +684,25 @@ fn signal_name_conflict(
     candidates: Vec<String>,
     env: &mut HashMap<String, EvalResult>,
 ) -> Result<Option<String>, String> {
+    if std::env::var("RLASP_DEBUG_NAME_CONFLICT")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+    {
+        let current_pkg = get_current_package();
+        let use_list = PACKAGES.with(|p| {
+            let packages = p.borrow();
+            packages
+                .get(&current_pkg)
+                .map(|pkg| pkg.get_use_list().clone())
+                .unwrap_or_default()
+        });
+        eprintln!(
+            "RLASP_DEBUG_NAME_CONFLICT current_package={} use_list={:?} candidates={:?}",
+            current_pkg,
+            use_list,
+            candidates
+        );
+    }
     let candidate_values = candidates
         .iter()
         .map(|s| EvalResult::Symbol(s.clone()))
@@ -587,6 +719,18 @@ fn signal_name_conflict(
     Ok(None)
 }
 
+fn debug_name_conflict_site(site: &str, pkg: &str, base: &str, candidates: &[String]) {
+    if std::env::var("RLASP_DEBUG_NAME_CONFLICT")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "RLASP_DEBUG_NAME_CONFLICT site={} package={} base={} candidates={:?}",
+            site, pkg, base, candidates
+        );
+    }
+}
+
 pub fn call_package_builtin(
     name: &str,
     args: &[EvalResult],
@@ -597,7 +741,11 @@ pub fn call_package_builtin(
         .rsplit(':')
         .next()
         .unwrap_or(name_lower_full.as_str());
-    match name_lower {
+    let debug_pkg_ops = std::env::var("RLASP_DEBUG_PACKAGE_OPS").is_ok();
+    if debug_pkg_ops {
+        eprintln!("[pkg-op] enter {} args={:?}", name_lower, args);
+    }
+    let result = match name_lower {
         "packagep" => {
             // Check if object is (or designates) a package.
             let is_pkg = match args.get(0) {
@@ -623,12 +771,15 @@ pub fn call_package_builtin(
             match args.get(0) {
                 Some(EvalResult::Character(c)) => {
                     let pkg_name = c.to_string().to_uppercase();
+                    ensure_eval_package_registered(&pkg_name);
                     PACKAGES.with(|p| {
                         let packages = p.borrow();
                         if let Some(pkg) = packages.get(&pkg_name) {
                             Ok(EvalResult::Package(pkg.get_name().to_string()))
-                        } else if rlasp_jit::intrinsics::is_jit_package(&pkg_name) {
-                            Ok(EvalResult::Package(pkg_name.clone()))
+                        } else if let Some(canon) =
+                            rlasp_jit::intrinsics::canonical_jit_package_name(&pkg_name)
+                        {
+                            Ok(EvalResult::Package(canon))
                         } else {
                             Ok(EvalResult::Nil)
                         }
@@ -646,6 +797,7 @@ pub fn call_package_builtin(
                         name.as_str()
                     };
                     let pkg_name = raw.to_uppercase();
+                    ensure_eval_package_registered(&pkg_name);
                     // Look up the package and return its canonical name
                     PACKAGES.with(|p| {
                         let packages = p.borrow();
@@ -654,8 +806,10 @@ pub fn call_package_builtin(
                             Ok(EvalResult::Package(pkg.get_name().to_string()))
                         } else {
                             // Check JIT package registry (populated during load-mlir)
-                            if rlasp_jit::intrinsics::is_jit_package(&pkg_name) {
-                                Ok(EvalResult::Package(pkg_name.clone()))
+                            if let Some(canon) =
+                                rlasp_jit::intrinsics::canonical_jit_package_name(&pkg_name)
+                            {
+                                Ok(EvalResult::Package(canon))
                             } else {
                                 Ok(EvalResult::Nil)
                             }
@@ -665,10 +819,15 @@ pub fn call_package_builtin(
                 // Package object passed directly
                 Some(EvalResult::Package(name)) => {
                     let key = name.to_uppercase();
+                    ensure_eval_package_registered(&key);
                     PACKAGES.with(|p| {
                         let packages = p.borrow();
                         if let Some(pkg) = packages.get(&key) {
                             Ok(EvalResult::Package(pkg.get_name().to_string()))
+                        } else if let Some(canon) =
+                            rlasp_jit::intrinsics::canonical_jit_package_name(&key)
+                        {
+                            Ok(EvalResult::Package(canon))
                         } else {
                             Ok(EvalResult::Nil)
                         }
@@ -1011,23 +1170,78 @@ pub fn call_package_builtin(
             };
 
             let symbols = symbol_list_from_arg(&args[0], Some(&pkg_name))?;
+            if debug_pkg_ops {
+                eprintln!("[pkg-op][export] pkg={} symbols={:?}", pkg_name, symbols);
+            }
             for sym in symbols {
                 let base = symbol_base_name(&sym);
                 let source_state = PACKAGES.with(|p| {
                     let packages = p.borrow();
                     packages.get(&pkg_name).map(|pkg| {
+                        let mut inherited_sym: Option<String> = None;
+                        let mut inherited_conflict = false;
+                        for used in pkg.get_use_list() {
+                            if let Some(used_pkg) = packages.get(used) {
+                                if let Some(sym) = used_pkg.external_symbols.get(&base) {
+                                    if let Some(prev) = &inherited_sym {
+                                        if !prev.eq_ignore_ascii_case(sym) {
+                                            inherited_conflict = true;
+                                            break;
+                                        }
+                                    } else {
+                                        inherited_sym = Some(sym.clone());
+                                    }
+                                }
+                            }
+                        }
                         (
                             pkg.internal_symbols.get(&base).cloned(),
                             pkg.external_symbols.get(&base).cloned(),
+                            inherited_sym,
+                            inherited_conflict,
                         )
                     })
                 });
-                let (internal_sym, external_sym) = source_state.unwrap_or((None, None));
+                if debug_pkg_ops {
+                    eprintln!(
+                        "[pkg-op][export] sym={} base={} source_state={:?}",
+                        sym, base, source_state
+                    );
+                    if source_state.is_none() {
+                        let keys = PACKAGES.with(|p| {
+                            let packages = p.borrow();
+                            let mut keys = packages.keys().cloned().collect::<Vec<_>>();
+                            keys.sort();
+                            keys
+                        });
+                        eprintln!(
+                            "[pkg-op][export] missing-pkg pkg_name={:?} pkg_len={} pkg_bytes={:?} keys={:?}",
+                            pkg_name,
+                            pkg_name.len(),
+                            pkg_name.as_bytes(),
+                            keys
+                        );
+                    }
+                }
+                let (internal_sym, external_sym, inherited_sym, inherited_conflict) =
+                    source_state.unwrap_or((None, None, None, false));
 
                 let export_sym = if let Some(es) = &external_sym {
                     es.clone()
                 } else if let Some(isym) = &internal_sym {
                     isym.clone()
+                } else if inherited_conflict {
+                    let continued = signal_package_error(
+                        &format!("Symbol {} is inherited ambiguously in {}", sym, pkg_name),
+                        env,
+                        true,
+                    );
+                    if continued.is_err() {
+                        return continued;
+                    }
+                    sym.clone()
+                } else if let Some(inherited) = &inherited_sym {
+                    inherited.clone()
                 } else {
                     let continued = signal_package_error(
                         &format!("Symbol {} is not accessible in {}", sym, pkg_name),
@@ -1039,6 +1253,12 @@ pub fn call_package_builtin(
                     }
                     sym.clone()
                 };
+                if debug_pkg_ops {
+                    eprintln!(
+                        "[pkg-op][export] sym={} export_sym={} internal={:?} external={:?} inherited={:?} inherited_conflict={}",
+                        sym, export_sym, internal_sym, external_sym, inherited_sym, inherited_conflict
+                    );
+                }
 
                 // Resolve conflicts in packages using this package.
                 let users = PACKAGES.with(|p| {
@@ -1052,6 +1272,9 @@ pub fn call_package_builtin(
                         .map(|pkg| pkg.get_name().to_string())
                         .collect::<Vec<_>>()
                 });
+                if debug_pkg_ops {
+                    eprintln!("[pkg-op][export] sym={} users={:?}", sym, users);
+                }
                 for user in users {
                     let (present, inherited_other, is_shadowing) = PACKAGES.with(|p| {
                         let packages = p.borrow();
@@ -1079,6 +1302,12 @@ pub fn call_package_builtin(
                         }
                         (present, inherited, shadowing)
                     });
+                    if debug_pkg_ops {
+                        eprintln!(
+                            "[pkg-op][export] sym={} user={} present={:?} inherited_other={:?} shadowing={}",
+                            sym, user, present, inherited_other, is_shadowing
+                        );
+                    }
 
                     if is_shadowing {
                         // A shadowing symbol suppresses inherited name conflicts.
@@ -1087,7 +1316,9 @@ pub fn call_package_builtin(
 
                     if let Some(old_present) = present {
                         if !old_present.eq_ignore_ascii_case(&export_sym) {
-                            let chosen = signal_name_conflict(vec![old_present.clone(), export_sym.clone()], env)?;
+                            let candidates = vec![old_present.clone(), export_sym.clone()];
+                            debug_name_conflict_site("export/present", &user, &base, &candidates);
+                            let chosen = signal_name_conflict(candidates, env)?;
                             let chosen = match chosen {
                                 Some(c) => c,
                                 None => continue,
@@ -1109,7 +1340,9 @@ pub fn call_package_builtin(
                         }
                     } else if let Some(old_inherited) = inherited_other {
                         if !old_inherited.eq_ignore_ascii_case(&export_sym) {
-                            let chosen = signal_name_conflict(vec![old_inherited.clone(), export_sym.clone()], env)?;
+                            let candidates = vec![old_inherited.clone(), export_sym.clone()];
+                            debug_name_conflict_site("export/inherited", &user, &base, &candidates);
+                            let chosen = signal_name_conflict(candidates, env)?;
                             let chosen = chosen.unwrap_or(old_inherited.clone());
                             PACKAGES.with(|p| {
                                 let mut packages = p.borrow_mut();
@@ -1125,13 +1358,32 @@ pub fn call_package_builtin(
                 }
 
                 if !matches!(external_sym, Some(ref e) if e.eq_ignore_ascii_case(&export_sym)) {
+                    if debug_pkg_ops {
+                        eprintln!(
+                            "[pkg-op][export] sym={} finalizing pkg={} export_sym={}",
+                            sym, pkg_name, export_sym
+                        );
+                    }
                     ensure_package_unlocked(&pkg_name, env)?;
                     PACKAGES.with(|p| {
                         let mut packages = p.borrow_mut();
-                        if let Some(pkg) = packages.get_mut(&pkg_name) {
+                        if mutate_package_and_aliases(&mut packages, &pkg_name, |pkg| {
                             pkg.add_external_symbol_identity(&base, &export_sym);
+                        }) {
+                            // updated
                         }
                     });
+                    if debug_pkg_ops {
+                        let rebound = PACKAGES.with(|p| {
+                            p.borrow()
+                                .get(&pkg_name)
+                                .and_then(|pkg| pkg.external_symbols.get(&base).cloned())
+                        });
+                        eprintln!(
+                            "[pkg-op][export] sym={} rebound_external={:?}",
+                            sym, rebound
+                        );
+                    }
                 }
             }
 
@@ -1158,6 +1410,7 @@ pub fn call_package_builtin(
             if args.is_empty() {
                 return Ok(EvalResult::Boolean(true));
             }
+            let debug_import_eq = std::env::var("RLASP_DEBUG_IMPORT_EQ").is_ok();
 
             // Get package name
             let pkg_name = if args.len() > 1 {
@@ -1178,37 +1431,51 @@ pub fn call_package_builtin(
                         .get(&pkg_name)
                         .and_then(|pkg| pkg.internal_symbols.get(&base).cloned().or_else(|| pkg.external_symbols.get(&base).cloned()))
                 });
+                if debug_import_eq {
+                    eprintln!(
+                        "[pkg-import] pkg={} base={} sym={} existing={:?} current={}",
+                        pkg_name,
+                        base,
+                        sym,
+                        existing,
+                        get_current_package()
+                    );
+                }
 
                 if let Some(existing_sym) = existing {
                     if existing_sym.eq_ignore_ascii_case(&sym) {
+                        if debug_import_eq {
+                            eprintln!("[pkg-import] noop continue");
+                        }
                         continue;
                     }
-                    let chosen = signal_name_conflict(vec![existing_sym.clone(), sym.clone()], env)?;
-                    let chosen = match chosen {
-                        Some(c) => c,
-                        None => continue,
-                    };
-                    if !chosen.eq_ignore_ascii_case(&existing_sym) && !chosen.eq_ignore_ascii_case(&sym) {
-                        return signal_package_error("resolve-conflict must select one of the candidates", env, false);
+                    let candidates = vec![existing_sym.clone(), sym.clone()];
+                    debug_name_conflict_site("import/present", &pkg_name, &base, &candidates);
+                    let chosen = signal_name_conflict(candidates, env)?
+                        .unwrap_or(existing_sym.clone());
+                    if !chosen.eq_ignore_ascii_case(&sym) {
+                        continue;
                     }
-                    if chosen.eq_ignore_ascii_case(&sym) {
-                        ensure_package_unlocked(&pkg_name, env)?;
-                        PACKAGES.with(|p| {
-                            let mut packages = p.borrow_mut();
-                            if let Some(pkg) = packages.get_mut(&pkg_name) {
-                                pkg.add_internal_symbol_identity(&base, &sym);
-                                pkg.external_symbols.remove(&base);
-                            }
-                        });
-                    }
+                    ensure_package_unlocked(&pkg_name, env)?;
+                    PACKAGES.with(|p| {
+                        let mut packages = p.borrow_mut();
+                        if mutate_package_and_aliases(&mut packages, &pkg_name, |pkg| {
+                            pkg.add_internal_symbol_identity(&base, &sym);
+                            pkg.external_symbols.remove(&base);
+                        }) {
+                            // updated
+                        }
+                    });
                     continue;
                 }
 
                 ensure_package_unlocked(&pkg_name, env)?;
                 PACKAGES.with(|p| {
                     let mut packages = p.borrow_mut();
-                    if let Some(pkg) = packages.get_mut(&pkg_name) {
+                    if mutate_package_and_aliases(&mut packages, &pkg_name, |pkg| {
                         pkg.add_internal_symbol_identity(&base, &sym);
+                    }) {
+                        // updated
                     }
                 });
             }
@@ -1254,6 +1521,21 @@ pub fn call_package_builtin(
             ensure_package_unlocked(&target_pkg, env)?;
 
             for used_pkg in &pkgs_to_use {
+                let already_using = PACKAGES.with(|p| {
+                    let packages = p.borrow();
+                    packages
+                        .get(&target_pkg)
+                        .map(|pkg| {
+                            pkg.get_use_list()
+                                .iter()
+                                .any(|u| u.eq_ignore_ascii_case(used_pkg))
+                        })
+                        .unwrap_or(false)
+                });
+                if already_using {
+                    continue;
+                }
+
                 let exported = PACKAGES.with(|p| {
                     let packages = p.borrow();
                     packages
@@ -1302,7 +1584,9 @@ pub fn call_package_builtin(
 
                     if let Some(old_present) = present {
                         if !old_present.eq_ignore_ascii_case(&new_sym) {
-                            let chosen = signal_name_conflict(vec![old_present.clone(), new_sym.clone()], env)?
+                            let candidates = vec![old_present.clone(), new_sym.clone()];
+                            debug_name_conflict_site("use-package/present", &target_pkg, &base, &candidates);
+                            let chosen = signal_name_conflict(candidates, env)?
                                 .unwrap_or(old_present.clone());
                             PACKAGES.with(|p| {
                                 let mut packages = p.borrow_mut();
@@ -1321,7 +1605,9 @@ pub fn call_package_builtin(
                         }
                     } else if let Some(old_inherited) = inherited_other {
                         if !old_inherited.eq_ignore_ascii_case(&new_sym) {
-                            let chosen = signal_name_conflict(vec![old_inherited.clone(), new_sym.clone()], env)?
+                            let candidates = vec![old_inherited.clone(), new_sym.clone()];
+                            debug_name_conflict_site("use-package/inherited", &target_pkg, &base, &candidates);
+                            let chosen = signal_name_conflict(candidates, env)?
                                 .unwrap_or(old_inherited.clone());
                             PACKAGES.with(|p| {
                                 let mut packages = p.borrow_mut();
@@ -1338,8 +1624,10 @@ pub fn call_package_builtin(
 
                 PACKAGES.with(|p| {
                     let mut packages = p.borrow_mut();
-                    if let Some(pkg) = packages.get_mut(&target_pkg) {
+                    if mutate_package_and_aliases(&mut packages, &target_pkg, |pkg| {
                         pkg.use_package(used_pkg);
+                    }) {
+                        // updated
                     }
                 });
             }
@@ -1549,11 +1837,11 @@ pub fn call_package_builtin(
             // Remove symbol from package
             let removed = PACKAGES.with(|p| {
                 let mut packages = p.borrow_mut();
-                if let Some(pkg) = packages.get_mut(&pkg_name) {
-                    pkg.unintern(&sym_name)
-                } else {
-                    false
-                }
+                let mut did_remove = false;
+                let found = mutate_package_and_aliases(&mut packages, &pkg_name, |pkg| {
+                    did_remove = pkg.unintern(&sym_name);
+                });
+                found && did_remove
             });
 
             if !removed {
@@ -1578,14 +1866,18 @@ pub fn call_package_builtin(
                 out
             });
             if candidates.len() > 1 {
-                let chosen = signal_name_conflict(candidates.clone(), env)?.unwrap_or_else(|| candidates[0].clone());
+                debug_name_conflict_site("unintern/inherited", &pkg_name, &sym_name, &candidates);
+                let chosen =
+                    signal_name_conflict(candidates.clone(), env)?.unwrap_or_else(|| candidates[0].clone());
                 PACKAGES.with(|p| {
                     let mut packages = p.borrow_mut();
-                    if let Some(pkg) = packages.get_mut(&pkg_name) {
+                    if mutate_package_and_aliases(&mut packages, &pkg_name, |pkg| {
                         pkg.add_internal_symbol_identity(&sym_name, &chosen);
                         if !pkg.shadowing_symbols.contains(&sym_name) {
                             pkg.shadowing_symbols.push(sym_name.clone());
                         }
+                    }) {
+                        // updated
                     }
                 });
             }
@@ -2093,5 +2385,36 @@ pub fn call_package_builtin(
         }
 
         _ => Err(format!("Unknown package builtin: {}", name)),
+    };
+    if result.is_ok()
+        && matches!(
+            name_lower,
+            "make-package"
+                | "package-add-nickname"
+                | "package-remove-nickname"
+                | "lock-package"
+                | "unlock-package"
+                | "export"
+                | "unexport"
+                | "import"
+                | "use-package"
+                | "unuse-package"
+                | "rename-package"
+                | "unintern"
+                | "intern"
+                | "delete-package"
+                | "shadow"
+                | "shadowing-import"
+                | "in-package"
+        )
+    {
+        sync_jit_package_registry_from_eval();
     }
+    if debug_pkg_ops {
+        match &result {
+            Ok(v) => eprintln!("[pkg-op] ok {} => {:?}", name_lower, v),
+            Err(e) => eprintln!("[pkg-op] err {} => {}", name_lower, e),
+        }
+    }
+    result
 }

@@ -94,8 +94,12 @@ impl MLIRCodegen {
         self.writeln("func.func private @cc_incf(i64) -> i64");
         self.writeln("func.func private @cc_reduce(i64, i64) -> i64");
         self.writeln("func.func private @cc_fboundp(i64) -> i64");
+        self.writeln("func.func private @cc_fdefinition(i64) -> i64");
+        self.writeln("func.func private @cc_fmakunbound(i64) -> i64");
         self.writeln("func.func private @cc_boundp(i64) -> i64");
         self.writeln("func.func private @cc_functionp(i64) -> i64");
+        self.writeln("func.func private @cc_push_float_trap_mask(i64) -> i64");
+        self.writeln("func.func private @cc_restore_float_trap_mask(i64) -> i64");
         self.writeln("func.func private @cc_format(i64, i64) -> i64");
         self.writeln("func.func private @cc_read_from_string(i64) -> i64");
         self.writeln("func.func private @cc_eval(i64) -> i64");

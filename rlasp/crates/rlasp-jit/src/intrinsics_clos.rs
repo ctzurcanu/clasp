@@ -381,6 +381,11 @@ pub extern "C" fn cc_clear_all_caches() -> usize {
 /// Returns: instance object
 #[no_mangle]
 pub extern "C" fn cc_make_instance(class_name: usize, initargs: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(class_name) {
+        if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("make-instance", &[class_name, initargs]) {
+            return bridged;
+        }
+    }
     let class_name_str = extract_string_from_cons_list(class_name);
 
     let registry = get_class_registry().lock().unwrap();
@@ -458,6 +463,25 @@ pub extern "C" fn cc_make_instance(class_name: usize, initargs: usize) -> usize 
 /// Returns: slot value
 #[no_mangle]
 pub extern "C" fn cc_slot_value(instance: usize, slot_name: usize) -> usize {
+    let trace_slot_bridge = std::env::var("RLASP_TRACE_SLOT_BRIDGE").is_ok();
+    // Slot access participates in UPDATE-INSTANCE-FOR-REDEFINED-CLASS and
+    // related CLOS machinery. The shallow native fallback cannot reproduce
+    // those semantics, so prefer the bridge whenever it is available.
+    if trace_slot_bridge {
+        eprintln!(
+            "[slot-bridge] slot-value instance=0x{:x} slot=0x{:x}",
+            instance, slot_name
+        );
+    }
+    if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("slot-value", &[instance, slot_name]) {
+        if trace_slot_bridge {
+            eprintln!("[slot-bridge] slot-value bridged");
+        }
+        return bridged;
+    }
+    if trace_slot_bridge {
+        eprintln!("[slot-bridge] slot-value fallback-native");
+    }
     let inst_obj = unsafe { LispObject::from_raw(instance) };
     let slot_name_str = extract_string_from_cons_list(slot_name);
 
@@ -474,6 +498,18 @@ pub extern "C" fn cc_slot_value(instance: usize, slot_name: usize) -> usize {
 /// Set slot value in an instance
 #[no_mangle]
 pub extern "C" fn cc_set_slot_value(instance: usize, slot_name: usize, new_value: usize) -> usize {
+    let trace_slot_bridge = std::env::var("RLASP_TRACE_SLOT_BRIDGE").is_ok();
+    if let Some(bridged) =
+        crate::intrinsics::try_eval_bridge_call("set-slot-value", &[instance, slot_name, new_value])
+    {
+        if trace_slot_bridge {
+            eprintln!("[slot-bridge] set-slot-value bridged");
+        }
+        return bridged;
+    }
+    if trace_slot_bridge {
+        eprintln!("[slot-bridge] set-slot-value fallback-native");
+    }
     let inst_obj = unsafe { LispObject::from_raw(instance) };
     let slot_name_str = extract_string_from_cons_list(slot_name);
     let new_val_obj = unsafe { LispObject::from_raw(new_value) };
@@ -857,6 +893,15 @@ fn get_object_class_name(obj: LispObject) -> String {
                                 if !err_ptr.is_null() {
                                     let err = unsafe { &*err_ptr };
                                     if let Some(msg) = &err.message {
+                                        if let Some(rest) = msg.strip_prefix("__RLASP_COND_HANDLE__:") {
+                                            if let Some((encoded_type, _handle)) = rest.split_once(':') {
+                                                if !encoded_type.is_empty()
+                                                    && !encoded_type.starts_with("__RLASP_BRIDGE_HANDLE__")
+                                                {
+                                                    return normalize_type_name(encoded_type);
+                                                }
+                                            }
+                                        }
                                         let upper = msg.to_ascii_uppercase();
                                         if upper.starts_with("FILE-ERROR") {
                                             return "FILE-ERROR".to_string();
@@ -1042,6 +1087,11 @@ pub extern "C" fn cc_find_class(class_name: usize) -> usize {
 /// Returns: class object
 #[no_mangle]
 pub extern "C" fn cc_class_of(object: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(object) {
+        if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("class-of", &[object]) {
+            return bridged;
+        }
+    }
     let obj = unsafe { LispObject::from_raw(object) };
 
     // For instances, return their class
@@ -1070,7 +1120,17 @@ pub extern "C" fn cc_class_of(object: usize) -> usize {
 /// Returns: symbol
 #[no_mangle]
 pub extern "C" fn cc_class_name(class: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(class) {
+        if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("class-name", &[class]) {
+            return bridged;
+        }
+    }
     let class_obj = unsafe { LispObject::from_raw(class) };
+
+    let class_name_str = extract_string_from_cons_list(class);
+    if !class_name_str.is_empty() {
+        return make_symbol(&class_name_str);
+    }
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
         let class = unsafe { &*class_ptr };
@@ -1087,6 +1147,11 @@ pub extern "C" fn cc_class_name(class: usize) -> usize {
 /// Returns: list of slot names
 #[no_mangle]
 pub extern "C" fn cc_class_slots(class: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(class) {
+        if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("class-slots", &[class]) {
+            return bridged;
+        }
+    }
     let class_obj = unsafe { LispObject::from_raw(class) };
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
@@ -1103,6 +1168,11 @@ pub extern "C" fn cc_class_slots(class: usize) -> usize {
 /// Returns: list of slot names
 #[no_mangle]
 pub extern "C" fn cc_class_direct_slots(class: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(class) {
+        if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("class-direct-slots", &[class]) {
+            return bridged;
+        }
+    }
     let class_obj = unsafe { LispObject::from_raw(class) };
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
@@ -1119,6 +1189,13 @@ pub extern "C" fn cc_class_direct_slots(class: usize) -> usize {
 /// Returns: list of class names
 #[no_mangle]
 pub extern "C" fn cc_class_direct_superclasses(class: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(class) {
+        if let Some(bridged) =
+            crate::intrinsics::try_eval_bridge_call("class-direct-superclasses", &[class])
+        {
+            return bridged;
+        }
+    }
     let class_obj = unsafe { LispObject::from_raw(class) };
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
@@ -1135,6 +1212,13 @@ pub extern "C" fn cc_class_direct_superclasses(class: usize) -> usize {
 /// Returns: list of class names in precedence order
 #[no_mangle]
 pub extern "C" fn cc_class_precedence_list(class: usize) -> usize {
+    if crate::intrinsics::is_bridge_handle_symbol_raw(class) {
+        if let Some(bridged) =
+            crate::intrinsics::try_eval_bridge_call("class-precedence-list", &[class])
+        {
+            return bridged;
+        }
+    }
     let class_obj = unsafe { LispObject::from_raw(class) };
 
     if let Some(class_ptr) = class_obj.as_class_ptr() {
@@ -1155,6 +1239,12 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
     let class_obj = unsafe { LispObject::from_raw(class_name) };
     let name_str = normalize_type_name(&extract_string_from_cons_list(class_name));
 
+    if let Some(alias_raw) = crate::intrinsics::lookup_deftype_alias_raw(&name_str) {
+        if alias_raw != class_name {
+            return cc_typep(object, alias_raw);
+        }
+    }
+
     if let Some(spec_ptr) = class_obj.as_cons_ptr() {
         let spec = unsafe { &*spec_ptr };
         if let Some(head) = symbol_name_if_symbol(spec.car()) {
@@ -1169,6 +1259,71 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
                         LispObject::nil().raw()
                     };
                 }
+            }
+        }
+    }
+
+    if let Some(spec_ptr) = class_obj.as_cons_ptr() {
+        let spec = unsafe { &*spec_ptr };
+        if let Some(head) = symbol_name_if_symbol(spec.car()) {
+            if normalize_type_name(&head) == "ARRAY" {
+                let dims = crate::intrinsics::array_dims_object(obj);
+                let is_array_like = matches!(get_object_class_name(obj).as_str(), "VECTOR" | "STRING");
+                if !is_array_like {
+                    return LispObject::nil().raw();
+                }
+
+                let mut rank_spec: Option<LispObject> = None;
+                if let Some(rest_ptr) = spec.cdr().as_cons_ptr() {
+                    let rest = unsafe { &*rest_ptr };
+                    if let Some(rank_ptr) = rest.cdr().as_cons_ptr() {
+                        let rank_cell = unsafe { &*rank_ptr };
+                        rank_spec = Some(maybe_unquote(rank_cell.car()));
+                    }
+                }
+
+                let rank_ok = match rank_spec {
+                    None => true,
+                    Some(r) if r.is_nil() => dims.is_empty(),
+                    Some(r) => {
+                        if let Some(n) = r.as_fixnum() {
+                            dims.len() == n as usize
+                        } else if let Some(rank_list_ptr) = r.as_cons_ptr() {
+                            let mut actual_dims = dims.iter();
+                            let mut current = Some(rank_list_ptr);
+                            let mut ok = true;
+                            while let Some(cell_ptr) = current {
+                                let cell = unsafe { &*cell_ptr };
+                                let spec_dim = maybe_unquote(cell.car());
+                                let Some(actual) = actual_dims.next() else {
+                                    ok = false;
+                                    break;
+                                };
+                                if let Some(n) = spec_dim.as_fixnum() {
+                                    if *actual as i64 != n {
+                                        ok = false;
+                                        break;
+                                    }
+                                } else if let Some(sym) = symbol_name_if_symbol(spec_dim) {
+                                    if normalize_type_name(&sym) != "*" {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                current = cell.cdr().as_cons_ptr();
+                            }
+                            ok && actual_dims.next().is_none()
+                        } else {
+                            true
+                        }
+                    }
+                };
+
+                return if rank_ok {
+                    LispObject::t().raw()
+                } else {
+                    LispObject::nil().raw()
+                };
             }
         }
     }
@@ -1229,6 +1384,7 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
             "PROCESS" => sym_name.starts_with("%PROCESS-"),
             "MUTEX" => sym_name.starts_with("%MUTEX-"),
             "RECURSIVE-MUTEX" => sym_name.starts_with("%RECURSIVE-MUTEX-"),
+            "RANDOM-STATE" => normalize_type_name(&sym_name) == "RANDOM-STATE",
             _ => false,
         };
         if is_match {
@@ -1376,8 +1532,17 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
     if is_error_subtype && (name_str == "SIMPLE-ERROR" || name_str == "SIMPLE-CONDITION") {
         return LispObject::t().raw();
     }
+    if matches!(obj_class.as_str(), "NAME-CONFLICT" | "PACKAGE-LOCK-VIOLATION")
+        && name_str == "PACKAGE-ERROR"
+    {
+        return LispObject::t().raw();
+    }
     if obj_class == "DIVISION-BY-ZERO" && name_str == "ARITHMETIC-ERROR" {
         return LispObject::t().raw();
+    }
+
+    if let Some(bridged) = crate::intrinsics::try_eval_bridge_call("typep", &[object, class_name]) {
+        return bridged;
     }
 
     LispObject::nil().raw()

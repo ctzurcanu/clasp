@@ -11,12 +11,20 @@ AOT_SCRIPT="/Users/christiantzurcanu/Documents/dev/clasp/rlasp/scripts/mlirbc_ao
 LOG_DIR="$BASE_DIR/regression-tests/logs"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
+SUITE_REPEAT_COUNT="${SUITE_REPEAT_COUNT:-10}"
 IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 MLIR_EVAL_LOAD_FOR_COMPILE="${RLASP_MLIR_EVAL_LOAD_FOR_COMPILE:-0}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
+FORCE_BRIDGE_BUILTINS="${RLASP_FORCE_BRIDGE_BUILTINS:-1}"
+AOT_DISABLE_GC="${RLASP_DISABLE_GC:-1}"
+AOT_KEEP_SUITE_ARTIFACTS="${AOT_KEEP_SUITE_ARTIFACTS:-0}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for AOT harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
+  exit 2
+fi
+if ! [[ "$SUITE_REPEAT_COUNT" =~ ^[0-9]+$ ]] || (( SUITE_REPEAT_COUNT < 1 )); then
+  echo "Error: SUITE_REPEAT_COUNT must be an integer >= 1 (got $SUITE_REPEAT_COUNT)" >&2
   exit 2
 fi
 
@@ -103,17 +111,25 @@ extract_suites() {
   ' "$RUNNER_FILE"
 }
 
+AOT_TRACE_TEST_PROGRESS="${RLASP_TRACE_TEST_PROGRESS:-0}"
+
 create_suite_runner() {
   local suite="$1"
-  local runner_path="$LOG_DIR/irlasp-aot-suite-${STAMP}-${suite}.lisp"
+  local run_id="$2"
+  local runner_path="$LOG_DIR/irlasp-aot-suite-${STAMP}-${run_id}-${suite}.lisp"
   {
     echo "(in-package :cl-user)"
-    cat "$BASE_DIR/regression-tests/framework.lisp"
-    cat "$BASE_DIR/regression-tests/set-unexpected-failures.lisp"
+    echo "(load \"$BASE_DIR/regression-tests/framework.lisp\")"
+    echo "(load \"$BASE_DIR/regression-tests/set-unexpected-failures.lisp\")"
     echo "(in-package #:clasp-tests)"
+    if [[ "$AOT_TRACE_TEST_PROGRESS" == "1" || "$AOT_TRACE_TEST_PROGRESS" == "true" ]]; then
+      echo "(setf *trace-test-progress* t)"
+    else
+      echo "(setf *trace-test-progress* nil)"
+    fi
     echo "(reset-clasp-tests)"
     echo "(message :emph \"~%Running $suite suite...\")"
-    cat "$BASE_DIR/regression-tests/$suite.lisp"
+    echo "(load \"$BASE_DIR/regression-tests/$suite.lisp\")"
     echo "(show-test-summary)"
     # Emit machine-readable counts to stderr so harness parsing is robust even if
     # suites dynamically rebind *standard-output*.
@@ -208,6 +224,7 @@ if [[ ! -x "$AOT_SCRIPT" ]]; then
 fi
 
 typeset -a suites
+typeset -a repeated_suites
 if [[ -n "$SUITES" ]]; then
   IFS=',' read -rA suites <<< "$SUITES"
 else
@@ -215,15 +232,24 @@ else
     [[ -n "$s" ]] && suites+=("$s")
   done < <(extract_suites)
 fi
+for ((rep=1; rep<=SUITE_REPEAT_COUNT; rep++)); do
+  for suite in "${suites[@]}"; do
+    repeated_suites+=("$suite")
+  done
+done
 
 : > "$MAIN_LOG"
 : > "$SUMMARY_FILE"
 echo "Running mode=mlir-aot log=$MAIN_LOG" | tee -a "$SUMMARY_FILE"
 echo "SUITE_TIMEOUT_S $SUITE_TIMEOUT_S" | tee -a "$SUMMARY_FILE"
+echo "SUITE_REPEAT_COUNT $SUITE_REPEAT_COUNT" | tee -a "$SUMMARY_FILE"
+echo "SUITE_RUNS_TOTAL ${#repeated_suites[@]}" | tee -a "$SUMMARY_FILE"
 echo "TIMEOUT_BIN ${TIMEOUT_BIN:-none}" | tee -a "$SUMMARY_FILE"
 echo "IRLASP_MEMORY_CEILING_MB $IRLASP_MEMORY_CEILING_MB" | tee -a "$SUMMARY_FILE"
 echo "IRLASP_MEMORY_CEILING_CHECK_MS $IRLASP_MEMORY_CEILING_CHECK_MS" | tee -a "$SUMMARY_FILE"
 echo "RLASP_MLIR_EVAL_LOAD_FOR_COMPILE $MLIR_EVAL_LOAD_FOR_COMPILE" | tee -a "$SUMMARY_FILE"
+echo "RLASP_FORCE_BRIDGE_BUILTINS $FORCE_BRIDGE_BUILTINS" | tee -a "$SUMMARY_FILE"
+echo "RLASP_DISABLE_GC $AOT_DISABLE_GC" | tee -a "$SUMMARY_FILE"
 echo "AOT_SCRIPT $AOT_SCRIPT" | tee -a "$SUMMARY_FILE"
 
 mode_start="$(now_mono_ts)"
@@ -245,15 +271,15 @@ nonpassing=0
 timed_out=0
 
 idx=0
-for suite in "${suites[@]}"; do
+for suite in "${repeated_suites[@]}"; do
   idx=$((idx + 1))
-  echo "[$idx/${#suites[@]}] suite=$suite" | tee -a "$SUMMARY_FILE"
+  echo "[$idx/${#repeated_suites[@]}] suite=$suite" | tee -a "$SUMMARY_FILE"
 
   expected_total="${EXPECTED_SUITE_TOTALS[$suite]:-0}"
-  suite_out_dir="$LOG_DIR/irlasp-mlir-aot-${STAMP}-${suite}"
+  suite_out_dir="$LOG_DIR/irlasp-mlir-aot-${STAMP}-${idx}-${suite}"
   mkdir -p "$suite_out_dir"
 
-  runner_file="$(create_suite_runner "$suite")"
+  runner_file="$(create_suite_runner "$suite" "$idx")"
   module_name="${runner_file:t:r}"
   artifact_path="/tmp/${module_name}.mlirbc"
   compile_log="$suite_out_dir/compile.log"
@@ -270,16 +296,18 @@ for suite in "${suites[@]}"; do
   compile_start="$(now_mono_ts)"
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_SELECTIVE_EVAL=1 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
+    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_SELECTIVE_EVAL=0 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
       RLASP_MLIR_EXEC_ARTIFACT=1 RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      RLASP_FORCE_BRIDGE_BUILTINS="$FORCE_BRIDGE_BUILTINS" \
       RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" \
       RLASP_MEMORY_CEILING_ACTION=exit \
       RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
       "$TIMEOUT_BIN" -k 5 "$SUITE_TIMEOUT_S" "$IRLASP_BIN" -m mlir "$runner_file" > "$compile_log" 2>&1
     compile_rc=$?
   else
-    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_SELECTIVE_EVAL=1 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
+    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_SELECTIVE_EVAL=0 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
       RLASP_MLIR_EXEC_ARTIFACT=1 RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      RLASP_FORCE_BRIDGE_BUILTINS="$FORCE_BRIDGE_BUILTINS" \
       RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" \
       RLASP_MEMORY_CEILING_ACTION=exit \
       RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
@@ -290,6 +318,14 @@ for suite in "${suites[@]}"; do
   compile_end="$(now_mono_ts)"
   compile_s="$(float_sub "$compile_end" "$compile_start")"
   mlirbc_compile_sum="$(float_add "$mlirbc_compile_sum" "$compile_s")"
+
+  if [[ ! -f "$artifact_path" ]]; then
+    typeset -a artifact_candidates
+    artifact_candidates=(/tmp/${module_name}*.mlirbc(Nom[1]))
+    if (( ${#artifact_candidates[@]} > 0 )); then
+      artifact_path="${artifact_candidates[1]}"
+    fi
+  fi
 
   lower_s="0.000000"
   translate_s="0.000000"
@@ -338,10 +374,22 @@ for suite in "${suites[@]}"; do
       exec_start="$(now_mono_ts)"
       set +e
       if [[ -n "$TIMEOUT_BIN" ]]; then
-        "$TIMEOUT_BIN" -k 5 "$SUITE_TIMEOUT_S" "$exe_path" > "$suite_log" 2>&1
+        env \
+          RLASP_FORCE_BRIDGE_BUILTINS="$FORCE_BRIDGE_BUILTINS" \
+          RLASP_DISABLE_GC="$AOT_DISABLE_GC" \
+          RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" \
+          RLASP_MEMORY_CEILING_ACTION=exit \
+          RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
+          "$TIMEOUT_BIN" -k 5 "$SUITE_TIMEOUT_S" "$exe_path" > "$suite_log" 2>&1
         run_rc=$?
       else
-        "$exe_path" > "$suite_log" 2>&1
+        env \
+          RLASP_FORCE_BRIDGE_BUILTINS="$FORCE_BRIDGE_BUILTINS" \
+          RLASP_DISABLE_GC="$AOT_DISABLE_GC" \
+          RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" \
+          RLASP_MEMORY_CEILING_ACTION=exit \
+          RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
+          "$exe_path" > "$suite_log" 2>&1
         run_rc=$?
       fi
       set -e
@@ -379,7 +427,7 @@ for suite in "${suites[@]}"; do
   passed_total=$((passed_total + suite_passed))
   failed_total=$((failed_total + suite_failed))
 
-  echo "SUITE ${suite:0:24} TOTAL $suite_total FAILED $suite_failed PASSED $suite_passed TIME_TOTAL_S $suite_total_s TIME_MLIRBC_COMPILE_S $compile_s TIME_AOT_NATIVE_BUILD_S $native_build_s TIME_AOT_LOWER_S $lower_s TIME_AOT_TRANSLATE_S $translate_s TIME_AOT_OBJECT_S $object_s TIME_AOT_LINK_EXE_S $link_exe_s TIME_AOT_EXEC_S $exec_s" | tee -a "$SUMMARY_FILE"
+  echo "SUITE ${suite:0:24} RUN $idx TOTAL $suite_total FAILED $suite_failed PASSED $suite_passed TIME_TOTAL_S $suite_total_s TIME_MLIRBC_COMPILE_S $compile_s TIME_AOT_NATIVE_BUILD_S $native_build_s TIME_AOT_LOWER_S $lower_s TIME_AOT_TRANSLATE_S $translate_s TIME_AOT_OBJECT_S $object_s TIME_AOT_LINK_EXE_S $link_exe_s TIME_AOT_EXEC_S $exec_s" | tee -a "$SUMMARY_FILE"
   {
     echo "===== SUITE $suite ====="
     echo "RUNNER $runner_file"
@@ -400,6 +448,11 @@ for suite in "${suites[@]}"; do
     cat "$suite_log"
     echo
   } >> "$MAIN_LOG"
+
+  if [[ "$AOT_KEEP_SUITE_ARTIFACTS" != "1" ]]; then
+    rm -f "$runner_file" "$artifact_path"
+    rm -rf "$suite_out_dir"
+  fi
 done
 
 mode_end="$(now_mono_ts)"
@@ -408,7 +461,7 @@ mode_wall_s="$(float_sub "$mode_end" "$mode_start")"
 nonpassing=$((failed_total + compile_errors + run_errors))
 
 echo "TOTAL $total FAILED $failed_total COMPILE_ERRORS $compile_errors RUN_ERRORS $run_errors NON_PASSING $nonpassing PASSED $passed_total SUITE_TIME_SUM_S $suite_time_sum MLIRBC_COMPILE_SUM_S $mlirbc_compile_sum AOT_NATIVE_BUILD_SUM_S $aot_native_build_sum AOT_LOWER_SUM_S $aot_lower_sum AOT_TRANSLATE_SUM_S $aot_translate_sum AOT_OBJECT_SUM_S $aot_object_sum AOT_LINK_EXE_SUM_S $aot_link_exe_sum AOT_EXEC_SUM_S $aot_exec_sum WALL_CLOCK_S $mode_wall_s" | tee -a "$SUMMARY_FILE"
-echo "SUITES_TOTAL ${#suites[@]} SUITES_TIMED_OUT $timed_out" | tee -a "$SUMMARY_FILE"
+echo "SUITES_TOTAL ${#suites[@]} SUITE_REPEAT_COUNT $SUITE_REPEAT_COUNT SUITE_RUNS_TOTAL ${#repeated_suites[@]} SUITES_TIMED_OUT $timed_out" | tee -a "$SUMMARY_FILE"
 
 echo "Summary (mlir-aot):"
 cat "$SUMMARY_FILE"

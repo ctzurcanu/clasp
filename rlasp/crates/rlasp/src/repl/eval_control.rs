@@ -273,7 +273,9 @@ pub(super) fn eval_return(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     if env.contains_key(BLOCK_CAPTURE_DEPTH_KEY) {
         if let Some(target_id) = find_visible_block_id("nil", env) {
             if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
+                let stack_snapshot = ACTIVE_BLOCK_STACK.with(|s| s.borrow().clone());
                 eprintln!("[return-raise] block=nil target={} value={:?}", target_id, return_val);
+                eprintln!("[return-raise] active-stack={:?}", stack_snapshot);
             }
             return Err(format!("RETURN-FROM-ID:{}:nil:{}", target_id, encoded));
         }
@@ -343,10 +345,12 @@ pub(super) fn eval_return_from(args: &[ASTNode], env: &mut HashMap<String, EvalR
     if env.contains_key(BLOCK_CAPTURE_DEPTH_KEY) {
         if let Some(target_id) = find_visible_block_id(&block_name, env) {
             if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
+                let stack_snapshot = ACTIVE_BLOCK_STACK.with(|s| s.borrow().clone());
                 eprintln!(
                     "[return-raise] block={} target={} value={:?}",
                     block_name, target_id, return_val
                 );
+                eprintln!("[return-raise] active-stack={:?}", stack_snapshot);
             }
             return Err(format!("RETURN-FROM-ID:{}:{}:{}", target_id, block_name, encoded));
         }
@@ -627,14 +631,8 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
 
     // Parse the iteration spec: (var list-form result-form?)
     let spec = &args[0];
-    let spec_parts = match spec {
-        ASTNode::Call { function, args: spec_args } => {
-            let mut parts = vec![*function.clone()];
-            parts.extend(spec_args.clone());
-            parts
-        }
-        _ => return Err("dolist spec must be a list".to_string()),
-    };
+    let spec_parts = super::eval_system::ast_list_elements(spec)
+        .map_err(|_| "dolist spec must be a list".to_string())?;
 
     if spec_parts.len() < 2 || spec_parts.len() > 3 {
         return Err("dolist spec must have 2 or 3 elements: (var list-form [result-form])".to_string());
@@ -1499,6 +1497,11 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             ],
                         };
                         last_value = eval_with_env(&nested_setf, env)?;
+                    } else if base_name.eq_ignore_ascii_case("readtable-case") && !place_args.is_empty() {
+                        let mut eval_args: Vec<EvalResult> = Vec::with_capacity(2);
+                        eval_args.push(super::eval_types::primary_value(value.clone()));
+                        eval_args.push(super::eval_types::primary_value(eval_with_env(&place_args[0], env)?));
+                        last_value = super::eval_readtable::set_readtable_case_builtin(&eval_args)?;
                     } else if func_name == "stream-element-type" && !place_args.is_empty() {
                         let stream = eval_with_env(&place_args[0], env)?;
                         let _ = super::eval_io::call_io_builtin(
@@ -1513,6 +1516,18 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             &[stream, value.clone()],
                         )?;
                         last_value = value.clone();
+                    } else if func_name == "documentation" && place_args.len() >= 2 {
+                        let target = eval_with_env(&place_args[0], env)?;
+                        let doc_type = eval_with_env(&place_args[1], env)?;
+                        match target {
+                            EvalResult::Symbol(sym) => {
+                                super::eval_symbol::set_symbol_property(&sym, doc_type, value.clone());
+                                last_value = value.clone();
+                            }
+                            _ => {
+                                last_value = value.clone();
+                            }
+                        }
                     } else
                     if func_name == "gethash" && place_args.len() >= 2 {
                         let key = eval_with_env(&place_args[0], env)?;
@@ -1810,23 +1825,33 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         // Try to find a setf function defined via (defun (setf name) ...)
                         // These are stored as %FN%(setf name) in the environment
                         let setf_fn_name = format!("{}(setf {})", super::eval_core::FUNCTION_NS_PREFIX, func_name);
-                        if let Some(func_val) = env.get(&setf_fn_name).cloned() {
-                            match func_val {
-                                EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
-                                    // Call the setf function with (new-value ...other-args)
-                                    // First arg is the new value, rest are the place args
-                                    let mut all_args: Vec<ASTNode> = Vec::new();
-                                    all_args.push(super::eval_system::result_to_ast_quoted(&value)?);
-                                    all_args.extend(place_args.iter().cloned());
-                                    last_value = super::eval_core::eval_lambda_call(
-                                        params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, &all_args, env
-                                    )?;
+                        let setf_fn = super::eval_core::lookup_env_binding(&setf_fn_name, env)
+                            .or_else(|| super::eval_core::lookup_global_function_binding(&setf_fn_name))
+                            .or_else(|| {
+                                let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                                if base_name.eq_ignore_ascii_case(func_name) {
+                                    None
+                                } else {
+                                    let base_setf = format!(
+                                        "{}(setf {})",
+                                        super::eval_core::FUNCTION_NS_PREFIX,
+                                        base_name
+                                    );
+                                    super::eval_core::lookup_env_binding(&base_setf, env)
+                                        .or_else(|| super::eval_core::lookup_global_function_binding(&base_setf))
                                 }
-                                _ => {
-                                    // Unknown accessor - just return the value without erroring
-                                    last_value = value.clone();
-                                }
+                            });
+                        if let Some(func_val) = setf_fn {
+                            // Call the setf function with evaluated values directly:
+                            // (new-value ...place-arguments)
+                            // This preserves non-printable runtime objects (instances, hash tables, etc.)
+                            // that would otherwise be degraded by AST round-tripping.
+                            let mut eval_args: Vec<EvalResult> = Vec::with_capacity(place_args.len() + 1);
+                            eval_args.push(value.clone());
+                            for arg_ast in place_args {
+                                eval_args.push(eval_with_env(arg_ast, env)?);
                             }
+                            last_value = super::eval_system::call_function_with_values(func_val, &eval_args, env)?;
                         } else {
                             // Unknown accessor - just return the value without erroring
                             // This allows files to parse even if we don't support the accessor
@@ -1972,6 +1997,46 @@ fn result_to_list(result: &EvalResult) -> Vec<EvalResult> {
     list
 }
 
+fn bind_pattern_value(pattern: &ASTNode, value: EvalResult, env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
+    match pattern {
+        ASTNode::Variable(name) => {
+            env.insert(name.clone(), value);
+            Ok(())
+        }
+        ASTNode::Constant(crate::ir::ConstantValue::Nil) => Ok(()),
+        ASTNode::Call { .. } | ASTNode::DottedPair { .. } => {
+            let nested = result_to_list(&value);
+            destructure_bind(pattern, &nested, env)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn ensure_destructuring_key_map(
+    key_map: &mut Option<HashMap<String, EvalResult>>,
+    data: &[EvalResult],
+    start_idx: usize,
+) {
+    if key_map.is_none() {
+        let mut map = HashMap::new();
+        let mut i = start_idx;
+        while i + 1 < data.len() {
+            if let EvalResult::Symbol(sym) = &data[i] {
+                if sym.starts_with(':') {
+                    map.insert(
+                        sym.trim_start_matches(':').to_ascii_lowercase(),
+                        data[i + 1].clone(),
+                    );
+                    i += 2;
+                    continue;
+                }
+            }
+            break;
+        }
+        *key_map = Some(map);
+    }
+}
+
 fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
     match pattern {
         ASTNode::Variable(name) => {
@@ -1996,6 +2061,7 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
             let mut data_idx = 0;
             let mut pattern_idx = 0;
             let mut mode = "required";
+            let mut key_map: Option<HashMap<String, EvalResult>> = None;
 
             // First element of Call is the function (first pattern element)
             let mut all_patterns = Vec::new();
@@ -2024,10 +2090,14 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
                                 env.insert(rest_name.clone(), rest_data);
                             }
                         }
-                        return Ok(());
+                        pattern_idx += 1;
+                        continue;
                     }
                     ASTNode::Variable(name) if name == "&key" || name == "&allow-other-keys" || name == "&aux" => {
-                        // Skip these for now - simplified implementation
+                        if name == "&key" {
+                            mode = "key";
+                        }
+                        // Keep permissive behavior for &allow-other-keys / &aux in this binder.
                         pattern_idx += 1;
                         continue;
                     }
@@ -2037,8 +2107,15 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
                         continue;
                     }
                     ASTNode::Variable(name) => {
-                        // Simple variable
-                        if data_idx < data.len() {
+                        if mode == "key" {
+                            ensure_destructuring_key_map(&mut key_map, data, data_idx);
+                            let key_name = name.trim_start_matches(':').to_ascii_lowercase();
+                            let value = key_map
+                                .as_ref()
+                                .and_then(|map| map.get(&key_name).cloned())
+                                .unwrap_or(EvalResult::Nil);
+                            env.insert(name.clone(), value);
+                        } else if data_idx < data.len() {
                             env.insert(name.clone(), data[data_idx].clone());
                             data_idx += 1;
                         } else if mode == "optional" {
@@ -2050,7 +2127,57 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
                     }
                     ASTNode::Call { function: inner_fn, args: inner_args } => {
                         // Could be (var default) for &optional, or nested destructuring
-                        if mode == "optional" {
+                        if mode == "key" {
+                            ensure_destructuring_key_map(&mut key_map, data, data_idx);
+
+                            let (key_name, var_name, default_ast, supplied_p) = if let ASTNode::Variable(var) = inner_fn.as_ref() {
+                                if var.starts_with(':') {
+                                    (
+                                        var.trim_start_matches(':').to_ascii_lowercase(),
+                                        inner_args
+                                            .get(0)
+                                            .and_then(|a| if let ASTNode::Variable(v) = a { Some(v.clone()) } else { None })
+                                            .unwrap_or_else(|| var.trim_start_matches(':').to_string()),
+                                        inner_args.get(1).cloned(),
+                                        inner_args
+                                            .get(2)
+                                            .and_then(|a| if let ASTNode::Variable(v) = a { Some(v.clone()) } else { None }),
+                                    )
+                                } else {
+                                    (
+                                        var.to_ascii_lowercase(),
+                                        var.clone(),
+                                        inner_args.get(0).cloned(),
+                                        inner_args
+                                            .get(1)
+                                            .and_then(|a| if let ASTNode::Variable(v) = a { Some(v.clone()) } else { None }),
+                                    )
+                                }
+                            } else {
+                                pattern_idx += 1;
+                                continue;
+                            };
+
+                            let (value, present) = if let Some(map) = key_map.as_ref() {
+                                if let Some(v) = map.get(&key_name) {
+                                    (v.clone(), true)
+                                } else if let Some(def_ast) = default_ast {
+                                    (eval_with_env(&def_ast, env)?, false)
+                                } else {
+                                    (EvalResult::Nil, false)
+                                }
+                            } else {
+                                (EvalResult::Nil, false)
+                            };
+
+                            env.insert(var_name, value);
+                            if let Some(supplied_p_var) = supplied_p {
+                                env.insert(
+                                    supplied_p_var,
+                                    if present { EvalResult::Bool(true) } else { EvalResult::Nil },
+                                );
+                            }
+                        } else if mode == "optional" {
                             // (var default-value) form
                             if let ASTNode::Variable(var_name) = inner_fn.as_ref() {
                                 if data_idx < data.len() {
@@ -2081,6 +2208,20 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
             }
             Ok(())
         }
+        ASTNode::DottedPair { car, cdr } => {
+            if data.is_empty() {
+                return Err("destructuring-bind: not enough values for dotted pattern".to_string());
+            }
+            let first = data[0].clone();
+            let rest = if data.len() > 1 {
+                vec_to_cons(&data[1..])
+            } else {
+                EvalResult::Nil
+            };
+            bind_pattern_value(car, first, env)?;
+            bind_pattern_value(cdr, rest, env)?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -2107,68 +2248,133 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
 
     let protected_form = &args[0];
     let handlers = &args[1..];
+    let trace_pkg = std::env::var("RLASP_DEBUG_AOT_PKG_HANDLER").is_ok();
 
-    // Try to evaluate the protected form
-    match eval_with_env(protected_form, env) {
-        Ok(result) => Ok(result),
-        Err(error_msg) => {
-            let mut pending_condition = if error_msg == "__SIGNAL_CONDITION__" {
-                super::eval_conditions::take_pending_signaled_condition()
-            } else {
-                None
-            };
-            // Try each handler
-            for handler in handlers {
-                if let ASTNode::Call { function: _condition_type, args: handler_args } = handler {
-                    // For now, catch all errors (ignore condition type matching)
-                    // Handler format: (condition-type (var) body...)
-                    // handler_args[0] is (var) - the variable binding list
-                    // handler_args[1..] is the body
+    let run_handlers = |error_msg: String,
+                        pending_condition: Option<EvalResult>,
+                        env: &mut HashMap<String, EvalResult>|
+     -> Result<EvalResult, String> {
+        let mut pending_condition = pending_condition;
+        if trace_pkg {
+            eprintln!(
+                "[aot-handler-case] run_handlers err={} handlers={} pending={:?}",
+                error_msg,
+                handlers.len(),
+                pending_condition
+            );
+        }
+        for handler in handlers {
+            if let ASTNode::Call { function: _condition_type, args: handler_args } = handler {
+                if trace_pkg {
+                    eprintln!("[aot-handler-case] handler_args={:?}", handler_args);
+                }
+                let mut handler_env = env.clone();
+                let mut shadowed_handler_vars: Vec<String> = Vec::new();
 
-                    let mut handler_env = env.clone();
-
-                    // Extract variable from (var) list and bind error message
-                    if let Some(var_list) = handler_args.get(0) {
-                        match var_list {
-                            // (var) form where var is called as function
-                            ASTNode::Call { function, args: _ } => {
-                                if let ASTNode::Variable(var_name) = &**function {
-                                    if let Some(cond) = &pending_condition {
-                                        handler_env.insert(var_name.clone(), cond.clone());
-                                    } else {
-                                        handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
-                                    }
-                                }
-                            }
-                            // Single variable (no parens, rare)
-                            ASTNode::Variable(var_name) => {
+                if let Some(var_list) = handler_args.get(0) {
+                    match var_list {
+                        ASTNode::Call { function, args: _ } => {
+                            if let ASTNode::Variable(var_name) = &**function {
+                                shadowed_handler_vars.push(var_name.clone());
                                 if let Some(cond) = &pending_condition {
                                     handler_env.insert(var_name.clone(), cond.clone());
                                 } else {
                                     handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
                                 }
                             }
-                            // nil or empty list means no binding
-                            ASTNode::Constant(ConstantValue::Nil) => {}
-                            _ => {}
                         }
+                        ASTNode::Variable(var_name) => {
+                            shadowed_handler_vars.push(var_name.clone());
+                            if let Some(cond) = &pending_condition {
+                                handler_env.insert(var_name.clone(), cond.clone());
+                            } else {
+                                handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                            }
+                        }
+                        ASTNode::Constant(ConstantValue::Nil) => {}
+                        _ => {}
                     }
-
-                    // Execute handler body (all args after the variable list)
-                    let mut handler_result = EvalResult::Nil;
-                    for form in handler_args.iter().skip(1) {
-                        handler_result = eval_with_env(form, &mut handler_env)?;
-                    }
-                    return Ok(handler_result);
                 }
+
+                let mut handler_result = EvalResult::Nil;
+                for form in handler_args.iter().skip(1) {
+                    if trace_pkg {
+                        eprintln!("[aot-handler-case] eval handler form={:?}", form);
+                    }
+                    handler_result = eval_with_env(form, &mut handler_env)?;
+                }
+                if trace_pkg {
+                    eprintln!("[aot-handler-case] handler_result={:?}", handler_result);
+                }
+                let original_keys: Vec<String> = env.keys().cloned().collect();
+                for key in original_keys {
+                    let key_base = key.rsplit(':').next().unwrap_or(key.as_str());
+                    if shadowed_handler_vars.iter().any(|shadowed| {
+                        shadowed
+                            .rsplit(':')
+                            .next()
+                            .unwrap_or(shadowed.as_str())
+                            .eq_ignore_ascii_case(key_base)
+                    }) {
+                        continue;
+                    }
+                    if let Some(updated) = handler_env.get(&key).cloned() {
+                        env.insert(key, updated);
+                    }
+                }
+                return Ok(handler_result);
             }
-            // No handler matched, re-raise the error
-            if error_msg == "__SIGNAL_CONDITION__" {
-                if let Some(cond) = pending_condition.take() {
+        }
+        if error_msg == "__SIGNAL_CONDITION__" {
+            if let Some(cond) = pending_condition.take() {
+                super::eval_conditions::set_pending_signaled_condition(cond);
+            }
+        }
+        Err(error_msg)
+    };
+
+    let prior_pending = super::eval_conditions::take_pending_signaled_condition();
+
+    // Try to evaluate the protected form
+    match eval_with_env(protected_form, env) {
+        Ok(result) => {
+            if trace_pkg {
+                eprintln!("[aot-handler-case] protected ok result={:?}", result);
+            }
+            if let Some(cond) = super::eval_conditions::take_pending_signaled_condition() {
+                if trace_pkg {
+                    eprintln!("[aot-handler-case] protected ok pending={:?}", cond);
+                }
+                let handled = run_handlers("__SIGNAL_CONDITION__".to_string(), Some(cond), env);
+                if let Some(cond) = prior_pending.clone() {
+                    super::eval_conditions::set_pending_signaled_condition(cond);
+                }
+                return handled;
+            }
+            if let Some(cond) = prior_pending.clone() {
+                super::eval_conditions::set_pending_signaled_condition(cond);
+            }
+            Ok(result)
+        }
+        Err(error_msg) => {
+            if trace_pkg {
+                eprintln!("[aot-handler-case] protected err={}", error_msg);
+            }
+            let pending_condition = if error_msg == "__SIGNAL_CONDITION__" {
+                super::eval_conditions::take_pending_signaled_condition()
+            } else {
+                None
+            };
+            if trace_pkg {
+                eprintln!("[aot-handler-case] pending_condition={:?}", pending_condition);
+            }
+            let handled = run_handlers(error_msg, pending_condition, env);
+            if let Ok(_) = handled {
+                if let Some(cond) = prior_pending.clone() {
                     super::eval_conditions::set_pending_signaled_condition(cond);
                 }
             }
-            Err(error_msg)
+            handled
         }
     }
 }

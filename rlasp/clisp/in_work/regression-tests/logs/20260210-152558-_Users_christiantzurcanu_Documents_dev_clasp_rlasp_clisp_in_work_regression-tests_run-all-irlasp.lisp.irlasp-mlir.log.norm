@@ -1,4 +1,0 @@
-
-
-thread 'main' panicked at crates/irlasp/src/main.rs:78:10:
-Main thread panicked: Any { .. }

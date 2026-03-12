@@ -360,43 +360,67 @@ fn parse_slot_spec(spec: &ASTNode) -> Option<ConditionSlot> {
             };
 
             // Parse keyword options
+            let normalize_key = |raw: &str| -> String {
+                raw.rsplit(':')
+                    .next()
+                    .unwrap_or(raw)
+                    .trim_start_matches(':')
+                    .to_ascii_lowercase()
+            };
             let mut i = 0;
             while i < args.len() {
-                if let ASTNode::Variable(kw) = &args[i] {
-                    let kw_lower = kw.to_lowercase();
-                    match kw_lower.as_str() {
-                        ":initarg" | "initarg" => {
-                            if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
-                                slot.initarg = Some(v.to_uppercase());
-                                i += 1;
-                            }
-                        }
-                        ":initform" | "initform" => {
-                            if let Some(form) = args.get(i + 1) {
-                                slot.initform = Some(form.clone());
-                                i += 1;
-                            }
-                        }
-                        ":reader" | "reader" => {
-                            if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
-                                slot.reader = Some(v.to_uppercase());
-                                i += 1;
-                            }
-                        }
-                        ":writer" | "writer" => {
-                            if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
-                                slot.writer = Some(v.to_uppercase());
-                                i += 1;
-                            }
-                        }
-                        ":accessor" | "accessor" => {
-                            if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
-                                slot.accessor = Some(v.to_uppercase());
-                                i += 1;
-                            }
-                        }
-                        _ => {}
+                let key = match &args[i] {
+                    ASTNode::Variable(kw) => normalize_key(kw),
+                    ASTNode::Constant(ConstantValue::Symbol(kw)) => normalize_key(kw),
+                    _ => {
+                        i += 1;
+                        continue;
                     }
+                };
+                match key.as_str() {
+                    "initarg" => {
+                        if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
+                            slot.initarg = Some(v.to_uppercase());
+                            i += 1;
+                        } else if let Some(ASTNode::Constant(ConstantValue::Symbol(v))) = args.get(i + 1) {
+                            slot.initarg = Some(v.to_uppercase());
+                            i += 1;
+                        }
+                    }
+                    "initform" => {
+                        if let Some(form) = args.get(i + 1) {
+                            slot.initform = Some(form.clone());
+                            i += 1;
+                        }
+                    }
+                    "reader" => {
+                        if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
+                            slot.reader = Some(v.to_uppercase());
+                            i += 1;
+                        } else if let Some(ASTNode::Constant(ConstantValue::Symbol(v))) = args.get(i + 1) {
+                            slot.reader = Some(v.to_uppercase());
+                            i += 1;
+                        }
+                    }
+                    "writer" => {
+                        if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
+                            slot.writer = Some(v.to_uppercase());
+                            i += 1;
+                        } else if let Some(ASTNode::Constant(ConstantValue::Symbol(v))) = args.get(i + 1) {
+                            slot.writer = Some(v.to_uppercase());
+                            i += 1;
+                        }
+                    }
+                    "accessor" => {
+                        if let Some(ASTNode::Variable(v)) = args.get(i + 1) {
+                            slot.accessor = Some(v.to_uppercase());
+                            i += 1;
+                        } else if let Some(ASTNode::Constant(ConstantValue::Symbol(v))) = args.get(i + 1) {
+                            slot.accessor = Some(v.to_uppercase());
+                            i += 1;
+                        }
+                    }
+                    _ => {}
                 }
                 i += 1;
             }
@@ -455,25 +479,37 @@ pub fn eval_define_condition(args: &[ASTNode], env: &mut HashMap<String, EvalRes
     let mut report_fn = None;
     let mut documentation = None;
 
+    let normalize_key = |raw: &str| -> String {
+        raw.rsplit(':')
+            .next()
+            .unwrap_or(raw)
+            .trim_start_matches(':')
+            .to_ascii_lowercase()
+    };
     let mut i = 3;
     while i < args.len() {
-        if let ASTNode::Variable(kw) = &args[i] {
-            let kw_lower = kw.to_lowercase();
-            match kw_lower.as_str() {
-                ":report" | "report" => {
-                    if let Some(form) = args.get(i + 1) {
-                        report_fn = Some(form.clone());
-                        i += 1;
-                    }
-                }
-                ":documentation" | "documentation" => {
-                    if let Some(ASTNode::Constant(crate::ir::ConstantValue::String(s))) = args.get(i + 1) {
-                        documentation = Some(s.clone());
-                        i += 1;
-                    }
-                }
-                _ => {}
+        let key = match &args[i] {
+            ASTNode::Variable(kw) => normalize_key(kw),
+            ASTNode::Constant(ConstantValue::Symbol(kw)) => normalize_key(kw),
+            _ => {
+                i += 1;
+                continue;
             }
+        };
+        match key.as_str() {
+            "report" => {
+                if let Some(form) = args.get(i + 1) {
+                    report_fn = Some(form.clone());
+                    i += 1;
+                }
+            }
+            "documentation" => {
+                if let Some(ASTNode::Constant(crate::ir::ConstantValue::String(s))) = args.get(i + 1) {
+                    documentation = Some(s.clone());
+                    i += 1;
+                }
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -514,11 +550,8 @@ pub fn eval_make_condition(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     let type_result = eval_with_env(&args[0], env)?;
     let type_name = match type_result {
         EvalResult::Symbol(n) => {
-            if n.starts_with(':') || n.starts_with("'") {
-                n.trim_start_matches(':').trim_start_matches('\'').to_uppercase()
-            } else {
-                n.to_uppercase()
-            }
+            let trimmed = n.trim_start_matches(':').trim_start_matches('\'');
+            trimmed.rsplit(':').next().unwrap_or(trimmed).to_uppercase()
         }
         _ => return Err("make-condition: type must be a symbol".to_string()),
     };
@@ -538,7 +571,8 @@ pub fn eval_make_condition(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     while i < args.len() {
         let key = eval_with_env(&args[i], env)?;
         if let EvalResult::Symbol(k) = key {
-            let key_name = k.trim_start_matches(':').to_uppercase();
+            let key_base = k.rsplit(':').next().unwrap_or(&k);
+            let key_name = key_base.trim_start_matches(':').to_uppercase();
             if i + 1 < args.len() {
                 let value = eval_with_env(&args[i + 1], env)?;
                 slot_values.insert(key_name, value);
@@ -552,6 +586,11 @@ pub fn eval_make_condition(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     }
 
     // Create the condition instance
+    if std::env::var("RLASP_DEBUG_CIRCULAR_CONDITION").is_ok()
+        && type_name.eq_ignore_ascii_case("CIRCULAR-DEPENDENCY")
+    {
+        eprintln!("[circular-condition] slots={:?}", slot_values);
+    }
     let instance = ConditionInstance {
         type_name: type_name.clone(),
         slots: slot_values,
@@ -563,10 +602,17 @@ pub fn eval_make_condition(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 
 /// Check if a condition is of a given type
 pub fn condition_typep(condition: &ConditionInstance, type_name: &str) -> bool {
+    let normalized_type = type_name
+        .trim_start_matches('\'')
+        .trim_start_matches(':')
+        .rsplit(':')
+        .next()
+        .unwrap_or(type_name)
+        .to_uppercase();
     CONDITION_TYPES.with(|types| {
         let types = types.borrow();
         if let Some(cond_type) = types.get(&condition.type_name) {
-            cond_type.is_subtype_of(type_name, &types)
+            cond_type.is_subtype_of(&normalized_type, &types)
         } else {
             false
         }
@@ -574,18 +620,98 @@ pub fn condition_typep(condition: &ConditionInstance, type_name: &str) -> bool {
 }
 
 fn handler_matches_condition(handler_type: &str, condition_type: &str) -> bool {
-    let handler_upper = handler_type.to_uppercase();
+    let handler_upper = handler_type
+        .trim_start_matches('\'')
+        .trim_start_matches(':')
+        .rsplit(':')
+        .next()
+        .unwrap_or(handler_type)
+        .to_uppercase();
+    let condition_upper = condition_type
+        .trim_start_matches('\'')
+        .trim_start_matches(':')
+        .rsplit(':')
+        .next()
+        .unwrap_or(condition_type)
+        .to_uppercase();
     if handler_upper == "T" || handler_upper == "CONDITION" {
         return true;
     }
     CONDITION_TYPES.with(|types| {
         let types = types.borrow();
-        if let Some(cond_type) = types.get(condition_type) {
+        if let Some(cond_type) = types.get(&condition_upper) {
             cond_type.is_subtype_of(&handler_upper, &types)
         } else {
-            handler_upper == condition_type
+            handler_upper == condition_upper
         }
     })
+}
+
+fn invoke_handler_function(
+    handler_fn: &ASTNode,
+    condition: &EvalResult,
+    condition_type: &str,
+    call_env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
+    let arg = condition.clone();
+    match handler_fn {
+        ASTNode::Variable(name) => {
+            let base = name.rsplit(':').next().unwrap_or(name.as_str());
+            let fn_candidates = [
+                format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, name),
+                format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, base),
+                format!(
+                    "{}{}",
+                    super::eval_core::FUNCTION_NS_PREFIX,
+                    name.to_ascii_uppercase()
+                ),
+                format!(
+                    "{}{}",
+                    super::eval_core::FUNCTION_NS_PREFIX,
+                    base.to_ascii_uppercase()
+                ),
+                format!(
+                    "{}{}",
+                    super::eval_core::FUNCTION_NS_PREFIX,
+                    name.to_ascii_lowercase()
+                ),
+                format!(
+                    "{}{}",
+                    super::eval_core::FUNCTION_NS_PREFIX,
+                    base.to_ascii_lowercase()
+                ),
+            ];
+            if let Some(fn_val) = fn_candidates
+                .iter()
+                .find_map(|candidate| call_env.get(candidate).cloned())
+            .or_else(|| {
+                let base_lower = base.to_ascii_lowercase();
+                if rlasp_runtime::is_cl_builtin(base) || rlasp_runtime::is_cl_builtin(base_lower.as_str()) {
+                    Some(EvalResult::BuiltinFunction(base_lower))
+                } else {
+                    None
+                }
+            }) {
+                return super::eval_system::call_function_with_values(fn_val, &[arg], call_env);
+            }
+        }
+        ASTNode::Call { function, args }
+            if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("function"))
+                && args.len() == 1 =>
+        {
+            return invoke_handler_function(&args[0], condition, condition_type, call_env);
+        }
+        _ => {}
+    }
+
+    let call = ASTNode::Call {
+        function: Box::new(handler_fn.clone()),
+        args: vec![match condition {
+            EvalResult::Condition(_) => ASTNode::Variable("__condition__".to_string()),
+            _ => ASTNode::Variable(condition_type.to_string()),
+        }],
+    };
+    eval_with_env(&call, call_env)
 }
 
 /// Evaluate (signal condition)
@@ -618,26 +744,39 @@ pub fn eval_signal(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> R
 
     // If we found a matching handler, invoke it
     if let Some(handler) = matching_handler {
-        // Call the handler function with the condition
-        let handler_env = handler.env.borrow().clone();
-        let mut call_env = handler_env;
+        let handler_seed = handler.env.borrow().clone();
+        let mut tracked_keys: std::collections::HashSet<String> = handler_seed.keys().cloned().collect();
+        tracked_keys.extend(env.keys().cloned());
+        let mut call_env = handler_seed;
         call_env.extend(env.clone());
-
-        // Create a call to the handler function with the condition
-        let call = ASTNode::Call {
-            function: Box::new(handler.handler_fn),
-            args: vec![match &condition {
-                EvalResult::Condition(_) => ASTNode::Variable("__condition__".to_string()),
-                _ => ASTNode::Variable(condition_type.clone()),
-            }],
-        };
 
         // Store condition in env for the call
         if let EvalResult::Condition(c) = &condition {
             call_env.insert("__condition__".to_string(), EvalResult::Condition(c.clone()));
         }
 
-        eval_with_env(&call, &mut call_env)?;
+        let mut persisted_handler_env = handler.env.borrow_mut();
+        let call_result = invoke_handler_function(
+            &handler.handler_fn,
+            &condition,
+            &condition_type,
+            &mut call_env,
+        );
+        for key in tracked_keys {
+            if key == "__condition__" || key.starts_with('%') {
+                continue;
+            }
+            let Some(value) = call_env.get(&key).cloned() else {
+                continue;
+            };
+            if persisted_handler_env.contains_key(&key) {
+                persisted_handler_env.insert(key.clone(), value.clone());
+            }
+            if env.contains_key(&key) {
+                env.insert(key, value);
+            }
+        }
+        call_result?;
     }
 
     // signal returns nil (unless a handler transfers control)
@@ -667,26 +806,44 @@ pub fn signal_condition_value(condition: EvalResult, env: &mut HashMap<String, E
 
     // If we found a matching handler, invoke it
     if let Some(handler) = matching_handler {
-        // Call the handler function with the condition
-        let handler_env = handler.env.borrow().clone();
-        let mut call_env = handler_env;
+        // Call the handler function with the condition.
+        // The handler's lexical environment is established at handler-bind time,
+        // but mutations performed by the handler must remain visible to the
+        // surrounding dynamic extent. Preserve that by syncing back only the
+        // bindings that were already visible before the call.
+        let handler_seed = handler.env.borrow().clone();
+        let mut tracked_keys: std::collections::HashSet<String> = handler_seed.keys().cloned().collect();
+        tracked_keys.extend(env.keys().cloned());
+        let mut call_env = handler_seed;
         call_env.extend(env.clone());
-
-        // Create a call to the handler function with the condition
-        let call = ASTNode::Call {
-            function: Box::new(handler.handler_fn),
-            args: vec![match &condition {
-                EvalResult::Condition(_) => ASTNode::Variable("__condition__".to_string()),
-                _ => ASTNode::Variable(condition_type.clone()),
-            }],
-        };
 
         // Store condition in env for the call
         if let EvalResult::Condition(c) = &condition {
             call_env.insert("__condition__".to_string(), EvalResult::Condition(c.clone()));
         }
 
-        eval_with_env(&call, &mut call_env)?;
+        let mut persisted_handler_env = handler.env.borrow_mut();
+        let call_result = invoke_handler_function(
+            &handler.handler_fn,
+            &condition,
+            &condition_type,
+            &mut call_env,
+        );
+        for key in tracked_keys {
+            if key == "__condition__" || key.starts_with('%') {
+                continue;
+            }
+            let Some(value) = call_env.get(&key).cloned() else {
+                continue;
+            };
+            if persisted_handler_env.contains_key(&key) {
+                persisted_handler_env.insert(key.clone(), value.clone());
+            }
+            if env.contains_key(&key) {
+                env.insert(key, value);
+            }
+        }
+        call_result?;
     }
 
     Ok(EvalResult::Nil)

@@ -149,7 +149,6 @@ impl LispObject {
     /// Is this nil?
     #[inline]
     pub fn is_nil(self) -> bool {
-        // Check if this is the global NIL symbol
         self.raw == crate::symbol::NIL_SYMBOL.raw
     }
 

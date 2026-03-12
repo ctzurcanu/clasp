@@ -22,6 +22,7 @@ pub mod io_syntax;
 pub mod pathname;
 pub mod stream;
 pub mod cl_builtins;
+pub mod character_names;
 
 pub use stack::{TypeTag, ObjectHandle, allocate_object};
 pub use header::{TypeHeader, ObjectType};
@@ -39,6 +40,7 @@ pub use error::{LispError, ErrorKind};
 pub use pathname::Pathname;
 pub use stream::{Stream, StreamDirection, StreamElementType, StreamData};
 pub use cl_builtins::is_cl_builtin;
+pub use character_names::parse_character_name;
 
 // Re-export GC functions
 pub use gc::{init_gc, global_gc, is_gc_initialized, GCAllocator};
@@ -54,6 +56,12 @@ pub fn init_runtime() {
     if !gc::is_gc_initialized() {
         gc::init_gc();
     }
+    let suppress_gc_warnings = std::env::var("RLASP_SUPPRESS_GC_WARNINGS")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true);
+    if suppress_gc_warnings {
+        gc::gc_ignore_warnings();
+    }
     // Optional escape hatch for AOT/debug stability when host-side roots are
     // incomplete for some runtime maps.
     if let Ok(v) = std::env::var("RLASP_DISABLE_GC") {
@@ -67,4 +75,9 @@ pub fn init_runtime() {
 /// Check if we're using Boehm GC
 pub fn using_boehm_gc() -> bool {
     cfg!(feature = "boehm-gc")
+}
+
+#[no_mangle]
+pub extern "C" fn cc_runtime_ignore_gc_warnings() {
+    gc::gc_ignore_warnings();
 }

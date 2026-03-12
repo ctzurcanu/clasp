@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::ffi::{CString, OsString};
 use std::fs;
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -263,6 +263,23 @@ fn update_atomic_max(target: &AtomicU64, candidate: u64) {
 }
 
 fn current_process_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut info: libc::mach_task_basic_info = std::mem::zeroed();
+        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        let kr = libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as libc::task_info_t,
+            &mut count,
+        );
+        if kr != libc::KERN_SUCCESS {
+            return None;
+        }
+        Some(info.resident_size as u64)
+    }
+
+    #[cfg(not(target_os = "macos"))]
     unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
         if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
@@ -271,15 +288,7 @@ fn current_process_rss_bytes() -> Option<u64> {
         if usage.ru_maxrss <= 0 {
             return Some(0);
         }
-        let raw = usage.ru_maxrss as u64;
-        #[cfg(target_os = "macos")]
-        {
-            Some(raw)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Some(raw.saturating_mul(1024))
-        }
+        Some((usage.ru_maxrss as u64).saturating_mul(1024))
     }
 }
 
@@ -458,6 +467,8 @@ fn resolve_mlir_behavior(default_behavior: MlirBehavior) -> MlirBehavior {
 static BRIDGE_LAMBDA_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static BRIDGE_HANDLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static BRIDGE_LITERAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const BRIDGE_HANDLE_SOFT_LIMIT: usize = 16_384;
+const BRIDGE_HANDLE_RETAIN_WINDOW: usize = 8_192;
 
 fn make_function_ref_by_name(name: &str) -> usize {
     if let Ok(c_name) = CString::new(name) {
@@ -496,7 +507,17 @@ fn make_bridge_handle_symbol(value: &rlasp::repl::EvalResult) -> usize {
     let id = BRIDGE_HANDLE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let handle_name = format!("__RLASP_BRIDGE_HANDLE__{}", id);
     MLIR_BRIDGE_HANDLES.with(|tbl| {
-        tbl.borrow_mut().insert(handle_name.clone(), value.clone());
+        let mut handles = tbl.borrow_mut();
+        handles.insert(handle_name.clone(), value.clone());
+        if handles.len() > BRIDGE_HANDLE_SOFT_LIMIT {
+            let min_keep_id = id.saturating_sub(BRIDGE_HANDLE_RETAIN_WINDOW);
+            handles.retain(|k, _| {
+                k.strip_prefix("__RLASP_BRIDGE_HANDLE__")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .map(|n| n >= min_keep_id)
+                    .unwrap_or(true)
+            });
+        }
     });
     rlasp_runtime::Symbol::allocate(handle_name).raw()
 }
@@ -505,7 +526,17 @@ fn make_bridge_handle_name(value: &rlasp::repl::EvalResult) -> String {
     let id = BRIDGE_HANDLE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let handle_name = format!("__RLASP_BRIDGE_HANDLE__{}", id);
     MLIR_BRIDGE_HANDLES.with(|tbl| {
-        tbl.borrow_mut().insert(handle_name.clone(), value.clone());
+        let mut handles = tbl.borrow_mut();
+        handles.insert(handle_name.clone(), value.clone());
+        if handles.len() > BRIDGE_HANDLE_SOFT_LIMIT {
+            let min_keep_id = id.saturating_sub(BRIDGE_HANDLE_RETAIN_WINDOW);
+            handles.retain(|k, _| {
+                k.strip_prefix("__RLASP_BRIDGE_HANDLE__")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .map(|n| n >= min_keep_id)
+                    .unwrap_or(true)
+            });
+        }
     });
     handle_name
 }
@@ -515,6 +546,179 @@ fn resolve_bridge_handle_symbol(symbol_name: &str) -> Option<rlasp::repl::EvalRe
         return None;
     }
     MLIR_BRIDGE_HANDLES.with(|tbl| tbl.borrow().get(symbol_name).cloned())
+}
+
+fn take_bridge_handle_symbol(symbol_name: &str) -> Option<rlasp::repl::EvalResult> {
+    if !symbol_name.starts_with("__RLASP_BRIDGE_HANDLE__") {
+        return None;
+    }
+    MLIR_BRIDGE_HANDLES.with(|tbl| tbl.borrow_mut().remove(symbol_name))
+}
+
+fn bind_and_unquote_bridge_handles_in_ast(
+    ast: &mut rlasp::ir::ASTNode,
+    env: &mut HashMap<String, rlasp::repl::EvalResult>,
+) {
+    use rlasp::ir::ASTNode;
+
+    match ast {
+        ASTNode::Quote(inner) => {
+            if let ASTNode::Variable(name) = inner.as_ref() {
+                if let Some(mapped) = resolve_bridge_handle_symbol(name) {
+                    bridge_env_insert_symbol_aliases(env, name, &mapped);
+                    *ast = ASTNode::Variable(name.clone());
+                    return;
+                }
+            }
+            bind_and_unquote_bridge_handles_in_ast(inner.as_mut(), env);
+        }
+        ASTNode::Call { function, args } => {
+            bind_and_unquote_bridge_handles_in_ast(function.as_mut(), env);
+            for arg in args {
+                bind_and_unquote_bridge_handles_in_ast(arg, env);
+            }
+        }
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => {
+            bind_and_unquote_bridge_handles_in_ast(test.as_mut(), env);
+            bind_and_unquote_bridge_handles_in_ast(then_branch.as_mut(), env);
+            bind_and_unquote_bridge_handles_in_ast(else_branch.as_mut(), env);
+        }
+        ASTNode::Cond { clauses } => {
+            for (test, result) in clauses {
+                bind_and_unquote_bridge_handles_in_ast(test, env);
+                bind_and_unquote_bridge_handles_in_ast(result, env);
+            }
+        }
+        ASTNode::Lambda { body, defaults, .. } => {
+            for value in defaults.values_mut() {
+                bind_and_unquote_bridge_handles_in_ast(value, env);
+            }
+            for expr in body {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::Macro { params, body } => {
+            bind_and_unquote_bridge_handles_in_ast(params.as_mut(), env);
+            for expr in body {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+            for (_, value) in bindings {
+                bind_and_unquote_bridge_handles_in_ast(value, env);
+            }
+            for expr in body {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::Setq { value, .. } => {
+            bind_and_unquote_bridge_handles_in_ast(value.as_mut(), env);
+        }
+        ASTNode::Progn { exprs } | ASTNode::Block { body: exprs, .. } => {
+            for expr in exprs {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::ReturnFrom { value, .. } => {
+            if let Some(v) = value.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+        }
+        ASTNode::DottedPair { car, cdr } => {
+            bind_and_unquote_bridge_handles_in_ast(car.as_mut(), env);
+            bind_and_unquote_bridge_handles_in_ast(cdr.as_mut(), env);
+        }
+        ASTNode::Backquote(inner) | ASTNode::Unquote(inner) | ASTNode::UnquoteSplicing(inner) => {
+            bind_and_unquote_bridge_handles_in_ast(inner.as_mut(), env);
+        }
+        ASTNode::CCall { args, .. } => {
+            for arg in args {
+                bind_and_unquote_bridge_handles_in_ast(arg, env);
+            }
+        }
+        ASTNode::CppMethodCall { object, args, .. } => {
+            bind_and_unquote_bridge_handles_in_ast(object.as_mut(), env);
+            for arg in args {
+                bind_and_unquote_bridge_handles_in_ast(arg, env);
+            }
+        }
+        ASTNode::HashTable { entries } => {
+            for (k, v) in entries {
+                bind_and_unquote_bridge_handles_in_ast(k, env);
+                bind_and_unquote_bridge_handles_in_ast(v, env);
+            }
+        }
+        ASTNode::Vector(values) | ASTNode::ArrayLiteral { elements: values, .. } => {
+            for value in values {
+                bind_and_unquote_bridge_handles_in_ast(value, env);
+            }
+        }
+        ASTNode::Dotimes { count, result, body, .. } => {
+            bind_and_unquote_bridge_handles_in_ast(count.as_mut(), env);
+            if let Some(v) = result.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            for expr in body {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::Dolist { list, result, body, .. } => {
+            bind_and_unquote_bridge_handles_in_ast(list.as_mut(), env);
+            if let Some(v) = result.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            for expr in body {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::Loop {
+            start,
+            limit,
+            when_condition,
+            collect,
+            sum,
+            else_collect,
+            else_sum,
+            ..
+        } => {
+            if let Some(v) = start.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            bind_and_unquote_bridge_handles_in_ast(limit.as_mut(), env);
+            if let Some(v) = when_condition.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            if let Some(v) = collect.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            if let Some(v) = sum.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            if let Some(v) = else_collect.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+            if let Some(v) = else_sum.as_mut() {
+                bind_and_unquote_bridge_handles_in_ast(v.as_mut(), env);
+            }
+        }
+        ASTNode::Defmethod { body, .. } => {
+            for expr in body {
+                bind_and_unquote_bridge_handles_in_ast(expr, env);
+            }
+        }
+        ASTNode::Defclass { slots, .. } => {
+            for slot in slots {
+                if let Some(initform) = slot.initform.as_mut() {
+                    bind_and_unquote_bridge_handles_in_ast(initform.as_mut(), env);
+                }
+            }
+        }
+        ASTNode::Constant(_) | ASTNode::Variable(_) | ASTNode::Defgeneric { .. } => {}
+    }
 }
 
 fn eval_keyword(symbol: &str) -> rlasp::repl::EvalResult {
@@ -582,8 +786,11 @@ fn make_eval_runtime_stream(stream_obj: rlasp_runtime::LispObject) -> Option<rla
             make_eval_input_stream(content.clone(), *position)
         }
         StreamData::StringOutput { buffer } => make_eval_output_stream(buffer.clone()),
-        StreamData::Stdin => make_eval_input_stream(String::new(), 0),
-        StreamData::Stdout | StreamData::Stderr => make_eval_output_stream(String::new()),
+        // Preserve console stream semantics through the bridge instead of
+        // converting them into detached string buffers.
+        StreamData::Stdin => EvalResult::Symbol("*standard-input*".to_string()),
+        StreamData::Stdout => EvalResult::Symbol("*standard-output*".to_string()),
+        StreamData::Stderr => EvalResult::Symbol("*error-output*".to_string()),
         StreamData::FileInput(_) | StreamData::FileOutput(_) => {
             let direction = if matches!(stream.data.as_ref(), StreamData::FileInput(_)) {
                 "INPUT"
@@ -614,7 +821,7 @@ fn make_eval_runtime_stream(stream_obj: rlasp_runtime::LispObject) -> Option<rla
 }
 
 fn make_eval_runtime_instance(obj: rlasp_runtime::LispObject) -> Option<rlasp::repl::EvalResult> {
-    use rlasp::repl::EvalResult;
+    use rlasp::repl::{EvalResult, Instance};
 
     let inst_ptr = obj.as_instance_ptr()?;
     if inst_ptr.is_null() {
@@ -627,9 +834,6 @@ fn make_eval_runtime_instance(obj: rlasp_runtime::LispObject) -> Option<rlasp::r
     }
     let class = unsafe { &*class_ptr };
     let class_name = class.name().to_ascii_uppercase();
-    if !class_name.contains("STREAM") {
-        return None;
-    }
 
     let fetch_slot = |slot: &str| -> Option<rlasp_runtime::LispObject> {
         inst.get_slot(slot)
@@ -637,34 +841,51 @@ fn make_eval_runtime_instance(obj: rlasp_runtime::LispObject) -> Option<rlasp::r
             .or_else(|| inst.get_slot(&slot.to_ascii_lowercase()))
     };
 
-    let index = fetch_slot("index")
-        .and_then(|v| v.as_fixnum())
-        .unwrap_or(0)
-        .max(0) as usize;
+    if class_name.contains("STREAM") {
+        let index = fetch_slot("index")
+            .and_then(|v| v.as_fixnum())
+            .unwrap_or(0)
+            .max(0) as usize;
 
-    let value_obj = fetch_slot("value");
-    let content = if let Some(v) = value_obj {
-        let eval_v = raw_lisp_to_eval_result(v);
-        match eval_v {
-            EvalResult::String(s) => s,
-            EvalResult::Array(arr) => {
-                let mut out = String::new();
-                for elem in arr.borrow().iter() {
-                    match elem {
-                        EvalResult::Fixnum(n) if *n >= 0 && *n <= 255 => out.push((*n as u8) as char),
-                        EvalResult::Character(c) => out.push(*c),
-                        _ => {}
+        let value_obj = fetch_slot("value");
+        let content = if let Some(v) = value_obj {
+            let eval_v = raw_lisp_to_eval_result(v);
+            match eval_v {
+                EvalResult::String(s) => s,
+                EvalResult::Array(arr) => {
+                    let mut out = String::new();
+                    for elem in arr.borrow().iter() {
+                        match elem {
+                            EvalResult::Fixnum(n) if *n >= 0 && *n <= 255 => out.push((*n as u8) as char),
+                            EvalResult::Character(c) => out.push(*c),
+                            _ => {}
+                        }
                     }
+                    out
                 }
-                out
+                _ => String::new(),
             }
-            _ => String::new(),
-        }
-    } else {
-        String::new()
-    };
+        } else {
+            String::new()
+        };
 
-    Some(make_eval_input_stream(content, index))
+        return Some(make_eval_input_stream(content, index));
+    }
+
+    let slots = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+    for slot_name in class.slots() {
+        if let Some(slot_value) = fetch_slot(slot_name) {
+            slots
+                .borrow_mut()
+                .insert(slot_name.to_ascii_uppercase(), raw_lisp_to_eval_result(slot_value));
+        }
+    }
+
+    Some(EvalResult::Instance(Instance {
+        id: rlasp::repl::next_instance_id(),
+        class_name,
+        slots,
+    }))
 }
 
 fn eval_result_to_lisp_object(
@@ -680,21 +901,48 @@ fn eval_result_to_lisp_object(
         EvalResult::Bignum(n) => Number::allocate_bignum(n.clone()).raw(),
         EvalResult::Ratio(r) => Number::allocate_ratio(r.clone()).raw(),
         EvalResult::Float(f) => Number::allocate_float(*f).raw(),
+        EvalResult::FloatSingle(f) => Number::allocate_single_float(*f).raw(),
         EvalResult::Complex(re, im) => Number::allocate_complex(Complex::new(*re, *im)).raw(),
         EvalResult::Bool(true) | EvalResult::Boolean(true) => LispObject::t().raw(),
         EvalResult::Bool(false) | EvalResult::Boolean(false) | EvalResult::Nil => LispObject::nil().raw(),
         EvalResult::String(s) => RString::allocate(s.clone()).raw(),
         EvalResult::Symbol(s) => {
+            let trimmed = s.trim();
+            let exact_symbol_tail = || {
+                if let Some(rest) = trimmed.strip_prefix("#:") {
+                    rest
+                } else if let Some(rest) = trimmed.strip_prefix(':') {
+                    rest
+                } else if let Some((_, tail)) = trimmed.split_once("::").or_else(|| trimmed.split_once(':')) {
+                    tail
+                } else {
+                    trimmed
+                }
+            };
+            let needs_exact_case_bridge_symbol =
+                exact_symbol_tail() != exact_symbol_tail().to_ascii_uppercase();
             if is_canonical_nil_symbol_name(s) {
                 LispObject::nil().raw()
             } else if is_canonical_t_symbol_name(s) {
                 LispObject::t().raw()
+            } else if s.trim_start().starts_with("#:") {
+                Symbol::allocate_uninterned(s.trim_start().trim_start_matches("#:").to_string()).raw()
+            } else if needs_exact_case_bridge_symbol {
+                rlasp_jit::intrinsics::bridge_intern_exact_symbol(trimmed, None)
             } else if s.trim_start().starts_with(':') {
                 // Keyword symbols must be interned and EQ-stable so callers that
                 // branch on FIND-SYMBOL/INTERN status via EQ behave like CL.
                 rlasp_jit::intrinsics::keyword_symbol(s)
             } else {
-                Symbol::allocate(s.clone()).raw()
+                let trimmed = s.trim();
+                if let Some((pkg, tail)) = trimmed.split_once("::").or_else(|| trimmed.split_once(':')) {
+                    let name_obj = RString::allocate(tail.to_string()).raw();
+                    let pkg_obj = RString::allocate(pkg.to_string()).raw();
+                    rlasp_jit::intrinsics::cc_intern(name_obj, pkg_obj)
+                } else {
+                    let name_obj = RString::allocate(s.clone()).raw();
+                    rlasp_jit::intrinsics::cc_intern(name_obj, LispObject::nil().raw())
+                }
             }
         }
         EvalResult::Character(c) => LispObject::character(*c).raw(),
@@ -779,9 +1027,37 @@ fn eval_result_to_lisp_object(
             }
         }
         EvalResult::HashTable(_) => make_bridge_handle_symbol(value),
-        EvalResult::Array(_) | EvalResult::Instance(_) if is_bridge_stream_object(value) => {
-            make_bridge_handle_symbol(value)
+        EvalResult::Array(arr) => {
+            if is_bridge_stream_object(value) {
+                return make_bridge_handle_symbol(value);
+            }
+            let logical_len = arr.borrow().len();
+            let elems_raw: Vec<rlasp_runtime::LispObject> = arr
+                .borrow()
+                .iter()
+                .map(|elem| {
+                    let raw = eval_result_to_lisp_object(elem, env);
+                    unsafe { rlasp_runtime::LispObject::from_raw(raw) }
+                })
+                .collect();
+            let vec_raw = rlasp_runtime::RVector::allocate(elems_raw).raw();
+            let dims = rlasp::repl::array_dims_for_bridge(arr);
+            let effective_dims = if dims.is_empty() && logical_len != 1 {
+                vec![logical_len]
+            } else {
+                dims
+            };
+            if effective_dims.len() != 1 || effective_dims[0] != logical_len {
+                let vec_obj = unsafe { rlasp_runtime::LispObject::from_raw(vec_raw) };
+                if let Some(vec_ptr) = vec_obj.as_general_ptr::<rlasp_runtime::RVector>() {
+                    if !vec_ptr.is_null() {
+                        unsafe { (&mut *(vec_ptr as *mut rlasp_runtime::RVector)).set_dims(effective_dims) };
+                    }
+                }
+            }
+            vec_raw
         }
+        EvalResult::Instance(_) => make_bridge_handle_symbol(value),
         EvalResult::Condition(cond) => {
             let cond_ref = cond.borrow();
             let kind = match cond_ref.type_name.to_ascii_uppercase().as_str() {
@@ -800,7 +1076,11 @@ fn eval_result_to_lisp_object(
                     cond_ref.type_name, handle_name
                 );
             }
-            let message = Some(format!("__RLASP_COND_HANDLE__:{}", handle_name));
+            let message = Some(format!(
+                "__RLASP_COND_HANDLE__:{}:{}",
+                cond_ref.type_name.to_ascii_uppercase(),
+                handle_name
+            ));
             LispError::allocate(kind, message).raw()
         }
         _ => LispObject::nil().raw(),
@@ -840,7 +1120,9 @@ fn bridge_error_from_string(err: String) -> (rlasp_runtime::ErrorKind, String) {
     } else {
         ErrorKind::InvalidArgument
     };
-    let msg = if normalized.contains("END OF FILE") || normalized.contains("END-OF-FILE") {
+    let msg = if err.starts_with("__") {
+        err
+    } else if normalized.contains("END OF FILE") || normalized.contains("END-OF-FILE") {
         format!("END-OF-FILE: {}", err)
     } else if matches!(kind, ErrorKind::InvalidArgument) {
         format!("eval failed: {}", err)
@@ -848,6 +1130,52 @@ fn bridge_error_from_string(err: String) -> (rlasp_runtime::ErrorKind, String) {
         err
     };
     (kind, msg)
+}
+
+fn bridge_condition_from_error_string(
+    err: &str,
+) -> Option<rlasp::repl::EvalResult> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let normalized = err.trim().to_ascii_uppercase();
+    let type_name = if normalized == "READER-ERROR"
+        || normalized.starts_with("READER-ERROR:")
+    {
+        "READER-ERROR"
+    } else if normalized == "PROGRAM-ERROR"
+        || normalized.starts_with("PROGRAM-ERROR:")
+    {
+        "PROGRAM-ERROR"
+    } else if normalized == "END-OF-FILE"
+        || normalized.starts_with("END-OF-FILE:")
+        || normalized.contains("END OF FILE")
+    {
+        "END-OF-FILE"
+    } else if normalized == "TYPE-ERROR"
+        || normalized.starts_with("TYPE-ERROR:")
+    {
+        "TYPE-ERROR"
+    } else if normalized == "PACKAGE-ERROR"
+        || normalized.starts_with("PACKAGE-ERROR:")
+    {
+        "PACKAGE-ERROR"
+    } else {
+        return None;
+    };
+
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        "FORMAT-CONTROL".to_string(),
+        rlasp::repl::EvalResult::String(err.trim().to_string()),
+    );
+    slots.insert("FORMAT-ARGUMENTS".to_string(), rlasp::repl::EvalResult::Nil);
+    Some(rlasp::repl::EvalResult::Condition(Rc::new(RefCell::new(
+        rlasp::repl::eval_conditions::ConditionInstance {
+            type_name: type_name.to_string(),
+            slots,
+        },
+    ))))
 }
 
 fn is_canonical_nil_symbol_name(name: &str) -> bool {
@@ -864,6 +1192,73 @@ fn is_canonical_t_symbol_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("cl::t")
         || name.eq_ignore_ascii_case("common-lisp:t")
         || name.eq_ignore_ascii_case("common-lisp::t")
+}
+
+fn decode_runtime_string(obj: rlasp_runtime::LispObject) -> Option<String> {
+    use rlasp_runtime::header::ObjectType;
+
+    let ptr = obj.as_general_ptr::<u8>()?;
+    if ptr.is_null() {
+        return None;
+    }
+    match unsafe { rlasp_runtime::TypeHeader::from_ptr(ptr) } {
+        Some(ObjectType::String) => {
+            let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+            Some(s.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn runtime_symbol_package_name(obj: rlasp_runtime::LispObject) -> Option<String> {
+    let pkg_raw = rlasp_jit::intrinsics::cc_symbol_package(obj.raw());
+    if pkg_raw == rlasp_runtime::LispObject::nil().raw() {
+        return None;
+    }
+    let pkg_name_raw = rlasp_jit::intrinsics::cc_package_name(pkg_raw);
+    if pkg_name_raw == rlasp_runtime::LispObject::nil().raw() {
+        return None;
+    }
+    decode_runtime_string(unsafe { rlasp_runtime::LispObject::from_raw(pkg_name_raw) })
+}
+
+fn runtime_symbol_to_eval_result_with_options(
+    obj: rlasp_runtime::LispObject,
+    name: &str,
+    preserve_bridge_handles: bool,
+) -> rlasp::repl::EvalResult {
+    use rlasp::repl::EvalResult;
+
+    if is_canonical_nil_symbol_name(name) {
+        return EvalResult::Nil;
+    }
+    if is_canonical_t_symbol_name(name) {
+        return EvalResult::Bool(true);
+    }
+    if preserve_bridge_handles && name.starts_with("__RLASP_BRIDGE_HANDLE__") {
+        return EvalResult::Symbol(name.to_string());
+    }
+    if let Some(mapped) = resolve_bridge_handle_symbol(name) {
+        return mapped;
+    }
+    if let Some(pkg_name) = runtime_symbol_package_name(obj) {
+        let base = name.rsplit(':').next().unwrap_or(name);
+        if pkg_name.eq_ignore_ascii_case("KEYWORD") && !name.starts_with(':') {
+            return EvalResult::Symbol(format!(":{}", name));
+        }
+        let current_pkg = rlasp::repl::eval_package::get_current_package();
+        if !name.contains(':') && !pkg_name.eq_ignore_ascii_case(&current_pkg) {
+            return EvalResult::Symbol(format!("{}::{}", pkg_name, base));
+        }
+    }
+    EvalResult::Symbol(name.to_string())
+}
+
+fn runtime_symbol_to_eval_result(
+    obj: rlasp_runtime::LispObject,
+    name: &str,
+) -> rlasp::repl::EvalResult {
+    runtime_symbol_to_eval_result_with_options(obj, name, false)
 }
 
 fn is_package_bridge_builtin(name: &str) -> bool {
@@ -922,6 +1317,7 @@ fn is_io_bridge_builtin(name: &str) -> bool {
             | "unread-char"
             | "peek-char"
             | "read-line"
+            | "read-delimited-list"
             | "read-byte"
             | "write-byte"
             | "file-position"
@@ -965,12 +1361,26 @@ fn is_io_bridge_builtin(name: &str) -> bool {
     )
 }
 
-fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalResult {
+fn raw_lisp_to_eval_result_impl(
+    obj: rlasp_runtime::LispObject,
+    seen: &mut std::collections::HashMap<usize, rlasp::repl::EvalResult>,
+    preserve_bridge_handles: bool,
+) -> rlasp::repl::EvalResult {
     use rlasp::repl::EvalResult;
     use rlasp_runtime::header::ObjectType;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
+
+    fn function_designator_result(name: String) -> EvalResult {
+        EvalResult::Cons(
+            Rc::new(RefCell::new(EvalResult::Symbol("function".to_string()))),
+            Rc::new(RefCell::new(EvalResult::Cons(
+                Rc::new(RefCell::new(EvalResult::Symbol(name))),
+                Rc::new(RefCell::new(EvalResult::Nil)),
+            ))),
+        )
+    }
 
     if obj.is_nil() {
         return EvalResult::Nil;
@@ -979,11 +1389,11 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
         return EvalResult::Bool(true);
     }
     if let Some(n) = obj.as_fixnum() {
-        // Function references cross the MLIR/JIT boundary as fixnum IDs.
-        // Preserve them as callable designators when reconstructing EvalResult
-        // for eval-bridge calls (e.g. bridge lambdas passed as callback args).
         if let Some(name) = rlasp_jit::intrinsics::extract_function_name(obj.raw()) {
-            return EvalResult::Symbol(name);
+            if preserve_bridge_handles {
+                return EvalResult::Fixnum(n);
+            }
+            return function_designator_result(name);
         }
         return EvalResult::Fixnum(n);
     }
@@ -997,14 +1407,23 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
         return inst;
     }
     if let Some(cons_ptr) = obj.as_cons_ptr() {
+        let key = cons_ptr as usize;
+        if let Some(existing) = seen.get(&key) {
+            return existing.clone();
+        }
+        let car_cell = Rc::new(RefCell::new(EvalResult::Nil));
+        let cdr_cell = Rc::new(RefCell::new(EvalResult::Nil));
+        let result = EvalResult::Cons(car_cell.clone(), cdr_cell.clone());
+        seen.insert(key, result.clone());
         let cons = unsafe { &*cons_ptr };
-        let car = raw_lisp_to_eval_result(cons.car());
-        let cdr = raw_lisp_to_eval_result(cons.cdr());
-        return EvalResult::Cons(Rc::new(RefCell::new(car)), Rc::new(RefCell::new(cdr)));
+        *car_cell.borrow_mut() = raw_lisp_to_eval_result_impl(cons.car(), seen, preserve_bridge_handles);
+        *cdr_cell.borrow_mut() = raw_lisp_to_eval_result_impl(cons.cdr(), seen, preserve_bridge_handles);
+        return result;
     }
 
     if let Some(ptr) = obj.as_general_ptr::<()>() {
         if !ptr.is_null() {
+            let key = ptr as usize;
             if let Some(kind) = unsafe { rlasp_runtime::TypeHeader::from_ptr(ptr) } {
                 match kind {
                     ObjectType::String => {
@@ -1013,21 +1432,34 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
                     }
                     ObjectType::Symbol => {
                         let s = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                        if is_canonical_nil_symbol_name(s.name()) {
-                            return EvalResult::Nil;
-                        }
-                        if is_canonical_t_symbol_name(s.name()) {
-                            return EvalResult::Bool(true);
-                        }
-                        if let Some(mapped) = resolve_bridge_handle_symbol(s.name()) {
-                            return mapped;
-                        }
-                        return EvalResult::Symbol(s.name().to_string());
+                        return runtime_symbol_to_eval_result_with_options(
+                            obj,
+                            s.name(),
+                            preserve_bridge_handles,
+                        );
                     }
                     ObjectType::Stream => {
                         if let Some(v) = make_eval_runtime_stream(obj) {
                             return v;
                         }
+                    }
+                    ObjectType::Vector => {
+                        if let Some(existing) = seen.get(&key) {
+                            return existing.clone();
+                        }
+                        let vec = unsafe { &*(ptr as *const rlasp_runtime::RVector) };
+                        let arr = Rc::new(RefCell::new(Vec::new()));
+                        let result = EvalResult::Array(arr.clone());
+                        seen.insert(key, result.clone());
+                        let elems: Vec<EvalResult> = vec
+                            .as_slice()
+                            .iter()
+                            .copied()
+                            .map(|elem| raw_lisp_to_eval_result_impl(elem, seen, preserve_bridge_handles))
+                            .collect();
+                        *arr.borrow_mut() = elems;
+                        rlasp::repl::eval::register_array_dims_for_bridge(&arr, vec.dims().to_vec());
+                        return result;
                     }
                     ObjectType::Package => {
                         let p = unsafe { &*(ptr as *const rlasp_runtime::Package) };
@@ -1054,29 +1486,30 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
                         };
                     }
                     ObjectType::Closure => {
-                        // Prefer stable function names for runtime closures so callbacks
-                        // (e.g. clasp-debug:map-stack lambdas) stay callable in raw bridge mode.
-                        if let Some(name) = rlasp_jit::intrinsics::extract_function_name(obj.raw()) {
-                            return EvalResult::Symbol(name);
-                        }
-                        // Fallback to opaque handle symbol when no function id mapping is available.
-                        return EvalResult::Symbol(format!("__RLASP_JIT_RAW_OBJECT__{:x}", obj.raw()));
+                        // Preserve captured runtime closures as raw callable handles so
+                        // evaluator-side funcall/apply can route them back through the
+                        // JIT without losing their closed-over environment.
+                        return EvalResult::Symbol(rlasp::repl::register_raw_jit_object_handle(obj.raw()));
                     }
                     ObjectType::HashTable => {
-                        // Preserve structured hash tables (notably clasp-debug frame maps)
-                        // so frame accessors can decode lambda-list/locals/documentation.
+                        if let Some(existing) = seen.get(&key) {
+                            return existing.clone();
+                        }
                         let ht = unsafe { &*(ptr as *const rlasp_runtime::HashTable) };
-                        let mut out = HashMap::new();
+                        let out = Rc::new(RefCell::new(HashMap::new()));
+                        let result = EvalResult::HashTable(out.clone());
+                        seen.insert(key, result.clone());
                         for (k, v) in ht.entries() {
-                            let key = match raw_lisp_to_eval_result(k) {
+                            let entry_key = match raw_lisp_to_eval_result_impl(k, seen, preserve_bridge_handles) {
                                 EvalResult::Symbol(s) => s,
                                 EvalResult::String(s) => s,
                                 EvalResult::Fixnum(n) => n.to_string(),
                                 other => format!("{:?}", other),
                             };
-                            out.insert(key, raw_lisp_to_eval_result(v));
+                            out.borrow_mut()
+                                .insert(entry_key, raw_lisp_to_eval_result_impl(v, seen, preserve_bridge_handles));
                         }
-                        return EvalResult::HashTable(Rc::new(RefCell::new(out)));
+                        return result;
                     }
                     ObjectType::Error => {
                         let e = unsafe { &*(ptr as *const rlasp_runtime::LispError) };
@@ -1084,7 +1517,11 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
                             eprintln!("[bridge-cond-decode] kind={:?} msg={:?}", e.kind, e.message);
                         }
                         if let Some(msg) = &e.message {
-                            if let Some(handle_name) = msg.strip_prefix("__RLASP_COND_HANDLE__:") {
+                            if let Some(rest) = msg.strip_prefix("__RLASP_COND_HANDLE__:") {
+                                let handle_name = rest
+                                    .split_once(':')
+                                    .map(|(_, handle)| handle)
+                                    .unwrap_or(rest);
                                 if let Some(mapped) = resolve_bridge_handle_symbol(handle_name) {
                                     if std::env::var("RLASP_BRIDGE_TRACE").is_ok() {
                                         eprintln!("[bridge-cond-decode] resolved {}", handle_name);
@@ -1120,6 +1557,18 @@ fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalR
     EvalResult::String(format!("{}", obj))
 }
 
+fn raw_lisp_to_eval_result(obj: rlasp_runtime::LispObject) -> rlasp::repl::EvalResult {
+    let mut seen = std::collections::HashMap::new();
+    raw_lisp_to_eval_result_impl(obj, &mut seen, false)
+}
+
+fn raw_lisp_to_eval_result_preserve_bridge_handles(
+    obj: rlasp_runtime::LispObject,
+) -> rlasp::repl::EvalResult {
+    let mut seen = std::collections::HashMap::new();
+    raw_lisp_to_eval_result_impl(obj, &mut seen, true)
+}
+
 fn bridge_env_insert_symbol_aliases(
     env: &mut HashMap<String, rlasp::repl::EvalResult>,
     name: &str,
@@ -1142,6 +1591,290 @@ fn bridge_env_insert_symbol_aliases(
     }
     for k in keys {
         env.insert(k, value.clone());
+    }
+}
+
+fn bridge_env_lookup_symbol_alias(
+    env: &HashMap<String, rlasp::repl::EvalResult>,
+    name: &str,
+) -> Option<rlasp::repl::EvalResult> {
+    let base = name.rsplit(':').next().unwrap_or(name);
+    let candidates = [
+        name.to_string(),
+        name.to_ascii_uppercase(),
+        name.to_ascii_lowercase(),
+        base.to_string(),
+        base.to_ascii_uppercase(),
+        base.to_ascii_lowercase(),
+    ];
+    for candidate in candidates {
+        if let Some(value) = env.get(&candidate) {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
+fn canonical_bridge_readtable_value(
+    value: &rlasp::repl::EvalResult,
+) -> rlasp::repl::EvalResult {
+    match value {
+        rlasp::repl::EvalResult::Symbol(s) | rlasp::repl::EvalResult::String(s) => {
+            if s.starts_with("__RLASP_READTABLE__") {
+                value.clone()
+            } else if s.eq_ignore_ascii_case("*readtable*")
+                || s.eq_ignore_ascii_case("*standard-readtable*")
+                || s.eq_ignore_ascii_case("readtable::*standard-readtable*")
+                || s.eq_ignore_ascii_case("eclector.readtable:*standard-readtable*")
+            {
+                rlasp::repl::EvalResult::Symbol("__RLASP_READTABLE__0".to_string())
+            } else {
+                rlasp::repl::EvalResult::Symbol("__RLASP_READTABLE__0".to_string())
+            }
+        }
+        _ => rlasp::repl::EvalResult::Symbol("__RLASP_READTABLE__0".to_string()),
+    }
+}
+
+fn debug_bridge_binding_enabled(name: &str) -> bool {
+    let Ok(spec) = std::env::var("RLASP_DEBUG_BRIDGE_BINDING") else {
+        return false;
+    };
+    let name_upper = name.to_ascii_uppercase();
+    spec.split(',')
+        .map(|s| s.trim().to_ascii_uppercase())
+        .any(|needle| !needle.is_empty() && needle == name_upper)
+}
+
+fn collect_ast_variable_names(
+    ast: &rlasp::ir::ASTNode,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use rlasp::ir::ASTNode;
+
+    match ast {
+        ASTNode::Variable(name) => {
+            out.insert(name.clone());
+        }
+        ASTNode::Call { function, args } => {
+            collect_ast_variable_names(function, out);
+            for arg in args {
+                collect_ast_variable_names(arg, out);
+            }
+        }
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => {
+            collect_ast_variable_names(test, out);
+            collect_ast_variable_names(then_branch, out);
+            collect_ast_variable_names(else_branch, out);
+        }
+        ASTNode::Cond { clauses } => {
+            for (test, result) in clauses {
+                collect_ast_variable_names(test, out);
+                collect_ast_variable_names(result, out);
+            }
+        }
+        ASTNode::Lambda { body, defaults, .. } => {
+            for value in defaults.values() {
+                collect_ast_variable_names(value, out);
+            }
+            for expr in body {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::Macro { params, body } => {
+            collect_ast_variable_names(params, out);
+            for expr in body {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+            for (_, value) in bindings {
+                collect_ast_variable_names(value, out);
+            }
+            for expr in body {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::Setq { var, value } => {
+            if !var.eq_ignore_ascii_case("nil") && !var.eq_ignore_ascii_case("t") {
+                out.insert(var.clone());
+            }
+            collect_ast_variable_names(value, out);
+        }
+        ASTNode::Progn { exprs } | ASTNode::Block { body: exprs, .. } => {
+            for expr in exprs {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::ReturnFrom { value, .. } => {
+            if let Some(value) = value {
+                collect_ast_variable_names(value, out);
+            }
+        }
+        ASTNode::Quote(inner)
+        | ASTNode::Backquote(inner)
+        | ASTNode::Unquote(inner)
+        | ASTNode::UnquoteSplicing(inner) => {
+            collect_ast_variable_names(inner, out);
+        }
+        ASTNode::DottedPair { car, cdr } => {
+            collect_ast_variable_names(car, out);
+            collect_ast_variable_names(cdr, out);
+        }
+        ASTNode::Vector(values) | ASTNode::ArrayLiteral { elements: values, .. } => {
+            for value in values {
+                collect_ast_variable_names(value, out);
+            }
+        }
+        ASTNode::Dotimes { count, result, body, .. } => {
+            collect_ast_variable_names(count, out);
+            if let Some(value) = result {
+                collect_ast_variable_names(value, out);
+            }
+            for expr in body {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::Dolist { list, result, body, .. } => {
+            collect_ast_variable_names(list, out);
+            if let Some(value) = result {
+                collect_ast_variable_names(value, out);
+            }
+            for expr in body {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::Loop {
+            start,
+            limit,
+            when_condition,
+            collect,
+            sum,
+            else_collect,
+            else_sum,
+            ..
+        } => {
+            if let Some(value) = start {
+                collect_ast_variable_names(value, out);
+            }
+            collect_ast_variable_names(limit, out);
+            if let Some(value) = when_condition {
+                collect_ast_variable_names(value, out);
+            }
+            if let Some(value) = collect {
+                collect_ast_variable_names(value, out);
+            }
+            if let Some(value) = sum {
+                collect_ast_variable_names(value, out);
+            }
+            if let Some(value) = else_collect {
+                collect_ast_variable_names(value, out);
+            }
+            if let Some(value) = else_sum {
+                collect_ast_variable_names(value, out);
+            }
+        }
+        ASTNode::CCall { args, .. } => {
+            for arg in args {
+                collect_ast_variable_names(arg, out);
+            }
+        }
+        ASTNode::CppMethodCall { object, args, .. } => {
+            collect_ast_variable_names(object, out);
+            for arg in args {
+                collect_ast_variable_names(arg, out);
+            }
+        }
+        ASTNode::HashTable { entries } => {
+            for (key, value) in entries {
+                collect_ast_variable_names(key, out);
+                collect_ast_variable_names(value, out);
+            }
+        }
+        ASTNode::Defmethod { body, .. } => {
+            for expr in body {
+                collect_ast_variable_names(expr, out);
+            }
+        }
+        ASTNode::Defclass { slots, .. } => {
+            for slot in slots {
+                if let Some(initform) = &slot.initform {
+                    collect_ast_variable_names(initform, out);
+                }
+            }
+        }
+        ASTNode::Defgeneric { .. } | ASTNode::Constant(_) => {}
+    }
+}
+
+fn sync_bridge_named_bindings_from_runtime(
+    ast: &rlasp::ir::ASTNode,
+    env: &mut HashMap<String, rlasp::repl::EvalResult>,
+) -> Vec<String> {
+    use rlasp_runtime::LispObject;
+
+    let mut names = std::collections::HashSet::new();
+    collect_ast_variable_names(ast, &mut names);
+    let mut synced = Vec::new();
+    for name in names {
+        if let Some(raw) = rlasp_jit::intrinsics::get_dynamic_value(&name) {
+            let value = raw_lisp_to_eval_result(unsafe { LispObject::from_raw(raw) });
+            let existing = bridge_env_lookup_symbol_alias(env, &name);
+            if debug_bridge_binding_enabled(&name) {
+                eprintln!(
+                    "[bridge-sync-from] {} => {:?} existing={:?}",
+                    name,
+                    value,
+                    existing
+                );
+            }
+            // Bridge eval runs in a persistent environment. When MLIR/AOT
+            // rebound lexicals through runtime dynamic slots for eval
+            // fallback, stale bindings from an earlier bridge call must not
+            // win over the current runtime value.
+            bridge_env_insert_symbol_aliases(env, &name, &value);
+            synced.push(name);
+        }
+    }
+    synced.sort();
+    synced.dedup();
+    synced
+}
+
+fn sync_bridge_named_bindings_to_runtime(
+    names: &[String],
+    env: &mut HashMap<String, rlasp::repl::EvalResult>,
+) {
+    use rlasp_runtime::Symbol;
+
+    for name in names {
+        let Some(mut value) = bridge_env_lookup_symbol_alias(env, name) else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("*readtable*") {
+            let normalized = canonical_bridge_readtable_value(&value);
+            let valid = matches!(
+                &normalized,
+                rlasp::repl::EvalResult::Symbol(s) if s.starts_with("__RLASP_READTABLE__")
+            );
+            if !valid {
+                if std::env::var("RLASP_TRACE_READTABLE_BINDINGS").is_ok() {
+                    eprintln!("[readtable-sync-skip] invalid env value {:?}", value);
+                }
+                continue;
+            }
+            value = normalized;
+        }
+        if debug_bridge_binding_enabled(name) {
+            eprintln!("[bridge-sync-to] {} <= {:?}", name, value);
+        }
+        let raw_value = eval_result_to_lisp_object(&value, env);
+        let sym = Symbol::allocate(name.clone()).raw();
+        rlasp_jit::intrinsics::cc_set_symbol_value(sym, raw_value);
     }
 }
 
@@ -1183,6 +1916,17 @@ fn sync_bridge_dynamic_specials_from_runtime(
     ];
 
     for &name in NAMES {
+        if name.eq_ignore_ascii_case("*readtable*") {
+            let value = if let Some(raw) = rlasp_jit::intrinsics::get_dynamic_value(name) {
+                canonical_bridge_readtable_value(
+                    &raw_lisp_to_eval_result(unsafe { LispObject::from_raw(raw) }),
+                )
+            } else {
+                rlasp::repl::EvalResult::Symbol("__RLASP_READTABLE__0".to_string())
+            };
+            bridge_env_insert_symbol_aliases(env, name, &value);
+            continue;
+        }
         if let Some(raw) = rlasp_jit::intrinsics::get_dynamic_value(name) {
             let value = raw_lisp_to_eval_result(unsafe { LispObject::from_raw(raw) });
             bridge_env_insert_symbol_aliases(env, name, &value);
@@ -1193,6 +1937,7 @@ fn sync_bridge_dynamic_specials_from_runtime(
 fn runtime_obj_to_io_syntax_value(
     obj: rlasp_runtime::LispObject,
 ) -> Option<rlasp_runtime::io_syntax::IoSyntaxValue> {
+    use rlasp_runtime::header::{ObjectType, TypeHeader};
     use rlasp_runtime::io_syntax::IoSyntaxValue;
 
     if obj.is_nil() {
@@ -1204,22 +1949,24 @@ fn runtime_obj_to_io_syntax_value(
     if let Some(n) = obj.as_fixnum() {
         return Some(IoSyntaxValue::Fixnum(n));
     }
-    if let Some(sym_ptr) = obj.as_general_ptr::<rlasp_runtime::Symbol>() {
-        if !sym_ptr.is_null() {
-            let sym = unsafe { &*sym_ptr };
-            return Some(IoSyntaxValue::Symbol(sym.name().to_string()));
+    if let Some(ptr) = obj.as_general_ptr::<u8>() {
+        if ptr.is_null() {
+            return None;
         }
-    }
-    if let Some(str_ptr) = obj.as_general_ptr::<rlasp_runtime::RString>() {
-        if !str_ptr.is_null() {
-            let s = unsafe { &*str_ptr };
-            return Some(IoSyntaxValue::Symbol(s.as_str().to_string()));
-        }
-    }
-    if let Some(pkg_ptr) = obj.as_general_ptr::<rlasp_runtime::Package>() {
-        if !pkg_ptr.is_null() {
-            let p = unsafe { &*pkg_ptr };
-            return Some(IoSyntaxValue::Symbol(p.name().to_string()));
+        match unsafe { TypeHeader::from_ptr(ptr) } {
+            Some(ObjectType::Symbol) => {
+                let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+                return Some(IoSyntaxValue::Symbol(sym.name().to_string()));
+            }
+            Some(ObjectType::String) => {
+                let s = unsafe { &*(ptr as *const rlasp_runtime::RString) };
+                return Some(IoSyntaxValue::Symbol(s.as_str().to_string()));
+            }
+            Some(ObjectType::Package) => {
+                let p = unsafe { &*(ptr as *const rlasp_runtime::Package) };
+                return Some(IoSyntaxValue::Symbol(p.name().to_string()));
+            }
+            _ => {}
         }
     }
     None
@@ -1289,6 +2036,78 @@ fn decode_raw_bridge_call(form: rlasp_runtime::LispObject) -> Option<(String, Ve
     Some((fn_name, raw_args))
 }
 
+fn seed_bridge_env_from_runner_file(runner_path: &str) -> std::result::Result<(), String> {
+    let source = std::fs::read_to_string(runner_path)
+        .map_err(|e| format!("failed to read bridge seed runner {}: {}", runner_path, e))?;
+    let forms = rlasp_reader::read_all_from_string(&source)
+        .map_err(|e| format!("failed to parse bridge seed runner {}: {}", runner_path, e))?;
+
+    use rlasp::ir::ASTNode;
+    use rlasp::repl::{eval_with_persistent_env, lisp_to_ast, EvalResult};
+    use std::collections::HashMap;
+
+    MLIR_INTERP_ENV.with(|cell| {
+        let mut env: HashMap<String, EvalResult> = cell.borrow().clone();
+        let seed_no_run_tests = std::env::var("RLASP_MLIR_SEED_NO_RUN_TESTS")
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+            })
+            .unwrap_or(false);
+        if seed_no_run_tests {
+            env.insert("*seed-no-run*".to_string(), EvalResult::Boolean(true));
+            env.insert("*SEED-NO-RUN*".to_string(), EvalResult::Boolean(true));
+            env.insert("clasp-tests::*seed-no-run*".to_string(), EvalResult::Boolean(true));
+            env.insert("CLASP-TESTS::*SEED-NO-RUN*".to_string(), EvalResult::Boolean(true));
+        }
+        for form in forms {
+            let ast = match lisp_to_ast::with_read_time_env(&mut env, || lisp_to_ast::lisp_to_ast(form)) {
+                Ok(ast) => ast,
+                Err(e) => return Err(format!("bridge seed ast conversion failed for {}: {}", runner_path, e)),
+            };
+
+            // Seed only bootstrap forms from runner files. Stop before suite
+            // execution to avoid polluting runtime state and doubling suite time.
+            let base_op = match &ast {
+                ASTNode::Call { function, .. } => match function.as_ref() {
+                    ASTNode::Variable(name) => name
+                        .rsplit(':')
+                        .next(),
+                    ASTNode::Constant(rlasp::ir::ConstantValue::Symbol(name)) => name
+                        .rsplit(':')
+                        .next(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let should_stop = base_op.map(|op| {
+                op.eq_ignore_ascii_case("load-if-compiled-correctly")
+                    || op.eq_ignore_ascii_case("show-test-summary")
+            }).unwrap_or(false);
+            if should_stop {
+                break;
+            }
+            let should_skip = base_op.map(|op| {
+                op.eq_ignore_ascii_case("message")
+                    || op.eq_ignore_ascii_case("reset-clasp-tests")
+            }).unwrap_or(false);
+            if should_skip {
+                continue;
+            }
+
+            let _ = eval_with_persistent_env(&ast, &mut env);
+        }
+        if seed_no_run_tests {
+            env.insert("*seed-no-run*".to_string(), EvalResult::Boolean(false));
+            env.insert("*SEED-NO-RUN*".to_string(), EvalResult::Boolean(false));
+            env.insert("clasp-tests::*seed-no-run*".to_string(), EvalResult::Boolean(false));
+            env.insert("CLASP-TESTS::*SEED-NO-RUN*".to_string(), EvalResult::Boolean(false));
+        }
+        *cell.borrow_mut() = env;
+        Ok(())
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
     use rlasp::repl::{eval_with_persistent_env, lisp_to_ast, EvalResult};
@@ -1324,15 +2143,36 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
                         | "abort-process"
                 );
             let trace_bridge_raw = std::env::var("RLASP_BRIDGE_TRACE").is_ok();
-            let mut eval_args: Vec<EvalResult> = raw_args
-                .iter()
-                .map(|raw| raw_lisp_to_eval_result(unsafe { LispObject::from_raw(*raw) }))
-                .collect();
             let fn_base = fn_name
                 .rsplit(':')
                 .next()
                 .unwrap_or(fn_name.as_str())
                 .to_ascii_lowercase();
+            let preserve_callable_refs = matches!(
+                fn_base.as_str(),
+                "process-run-function" | "make-process"
+            );
+            let mut eval_args: Vec<EvalResult> = raw_args
+                .iter()
+                .map(|raw| {
+                    let obj = unsafe { LispObject::from_raw(*raw) };
+                    if preserve_callable_refs {
+                        raw_lisp_to_eval_result_preserve_bridge_handles(obj)
+                    } else {
+                        raw_lisp_to_eval_result(obj)
+                    }
+                })
+                .collect();
+            if fn_base == "make-synonym-stream" {
+                for arg in &eval_args {
+                    if let EvalResult::Symbol(name) = arg {
+                        if let Some(raw) = rlasp_jit::intrinsics::get_dynamic_value(name) {
+                            let value = raw_lisp_to_eval_result(unsafe { LispObject::from_raw(raw) });
+                            bridge_env_insert_symbol_aliases(&mut env, name, &value);
+                        }
+                    }
+                }
+            }
             if fn_base == "read-delimited-list"
                 && matches!(eval_args.get(1), Some(EvalResult::Nil) | None)
             {
@@ -1367,7 +2207,12 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
                         .unwrap_or(EvalResult::Nil),
                     _ => EvalResult::Nil,
                 };
-                let raw = eval_result_to_lisp_object(&out, &mut env);
+                let raw = match &out {
+                    EvalResult::Condition(_)
+                    | EvalResult::Instance(_)
+                    | EvalResult::HashTable(_) => make_bridge_handle_symbol(&out),
+                    _ => eval_result_to_lisp_object(&out, &mut env),
+                };
                 let result_obj = pack_single(raw);
                 *cell.borrow_mut() = env;
                 return result_obj;
@@ -1385,7 +2230,9 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
                         .map(EvalResult::String)
                         .unwrap_or(EvalResult::Nil))
                 } else if is_io_bridge_builtin(&fn_name) {
-                    rlasp::repl::eval_io::call_io_builtin(&fn_name, &eval_args)
+                    rlasp::repl::eval_io::with_io_eval_env(&mut env, || {
+                        rlasp::repl::eval_io::call_io_builtin(&fn_name, &eval_args)
+                    })
                 } else if is_package_bridge_builtin(&fn_name) {
                     rlasp::repl::eval_package::call_package_builtin(&fn_name, &eval_args, &mut env)
                 } else {
@@ -1416,6 +2263,12 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
                             *cell.borrow_mut() = env;
                             return result_obj;
                         }
+                    }
+                    if let Some(cond) = bridge_condition_from_error_string(&e) {
+                        let raw = eval_result_to_lisp_object(&cond, &mut env);
+                        let result_obj = pack_single(raw);
+                        *cell.borrow_mut() = env;
+                        return result_obj;
                     }
                     if is_package_bridge_builtin(&fn_name) {
                         return pack_single(LispError::allocate(
@@ -1476,20 +2329,95 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
 
         let trace_general_read = std::env::var("RLASP_TRACE_BRIDGE_READ_FROM_STRING").is_ok();
         let trace_bridge_general = std::env::var("RLASP_BRIDGE_TRACE").is_ok();
-        let ast = match lisp_to_ast::with_read_time_env(&mut env, || lisp_to_ast::lisp_to_ast(form)) {
-            Ok(ast) => ast,
-            Err(e) => {
-                return pack_single(LispError::allocate(
-                    ErrorKind::InvalidArgument,
-                    Some(format!("eval parse failed: {}", e)),
-                )
-                .raw())
+        let form_eval = raw_lisp_to_eval_result_preserve_bridge_handles(form);
+        if trace_bridge_general {
+            eprintln!("[bridge-gen-form] raw={:?}", form);
+            eprintln!("[bridge-gen-form] eval={:?}", form_eval);
+            for key in [
+                "%FUNCTION%SAFELY-DELETE-PACKAGE",
+                "%FUNCTION%safely-delete-package",
+                "SAFELY-DELETE-PACKAGE",
+                "safely-delete-package",
+                "COMMON-LISP-USER::SAFELY-DELETE-PACKAGE",
+            ] {
+                if let Some(val) = env.get(key) {
+                    eprintln!("[bridge-gen-env] {} => {:?}", key, val);
+                }
             }
+        }
+        let mut ast = match rlasp::repl::result_to_ast(&form_eval) {
+            Ok(ast) => ast,
+            Err(conv_err) => match lisp_to_ast::with_read_time_env(&mut env, || lisp_to_ast::lisp_to_ast(form)) {
+                Ok(ast) => ast,
+                Err(parse_err) => {
+                    return pack_single(LispError::allocate(
+                        ErrorKind::InvalidArgument,
+                        Some(format!(
+                            "eval ast conversion failed: {}; eval parse failed: {}",
+                            conv_err, parse_err
+                        )),
+                    )
+                    .raw())
+                }
+            },
+        };
+        if trace_bridge_general {
+            eprintln!("[bridge-gen-ast] {:?}", ast);
+        }
+
+        bind_and_unquote_bridge_handles_in_ast(&mut ast, &mut env);
+        let synced_named_bindings = sync_bridge_named_bindings_from_runtime(&ast, &mut env);
+        env.insert(
+            "__RLASP_BRIDGE_INTERPRET_ONLY__".to_string(),
+            EvalResult::Boolean(true),
+        );
+
+        let traced_bridge_progn = std::env::var("RLASP_BRIDGE_TRACE_PROGN").is_ok();
+        let eval_bridged_ast = |ast: &rlasp::ir::ASTNode,
+                                env: &mut std::collections::HashMap<String, rlasp::repl::EvalResult>|
+         -> std::result::Result<rlasp::repl::EvalResult, String> {
+            if traced_bridge_progn {
+                let progn_exprs: Option<&[rlasp::ir::ASTNode]> = match ast {
+                    rlasp::ir::ASTNode::Progn { exprs } => Some(exprs.as_slice()),
+                    rlasp::ir::ASTNode::Call { function, args }
+                        if matches!(function.as_ref(), rlasp::ir::ASTNode::Variable(name)
+                            if name.rsplit(':').next().map(|s| s.eq_ignore_ascii_case("progn")).unwrap_or(false)) =>
+                    {
+                        Some(args.as_slice())
+                    }
+                    _ => None,
+                };
+                if let Some(exprs) = progn_exprs {
+                    let mut last = rlasp::repl::EvalResult::Nil;
+                    for (idx, expr) in exprs.iter().enumerate() {
+                        if std::env::var("RLASP_BRIDGE_TRACE").is_ok() {
+                            eprintln!("[bridge-progn] begin idx={} expr={:?}", idx, expr);
+                        }
+                        match eval_with_persistent_env(expr, env) {
+                            Ok(v) => {
+                                last = v;
+                                if std::env::var("RLASP_BRIDGE_TRACE").is_ok() {
+                                    eprintln!("[bridge-progn] ok idx={} value={:?}", idx, last);
+                                }
+                            }
+                            Err(e) => {
+                                if std::env::var("RLASP_BRIDGE_TRACE").is_ok() {
+                                    eprintln!("[bridge-progn] err idx={} expr={:?} err={}", idx, expr, e);
+                                }
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(last);
+                }
+            }
+            eval_with_persistent_env(ast, env)
         };
 
-        let evaluated = match eval_with_persistent_env(&ast, &mut env) {
+        let evaluated = match eval_bridged_ast(&ast, &mut env) {
             Ok(v) => v,
             Err(e) => {
+                sync_bridge_named_bindings_to_runtime(&synced_named_bindings, &mut env);
                 if trace_bridge_general {
                     eprintln!("[bridge-gen-err] ast={:?}", ast);
                     eprintln!("[bridge-gen-err] err={}", e);
@@ -1498,6 +2426,7 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
                     if let Some(cond) = rlasp::repl::take_pending_mp_signal_condition() {
                         let raw = eval_result_to_lisp_object(&cond, &mut env);
                         let result_obj = pack_single(raw);
+                        env.remove("__RLASP_BRIDGE_INTERPRET_ONLY__");
                         *cell.borrow_mut() = env;
                         return result_obj;
                     }
@@ -1506,14 +2435,19 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
                     if let Some(cond) = rlasp::repl::eval_conditions::take_pending_signaled_condition() {
                         let raw = eval_result_to_lisp_object(&cond, &mut env);
                         let result_obj = pack_single(raw);
+                        env.remove("__RLASP_BRIDGE_INTERPRET_ONLY__");
                         *cell.borrow_mut() = env;
                         return result_obj;
                     }
                 }
                 let (kind, msg) = bridge_error_from_string(e);
+                env.remove("__RLASP_BRIDGE_INTERPRET_ONLY__");
+                *cell.borrow_mut() = env;
                 return pack_single(LispError::allocate(kind, Some(msg)).raw());
             }
         };
+        sync_bridge_named_bindings_to_runtime(&synced_named_bindings, &mut env);
+        env.remove("__RLASP_BRIDGE_INTERPRET_ONLY__");
         if trace_general_read {
             eprintln!("[bridge-read-gen] ast={:?}", ast);
             eprintln!("[bridge-read-gen] evaluated={:?}", evaluated);
@@ -1545,22 +2479,40 @@ pub extern "C" fn cc_eval_bridge(form_obj: usize) -> usize {
     })
 }
 
-// Declare external C functions from librlasp for interpreter mode
-#[link(name = "rlasp")]
-extern "C" {
-    fn rlasp_init() -> *mut std::ffi::c_void;
-    fn rlasp_eval(
-        runtime: *mut std::ffi::c_void,
-        expr: *const c_char,
-        result_out: *mut *mut c_char,
-    ) -> c_int;
-    fn rlasp_eval_file(
-        runtime: *mut std::ffi::c_void,
-        source: *const c_char,
-        result_out: *mut *mut c_char,
-    ) -> c_int;
-    fn rlasp_free_string(s: *mut c_char);
-    fn rlasp_shutdown(runtime: *mut std::ffi::c_void);
+// Interpreter mode calls the in-workspace Rust C-ABI exports directly
+// to avoid loading a second librlasp dynamic copy (which duplicates
+// global runtime singletons and breaks EQ identity assumptions).
+#[inline]
+unsafe fn rlasp_init() -> *mut std::ffi::c_void {
+    rlasp::rlasp_init() as *mut std::ffi::c_void
+}
+
+#[inline]
+unsafe fn rlasp_eval(
+    runtime: *mut std::ffi::c_void,
+    expr: *const c_char,
+    result_out: *mut *mut c_char,
+) -> c_int {
+    rlasp::rlasp_eval(runtime as *mut rlasp::c_api::RlaspRuntime, expr, result_out)
+}
+
+#[inline]
+unsafe fn rlasp_eval_file(
+    runtime: *mut std::ffi::c_void,
+    source: *const c_char,
+    result_out: *mut *mut c_char,
+) -> c_int {
+    rlasp::rlasp_eval_file(runtime as *mut rlasp::c_api::RlaspRuntime, source, result_out)
+}
+
+#[inline]
+unsafe fn rlasp_free_string(s: *mut c_char) {
+    rlasp::rlasp_free_string(s);
+}
+
+#[inline]
+unsafe fn rlasp_shutdown(runtime: *mut std::ffi::c_void) {
+    rlasp::rlasp_shutdown(runtime as *mut rlasp::c_api::RlaspRuntime);
 }
 
 fn main() -> Result<()> {
@@ -2517,32 +3469,32 @@ fn normalize_special_forms(ast: &rlasp::ir::ASTNode) -> rlasp::ir::ASTNode {
                         // Call { function: first_binding, args: [rest_bindings...] }
                         // Where each binding is Call { function: Variable(name), args: [value] }
                         fn extract_binding(node: &ASTNode) -> Option<(String, ASTNode)> {
-                            if let ASTNode::Call { function, args } = node {
-                                if let ASTNode::Variable(var_name) = &**function {
-                                    if !args.is_empty() {
-                                        return Some((var_name.clone(), args[0].clone()));
-                                    }
+                            match node {
+                                ASTNode::Variable(var_name) => {
+                                    Some((var_name.clone(), ASTNode::nil()))
                                 }
+                                ASTNode::Call { function, args } => {
+                                    if let ASTNode::Variable(var_name) = &**function {
+                                        let value = args.get(0).cloned().unwrap_or_else(ASTNode::nil);
+                                        return Some((var_name.clone(), value));
+                                    }
+                                    None
+                                }
+                                _ => None,
                             }
-                            None
                         }
 
                         fn extract_bindings(node: &ASTNode) -> Vec<(String, ASTNode)> {
+                            if let Some(binding) = extract_binding(node) {
+                                return vec![binding];
+                            }
+
                             let mut result = vec![];
-                            match node {
-                                ASTNode::Call { function, args } => {
-                                    // First binding is in function
-                                    if let Some(binding) = extract_binding(function) {
-                                        result.push(binding);
-                                    }
-                                    // Remaining bindings are in args
-                                    for arg in args {
-                                        if let Some(binding) = extract_binding(arg) {
-                                            result.push(binding);
-                                        }
-                                    }
+                            if let ASTNode::Call { function, args } = node {
+                                result.extend(extract_bindings(function));
+                                for arg in args {
+                                    result.extend(extract_bindings(arg));
                                 }
-                                _ => {}
                             }
                             result
                         }
@@ -2694,7 +3646,10 @@ fn env_var_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn mlir_artifact_path_for_source(file_path: &str) -> String {
+fn mlir_artifact_path_for_source(file_path: &str, source: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     let mut stem = std::path::Path::new(file_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -2703,7 +3658,10 @@ fn mlir_artifact_path_for_source(file_path: &str) -> String {
     if stem.is_empty() {
         stem = "module".to_string();
     }
-    format!("/tmp/{}.mlirbc", stem)
+    let mut hasher = DefaultHasher::new();
+    file_path.hash(&mut hasher);
+    source.hash(&mut hasher);
+    format!("/tmp/{}-{:016x}.mlirbc", stem, hasher.finish())
 }
 
 fn eval_file_mlir_via_artifact(
@@ -2748,14 +3706,28 @@ fn eval_file_mlir_via_artifact(
     let _load_specials_guard = install_mlir_load_specials(file_path);
 
     let compile_only_requested = respect_compile_only && env_var_truthy("RLASP_MLIR_COMPILE_ONLY");
-    let artifact_path = mlir_artifact_path_for_source(file_path);
+    let artifact_path = std::env::var("RLASP_MLIR_ARTIFACT_PATH")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| {
+            if compile_only_requested {
+                let module_name = Path::new(file_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("module");
+                format!("/tmp/{}.mlirbc", module_name)
+            } else {
+                mlir_artifact_path_for_source(file_path, source)
+            }
+        });
 
     let prev_save_artifacts = std::env::var_os("RLASP_SAVE_ARTIFACTS");
     let prev_compile_only = std::env::var_os("RLASP_MLIR_COMPILE_ONLY");
     let prev_selective_eval = std::env::var_os("RLASP_MLIR_SELECTIVE_EVAL");
-
+    let prev_artifact_path = std::env::var_os("RLASP_MLIR_ARTIFACT_PATH");
     std::env::set_var("RLASP_SAVE_ARTIFACTS", "1");
     std::env::set_var("RLASP_MLIR_COMPILE_ONLY", "1");
+    std::env::set_var("RLASP_MLIR_ARTIFACT_PATH", &artifact_path);
     let compile_result = eval_file_mlir(source, file_path, init_runtime, default_behavior);
 
     match prev_save_artifacts {
@@ -2770,8 +3742,14 @@ fn eval_file_mlir_via_artifact(
         Some(v) => std::env::set_var("RLASP_MLIR_SELECTIVE_EVAL", v),
         None => std::env::remove_var("RLASP_MLIR_SELECTIVE_EVAL"),
     }
+    match prev_artifact_path {
+        Some(v) => std::env::set_var("RLASP_MLIR_ARTIFACT_PATH", v),
+        None => std::env::remove_var("RLASP_MLIR_ARTIFACT_PATH"),
+    }
 
-    compile_result?;
+    if let Err(e) = compile_result {
+        return Err(e);
+    }
     if compile_only_requested {
         return Ok(());
     }
@@ -2852,25 +3830,21 @@ fn eval_file_mlir(
             let t = v.trim().to_ascii_lowercase();
             !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
         })
-        // Compile-time LOAD evaluation is required for macro-heavy CL files
-        // (regression harness and ASDF-style loaders) to preserve expansion semantics.
-        .unwrap_or(true);
+        // CL-faithful default: plain top-level LOAD is runtime behavior unless
+        // explicitly forced for compatibility via env.
+        .unwrap_or(false);
     let skip_side_effect_forms = std::env::var("RLASP_MLIR_SKIP_SIDE_EFFECT_FORMS")
         .map(|v| {
             let t = v.trim().to_ascii_lowercase();
             !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
         })
         .unwrap_or(false);
-    let memory_ceiling_active = std::env::var_os("IRLASP_MEMORY_CEILING_MB").is_some()
-        || std::env::var_os("RLASP_MEMORY_CEILING_MB").is_some()
-        || std::env::var_os("IRLASP_MEMORY_CEILING_BYTES").is_some()
-        || std::env::var_os("RLASP_MEMORY_CEILING_BYTES").is_some();
     let force_gc_every_form = std::env::var("RLASP_MLIR_FORCE_GC_EVERY_FORM")
         .map(|v| {
             let t = v.trim().to_ascii_lowercase();
             !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
         })
-        .unwrap_or(memory_ceiling_active);
+        .unwrap_or(false);
 
     // Stream forms from the reader instead of storing all LispObjects up-front.
     // This avoids stale/unrooted form handles across compile-time eval/GC.
@@ -3108,6 +4082,9 @@ fn eval_file_mlir(
     fn should_eval_for_compile_env(ast: &rlasp::ir::ASTNode, eval_load_for_compile: bool) -> bool {
         match ast {
             rlasp::ir::ASTNode::Setq { .. } => true,
+            rlasp::ir::ASTNode::Defclass { .. }
+            | rlasp::ir::ASTNode::Defgeneric { .. }
+            | rlasp::ir::ASTNode::Defmethod { .. } => true,
             rlasp::ir::ASTNode::Progn { exprs } => exprs
                 .iter()
                 .any(|expr| should_eval_for_compile_env(expr, eval_load_for_compile)),
@@ -3205,7 +4182,6 @@ fn eval_file_mlir(
                 "load"
                     | "require"
                     | "provide"
-                    | "defstruct"
                     | "with-upgradability"
             )
         }
@@ -3328,18 +4304,24 @@ fn eval_file_mlir(
                 } else {
                     None
                 };
-                // Step 1: Default to permissive compile-time eval.
-                // Selective compile-time eval can skip required top-level effects
-                // (macro setup, declarations, special bindings) and produce large
-                // semantic regressions across CL suites.
-                // Set RLASP_MLIR_SELECTIVE_EVAL=1 to enable selective mode.
-                let selective_eval_default = false;
-                let selective_eval = std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
-                    .map(|v| {
-                        let t = v.trim().to_ascii_lowercase();
-                        !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
-                    })
-                    .unwrap_or(selective_eval_default);
+                // Step 1: CL-faithful selective compile-time eval by default.
+                // Compile-time evaluation should be restricted to forms that
+                // establish compile environment semantics (macros, declarations,
+                // compile-situation eval-when, etc.), not arbitrary runtime forms.
+                let selective_eval_default = true;
+                let selective_eval = if compile_only {
+                    // Compile-only must preserve compile-file semantics: evaluate
+                    // only definition/setup forms needed to build the compile-time
+                    // environment, never arbitrary runtime/test top-level forms.
+                    true
+                } else {
+                    std::env::var("RLASP_MLIR_SELECTIVE_EVAL")
+                        .map(|v| {
+                            let t = v.trim().to_ascii_lowercase();
+                            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+                        })
+                        .unwrap_or(selective_eval_default)
+                };
                 let should_eval_compile = should_eval_for_compile_env(&ast, eval_load_for_compile);
                 let skip_compile_eval = head
                     .as_deref()
@@ -3405,6 +4387,25 @@ fn eval_file_mlir(
                         ast.clone()
                     }
                 };
+                if std::env::var("RLASP_TRACE_FLOAT_TRAPS_FORM").is_ok() {
+                    let head_matches = head
+                        .as_deref()
+                        .map(|h| h.eq_ignore_ascii_case("ext:with-float-traps-masked")
+                            || h.eq_ignore_ascii_case("with-float-traps-masked"))
+                        .unwrap_or(false);
+                    let ast_dbg = format!("{:?}", &ast);
+                    let expanded_dbg = format!("{:?}", &expanded);
+                    if head_matches
+                        || ast_dbg.contains("with-float-traps-masked")
+                        || expanded_dbg.contains("with-float-traps-masked")
+                        || ast_dbg.contains(":invalid")
+                        || expanded_dbg.contains(":invalid")
+                    {
+                        eprintln!("[float-traps-form] form={} head={}", form_count, head.clone().unwrap_or_else(|| "<unknown>".to_string()));
+                        eprintln!("[float-traps-form] ast={}", ast_dbg);
+                        eprintln!("[float-traps-form] expanded={}", expanded_dbg);
+                    }
+                }
                 if trace_stage {
                     println!(
                         "[MLIR-STAGE] form={} stage=macroexpand end elapsed_ms={}",
@@ -3421,6 +4422,11 @@ fn eval_file_mlir(
                         eprintln!("[test-macro] form {} ast={:?}", form_count, ast);
                         eprintln!("[test-macro] form {} expanded={:?}", form_count, expanded);
                     }
+                }
+                if std::env::var("RLASP_TRACE_MLIR_EXPANDED_FORM").is_ok() {
+                    eprintln!("[mlir-expanded-form] form={} head={}", form_count, head.clone().unwrap_or_else(|| "<unknown>".to_string()));
+                    eprintln!("[mlir-expanded-form] ast={:?}", ast);
+                    eprintln!("[mlir-expanded-form] expanded={:?}", expanded);
                 }
 
                 // Debug: check if expanded form contains defgeneric
@@ -3661,7 +4667,15 @@ fn eval_file_mlir(
 
     // Save MLIR to file
     if save_artifacts {
-        let mlir_path = format!("/tmp/{}.mlir", module_name);
+        let artifact_path_override = std::env::var("RLASP_MLIR_ARTIFACT_PATH").ok();
+        let mlirbc_path = artifact_path_override
+            .clone()
+            .unwrap_or_else(|| format!("/tmp/{}.mlirbc", module_name));
+        let mlir_path = if let Some(stripped) = mlirbc_path.strip_suffix(".mlirbc") {
+            format!("{}.mlir", stripped)
+        } else {
+            format!("/tmp/{}.mlir", module_name)
+        };
         std::fs::write(&mlir_path, &mlir_text)
             .map_err(|e| format!("Failed to write MLIR file: {}", e))?;
         if mlir_verbose {
@@ -3669,14 +4683,10 @@ fn eval_file_mlir(
         }
 
         // Save MLIR bytecode
-        let mlirbc_path = format!("/tmp/{}.mlirbc", module_name);
-        match rlasp_mlir::lowering::emit_mlir_bytecode(&mlir_text, &mlirbc_path) {
-            Ok(()) => {
-                if mlir_verbose {
-                    println!("[Saved MLIR bytecode to: {}]", mlirbc_path);
-                }
-            }
-            Err(e) => eprintln!("[Warning: Could not emit MLIR bytecode: {}]", e),
+        rlasp_mlir::lowering::emit_mlir_bytecode(&mlir_text, &mlirbc_path)
+            .map_err(|e| format!("Failed to emit MLIR bytecode: {}", e))?;
+        if mlir_verbose {
+            println!("[Saved MLIR bytecode to: {}]", mlirbc_path);
         }
     }
 
@@ -3836,6 +4846,7 @@ fn eval_file_mlir(
             cc_last as *const (),
             cc_acons as *const (),
             cc_getf as *const (),
+            cc_remf_plist as *const (),
             cc_read_from_string as *const (),
             cc_substitute as *const (),
             cc_substitute_if as *const (),
@@ -3945,12 +4956,18 @@ fn eval_file_mlir(
     // Collect function names BEFORE transferring module to LLJIT
     // (After transfer, we can't iterate module.get_functions() anymore)
     let mut lambda_names: Vec<String> = Vec::new();
+    let mut extra_fn_names: Vec<String> = Vec::new();
     let mut method_names: Vec<String> = Vec::new();
     let mut local_function_names: Vec<String> = Vec::new();
-    for func_val in module.get_functions() {
-        let func_name = func_val.get_name().to_str().unwrap_or("");
+    let mut record_function_name = |func_name: &str| {
+        if func_name.is_empty() {
+            return;
+        }
         if func_name.starts_with("__lambda_") {
             lambda_names.push(func_name.to_string());
+        }
+        if func_name.starts_with("%FN%") {
+            extra_fn_names.push(func_name.to_string());
         }
         if func_name.starts_with("local_") {
             local_function_names.push(func_name.to_string());
@@ -3962,10 +4979,42 @@ fn eval_file_mlir(
         if is_method {
             method_names.push(func_name.to_string());
         }
+    };
+    for line in llvm_ir_text.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("define ") else {
+            continue;
+        };
+        let Some(at_pos) = rest.find('@') else {
+            continue;
+        };
+        let after_at = &rest[at_pos + 1..];
+        let func_name = if let Some(after_quote) = after_at.strip_prefix('"') {
+            after_quote.split('"').next().unwrap_or("")
+        } else {
+            after_at
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("")
+        };
+        record_function_name(func_name);
     }
+    for func_val in module.get_functions() {
+        let func_name = func_val.get_name().to_str().unwrap_or("");
+        record_function_name(func_name);
+    }
+    lambda_names.sort();
+    lambda_names.dedup();
+    extra_fn_names.sort();
+    extra_fn_names.dedup();
+    method_names.sort();
+    method_names.dedup();
+    local_function_names.sort();
+    local_function_names.dedup();
     if mlir_verbose {
         println!(
-            "[Collected {} lambdas, {} methods, {} local functions from module]",
+            "[Collected {} user fns, {} lambdas, {} methods, {} local functions from module]",
+            extra_fn_names.len(),
             lambda_names.len(),
             method_names.len(),
             local_function_names.len()
@@ -4073,9 +5122,11 @@ fn eval_file_mlir(
         use std::ffi::CString;
 
         let mut registered_functions = 0;
+        let mut registered_extra_functions = 0;
         let mut registered_lambdas = 0;
         let mut registered_methods = 0;
         let mut registered_local_functions = 0;
+        let trace_register = std::env::var("RLASP_TRACE_REGISTER_FN").is_ok();
         let expects_args_list = |func_name: &str| -> bool {
             let fn_pref = format!("%FN%{}", func_name);
             let lower = func_name.to_ascii_lowercase();
@@ -4096,6 +5147,8 @@ fn eval_file_mlir(
         for (name, params, _, _, _, _) in &defuns {
             // Use lookup_symbol to get function address from LLJIT
             if let Ok(func_ptr) = lookup_symbol(name) {
+                rlasp::register_function_lambda_list_metadata(name, params);
+                rlasp_jit::intrinsics::register_function_lambda_list_metadata(name, params);
                 let name_cstr = CString::new(name.as_str()).unwrap();
                 // Entry points like __main or __rlasp_* use direct params
                 // All other user functions (including main) use uniform calling convention
@@ -4128,6 +5181,30 @@ fn eval_file_mlir(
                         }
                     }
                 }
+            }
+        }
+
+        let known_defuns: std::collections::HashSet<String> =
+            defuns.iter().map(|(name, _, _, _, _, _)| name.clone()).collect();
+        for func_name in &extra_fn_names {
+            if known_defuns.contains(func_name) {
+                continue;
+            }
+            if let Ok(func_ptr) = lookup_symbol(func_name) {
+                if trace_register {
+                    eprintln!("[register-fn] {} ok=1 extra=1", func_name);
+                }
+                let name_cstr = CString::new(func_name.as_str()).unwrap();
+                unsafe {
+                    if expects_args_list(func_name) {
+                        cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                    } else {
+                        cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
+                    }
+                }
+                registered_extra_functions += 1;
+            } else if trace_register {
+                eprintln!("[register-fn] {} ok=0 extra=1", func_name);
             }
         }
 
@@ -4175,8 +5252,9 @@ fn eval_file_mlir(
         }
         if mlir_verbose {
             println!(
-                "[Registered {} functions, {} lambdas, {} methods, {} local functions]",
+                "[Registered {} functions, {} extra functions, {} lambdas, {} methods, {} local functions]",
                 registered_functions,
+                registered_extra_functions,
                 registered_lambdas,
                 registered_methods,
                 registered_local_functions
@@ -4520,6 +5598,70 @@ fn keyword_name_from_obj(obj: rlasp_runtime::LispObject) -> Option<String> {
     Some(base.trim_start_matches(':').to_ascii_uppercase())
 }
 
+fn external_format_name_from_obj(obj: rlasp_runtime::LispObject) -> Option<String> {
+    use rlasp_runtime::{RString, Symbol};
+
+    let raw = if let Some(sym_ptr) = obj.as_general_ptr::<Symbol>() {
+        if sym_ptr.is_null() {
+            return None;
+        }
+        unsafe { (&*sym_ptr).name().to_string() }
+    } else if let Some(str_ptr) = obj.as_general_ptr::<RString>() {
+        if str_ptr.is_null() {
+            return None;
+        }
+        unsafe { (&*str_ptr).as_str().to_string() }
+    } else {
+        return None;
+    };
+
+    Some(
+        raw.rsplit(':')
+            .next()
+            .unwrap_or(raw.as_str())
+            .trim_start_matches(':')
+            .to_ascii_lowercase(),
+    )
+}
+
+fn decode_bytes_with_external_format(
+    bytes: &[u8],
+    external_format: &str,
+) -> std::result::Result<String, String> {
+    let fmt = external_format.trim_start_matches(':').to_ascii_lowercase();
+    match fmt.as_str() {
+        "" | "default" | "utf-8" | "utf8" => {
+            String::from_utf8(bytes.to_vec()).map_err(|_| "stream did not contain valid UTF-8".to_string())
+        }
+        "latin-1" | "iso-8859-1" => {
+            let mut out = String::with_capacity(bytes.len());
+            for b in bytes {
+                out.push(char::from_u32(*b as u32).unwrap_or('\u{FFFD}'));
+            }
+            Ok(out)
+        }
+        "latin-2" | "iso-8859-2" => {
+            let mut out = String::with_capacity(bytes.len());
+            for b in bytes {
+                let codepoint = match *b {
+                    0xBB => 0x0165,
+                    _ => *b as u32,
+                };
+                out.push(char::from_u32(codepoint).unwrap_or('\u{FFFD}'));
+            }
+            Ok(out)
+        }
+        "us-ascii" | "ascii" => {
+            if bytes.iter().any(|b| *b > 0x7F) {
+                Err("stream-decoding-error".to_string())
+            } else {
+                String::from_utf8(bytes.to_vec()).map_err(|_| "stream-decoding-error".to_string())
+            }
+        }
+        _ => String::from_utf8(bytes.to_vec()).map_err(|_| "stream did not contain valid UTF-8".to_string()),
+    }
+}
+
 fn is_lisp_truthy(obj: rlasp_runtime::LispObject) -> bool {
     !obj.is_nil()
 }
@@ -4667,6 +5809,7 @@ fn load_object_with_options(
     load_obj: rlasp_runtime::LispObject,
     verbose: bool,
     print_values: bool,
+    external_format: Option<&str>,
 ) -> usize {
     use rlasp_runtime::LispObject;
     use std::path::Path;
@@ -4703,7 +5846,15 @@ fn load_object_with_options(
             );
         }
 
-        let file_contents = match std::fs::read_to_string(&resolved_path) {
+        let file_bytes = match std::fs::read(&resolved_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("load failed to read {}: {}", resolved_path, e);
+                return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
+            }
+        };
+        let fmt = external_format.unwrap_or("default");
+        let file_contents = match decode_bytes_with_external_format(&file_bytes, fmt) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("load failed to read {}: {}", resolved_path, e);
@@ -4732,6 +5883,11 @@ fn load_object_with_options(
     }
     ACTIVE_LOAD_PATHS.with(|stack| stack.borrow_mut().push(load_identity.clone()));
 
+    // CL LOAD inherits the caller's current package. When compiled code calls
+    // into this Rust load path, the JIT runtime package is authoritative.
+    let caller_pkg = rlasp_jit::intrinsics::current_package_name();
+    rlasp::repl::eval_package::set_current_package_runtime(&caller_pkg);
+
     let load_result = eval_file_mlir_via_artifact(
         &contents,
         &source_label,
@@ -4745,6 +5901,8 @@ fn load_object_with_options(
             stack.remove(pos);
         }
     });
+    let post_load_pkg = rlasp_jit::intrinsics::current_package_name();
+    rlasp::repl::eval_package::set_current_package_runtime(&post_load_pkg);
 
     match load_result {
         Ok(_) => {
@@ -4774,7 +5932,7 @@ fn default_compile_output_path(input_path: &str) -> String {
 #[no_mangle]
 pub extern "C" fn cc_load(path_obj: usize) -> usize {
     let obj = unsafe { rlasp_runtime::LispObject::from_raw(path_obj) };
-    load_object_with_options(obj, false, false)
+    load_object_with_options(obj, false, false, None)
 }
 
 #[no_mangle]
@@ -4790,19 +5948,26 @@ pub extern "C" fn cc_load_stack(args_list_obj: usize) -> usize {
 
     let mut verbose = false;
     let mut print_values = false;
+    let mut external_format = "default".to_string();
     let mut idx = 1usize;
     while idx + 1 < args.len() {
         if let Some(key) = keyword_name_from_obj(args[idx]) {
             match key.as_str() {
                 "VERBOSE" => verbose = is_lisp_truthy(args[idx + 1]),
                 "PRINT" => print_values = is_lisp_truthy(args[idx + 1]),
+                "EXTERNAL-FORMAT" => {
+                    if let Some(fmt) = external_format_name_from_obj(args[idx + 1]) {
+                        external_format = fmt;
+                    }
+                }
+                "IF-DOES-NOT-EXIST" => {}
                 _ => {}
             }
         }
         idx += 2;
     }
 
-    load_object_with_options(args[0], verbose, print_values)
+    load_object_with_options(args[0], verbose, print_values, Some(&external_format))
 }
 
 #[no_mangle]
@@ -4812,9 +5977,6 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
 
     let args_obj = unsafe { LispObject::from_raw(args_list_obj) };
     let args = lisp_list_to_vec(args_obj);
-    if std::env::var("RLASP_TRACE_COMPILE_FILE_STACK").is_ok() {
-        eprintln!("[cc_compile_file_stack] argc={}", args.len());
-    }
     if args.is_empty() {
         return LispError::allocate(
             ErrorKind::InvalidArgument,
@@ -4826,9 +5988,6 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
     let input_raw = match extract_pathname_string(args[0]) {
         Some(p) => p,
         None => {
-            if std::env::var("RLASP_TRACE_COMPILE_FILE_STACK").is_ok() {
-                eprintln!("[cc_compile_file_stack] bad input designator");
-            }
             return LispError::allocate(
                 ErrorKind::InvalidArgument,
                 Some("FILE-ERROR: compile-file requires a pathname designator".to_string()),
@@ -4840,6 +5999,7 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
     let mut verbose = true;
     let mut print_values = true;
     let mut output_override: Option<String> = None;
+    let mut external_format = "default".to_string();
     let mut idx = 1usize;
     while idx + 1 < args.len() {
         if let Some(key) = keyword_name_from_obj(args[idx]) {
@@ -4847,6 +6007,11 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
                 "VERBOSE" => verbose = is_lisp_truthy(args[idx + 1]),
                 "PRINT" => print_values = is_lisp_truthy(args[idx + 1]),
                 "OUTPUT-FILE" => output_override = extract_pathname_string(args[idx + 1]),
+                "EXTERNAL-FORMAT" => {
+                    if let Some(fmt) = external_format_name_from_obj(args[idx + 1]) {
+                        external_format = fmt;
+                    }
+                }
                 _ => {}
             }
         }
@@ -4865,18 +6030,22 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
             .unwrap_or(input_path.clone())
     };
 
-    let source = match std::fs::read_to_string(&resolved_input) {
+    let source_bytes = match std::fs::read(&resolved_input) {
         Ok(s) => s,
         Err(e) => {
-            if std::env::var("RLASP_TRACE_COMPILE_FILE_STACK").is_ok() {
-                eprintln!("[cc_compile_file_stack] read failed path='{}' err={}", resolved_input, e);
-            }
             return LispError::allocate(
                 ErrorKind::InvalidArgument,
-                Some(format!(
-                    "FILE-ERROR: compile-file: {} ({})",
-                    resolved_input, e
-                )),
+                Some(format!("FILE-ERROR: compile-file: {} ({})", resolved_input, e)),
+            )
+            .raw();
+        }
+    };
+    let source = match decode_bytes_with_external_format(&source_bytes, &external_format) {
+        Ok(s) => s,
+        Err(e) => {
+            return LispError::allocate(
+                ErrorKind::InvalidArgument,
+                Some(format!("FILE-ERROR: compile-file: {} ({})", resolved_input, e)),
             )
             .raw();
         }
@@ -4911,15 +6080,9 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
         }
     }
     if let Err(e) = std::fs::write(&output_path, source) {
-        if std::env::var("RLASP_TRACE_COMPILE_FILE_STACK").is_ok() {
-            eprintln!("[cc_compile_file_stack] write failed path='{}' err={}", output_path, e);
-        }
         return LispError::allocate(
             ErrorKind::InvalidArgument,
-            Some(format!(
-                "FILE-ERROR: compile-file: cannot write {} ({})",
-                output_path, e
-            )),
+            Some(format!("FILE-ERROR: compile-file: cannot write {} ({})", output_path, e)),
         )
         .raw();
     }
@@ -4929,9 +6092,6 @@ pub extern "C" fn cc_compile_file_stack(args_list_obj: usize) -> usize {
     }
     if print_values {
         write_text_to_cl_output(&format!("; wrote {}\n", output_path));
-    }
-    if std::env::var("RLASP_TRACE_COMPILE_FILE_STACK").is_ok() {
-        eprintln!("[cc_compile_file_stack] ok input='{}' output='{}'", input_path, output_path);
     }
 
     RString::allocate(output_path).raw()
@@ -4991,13 +6151,18 @@ fn jit_execute_llvm_ir(
     let module = context.create_module_from_ir(memory_buffer)
         .map_err(|e| format!("Failed to parse LLVM IR: {:?}", e))?;
 
-    // Collect function names before transferring module
+    // Collect function names before transferring module.
+    // Scan the original MLIR text first because some emitted helper/user
+    // functions (notably defclass-generated accessors) are present there even
+    // when later module enumeration misses them.
     let mut lambda_names: Vec<String> = Vec::new();
     let mut fn_names: Vec<String> = Vec::new();
     let mut method_names: Vec<String> = Vec::new();
     let mut local_function_names: Vec<String> = Vec::new();
-    for func_val in module.get_functions() {
-        let func_name = func_val.get_name().to_str().unwrap_or("");
+    let mut record_function_name = |func_name: &str| {
+        if func_name.is_empty() {
+            return;
+        }
         if func_name.starts_with("__lambda_") {
             lambda_names.push(func_name.to_string());
         }
@@ -5014,7 +6179,38 @@ fn jit_execute_llvm_ir(
         if is_method {
             method_names.push(func_name.to_string());
         }
+    };
+    for line in llvm_ir_text.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("define ") else {
+            continue;
+        };
+        let Some(at_pos) = rest.find('@') else {
+            continue;
+        };
+        let after_at = &rest[at_pos + 1..];
+        let func_name = if let Some(after_quote) = after_at.strip_prefix('"') {
+            after_quote.split('"').next().unwrap_or("")
+        } else {
+            after_at
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("")
+        };
+        record_function_name(func_name);
     }
+    for func_val in module.get_functions() {
+        let func_name = func_val.get_name().to_str().unwrap_or("");
+        record_function_name(func_name);
+    }
+    lambda_names.sort();
+    lambda_names.dedup();
+    fn_names.sort();
+    fn_names.dedup();
+    method_names.sort();
+    method_names.dedup();
+    local_function_names.sort();
+    local_function_names.dedup();
 
     // Create LLJIT
     let lljit: LLVMOrcLLJITRef = unsafe {
@@ -5123,43 +6319,64 @@ fn jit_execute_llvm_ir(
     {
         use rlasp_jit::intrinsics::{cc_register_function_ptr, cc_register_function_with_args_list};
         use std::ffi::CString;
+        let trace_register = std::env::var("RLASP_TRACE_REGISTER_FN").is_ok();
 
         for func_name in &fn_names {
             if let Ok(func_ptr) = lookup_symbol(func_name) {
+                if trace_register {
+                    eprintln!("[register-fn] {} ok=1", func_name);
+                }
                 let name_cstr = CString::new(func_name.as_str()).unwrap();
                 if expects_args_list(func_name) {
                     unsafe { cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
                 } else {
                     unsafe { cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
                 }
+            } else if trace_register {
+                eprintln!("[register-fn] {} ok=0", func_name);
             }
         }
         for func_name in &lambda_names {
             if let Ok(func_ptr) = lookup_symbol(func_name) {
+                if trace_register {
+                    eprintln!("[register-fn] {} ok=1", func_name);
+                }
                 let name_cstr = CString::new(func_name.as_str()).unwrap();
                 if expects_args_list(func_name) {
                     unsafe { cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
                 } else {
                     unsafe { cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
                 }
+            } else if trace_register {
+                eprintln!("[register-fn] {} ok=0", func_name);
             }
         }
         for func_name in &method_names {
             if let Ok(func_ptr) = lookup_symbol(func_name) {
+                if trace_register {
+                    eprintln!("[register-fn] {} ok=1", func_name);
+                }
                 let name_cstr = CString::new(func_name.as_str()).unwrap();
                 unsafe {
                     cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX);
                 }
+            } else if trace_register {
+                eprintln!("[register-fn] {} ok=0", func_name);
             }
         }
         for func_name in &local_function_names {
             if let Ok(func_ptr) = lookup_symbol(func_name) {
+                if trace_register {
+                    eprintln!("[register-fn] {} ok=1", func_name);
+                }
                 let name_cstr = CString::new(func_name.as_str()).unwrap();
                 if expects_args_list(func_name) {
                     unsafe { cc_register_function_with_args_list(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
                 } else {
                     unsafe { cc_register_function_ptr(name_cstr.as_ptr(), func_ptr as usize, usize::MAX); }
                 }
+            } else if trace_register {
+                eprintln!("[register-fn] {} ok=0", func_name);
             }
         }
     }
@@ -5168,6 +6385,14 @@ fn jit_execute_llvm_ir(
     // register builtin intrinsics and route bridge-eval calls through the interpreter.
     rlasp_jit::intrinsics::register_builtin_intrinsics();
     rlasp_jit::intrinsics::cc_set_eval_bridge(cc_eval_bridge as usize);
+
+    if let Ok(seed_runner) = std::env::var("RLASP_MLIR_BRIDGE_SEED_RUNNER") {
+        if !seed_runner.trim().is_empty() {
+            if let Err(e) = seed_bridge_env_from_runner_file(seed_runner.trim()) {
+                eprintln!("[Warning: MLIR bridge seed failed: {}]", e);
+            }
+        }
+    }
 
     let _runtime_load_specials_guard = if init_runtime {
         rlasp_jit::intrinsics::init_standard_cl_variables();
@@ -5573,6 +6798,7 @@ fn should_eval_form_via_bridge(op: &str) -> bool {
             | "macrolet"
             | "symbol-macrolet"
             | "defpackage"
+            | "define-package"
             | "in-package"
             | "do-symbols"
             | "do-external-symbols"
@@ -6718,18 +7944,10 @@ fn compile_ast_to_llvm<'ctx>(
                         "read_from_string_result",
                     );
                 }
-                if should_eval_form_via_bridge(op) {
+                if should_eval_form_via_bridge(op) || should_eval_form_via_bridge(op_base) {
                     return compile_eval_form_via_bridge(context, codegen, ast, env, user_functions);
                 }
-                if should_apply_via_bridge(op) {
-                    let mut compiled_args = Vec::with_capacity(args.len());
-                    for arg in args {
-                        compiled_args.push(compile_ast_to_llvm(context, codegen, arg, env, user_functions)?);
-                    }
-                    return compile_apply_by_name(context, codegen, op, compiled_args);
-                }
-                let base_op = op_base;
-                if !must_compile_call_form(op) && !must_compile_call_form(base_op) {
+                if should_apply_via_bridge(op) || should_apply_via_bridge(op_base) {
                     let mut compiled_args = Vec::with_capacity(args.len());
                     for arg in args {
                         compiled_args.push(compile_ast_to_llvm(context, codegen, arg, env, user_functions)?);
@@ -9912,33 +11130,42 @@ fn compile_ast_to_llvm<'ctx>(
                             op
                         };
 
-                        // Check module first (for local functions), then user_functions
-                        let func_name = if codegen.module().get_function(op).is_some() {
-                            op
+                        // Check module first (for compiled local/user functions),
+                        // otherwise fall back to runtime APPLY by name.
+                        if let Some(func_name) = if codegen.module().get_function(op).is_some() {
+                            Some(op)
                         } else if codegen.module().get_function(base_name).is_some() {
-                            base_name
+                            Some(base_name)
                         } else if user_functions.contains_key(op) {
-                            op
+                            Some(op)
                         } else if user_functions.contains_key(base_name) {
-                            base_name
+                            Some(base_name)
                         } else {
-                            return Err(format!("Unsupported function: {}", op));
-                        };
+                            None
+                        } {
+                            let func = codegen
+                                .module()
+                                .get_function(func_name)
+                                .ok_or(format!("User function {} not found", func_name))?;
 
-                        let func = codegen.module().get_function(func_name)
-                            .ok_or(format!("User function {} not found", func_name))?;
+                            let mut arg_vals = Vec::new();
+                            for arg in args {
+                                let val = compile_ast_to_llvm(context, codegen, arg, env, user_functions)?;
+                                arg_vals.push(val.into());
+                            }
 
-                        // Compile arguments
-                        let mut arg_vals = Vec::new();
-                        for arg in args {
-                            let val = compile_ast_to_llvm(context, codegen, arg, env, user_functions)?;
-                            arg_vals.push(val.into());
+                            let call = codegen
+                                .builder()
+                                .build_call(func, &arg_vals, "user_call")
+                                .map_err(|e| format!("Failed to build call: {:?}", e))?;
+                            Ok(call.as_any_value_enum().into_int_value().into())
+                        } else {
+                            let mut compiled_args = Vec::with_capacity(args.len());
+                            for arg in args {
+                                compiled_args.push(compile_ast_to_llvm(context, codegen, arg, env, user_functions)?);
+                            }
+                            compile_apply_by_name(context, codegen, op, compiled_args)
                         }
-
-                        // Call the function
-                        let call = codegen.builder().build_call(func, &arg_vals, "user_call")
-                            .map_err(|e| format!("Failed to build call: {:?}", e))?;
-                        Ok(call.as_any_value_enum().into_int_value().into())
                     }
                 }
             } else {

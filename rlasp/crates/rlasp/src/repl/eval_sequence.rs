@@ -11,6 +11,24 @@ pub fn call_sequence_builtin(
     args: &[EvalResult],
     env: &mut HashMap<String, EvalResult>,
 ) -> Result<EvalResult, String> {
+    fn is_function_designator(v: &EvalResult) -> bool {
+        matches!(
+            v,
+            EvalResult::Lambda { .. }
+                | EvalResult::BuiltinFunction(_)
+                | EvalResult::GenericFunction(_)
+                | EvalResult::ForeignFunction(_)
+                | EvalResult::Symbol(_)
+        )
+    }
+
+    fn is_sequence_value(v: &EvalResult) -> bool {
+        matches!(
+            v,
+            EvalResult::Nil | EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_)
+        )
+    }
+
     match name {
         // Sequence access
         "elt" => {
@@ -27,6 +45,12 @@ pub fn call_sequence_builtin(
                         EvalResult::String(s) => {
                             s.chars().nth(index)
                                 .map(EvalResult::Character)
+                                .ok_or_else(|| "Index out of bounds".to_string())
+                        }
+                        EvalResult::Array(arr) => {
+                            arr.borrow()
+                                .get(index)
+                                .cloned()
                                 .ok_or_else(|| "Index out of bounds".to_string())
                         }
                         EvalResult::Cons(_, _) => {
@@ -366,6 +390,22 @@ pub fn call_sequence_builtin(
             let seq = &args[1];
 
             match seq {
+                EvalResult::String(s) => {
+                    let needle = match item {
+                        EvalResult::Character(c) => Some(*c),
+                        EvalResult::String(text) if text.chars().count() == 1 => text.chars().next(),
+                        _ => None,
+                    };
+                    if let Some(needle) = needle {
+                        for ch in s.chars() {
+                            if ch == needle {
+                                return Ok(EvalResult::Character(ch));
+                            }
+                        }
+                        return Ok(EvalResult::Nil);
+                    }
+                    Ok(EvalResult::Nil)
+                }
                 EvalResult::Cons(_, _) => {
                     let mut current = seq.clone();
                     loop {
@@ -384,7 +424,7 @@ pub fn call_sequence_builtin(
                     Ok(EvalResult::Nil)
                 }
                 EvalResult::Nil => Ok(EvalResult::Nil),
-                _ => Err("find: sequence must be a list".to_string()),
+                _ => Err("find: sequence must be a list or string".to_string()),
             }
         }
 
@@ -398,6 +438,22 @@ pub fn call_sequence_builtin(
             let seq = &args[1];
 
             match seq {
+                EvalResult::String(s) => {
+                    let needle = match item {
+                        EvalResult::Character(c) => Some(*c),
+                        EvalResult::String(text) if text.chars().count() == 1 => text.chars().next(),
+                        _ => None,
+                    };
+                    if let Some(needle) = needle {
+                        for (index, ch) in s.chars().enumerate() {
+                            if ch == needle {
+                                return Ok(EvalResult::Fixnum(index as i64));
+                            }
+                        }
+                        return Ok(EvalResult::Nil);
+                    }
+                    Ok(EvalResult::Nil)
+                }
                 EvalResult::Cons(_, _) => {
                     let mut current = seq.clone();
                     let mut index = 0;
@@ -418,7 +474,7 @@ pub fn call_sequence_builtin(
                     Ok(EvalResult::Nil)
                 }
                 EvalResult::Nil => Ok(EvalResult::Nil),
-                _ => Err("position: sequence must be a list".to_string()),
+                _ => Err("position: sequence must be a list or string".to_string()),
             }
         }
 
@@ -535,8 +591,13 @@ pub fn call_sequence_builtin(
             if args.len() < 2 {
                 return Err("count-if requires predicate and sequence".to_string());
             }
-            let predicate = &args[0];
-            let seq = &args[1];
+            let (predicate, seq) = if is_sequence_value(&args[0]) && is_function_designator(&args[1]) {
+                // Some MLIR call paths can supply evaluated args in swapped order.
+                // Normalize to CL order here.
+                (&args[1], &args[0])
+            } else {
+                (&args[0], &args[1])
+            };
 
             let items: Vec<EvalResult> = match seq {
                 EvalResult::Nil => Vec::new(),
@@ -575,8 +636,13 @@ pub fn call_sequence_builtin(
             if args.len() < 2 {
                 return Err("count-if-not requires predicate and sequence".to_string());
             }
-            let predicate = &args[0];
-            let seq = &args[1];
+            let (predicate, seq) = if is_sequence_value(&args[0]) && is_function_designator(&args[1]) {
+                // Some MLIR call paths can supply evaluated args in swapped order.
+                // Normalize to CL order here.
+                (&args[1], &args[0])
+            } else {
+                (&args[0], &args[1])
+            };
 
             let items: Vec<EvalResult> = match seq {
                 EvalResult::Nil => Vec::new(),

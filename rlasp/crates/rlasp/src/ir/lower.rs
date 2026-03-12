@@ -177,6 +177,13 @@ impl LowerContext {
                 Ok(self.module.make_constant(ConstantValue::Nil))
             }
 
+            ASTNode::ArrayLiteral { elements, .. } => {
+                for elem in elements {
+                    let _ = self.lower_ast(elem)?;
+                }
+                Ok(self.module.make_constant(ConstantValue::Nil))
+            }
+
             // CLOS nodes - handled by MLIR codegen, not interpreter
             ASTNode::Defclass { .. } | ASTNode::Defgeneric { .. } | ASTNode::Defmethod { .. } => {
                 // CLOS forms are lowered directly to MLIR, not through the IR interpreter

@@ -1,0 +1,3 @@
+"return a portable S-expression, portably readable and writeable in any Common Lisp implementation
+using READ within a WITH-SAFE-IO-SYNTAX, that represents the warnings currently deferred by
+WITH-COMPILATION-UNIT. One of three functions required for deferred-warnings support in ASDF."

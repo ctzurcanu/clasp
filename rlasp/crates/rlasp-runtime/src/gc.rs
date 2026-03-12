@@ -19,6 +19,7 @@ use std::alloc::dealloc;
 #[cfg(feature = "boehm-gc")]
 #[allow(dead_code)]
 mod ffi {
+    use std::os::raw::c_char;
     use std::os::raw::c_void;
 
     extern "C" {
@@ -58,6 +59,10 @@ mod ffi {
         /// Enable/disable GC
         pub fn GC_enable();
         pub fn GC_disable();
+
+        /// Redirect or silence GC warnings.
+        pub fn GC_set_warn_proc(proc: Option<unsafe extern "C" fn(*mut c_char, usize)>);
+        pub fn GC_ignore_warn_proc(msg: *mut c_char, arg: usize);
 
         /// Register a finalizer
         pub fn GC_register_finalizer(
@@ -348,6 +353,7 @@ pub fn init_gc() {
         #[cfg(feature = "boehm-gc")]
         {
             GLOBAL_GC = Some(Box::new(BoehmGC::new()));
+            gc_ignore_warnings();
         }
         #[cfg(not(feature = "boehm-gc"))]
         {
@@ -361,6 +367,7 @@ pub fn init_gc() {
 pub fn init_boehm_gc() {
     unsafe {
         GLOBAL_GC = Some(Box::new(BoehmGC::new()));
+        gc_ignore_warnings();
     }
 }
 
@@ -394,6 +401,18 @@ pub fn gc_enable() {
         ffi::GC_enable();
     }
 }
+
+/// Silence Boehm GC warning output (e.g. repeated finalization-cycle spam).
+#[cfg(feature = "boehm-gc")]
+pub fn gc_ignore_warnings() {
+    unsafe {
+        ffi::GC_set_warn_proc(Some(ffi::GC_ignore_warn_proc));
+    }
+}
+
+/// No-op when not using Boehm GC.
+#[cfg(not(feature = "boehm-gc"))]
+pub fn gc_ignore_warnings() {}
 
 /// Conservative managed-pointer check used before reading object headers from
 /// raw tagged pointers that may be malformed.

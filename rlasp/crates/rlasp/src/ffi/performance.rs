@@ -7,7 +7,7 @@
 /// For hot paths (called millions of times), cxx is significantly faster.
 /// For cold paths or rarely-used APIs, libffi provides more flexibility.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cxx-bridge"))]
 mod tests {
     use crate::ffi::{VectorCxx, VectorWrapper};
     use std::time::Instant;

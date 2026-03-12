@@ -1,3 +1,0 @@
-; compiling /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel-source.lisp
-; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/lowlevel-source.fasl
-Error: Undefined function make-foo (base=make-foo, extension=false)

@@ -1,7 +1,8 @@
 //! Closure support for capturing lexical environments
 
 use crate::{LispObject, TypeHeader, ObjectType};
-use std::alloc::{alloc, Layout};
+use std::alloc::Layout;
+use std::mem::offset_of;
 
 /// A closure captures a function reference and its lexical environment
 #[repr(C)]
@@ -17,16 +18,17 @@ impl Closure {
     pub fn new(function_id: i64, captured_vars: &[LispObject]) -> *mut Self {
         let env_size = captured_vars.len();
 
-        // Calculate layout: header + function_id + env_size + captured variables
-        let base_size = std::mem::size_of::<TypeHeader>() +
-                        std::mem::size_of::<i64>() +
-                        std::mem::size_of::<usize>();
+        // Use the actual struct layout rather than reconstructing it manually.
+        let base_size = offset_of!(Closure, env);
         let total_size = base_size + env_size * std::mem::size_of::<LispObject>();
 
         let layout = Layout::from_size_align(total_size, 8).unwrap();
 
         unsafe {
-            let ptr = alloc(layout) as *mut Closure;
+            if !crate::gc::is_gc_initialized() {
+                crate::gc::init_gc();
+            }
+            let ptr = crate::gc::global_gc().allocate_raw(layout).as_ptr() as *mut Closure;
 
             // Initialize header
             (*ptr).header = TypeHeader::new(ObjectType::Closure);
@@ -60,9 +62,7 @@ impl Closure {
         }
 
         unsafe {
-            let base_size = std::mem::size_of::<TypeHeader>() +
-                            std::mem::size_of::<i64>() +
-                            std::mem::size_of::<usize>();
+            let base_size = offset_of!(Closure, env);
             let env_ptr = (self as *const Self as *const u8).add(base_size) as *const LispObject;
             Some(*env_ptr.add(index))
         }
@@ -71,9 +71,7 @@ impl Closure {
     /// Get all captured variables as a slice
     pub fn captured_vars(&self) -> &[LispObject] {
         unsafe {
-            let base_size = std::mem::size_of::<TypeHeader>() +
-                            std::mem::size_of::<i64>() +
-                            std::mem::size_of::<usize>();
+            let base_size = offset_of!(Closure, env);
             let env_ptr = (self as *const Self as *const u8).add(base_size) as *const LispObject;
             std::slice::from_raw_parts(env_ptr, self.env_size)
         }

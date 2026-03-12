@@ -301,17 +301,37 @@ if wants_kind exe; then
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
 extern void __main(void);
 extern void cc_register_builtin_intrinsics(void);
 extern void cc_init_standard_cl_variables(void);
+extern void cc_runtime_ignore_gc_warnings(void);
+extern void cc_set_eval_bridge(uintptr_t callback_ptr);
+extern uintptr_t cc_eval_bridge(uintptr_t form_obj);
 extern void cc_register_function_ptr(const char *name, uintptr_t address, uintptr_t arity);
 extern void cc_register_function_with_args_list(const char *name, uintptr_t address, uintptr_t arity);
 extern void stack_clear(void);
 extern int64_t stack_depth(void);
 extern uintptr_t stack_pop_pointer(void);
 $(cat "$REGISTER_DECLS_C")
+
+/*
+ * MLIR-generated code emits debug-stack push/pop hooks for backtrace tracking.
+ * The JIT runtime exports richer support, but AOT executables only need these
+ * hooks to exist so generated code links and executes correctly.
+ */
+static uintptr_t rlasp_aot_debug_stack_depth = 0;
+void cc_runtime_debug_stack_push_name(uintptr_t name_obj_raw) {
+  (void)name_obj_raw;
+  rlasp_aot_debug_stack_depth += 1;
+}
+void cc_runtime_debug_stack_pop_name(void) {
+  if (rlasp_aot_debug_stack_depth > 0) {
+    rlasp_aot_debug_stack_depth -= 1;
+  }
+}
 
 static int should_delegate_to_irlasp(int argc, char **argv) {
   if (argc <= 1) return 0;
@@ -357,20 +377,44 @@ static int maybe_delegate_to_irlasp(int argc, char **argv) {
   return 127;
 }
 
+static void install_irlasp_eval_bridge(void) {
+  cc_set_eval_bridge((uintptr_t)cc_eval_bridge);
+}
+
+static int should_suppress_gc_warnings(void) {
+  const char *value = getenv("RLASP_SUPPRESS_GC_WARNINGS");
+  if (!value || !*value) return 1;
+  if (strcmp(value, "0") == 0 ||
+      strcmp(value, "false") == 0 ||
+      strcmp(value, "FALSE") == 0 ||
+      strcmp(value, "no") == 0 ||
+      strcmp(value, "NO") == 0 ||
+      strcmp(value, "off") == 0 ||
+      strcmp(value, "OFF") == 0) {
+    return 0;
+  }
+  return 1;
+}
+
 int main(int argc, char **argv) {
   int delegate_rc = maybe_delegate_to_irlasp(argc, argv);
   if (delegate_rc != 0) {
     return delegate_rc;
   }
+  if (should_suppress_gc_warnings()) {
+    cc_runtime_ignore_gc_warnings();
+  }
   cc_register_builtin_intrinsics();
   cc_init_standard_cl_variables();
+  install_irlasp_eval_bridge();
 $(cat "$REGISTER_CALLS_C")
   stack_clear();
   __main();
   while (stack_depth() > 0) {
     (void)stack_pop_pointer();
   }
-  return 0;
+  fflush(NULL);
+  _exit(0);
 }
 EOF
   run_stage link_exe \
@@ -379,6 +423,7 @@ EOF
     "$OBJ" \
     -L "$RUNTIME_DIR" \
     -Wl,-rpath,"$RUNTIME_DIR" \
+    -lirlasp \
     -lrlasp_jit \
     -lrlasp_runtime \
     -o "$EXE"

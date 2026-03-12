@@ -9,9 +9,11 @@ mkdir -p "$LOG_DIR"
 SBCL_BIN="${SBCL_BIN:-/opt/homebrew/bin/sbcl}"
 CLASP_BIN="${CLASP_BIN:-/opt/homebrew/bin/clasp}"
 IRLASP_BIN="${IRLASP_BIN:-/Users/christiantzurcanu/Documents/dev/clasp/rlasp/target/release/irlasp}"
+AOT_SCRIPT="${AOT_SCRIPT:-/Users/christiantzurcanu/Documents/dev/clasp/rlasp/scripts/mlirbc_aot.sh}"
 RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-180}"
 IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
+BENCH_FILTER="${BENCH_FILTER:-}"
 TIMEOUT_BIN=""
 if command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="$(command -v gtimeout)"
@@ -29,6 +31,10 @@ if [[ ! -x "$CLASP_BIN" ]]; then
 fi
 if [[ ! -x "$IRLASP_BIN" ]]; then
   echo "Missing executable: IRLASP_BIN=$IRLASP_BIN"
+  exit 2
+fi
+if [[ ! -x "$AOT_SCRIPT" ]]; then
+  echo "Missing executable: AOT_SCRIPT=$AOT_SCRIPT"
   exit 2
 fi
 
@@ -70,7 +76,7 @@ result_line() {
 }
 
 CSV_FILE="${LOG_DIR}/benchmark-results.csv"
-echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,result_match" >"$CSV_FILE"
+echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,irlasp_aot_build_s,irlasp_aot_exec_s,irlasp_aot_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,irlasp_aot_build_rc,irlasp_aot_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,irlasp_aot_match_cl,result_match" >"$CSV_FILE"
 echo "IRLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB"
 echo "IRLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS"
 
@@ -89,6 +95,10 @@ while IFS='|' read -r bench_file bench_args_raw; do
 
   bench_name="${bench_file%.lisp}"
 
+  if [[ -n "$BENCH_FILTER" && ! "$bench_name" =~ $BENCH_FILTER ]]; then
+    continue
+  fi
+
   sbcl_out="${LOG_DIR}/${bench_name}.sbcl.out"
   sbcl_time="${LOG_DIR}/${bench_name}.sbcl.time"
   clasp_out="${LOG_DIR}/${bench_name}.clasp.out"
@@ -99,9 +109,17 @@ while IFS='|' read -r bench_file bench_args_raw; do
   mlir_compile_time="${LOG_DIR}/${bench_name}.irlasp-mlir-compile.time"
   mlir_exec_out="${LOG_DIR}/${bench_name}.irlasp-mlir-exec.out"
   mlir_exec_time="${LOG_DIR}/${bench_name}.irlasp-mlir-exec.time"
+  aot_build_out="${LOG_DIR}/${bench_name}.irlasp-aot-build.out"
+  aot_build_time="${LOG_DIR}/${bench_name}.irlasp-aot-build.time"
+  aot_exec_out="${LOG_DIR}/${bench_name}.irlasp-aot-exec.out"
+  aot_exec_time="${LOG_DIR}/${bench_name}.irlasp-aot-exec.time"
   mlirbc_path="/tmp/${bench_name}.mlirbc"
+  aot_out_dir="${LOG_DIR}/${bench_name}.aot"
+  aot_exe_path="${aot_out_dir}/${bench_name}"
   : >"$mlir_exec_out"
   : >"$mlir_exec_time"
+  : >"$aot_exec_out"
+  : >"$aot_exec_time"
 
   run_timed "$sbcl_out" "$sbcl_time" \
     "$SBCL_BIN" --noinform --disable-debugger \
@@ -148,10 +166,38 @@ while IFS='|' read -r bench_file bench_args_raw; do
   fi
   mlir_total_s="$(float_add "$mlir_compile_s" "$mlir_exec_s")"
 
+  rm -rf "$aot_out_dir"
+  if [[ "$mlir_compile_rc" -eq 0 && -f "$mlirbc_path" ]]; then
+    run_timed "$aot_build_out" "$aot_build_time" \
+      env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
+        "$AOT_SCRIPT" "$mlirbc_path" --out-dir "$aot_out_dir" --name "$bench_name" --kinds exe --no-smoke
+    aot_build_rc="$RUN_RC"
+    aot_build_s="$RUN_TIME_S"
+  else
+    aot_build_rc=1
+    aot_build_s="0.000000"
+  fi
+
+  if [[ "$aot_build_rc" -eq 0 && -x "$aot_exe_path" ]]; then
+    run_timed "$aot_exec_out" "$aot_exec_time" \
+      env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
+        "$aot_exe_path" "${args[@]}"
+    aot_exec_rc="$RUN_RC"
+    aot_exec_s="$RUN_TIME_S"
+  else
+    if [[ "$aot_build_rc" -eq 0 ]]; then
+      echo "ERROR: missing AOT executable at $aot_exe_path" >>"$aot_build_out"
+    fi
+    aot_exec_rc=1
+    aot_exec_s="0.000000"
+  fi
+  aot_total_s="$(float_add "$aot_build_s" "$aot_exec_s")"
+
   sbcl_result="$(result_line "$sbcl_out")"
   clasp_result="$(result_line "$clasp_out")"
   interp_result="$(result_line "$interp_out")"
   mlir_result="$(result_line "$mlir_exec_out")"
+  aot_result="$(result_line "$aot_exec_out")"
   cl_baseline="none"
   cl_expected=""
   if [[ "$sbcl_rc" -eq 0 && -n "$sbcl_result" ]]; then
@@ -164,6 +210,7 @@ while IFS='|' read -r bench_file bench_args_raw; do
   cl_expected_present="0"
   interp_match_cl="0"
   mlir_match_cl="0"
+  aot_match_cl="0"
   result_match="0"
   if [[ -n "$cl_expected" ]]; then
     cl_expected_present="1"
@@ -173,16 +220,19 @@ while IFS='|' read -r bench_file bench_args_raw; do
     if [[ "$mlir_exec_rc" -eq 0 && "$mlir_result" == "$cl_expected" ]]; then
       mlir_match_cl="1"
     fi
-    if [[ "$interp_match_cl" == "1" && "$mlir_match_cl" == "1" ]]; then
+    if [[ "$aot_exec_rc" -eq 0 && "$aot_result" == "$cl_expected" ]]; then
+      aot_match_cl="1"
+    fi
+    if [[ "$interp_match_cl" == "1" && "$mlir_match_cl" == "1" && "$aot_match_cl" == "1" ]]; then
       result_match="1"
     fi
   fi
 
   args_for_csv="${bench_args_raw//,/;}"
-  echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${cl_baseline},${cl_expected_present},${interp_match_cl},${mlir_match_cl},${result_match}" >>"$CSV_FILE"
+  echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${aot_build_s},${aot_exec_s},${aot_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${aot_build_rc},${aot_exec_rc},${cl_baseline},${cl_expected_present},${interp_match_cl},${mlir_match_cl},${aot_match_cl},${result_match}" >>"$CSV_FILE"
 
-  printf '%-22s sbcl=%8ss clasp=%8ss interp=%8ss mlir_compile=%8ss mlir_exec=%8ss mlir_total=%8ss baseline=%s interp_match=%s mlir_match=%s match=%s\n' \
-    "$bench_name" "$sbcl_s" "$clasp_s" "$interp_s" "$mlir_compile_s" "$mlir_exec_s" "$mlir_total_s" "$cl_baseline" "$interp_match_cl" "$mlir_match_cl" "$result_match"
+  printf '%-22s sbcl=%8ss clasp=%8ss interp=%8ss mlir_compile=%8ss mlir_exec=%8ss mlir_total=%8ss aot_build=%8ss aot_exec=%8ss aot_total=%8ss baseline=%s interp_match=%s mlir_match=%s aot_match=%s match=%s\n' \
+    "$bench_name" "$sbcl_s" "$clasp_s" "$interp_s" "$mlir_compile_s" "$mlir_exec_s" "$mlir_total_s" "$aot_build_s" "$aot_exec_s" "$aot_total_s" "$cl_baseline" "$interp_match_cl" "$mlir_match_cl" "$aot_match_cl" "$result_match"
 done <<'EOF'
 fibonacci_recursive.lisp|28
 fibonacci_iterative.lisp|900000

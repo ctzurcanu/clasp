@@ -1,7 +1,7 @@
 /// Types and data structures for the evaluator
 
 use crate::ir::ASTNode;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 use malachite::Integer;
@@ -17,22 +17,106 @@ thread_local! {
     pub static CLASS_HIERARCHY: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
     /// Global dynamic variable store for special variables (*earmuffs*)
     pub(super) static DYNAMIC_VARS: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
+    /// Additional globally special variables declared via DEFVAR/DEFPARAMETER/DEFCONSTANT/DECLARE.
+    pub(super) static DECLARED_SPECIAL_VARS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+fn base_symbol_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
 }
 
 /// Check if a variable name looks like a CL special/dynamic variable
 pub fn is_special_variable(name: &str) -> bool {
-    name.len() >= 3 && name.starts_with('*') && name.ends_with('*') && name != "*"
+    if name.len() >= 3 && name.starts_with('*') && name.ends_with('*') && name != "*" {
+        return true;
+    }
+    let name_base = base_symbol_name(name);
+    DECLARED_SPECIAL_VARS.with(|vars| {
+        vars.borrow().iter().any(|declared| {
+            declared.eq_ignore_ascii_case(name)
+                || base_symbol_name(declared).eq_ignore_ascii_case(name)
+                || declared.eq_ignore_ascii_case(name_base)
+                || base_symbol_name(declared).eq_ignore_ascii_case(name_base)
+        })
+    })
+}
+
+pub fn register_special_variable(name: &str) {
+    if std::env::var("RLASP_DEBUG_SPECIAL_SCOPE").is_ok() {
+        eprintln!("[special-debug] register {}", name);
+    }
+    DECLARED_SPECIAL_VARS.with(|vars| {
+        vars.borrow_mut().insert(name.to_string());
+    });
+}
+
+pub fn unregister_special_variable(name: &str) {
+    if std::env::var("RLASP_DEBUG_SPECIAL_SCOPE").is_ok() {
+        eprintln!("[special-debug] unregister {}", name);
+    }
+    DECLARED_SPECIAL_VARS.with(|vars| {
+        let target_base = base_symbol_name(name).to_ascii_lowercase();
+        vars.borrow_mut()
+            .retain(|declared| {
+                !declared.eq_ignore_ascii_case(name)
+                    && !base_symbol_name(declared).eq_ignore_ascii_case(name)
+                    && !declared.eq_ignore_ascii_case(&target_base)
+                    && !base_symbol_name(declared).eq_ignore_ascii_case(&target_base)
+            });
+    });
 }
 
 /// Get a dynamic variable value from the global store
 pub fn get_dynamic_var(name: &str) -> Option<EvalResult> {
-    DYNAMIC_VARS.with(|dv| dv.borrow().get(name).cloned())
+    let candidates = [
+        name.to_string(),
+        name.to_ascii_uppercase(),
+        name.to_ascii_lowercase(),
+        base_symbol_name(name).to_string(),
+        base_symbol_name(name).to_ascii_uppercase(),
+        base_symbol_name(name).to_ascii_lowercase(),
+    ];
+    DYNAMIC_VARS.with(|dv| {
+        let dv = dv.borrow();
+        for candidate in candidates.iter() {
+            if let Some(value) = dv.get(candidate).cloned() {
+                return Some(value);
+            }
+        }
+        None
+    })
 }
 
 /// Set a dynamic variable value in the global store
 pub fn set_dynamic_var(name: &str, value: EvalResult) {
     DYNAMIC_VARS.with(|dv| {
-        dv.borrow_mut().insert(name.to_string(), value);
+        let mut dv = dv.borrow_mut();
+        for candidate in [
+            name.to_string(),
+            name.to_ascii_uppercase(),
+            name.to_ascii_lowercase(),
+            base_symbol_name(name).to_string(),
+            base_symbol_name(name).to_ascii_uppercase(),
+            base_symbol_name(name).to_ascii_lowercase(),
+        ] {
+            dv.insert(candidate, value.clone());
+        }
+    });
+}
+
+pub fn clear_dynamic_var(name: &str) {
+    DYNAMIC_VARS.with(|dv| {
+        let mut dv = dv.borrow_mut();
+        for candidate in [
+            name.to_string(),
+            name.to_ascii_uppercase(),
+            name.to_ascii_lowercase(),
+            base_symbol_name(name).to_string(),
+            base_symbol_name(name).to_ascii_uppercase(),
+            base_symbol_name(name).to_ascii_lowercase(),
+        ] {
+            dv.remove(&candidate);
+        }
     });
 }
 
@@ -169,8 +253,21 @@ pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
 /// CLOS Instance: object with class metadata
 #[derive(Clone)]
 pub struct Instance {
+    pub id: u64,
     pub class_name: String,
     pub slots: Rc<RefCell<HashMap<String, EvalResult>>>,
+}
+
+thread_local! {
+    static INSTANCE_ID_COUNTER: RefCell<u64> = const { RefCell::new(1) };
+}
+
+pub fn next_instance_id() -> u64 {
+    INSTANCE_ID_COUNTER.with(|counter| {
+        let id = *counter.borrow();
+        *counter.borrow_mut() = id + 1;
+        id
+    })
 }
 
 /// CLOS Method: function with specializers for dispatch
@@ -229,6 +326,8 @@ pub enum EvalResult {
     },
     HashTable(Rc<RefCell<HashMap<String, EvalResult>>>),
     Array(Rc<RefCell<Vec<EvalResult>>>),  // Simple 1D array/vector
+    /// Deferred class slot initform AST (evaluated at instance initialization time).
+    InitForm(ASTNode),
     WasmBytes(Vec<u8>),
     BuiltinFunction(String),  // Name of builtin function
     MultipleValues(Vec<EvalResult>),  // Multiple return values
@@ -271,6 +370,7 @@ impl std::fmt::Display for EvalResult {
             EvalResult::ModifyMacro { name, .. } => write!(f, "#<MODIFY-MACRO {}>", name),
             EvalResult::HashTable(_) => write!(f, "#<HASH-TABLE>"),
             EvalResult::Array(_) => write!(f, "#<ARRAY>"),
+            EvalResult::InitForm(_) => write!(f, "#<INITFORM>"),
             EvalResult::WasmBytes(bytes) => write!(f, "#<WASM {} bytes>", bytes.len()),
             EvalResult::BuiltinFunction(name) => write!(f, "#<BUILTIN {}>", name),
             EvalResult::MultipleValues(vals) => {
@@ -283,7 +383,7 @@ impl std::fmt::Display for EvalResult {
             }
             EvalResult::ForeignLibrary(_) => write!(f, "#<FOREIGN-LIBRARY>"),
             EvalResult::ForeignFunction(_) => write!(f, "#<FOREIGN-FUNCTION>"),
-            EvalResult::Instance(inst) => write!(f, "#<{} instance>", inst.class_name),
+            EvalResult::Instance(inst) => write!(f, "#<{} instance>", class_of(&EvalResult::Instance(inst.clone()))),
             EvalResult::GenericFunction(gf) => write!(f, "#<GENERIC-FUNCTION {}>", gf.borrow().name),
             EvalResult::Condition(cond) => {
                 let cond_ref = cond.borrow();
@@ -334,6 +434,19 @@ pub(super) fn structural_equal(a: &EvalResult, b: &EvalResult) -> bool {
         (EvalResult::Float(a), EvalResult::FloatSingle(b))
         | (EvalResult::FloatSingle(a), EvalResult::Float(b)) => a == b,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
+        (EvalResult::Bool(a), EvalResult::Boolean(b))
+        | (EvalResult::Boolean(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Bool(true), EvalResult::Symbol(s))
+        | (EvalResult::Boolean(true), EvalResult::Symbol(s))
+        | (EvalResult::Symbol(s), EvalResult::Bool(true))
+        | (EvalResult::Symbol(s), EvalResult::Boolean(true)) => s.eq_ignore_ascii_case("T"),
+        (EvalResult::Nil, EvalResult::Symbol(s))
+        | (EvalResult::Symbol(s), EvalResult::Nil)
+        | (EvalResult::Bool(false), EvalResult::Symbol(s))
+        | (EvalResult::Boolean(false), EvalResult::Symbol(s))
+        | (EvalResult::Symbol(s), EvalResult::Bool(false))
+        | (EvalResult::Symbol(s), EvalResult::Boolean(false)) => s.eq_ignore_ascii_case("NIL"),
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Character(a), EvalResult::Character(b)) => a == b,
         (EvalResult::String(a), EvalResult::String(b)) => a == b,
@@ -387,6 +500,7 @@ pub fn class_of(val: &EvalResult) -> String {
         // Runtime arrays are currently 1-D vector-backed, so dispatch as VECTOR.
         EvalResult::Array(_) => "VECTOR".to_string(),
         EvalResult::GenericFunction(_) => "GENERIC-FUNCTION".to_string(),
+        EvalResult::InitForm(_) => "T".to_string(),
         _ => "T".to_string(),
     }
 }
@@ -394,7 +508,32 @@ pub fn class_of(val: &EvalResult) -> String {
 /// Check if a value matches a specializer for method dispatch
 /// T matches everything, otherwise check class hierarchy
 pub fn specializer_matches(specializer: &str, val: &EvalResult) -> bool {
-    if specializer == "T" || specializer.is_empty() {
+    let specializer_upper = specializer.to_ascii_uppercase();
+    if specializer_upper.starts_with("EQL::") {
+        let payload = &specializer[5..];
+        if let Some(sym_name) = payload.strip_prefix("SYM:") {
+            return matches!(val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case(sym_name));
+        }
+        if let Some(n_raw) = payload.strip_prefix("FIXNUM:") {
+            if let Ok(n) = n_raw.parse::<i64>() {
+                return matches!(val, EvalResult::Fixnum(v) if *v == n);
+            }
+            return false;
+        }
+        if let Some(s_raw) = payload.strip_prefix("STRING:") {
+            return matches!(val, EvalResult::String(s) if s == s_raw);
+        }
+        if payload.eq_ignore_ascii_case("NIL") {
+            return matches!(val, EvalResult::Nil);
+        }
+        if payload.eq_ignore_ascii_case("T") {
+            return matches!(val, EvalResult::Symbol(s) if s.eq_ignore_ascii_case("t"))
+                || matches!(val, EvalResult::Bool(true) | EvalResult::Boolean(true));
+        }
+        return false;
+    }
+
+    if specializer.eq_ignore_ascii_case("T") || specializer.is_empty() {
         return true;
     }
     let val_class = class_of(val);

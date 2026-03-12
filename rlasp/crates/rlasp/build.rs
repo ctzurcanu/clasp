@@ -57,7 +57,10 @@ fn main() {
 
     // cxx bridge for high-performance Vector API (Phase 1.4)
     // Only compile if all required files exist
-    if manifest_dir.join("src/ffi/cxx_bridge.rs").exists()
+    let cxx_bridge_enabled = std::env::var_os("CARGO_FEATURE_CXX_BRIDGE").is_some();
+
+    if cxx_bridge_enabled
+        && manifest_dir.join("src/ffi/cxx_bridge.rs").exists()
         && manifest_dir.join("src/ffi/cxx_bridge_impl.cpp").exists()
         && manifest_dir.join("include").exists()
         && vector_header.exists() {

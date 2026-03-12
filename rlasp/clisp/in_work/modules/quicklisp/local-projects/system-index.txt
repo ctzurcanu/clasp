@@ -1,0 +1,4 @@
+clingon/clingon.asd
+clingon/clingon.demo.asd
+clingon/clingon.test.asd
+clingon/clingon.intro.asd

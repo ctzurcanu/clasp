@@ -73,12 +73,15 @@ fn parse_readtable_case(arg: &EvalResult) -> Option<String> {
 }
 
 fn readtable_token(id: u64) -> EvalResult {
-    EvalResult::Symbol(format!("#<READTABLE:{}>", id))
+    // Use a bridge-stable plain symbol name. Tokens like "#<READTABLE:1>"
+    // are reinterpreted as package-qualified symbols when they cross the
+    // compiled bridge, which breaks readtable identity in MLIR/AOT.
+    EvalResult::Symbol(format!("__RLASP_READTABLE__{}", id))
 }
 
 fn parse_readtable_token(raw: &str) -> Option<u64> {
     let s = raw.trim();
-    let inner = s.strip_prefix("#<READTABLE:")?.strip_suffix('>')?;
+    let inner = s.strip_prefix("__RLASP_READTABLE__")?;
     inner.parse::<u64>().ok()
 }
 
@@ -87,6 +90,7 @@ fn current_readtable_id() -> u64 {
 }
 
 fn resolve_readtable_id(arg: Option<&EvalResult>) -> Result<u64, String> {
+    let debug_invalid = std::env::var("RLASP_DEBUG_READTABLE_INVALID").is_ok();
     match arg {
         None => Ok(current_readtable_id()),
         Some(EvalResult::Nil) => Ok(current_readtable_id()),
@@ -101,12 +105,31 @@ fn resolve_readtable_id(arg: Option<&EvalResult>) -> Result<u64, String> {
             if s.eq_ignore_ascii_case("*READTABLE*")
                 || s.eq_ignore_ascii_case("CL:*READTABLE*")
                 || s.eq_ignore_ascii_case("READTABLE")
+                || s.eq_ignore_ascii_case("*STANDARD-READTABLE*")
+                || s.eq_ignore_ascii_case("READTABLE::*STANDARD-READTABLE*")
+                || s.eq_ignore_ascii_case("ECLECTOR.READTABLE:*STANDARD-READTABLE*")
             {
-                return Ok(current_readtable_id());
+                return Ok(0);
+            }
+            if debug_invalid {
+                eprintln!(
+                    "[readtable-invalid] designator={:?} current_id={}",
+                    s,
+                    current_readtable_id()
+                );
             }
             Err("type-error: expected readtable designator".to_string())
         }
-        _ => Err("type-error: expected readtable designator".to_string()),
+        other => {
+            if debug_invalid {
+                eprintln!(
+                    "[readtable-invalid] designator={:?} current_id={}",
+                    other,
+                    current_readtable_id()
+                );
+            }
+            Err("type-error: expected readtable designator".to_string())
+        }
     }
 }
 
@@ -155,12 +178,25 @@ pub fn set_readtable_case_builtin(args: &[EvalResult]) -> Result<EvalResult, Str
     if args.len() < 2 {
         return Err("setf readtable-case requires new-case and readtable".to_string());
     }
+    let debug = std::env::var("RLASP_DEBUG_READTABLE").is_ok();
     let rt_id = resolve_readtable_id(args.get(1))?;
     let new_case =
         parse_readtable_case(&args[0]).ok_or_else(|| "type-error: invalid readtable-case".to_string())?;
+    if debug {
+        eprintln!(
+            "[readtable-set] args={:?} rt_id={} new_case={}",
+            args, rt_id, new_case
+        );
+    }
     READTABLES.with(|tables| {
         if let Some(state) = tables.borrow_mut().get_mut(&rt_id) {
+            if debug {
+                eprintln!("[readtable-set] before={}", state.case_mode);
+            }
             state.case_mode = new_case.clone();
+            if debug {
+                eprintln!("[readtable-set] after={}", state.case_mode);
+            }
         }
     });
     Ok(EvalResult::Symbol(format!(":{}", new_case)))
@@ -195,6 +231,9 @@ pub fn call_readtable_builtin(name: &str, args: &[EvalResult]) -> Result<EvalRes
             }
         }
         "readtable-case" => {
+            if matches!(args.get(0), Some(EvalResult::Nil)) {
+                return Err("type-error: expected readtable designator".to_string());
+            }
             let rt_id = resolve_readtable_id(args.get(0))?;
             let case_mode = READTABLES.with(|tables| {
                 tables
@@ -203,6 +242,12 @@ pub fn call_readtable_builtin(name: &str, args: &[EvalResult]) -> Result<EvalRes
                     .map(|rt| rt.case_mode.clone())
                     .unwrap_or_else(|| "UPCASE".to_string())
             });
+            if std::env::var("RLASP_DEBUG_READTABLE").is_ok() {
+                eprintln!(
+                    "[readtable-get] arg={:?} rt_id={} case_mode={}",
+                    args.get(0), rt_id, case_mode
+                );
+            }
             Ok(EvalResult::Symbol(format!(":{}", case_mode)))
         }
         "get-macro-character" => {

@@ -1,2 +1,0 @@
-file,eligible,skip_reason,baseline_engine,sbcl_status,sbcl_time_s,sbcl_match,clasp_status,clasp_time_s,clasp_match,irlasp_interpreter_status,irlasp_interpreter_time_s,irlasp_interpreter_match,irlasp_mlir_status,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s,irlasp_mlir_match
-"/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/numbers.lisp",yes,"",sbcl,0,0.091643,MATCH,0,8.450184,DIFF,0,61.787818,DIFF,139,63.420189,63.420189,0.000000,NA

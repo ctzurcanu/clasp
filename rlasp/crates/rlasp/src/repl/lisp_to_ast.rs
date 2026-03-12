@@ -51,6 +51,61 @@ fn eval_read_time_form(form: LispObject, as_data: bool) -> Result<ASTNode, Strin
     }
 }
 
+fn read_time_eval_arg(obj: LispObject) -> Option<LispObject> {
+    if !obj.is_cons() {
+        return None;
+    }
+    let cons_ptr = obj.as_cons_ptr()?;
+    if cons_ptr.is_null() {
+        return None;
+    }
+    let cons = unsafe { &*cons_ptr };
+    let car = cons.car();
+    let cdr = cons.cdr();
+    let name = symbol_name_if_symbol(car)?;
+    let base = name.rsplit(':').next().unwrap_or(name.as_str());
+    if !base.eq_ignore_ascii_case("read-time-eval") {
+        return None;
+    }
+    if !cdr.is_cons() {
+        return None;
+    }
+    let cdr_ptr = cdr.as_cons_ptr()?;
+    if cdr_ptr.is_null() {
+        return None;
+    }
+    let cdr_cons = unsafe { &*cdr_ptr };
+    let eval_arg = cdr_cons.car();
+    let rest = cdr_cons.cdr();
+    if !rest.is_nil() {
+        return None;
+    }
+    Some(eval_arg)
+}
+
+fn ast_list_to_vec(ast: ASTNode) -> Option<Vec<ASTNode>> {
+    match ast {
+        ASTNode::Constant(ConstantValue::Nil) => Some(Vec::new()),
+        ASTNode::Call { function, args } => {
+            let mut elements = Vec::with_capacity(args.len() + 1);
+            elements.push(*function);
+            elements.extend(args);
+            Some(elements)
+        }
+        ASTNode::DottedPair { car, cdr } => {
+            let mut elements = vec![*car];
+            match ast_list_to_vec(*cdr) {
+                Some(mut tail) => {
+                    elements.append(&mut tail);
+                    Some(elements)
+                }
+                None => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     // Special case: raw value 0 is ambiguous - it could be fixnum(0) or nil()
     // The runtime uses the same representation for both.
@@ -77,12 +132,24 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     match obj_type {
                         ObjectType::Vector => {
                             let vector = unsafe { &*(ptr as *const RVector) };
+                            let dims = vector.dims().to_vec();
                             let mut elements = Vec::new();
+                            let bit_vector = vector
+                                .element_type()
+                                .map(|ty| ty.eq_ignore_ascii_case("BIT"))
+                                .unwrap_or(false);
                             for elem in vector.as_slice() {
+                                if bit_vector && elem.raw() == 0 {
+                                    elements.push(ASTNode::fixnum(0));
+                                    continue;
+                                }
                                 // Reader vectors/arrays are self-evaluating literals.
                                 // Convert their elements as data so symbols remain symbols,
                                 // not variable references.
                                 elements.push(lisp_to_ast_as_data(*elem)?);
+                            }
+                            if dims.len() != 1 {
+                                return Ok(ASTNode::ArrayLiteral { dims, elements });
                             }
                             return Ok(ASTNode::Vector(elements));
                         }
@@ -219,7 +286,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                 let symbol = unsafe { &*symbol_ptr };
                 let name = symbol.name().to_string();
 
-                if name == "quote" {
+                let base = name.rsplit(':').next().unwrap_or(name.as_str());
+
+                if base.eq_ignore_ascii_case("quote") {
                     // (quote x) -> Quote(x)
                     // IMPORTANT: Convert quoted content as DATA, not as CODE
                     if cdr.is_cons() {
@@ -234,7 +303,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     }
                 }
 
-                if name == "backquote" || name == "quasiquote" {
+                if base.eq_ignore_ascii_case("backquote") || base.eq_ignore_ascii_case("quasiquote") {
                     // (backquote x) -> Backquote(x)
                     // The inner form is DATA, not executable code. Parsing it as code
                     // breaks macro templates by trying to validate forms like dolist/funcall
@@ -251,7 +320,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     }
                 }
 
-                if name == "unquote" {
+                if base.eq_ignore_ascii_case("unquote") {
                     // (unquote x) -> Unquote(x)
                     if cdr.is_cons() {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
@@ -265,7 +334,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     }
                 }
 
-                if name == "unquote-splicing" {
+                if base.eq_ignore_ascii_case("unquote-splicing") {
                     // (unquote-splicing x) -> UnquoteSplicing(x)
                     if cdr.is_cons() {
                         if let Some(cdr_ptr) = cdr.as_cons_ptr() {
@@ -300,6 +369,20 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                 };
 
                 let base = name.rsplit(':').next().unwrap_or(name);
+                if std::env::var("RLASP_DEBUG_SPECIAL_DISPATCH").is_ok()
+                    && (base.eq_ignore_ascii_case("let")
+                        || base.eq_ignore_ascii_case("let*")
+                        || raw_name.eq_ignore_ascii_case("let")
+                        || raw_name.eq_ignore_ascii_case("let*"))
+                {
+                    eprintln!(
+                        "[special-dispatch] raw_name={} name={} base={} special={}",
+                        raw_name,
+                        name,
+                        base,
+                        base.to_ascii_lowercase()
+                    );
+                }
                 if base.eq_ignore_ascii_case("read-time-eval") {
                     if !cdr.is_cons() {
                         return Err("read-time-eval requires one argument".to_string());
@@ -345,13 +428,30 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     return Ok(ASTNode::let_bindings(bindings, body));
                 }
 
+                if base.eq_ignore_ascii_case("with-float-traps-masked") {
+                    let raw_args = raw_cdr_to_vec(cdr.clone())?;
+                    if raw_args.len() < 2 {
+                        return Err("with-float-traps-masked requires trap mask and body".to_string());
+                    }
+                    let mut args = Vec::with_capacity(raw_args.len());
+                    args.push(lisp_to_ast_as_data(raw_args[0].clone())?);
+                    for raw_arg in raw_args.iter().skip(1) {
+                        args.push(lisp_to_ast(raw_arg.clone())?);
+                    }
+                    return Ok(ASTNode::Call {
+                        function: Box::new(ASTNode::variable(raw_name.clone())),
+                        args,
+                    });
+                }
+
                 if std::env::var("RLASP_DEBUG_DEFUN").is_ok()
                     && name.eq_ignore_ascii_case("defun")
                 {
                     let args = cdr_to_vec(cdr.clone())?;
                     eprintln!("[defun-raw] args={:?}", args);
                 }
-                match name {
+                let special_name = base.to_ascii_lowercase();
+                match special_name.as_str() {
                     "if" => {
                         let args = cdr_to_vec(cdr)?;
                         if args.len() < 2 {
@@ -1343,7 +1443,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             return Err("defmethod requires specialized-lambda-list".to_string());
                         }
 
-                        // Parse specialized lambda list
+                        // Parse specialized lambda list.
+                        // CLOS specializers apply only to required parameters.
                         let (specializers, params) = match &args[lambda_list_idx] {
                             ASTNode::Constant(ConstantValue::Nil) => (vec![], vec![]),
                             ASTNode::Call { function, args: param_specs } => {
@@ -1352,29 +1453,139 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                                 let mut spec_vec = Vec::new();
                                 let mut param_vec = Vec::new();
+                                let mut in_required = true;
+                                let extract_eql_specializer = |node: &ASTNode| -> Option<String> {
+                                    let ASTNode::Call { function, args } = node else {
+                                        return None;
+                                    };
+                                    let ASTNode::Variable(op) = function.as_ref() else {
+                                        return None;
+                                    };
+                                    if !op.eq_ignore_ascii_case("eql") || args.len() != 1 {
+                                        return None;
+                                    }
+                                    match &args[0] {
+                                        ASTNode::Variable(name) => Some(format!("EQL::SYM:{}", name)),
+                                        ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                                            Some(format!("EQL::SYM:{}", name))
+                                        }
+                                        ASTNode::Quote(inner) => match inner.as_ref() {
+                                            ASTNode::Variable(name) => Some(format!("EQL::SYM:{}", name)),
+                                            ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                                                Some(format!("EQL::SYM:{}", name))
+                                            }
+                                            ASTNode::Constant(ConstantValue::Fixnum(n)) => {
+                                                Some(format!("EQL::FIXNUM:{}", n))
+                                            }
+                                            ASTNode::Constant(ConstantValue::String(s)) => {
+                                                Some(format!("EQL::STRING:{}", s))
+                                            }
+                                            ASTNode::Constant(ConstantValue::Nil) => {
+                                                Some("EQL::NIL".to_string())
+                                            }
+                                            ASTNode::Constant(ConstantValue::T) => {
+                                                Some("EQL::T".to_string())
+                                            }
+                                            _ => Some("T".to_string()),
+                                        },
+                                        ASTNode::Constant(ConstantValue::Fixnum(n)) => {
+                                            Some(format!("EQL::FIXNUM:{}", n))
+                                        }
+                                        ASTNode::Constant(ConstantValue::String(s)) => {
+                                            Some(format!("EQL::STRING:{}", s))
+                                        }
+                                        ASTNode::Constant(ConstantValue::Nil) => Some("EQL::NIL".to_string()),
+                                        ASTNode::Constant(ConstantValue::T) => Some("EQL::T".to_string()),
+                                        _ => Some("T".to_string()),
+                                    }
+                                };
+
+                                let extract_nonrequired_name = |node: &ASTNode| -> Option<String> {
+                                    match node {
+                                        ASTNode::Variable(name) => Some(name.clone()),
+                                        ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.clone()),
+                                        ASTNode::Call { function, args } => {
+                                            match function.as_ref() {
+                                                ASTNode::Variable(name) if !name.starts_with(':') => Some(name.clone()),
+                                                ASTNode::Call { function: inner_fn, args: inner_args } => {
+                                                    if !inner_args.is_empty() {
+                                                        if let ASTNode::Variable(v) = &inner_args[0] {
+                                                            return Some(v.clone());
+                                                        }
+                                                        if let ASTNode::Constant(ConstantValue::Symbol(v)) = &inner_args[0] {
+                                                            return Some(v.clone());
+                                                        }
+                                                    }
+                                                    if let ASTNode::Variable(v) = inner_fn.as_ref() {
+                                                        if !v.starts_with(':') {
+                                                            return Some(v.clone());
+                                                        }
+                                                    }
+                                                    None
+                                                }
+                                                _ => {
+                                                    if !args.is_empty() {
+                                                        if let ASTNode::Variable(v) = &args[0] {
+                                                            return Some(v.clone());
+                                                        }
+                                                        if let ASTNode::Constant(ConstantValue::Symbol(v)) = &args[0] {
+                                                            return Some(v.clone());
+                                                        }
+                                                    }
+                                                    None
+                                                }
+                                            }
+                                        }
+                                        _ => None,
+                                    }
+                                };
 
                                 for param_spec in all_param_specs {
                                     match param_spec {
                                         ASTNode::Variable(param_name) => {
-                                            // Unspecialized parameter
-                                            spec_vec.push("T".to_string());
-                                            param_vec.push(param_name);
+                                            if param_name.starts_with('&') {
+                                                in_required = false;
+                                                param_vec.push(param_name);
+                                                continue;
+                                            }
+                                            param_vec.push(param_name.clone());
+                                            if in_required {
+                                                spec_vec.push("T".to_string());
+                                            }
+                                        }
+                                        ASTNode::Constant(ConstantValue::Symbol(param_name)) => {
+                                            if param_name.starts_with('&') {
+                                                in_required = false;
+                                                param_vec.push(param_name);
+                                                continue;
+                                            }
+                                            param_vec.push(param_name.clone());
+                                            if in_required {
+                                                spec_vec.push("T".to_string());
+                                            }
                                         }
                                         ASTNode::Call { function, args } => {
-                                            // Specialized parameter: (param class-name)
-                                            if let ASTNode::Variable(param_name) = &*function {
-                                                param_vec.push(param_name.clone());
-                                                if let Some(class_node) = args.first() {
-                                                    match class_node {
-                                                        ASTNode::Variable(class_name) => spec_vec.push(class_name.clone()),
-                                                        ASTNode::Constant(ConstantValue::Symbol(class_name)) => {
-                                                            spec_vec.push(class_name.clone())
+                                            if in_required {
+                                                if let ASTNode::Variable(param_name) = function.as_ref() {
+                                                    param_vec.push(param_name.clone());
+                                                    if let Some(class_node) = args.first() {
+                                                        if let Some(encoded) = extract_eql_specializer(class_node) {
+                                                            spec_vec.push(encoded);
+                                                        } else {
+                                                            match class_node {
+                                                                ASTNode::Variable(class_name) => spec_vec.push(class_name.clone()),
+                                                                ASTNode::Constant(ConstantValue::Symbol(class_name)) => {
+                                                                    spec_vec.push(class_name.clone())
+                                                                }
+                                                                _ => spec_vec.push("T".to_string()),
+                                                            }
                                                         }
-                                                        _ => spec_vec.push("T".to_string()),
+                                                    } else {
+                                                        spec_vec.push("T".to_string());
                                                     }
-                                                } else {
-                                                    spec_vec.push("T".to_string());
                                                 }
+                                            } else if let Some(name) = extract_nonrequired_name(&ASTNode::Call { function, args }) {
+                                                param_vec.push(name);
                                             }
                                         }
                                         _ => {}
@@ -1571,51 +1782,70 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
 /// Check for unquote/unquote-splicing in a raw LispObject
 /// Used to defer evaluation when unquote is found in backquote contexts
 fn contains_unquote_raw(obj: &LispObject) -> bool {
-    // Check if it's a symbol that is "unquote" or "unquote-splicing"
-    if obj.is_general() {
-        if let Some(ptr) = obj.as_general_ptr::<u8>() {
-            if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
-                let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                let name = sym.name().to_string();
-                return name == "unquote" || name == "unquote-splicing";
-            }
+    fn symbol_base_name(obj: &LispObject) -> Option<String> {
+        let ptr = obj.as_general_ptr::<u8>()?;
+        if ptr.is_null() || unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::Symbol) {
+            return None;
         }
+        let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
+        let name = sym.name().to_string();
+        Some(name.rsplit(':').next().unwrap_or(name.as_str()).to_ascii_lowercase())
     }
 
-    // Check if it's a cons cell
-    if obj.is_cons() {
-        if let Some(cons_ptr) = obj.as_cons_ptr() {
-            if cons_ptr.is_null() {
-                return false;
-            }
-            let cons = unsafe { &*cons_ptr };
-            let car = cons.car();
-            let cdr = cons.cdr();
+    fn contains_unquote_raw_with_depth(obj: &LispObject, quasiquote_depth: usize) -> bool {
+        if let Some(base) = symbol_base_name(obj) {
+            return quasiquote_depth == 0
+                && (base == "unquote" || base == "unquote-splicing");
+        }
 
-            // Check if car is unquote or unquote-splicing symbol
-            if car.is_general() {
-                if let Some(ptr) = car.as_general_ptr::<u8>() {
-                    if !ptr.is_null() && unsafe { TypeHeader::from_ptr(ptr) } == Some(ObjectType::Symbol) {
-                        let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                        let name = sym.name().to_string();
-                        if name == "unquote" || name == "unquote-splicing" {
-                            return true;
-                        }
+        if !obj.is_cons() {
+            return false;
+        }
+
+        let Some(cons_ptr) = obj.as_cons_ptr() else {
+            return false;
+        };
+        if cons_ptr.is_null() {
+            return false;
+        }
+
+        let cons = unsafe { &*cons_ptr };
+        let car = cons.car();
+        let cdr = cons.cdr();
+
+        if let Some(base) = symbol_base_name(&car) {
+            if base == "backquote" || base == "quasiquote" {
+                if let Some(arg_ptr) = cdr.as_cons_ptr() {
+                    if !arg_ptr.is_null() {
+                        let arg_cons = unsafe { &*arg_ptr };
+                        return contains_unquote_raw_with_depth(&arg_cons.car(), quasiquote_depth + 1);
                     }
                 }
+                return false;
             }
 
-            // Recursively check car and cdr
-            if contains_unquote_raw(&car) {
-                return true;
-            }
-            if contains_unquote_raw(&cdr) {
-                return true;
+            if base == "unquote" || base == "unquote-splicing" {
+                if quasiquote_depth == 0 {
+                    return true;
+                }
+                if let Some(arg_ptr) = cdr.as_cons_ptr() {
+                    if !arg_ptr.is_null() {
+                        let arg_cons = unsafe { &*arg_ptr };
+                        return contains_unquote_raw_with_depth(
+                            &arg_cons.car(),
+                            quasiquote_depth.saturating_sub(1),
+                        );
+                    }
+                }
+                return false;
             }
         }
+
+        contains_unquote_raw_with_depth(&car, quasiquote_depth)
+            || contains_unquote_raw_with_depth(&cdr, quasiquote_depth)
     }
 
-    false
+    contains_unquote_raw_with_depth(obj, 0)
 }
 
 /// Expand symbol macros in an AST node
@@ -1842,24 +2072,14 @@ fn build_data_list_ast(elements: Vec<ASTNode>, tail: Option<ASTNode>) -> ASTNode
         return tail.unwrap_or_else(ASTNode::nil);
     }
 
-    if let Some(tail_ast) = tail {
-        // Preserve improper-list structure: (a b . c) => (a . (b . c))
-        let mut result = tail_ast;
-        for elem in elements.into_iter().rev() {
-            result = ASTNode::DottedPair {
-                car: Box::new(elem),
-                cdr: Box::new(result),
-            };
-        }
-        return result;
+    let mut result = tail.unwrap_or_else(ASTNode::nil);
+    for elem in elements.into_iter().rev() {
+        result = ASTNode::DottedPair {
+            car: Box::new(elem),
+            cdr: Box::new(result),
+        };
     }
-
-    let mut iter = elements.into_iter();
-    let function = iter.next().unwrap_or_else(ASTNode::nil);
-    ASTNode::Call {
-        function: Box::new(function),
-        args: iter.collect(),
-    }
+    result
 }
 
 fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
@@ -1885,9 +2105,21 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                     match obj_type {
                         rlasp_runtime::header::ObjectType::Vector => {
                             let vector = unsafe { &*(ptr as *const rlasp_runtime::RVector) };
+                            let dims = vector.dims().to_vec();
                             let mut elements = Vec::new();
+                            let bit_vector = vector
+                                .element_type()
+                                .map(|ty| ty.eq_ignore_ascii_case("BIT"))
+                                .unwrap_or(false);
                             for elem in vector.as_slice() {
+                                if bit_vector && elem.raw() == 0 {
+                                    elements.push(ASTNode::fixnum(0));
+                                    continue;
+                                }
                                 elements.push(lisp_to_ast_as_data(*elem)?);
+                            }
+                            if dims.len() != 1 {
+                                return Ok(ASTNode::ArrayLiteral { dims, elements });
                             }
                             return Ok(ASTNode::Vector(elements));
                         }
@@ -1973,7 +2205,8 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
         // Check for unquote/unquote-splicing - these must be preserved even in quoted context
         // because they may be inside a backquote
         if let Some(name) = symbol_name_if_symbol(car_obj) {
-            if name == "unquote" {
+            let base = name.rsplit(':').next().unwrap_or(name.as_str());
+            if base.eq_ignore_ascii_case("unquote") {
                 // (unquote x) -> Unquote(x)
                 // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
                 // the unquoted form is CODE that will be evaluated
@@ -1989,7 +2222,7 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                 }
             }
 
-            if name == "unquote-splicing" {
+            if base.eq_ignore_ascii_case("unquote-splicing") {
                 // (unquote-splicing x) -> UnquoteSplicing(x)
                 // IMPORTANT: Use lisp_to_ast (not lisp_to_ast_as_data) because
                 // the unquoted form is CODE that will be evaluated
@@ -2036,6 +2269,18 @@ fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
     let mut result = Vec::new();
 
     while cdr.is_cons() {
+        if let Some(eval_arg) = read_time_eval_arg(cdr) {
+            let tail_ast = eval_read_time_form(eval_arg, true)?;
+            if matches!(tail_ast, ASTNode::Constant(ConstantValue::Nil)) {
+                break;
+            }
+            if let Some(mut tail_items) = ast_list_to_vec(tail_ast.clone()) {
+                result.append(&mut tail_items);
+            } else {
+                result.push(tail_ast);
+            }
+            return Ok(result);
+        }
         let cons_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
         if cons_ptr.is_null() {
             break;
@@ -2050,9 +2295,19 @@ fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
 
     // Handle dotted pair
     if !cdr.is_nil() {
-        // For now, just append the dotted tail as the last element
-        // This flattens (a b . c) to [a, b, c]
-        result.push(lisp_to_ast(cdr)?);
+        if let Some(eval_arg) = read_time_eval_arg(cdr) {
+            let tail_ast = eval_read_time_form(eval_arg, true)?;
+            if matches!(tail_ast, ASTNode::Constant(ConstantValue::Nil)) {
+                // Empty tail contributes no additional arguments.
+            } else if let Some(mut tail_items) = ast_list_to_vec(tail_ast.clone()) {
+                result.append(&mut tail_items);
+            } else {
+                result.push(tail_ast);
+            }
+        } else {
+            // Flatten (a b . c) to [a, b, c]
+            result.push(lisp_to_ast(cdr)?);
+        }
     }
 
     Ok(result)

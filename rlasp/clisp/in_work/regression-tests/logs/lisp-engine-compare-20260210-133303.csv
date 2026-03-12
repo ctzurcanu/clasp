@@ -1,2 +1,0 @@
-file,baseline_engine,sbcl_status,sbcl_time_s,sbcl_match,clasp_status,clasp_time_s,clasp_match,irlasp_interpreter_status,irlasp_interpreter_time_s,irlasp_interpreter_match,irlasp_mlir_status,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s,irlasp_mlir_match
-"/tmp/hello-compare.lisp",sbcl,0,0.029155,MATCH,132,0.208300,NA,0,0.027001,MATCH,127,0.107189,0.097443,0.009746,NA

@@ -1,2 +1,0 @@
-STYLE-WARNING:
-   Character decoding error in a ;-comment at position 449 reading source stream #<FORM-TRACKING-STREAM for "file /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/latin2-check.lisp" {700513E9F3}>, resyncing.

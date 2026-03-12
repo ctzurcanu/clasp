@@ -4,6 +4,8 @@
 
 use crate::ir::{ASTNode, ConstantValue};
 
+const READER_SKIP_MARKER: &str = "__RLASP_READER_SKIP__";
+
 /// Read error
 #[derive(Debug)]
 pub enum ReadError {
@@ -40,6 +42,16 @@ impl Reader {
 
     /// Read one form
     pub fn read(&mut self) -> Result<ASTNode, ReadError> {
+        loop {
+            let form = self.read_raw()?;
+            if Self::is_reader_skip_marker(&form) {
+                continue;
+            }
+            return Ok(form);
+        }
+    }
+
+    fn read_raw(&mut self) -> Result<ASTNode, ReadError> {
         self.skip_whitespace();
 
         if self.is_eof() {
@@ -115,7 +127,12 @@ impl Reader {
                 }
             }
 
-            forms.push(self.read()?);
+            let form = self.read_raw()?;
+            if Self::is_reader_skip_marker(&form) {
+                self.skip_whitespace();
+                continue;
+            }
+            forms.push(form);
             self.skip_whitespace();
         }
 
@@ -341,12 +358,12 @@ impl Reader {
                 // Include form if feature IS present in *features*
                 self.advance();
                 let feature = self.read()?; // Read feature expression
-                let form = self.read()?;    // Read form
+                let form = self.read_raw()?; // Read controlled form
                 if self.feature_present(&feature) {
                     Ok(form)
                 } else {
-                    // Feature not present - skip this form, read next
-                    self.read()
+                    // Feature not present - suppress this object.
+                    Ok(ASTNode::variable(READER_SKIP_MARKER.to_string()))
                 }
             }
             '-' => {
@@ -354,12 +371,12 @@ impl Reader {
                 // Include form if feature is NOT present in *features*
                 self.advance();
                 let feature = self.read()?; // Read feature expression
-                let form = self.read()?;    // Read form
+                let form = self.read_raw()?; // Read controlled form
                 if !self.feature_present(&feature) {
                     Ok(form)
                 } else {
-                    // Feature present - skip this form, read next
-                    self.read()
+                    // Feature present - suppress this object.
+                    Ok(ASTNode::variable(READER_SKIP_MARKER.to_string()))
                 }
             }
             '|' => {
@@ -465,21 +482,8 @@ impl Reader {
             return Err(ReadError::UnexpectedEof);
         }
 
-        // Convert named characters
-        let lower_name = name.to_lowercase();
-        let ch = match lower_name.as_str() {
-            "newline" => '\n',
-            "space" => ' ',
-            "tab" => '\t',
-            "return" => '\r',
-            "linefeed" => '\n',
-            "page" => '\x0C',
-            "backspace" => '\x08',
-            "rubout" | "delete" | "del" => '\x7F',
-            "null" | "nul" => '\0',
-            _ if name.chars().count() == 1 => name.chars().next().unwrap(),
-            _ => return Err(ReadError::InvalidNumber(format!("Unknown character: {}", name))),
-        };
+        let ch = rlasp_runtime::parse_character_name(&name)
+            .ok_or_else(|| ReadError::InvalidNumber(format!("Unknown character: {}", name)))?;
 
         Ok(ASTNode::Constant(ConstantValue::Character(ch)))
     }
@@ -490,7 +494,12 @@ impl Reader {
         let mut elements = Vec::new();
 
         while !self.is_eof() && self.peek() != ')' {
-            elements.push(self.read()?);
+            let form = self.read_raw()?;
+            if Self::is_reader_skip_marker(&form) {
+                self.skip_whitespace();
+                continue;
+            }
+            elements.push(form);
             self.skip_whitespace();
         }
 
@@ -858,6 +867,10 @@ impl Reader {
             EvalResult::Nil => false,
             _ => false,
         }
+    }
+
+    fn is_reader_skip_marker(form: &ASTNode) -> bool {
+        matches!(form, ASTNode::Variable(name) if name == READER_SKIP_MARKER)
     }
 }
 

@@ -1,8 +1,0 @@
-; compiling file "/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/minsuite_tmp.lisp" (written 10 FEB 2026 09:52:49 PM):
-
-; wrote /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/minsuite_tmp.fasl
-; compilation finished in 0:00:00.003
-Passed FLOOR-REMAINDER-CONTAGION
-Passed FFLOOR-QUOTIENT-CONTAGION
-
-Successes: 2

@@ -10,6 +10,7 @@ pub struct RVector {
     dims: Vec<usize>,
     displacement: Option<(usize, usize)>,
     fill_pointer: Option<usize>,
+    element_type: Option<String>,
 }
 
 impl RVector {
@@ -21,6 +22,7 @@ impl RVector {
             dims: vec![len],
             displacement: None,
             fill_pointer: None,
+            element_type: None,
         }
     }
 
@@ -75,8 +77,23 @@ impl RVector {
         self.fill_pointer = fill_pointer;
     }
 
+    pub fn element_type(&self) -> Option<&str> {
+        self.element_type.as_deref()
+    }
+
+    pub fn set_element_type(&mut self, element_type: Option<String>) {
+        self.element_type = element_type;
+    }
+
     pub fn allocate(elements: Vec<LispObject>) -> LispObject {
         let ptr = unsafe { crate::gc::gc_allocate_value(RVector::new(elements)).as_ptr() };
+        LispObject::from_general_ptr(ptr)
+    }
+
+    pub fn allocate_bit_vector(elements: Vec<LispObject>) -> LispObject {
+        let mut vector = RVector::new(elements);
+        vector.set_element_type(Some("BIT".to_string()));
+        let ptr = unsafe { crate::gc::gc_allocate_value(vector).as_ptr() };
         LispObject::from_general_ptr(ptr)
     }
 }

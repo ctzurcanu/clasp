@@ -41,13 +41,7 @@ fn truthy(value: &EvalResult) -> bool {
 
 fn keyword_name(value: &EvalResult) -> Option<String> {
     match value {
-        EvalResult::Symbol(s) => {
-            if s.starts_with(':') {
-                Some(s.trim_start_matches(':').to_ascii_lowercase())
-            } else {
-                None
-            }
-        }
+        EvalResult::Symbol(s) => Some(s.rsplit(':').next().unwrap_or(s).trim_start_matches(':').to_ascii_lowercase()),
         _ => None,
     }
 }
@@ -59,9 +53,43 @@ fn to_fixnum(value: &EvalResult) -> Option<i64> {
     }
 }
 
-fn to_string_designator(value: &EvalResult) -> Result<String, String> {
+fn symbol_base_name(sym: &str) -> &str {
+    sym.rsplit(':').next().unwrap_or(sym)
+}
+
+fn extract_pathname_string(value: &EvalResult) -> Option<String> {
     match value {
-        EvalResult::String(s) => Ok(s.clone()),
+        EvalResult::String(s) => Some(s.clone()),
+        EvalResult::Symbol(s) => {
+            if s.starts_with("#P\"") && s.ends_with('"') && s.len() >= 4 {
+                Some(s[3..s.len() - 1].to_string())
+            } else if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                Some(s[1..s.len() - 1].to_string())
+            } else {
+                Some(s.clone())
+            }
+        }
+        EvalResult::Cons(car, cdr) => {
+            let car_val = car.borrow();
+            if let EvalResult::Symbol(sym) = &*car_val {
+                if symbol_base_name(sym).eq_ignore_ascii_case("pathname") {
+                    if let EvalResult::Cons(path_car, _) = &*cdr.borrow() {
+                        return extract_pathname_string(&path_car.borrow());
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn to_string_designator(value: &EvalResult) -> Result<String, String> {
+    if let Some(path_like) = extract_pathname_string(value) {
+        return Ok(path_like);
+    }
+
+    match value {
         EvalResult::Symbol(s) => {
             if s.starts_with(':') {
                 Ok(s[1..].to_uppercase())
@@ -226,6 +254,26 @@ fn make_unsigned_byte_8_type() -> EvalResult {
     )
 }
 
+fn is_binary_element_type(value: &EvalResult) -> bool {
+    match value {
+        EvalResult::Cons(car, cdr) => {
+            let head = match &*car.borrow() {
+                EvalResult::Symbol(s) => s.rsplit(':').next().unwrap_or(s).to_ascii_uppercase(),
+                _ => return false,
+            };
+            if head != "UNSIGNED-BYTE" {
+                return false;
+            }
+            matches!(&*cdr.borrow(), EvalResult::Cons(_, _))
+        }
+        EvalResult::Symbol(s) => {
+            let base = s.rsplit(':').next().unwrap_or(s).to_ascii_uppercase();
+            base == "(UNSIGNED-BYTE 8)" || base == "UNSIGNED-BYTE"
+        }
+        _ => false,
+    }
+}
+
 fn pprint_dispatch_key_for_object(obj: &EvalResult) -> String {
     format_for_prin1(obj)
 }
@@ -256,10 +304,22 @@ fn maybe_apply_pprint_dispatch(obj: &EvalResult) -> Option<String> {
     };
     let stream = make_output_stream();
     let mut callback_env = HashMap::new();
-    if super::eval_system::call_function_with_values(function, &[stream.clone(), obj.clone()], &mut callback_env).is_ok() {
-        get_output_stream_string(&stream).ok()
-    } else {
-        None
+    match super::eval_system::call_function_with_values(
+        function,
+        &[stream.clone(), obj.clone()],
+        &mut callback_env,
+    ) {
+        Ok(value) => {
+            let streamed = get_output_stream_string(&stream).ok().unwrap_or_default();
+            if !streamed.is_empty() {
+                Some(streamed)
+            } else if !matches!(value, EvalResult::Nil) {
+                Some(format_for_princ(&value))
+            } else {
+                Some(String::new())
+            }
+        }
+        Err(_) => None,
     }
 }
 
@@ -273,6 +333,50 @@ fn is_stream(value: &EvalResult) -> bool {
             )
         }
         _ => false,
+    }
+}
+
+fn current_io_special(names: &[&str]) -> Option<EvalResult> {
+    with_current_io_env(|env| {
+        for &name in names {
+            if let Some(value) = env.get(name) {
+                return Some(value.clone());
+            }
+        }
+        None
+    })
+    .flatten()
+}
+
+fn symbol_matches_special(name: &str, special: &str) -> bool {
+    name.rsplit(':')
+        .next()
+        .map(|s| s.eq_ignore_ascii_case(special))
+        .unwrap_or(false)
+}
+
+fn resolve_output_destination(dest: Option<&EvalResult>) -> Option<EvalResult> {
+    match dest {
+        Some(EvalResult::Symbol(name)) if symbol_matches_special(name, "*standard-output*") => {
+            current_io_special(&[
+                "*standard-output*",
+                "*STANDARD-OUTPUT*",
+                "*terminal-io*",
+                "*TERMINAL-IO*",
+            ])
+            .or_else(|| Some(EvalResult::Symbol(name.clone())))
+        }
+        Some(EvalResult::Symbol(name)) if symbol_matches_special(name, "*error-output*") => {
+            current_io_special(&["*error-output*", "*ERROR-OUTPUT*"])
+                .or_else(|| Some(EvalResult::Symbol(name.clone())))
+        }
+        Some(value) => Some(value.clone()),
+        None => current_io_special(&[
+            "*standard-output*",
+            "*STANDARD-OUTPUT*",
+            "*terminal-io*",
+            "*TERMINAL-IO*",
+        ]),
     }
 }
 
@@ -332,7 +436,7 @@ fn set_stream_closed(value: &EvalResult, closed: bool) -> Result<(), String> {
     }
 }
 
-pub(super) fn with_io_eval_env<T, F>(
+pub fn with_io_eval_env<T, F>(
     env: &mut HashMap<String, EvalResult>,
     f: F,
 ) -> Result<T, String>
@@ -347,7 +451,7 @@ where
     })
 }
 
-fn with_current_io_env<T, F>(f: F) -> Option<T>
+pub(super) fn with_current_io_env<T, F>(f: F) -> Option<T>
 where
     F: FnOnce(&mut HashMap<String, EvalResult>) -> T,
 {
@@ -561,6 +665,7 @@ fn stream_write_raw_byte(stream: &EvalResult, byte: u8) -> Result<(), String> {
                     }
                     Ok(())
                 }
+                Some(STREAM_OUTPUT_TAG) => Err("TYPE-ERROR".to_string()),
                 _ => stream_write_text(stream, &(byte as char).to_string()),
             }
         }
@@ -730,7 +835,17 @@ pub(super) fn get_output_stream_string(stream: &EvalResult) -> Result<String, St
 }
 
 fn write_to_destination(dest: Option<&EvalResult>, text: &str) -> Result<(), String> {
-    match dest {
+    let resolved = resolve_output_destination(dest);
+    let trace_pkg = std::env::var("RLASP_DEBUG_AOT_PKG_FORMAT").is_ok();
+    if trace_pkg {
+        eprintln!(
+            "[aot-format] write dest={:?} resolved={:?} text={:?}",
+            dest,
+            resolved,
+            text
+        );
+    }
+    match resolved.as_ref() {
         Some(target) if is_stream(target) => stream_write_text(target, text),
         Some(EvalResult::Symbol(name))
             if name
@@ -772,7 +887,21 @@ fn line_col_for_prefix(text: &str, pos: usize) -> (i64, i64) {
 
 fn instance_slot_get(inst: &super::eval_types::Instance, key: &str) -> Option<EvalResult> {
     let slots = inst.slots.borrow();
-    slots.get(&key.to_ascii_lowercase()).cloned()
+    let wanted = key.to_ascii_lowercase();
+    if let Some(v) = slots.get(&wanted) {
+        return Some(v.clone());
+    }
+    for (k, v) in slots.iter() {
+        let base = k
+            .rsplit(':')
+            .next()
+            .unwrap_or(k.as_str())
+            .to_ascii_lowercase();
+        if base == wanted {
+            return Some(v.clone());
+        }
+    }
+    None
 }
 
 fn instance_slot_set(inst: &super::eval_types::Instance, key: &str, value: EvalResult) {
@@ -893,6 +1022,13 @@ fn read_raw_byte_from_file_stream(stream: &EvalResult) -> Option<Result<Option<u
     };
     if dir != FILE_DIR_INPUT && dir != FILE_DIR_IO {
         return Some(Err("read-byte requires an input stream".to_string()));
+    }
+    let element_type = cells
+        .get(9)
+        .cloned()
+        .unwrap_or_else(|| EvalResult::Symbol("CHARACTER".to_string()));
+    if !is_binary_element_type(&element_type) {
+        return Some(Err("TYPE-ERROR".to_string()));
     }
     let content = match cells.get(3) {
         Some(EvalResult::String(s)) => s.clone(),
@@ -1061,7 +1197,12 @@ fn stream_output_cursor(stream: &EvalResult) -> Option<(i64, i64)> {
 }
 
 pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
-    match name {
+    let op = name
+        .rsplit(':')
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches(':');
+    match op {
         // Output functions
         "prin1" => {
             // Print object in readable form (with escape characters)
@@ -1114,16 +1255,75 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             // Generic write with keywords
             if let Some(obj) = args.get(0) {
                 let mut dest: Option<&EvalResult> = args.get(1);
+                let mut escape = !matches!(
+                    current_io_special(&["*print-escape*", "*PRINT-ESCAPE*"]),
+                    Some(EvalResult::Nil)
+                );
+                let mut pretty = !matches!(
+                    current_io_special(&["*print-pretty*", "*PRINT-PRETTY*"]),
+                    Some(EvalResult::Nil)
+                );
+                let mut readably = !matches!(
+                    current_io_special(&["*print-readably*", "*PRINT-READABLY*"]),
+                    Some(EvalResult::Nil)
+                );
+                let mut lines: Option<usize> = current_io_special(&["*print-lines*", "*PRINT-LINES*"])
+                    .and_then(|v| to_fixnum(&v))
+                    .filter(|n| *n >= 0)
+                    .map(|n| n as usize);
+                let mut right_margin: Option<usize> =
+                    current_io_special(&["*print-right-margin*", "*PRINT-RIGHT-MARGIN*"])
+                        .and_then(|v| to_fixnum(&v))
+                        .filter(|n| *n >= 0)
+                        .map(|n| n as usize);
                 let mut i = 1usize;
                 while i + 1 < args.len() {
                     if let Some(key) = keyword_name(&args[i]) {
-                        if key == "stream" {
-                            dest = args.get(i + 1);
+                        match key.as_str() {
+                            "stream" => {
+                                dest = args.get(i + 1);
+                            }
+                            "escape" => {
+                                escape = !matches!(args.get(i + 1), Some(EvalResult::Nil));
+                            }
+                            "pretty" => {
+                                pretty = !matches!(args.get(i + 1), Some(EvalResult::Nil));
+                            }
+                            "readably" => {
+                                readably = !matches!(args.get(i + 1), Some(EvalResult::Nil));
+                            }
+                            "lines" => {
+                                lines = args.get(i + 1).and_then(to_fixnum).filter(|n| *n >= 0).map(|n| n as usize);
+                            }
+                            "right-margin" => {
+                                right_margin = args
+                                    .get(i + 1)
+                                    .and_then(to_fixnum)
+                                    .filter(|n| *n >= 0)
+                                    .map(|n| n as usize);
+                            }
+                            _ => {}
                         }
                     }
                     i += 2;
                 }
-                write_to_destination(dest, &format_for_prin1(obj))?;
+                let mut rendered = if escape {
+                    format_for_prin1(obj)
+                } else {
+                    format_for_princ(obj)
+                };
+                if pretty && !readably {
+                    if let Some(custom) = maybe_apply_pprint_dispatch(obj) {
+                        rendered = custom;
+                    } else if let Some(margin) = right_margin {
+                        if lines.unwrap_or(usize::MAX) <= 1 && char_len(&rendered) > margin {
+                            let keep = margin.saturating_sub(2);
+                            let prefix: String = rendered.chars().take(keep).collect();
+                            rendered = format!("{}..", prefix);
+                        }
+                    }
+                }
+                write_to_destination(dest, &rendered)?;
                 Ok(obj.clone())
             } else {
                 Ok(EvalResult::Nil)
@@ -1204,6 +1404,206 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 }
                 _ => Err("write-char requires a character".to_string()),
             }
+        }
+
+        "write-sequence" => {
+            if args.len() < 2 {
+                return Err("write-sequence requires sequence and stream".to_string());
+            }
+
+            let sequence = &args[0];
+            let stream = &args[1];
+            let mut start = 0usize;
+            let mut end: Option<usize> = None;
+            let mut i = 2usize;
+            while i + 1 < args.len() {
+                if let Some(key) = keyword_name(&args[i]) {
+                    match key.as_str() {
+                        "start" => match to_fixnum(&args[i + 1]) {
+                            Some(n) if n >= 0 => start = n as usize,
+                            _ => return Err("write-sequence start must be a non-negative integer".to_string()),
+                        },
+                        "end" => match to_fixnum(&args[i + 1]) {
+                            Some(n) if n >= 0 => end = Some(n as usize),
+                            _ => return Err("write-sequence end must be a non-negative integer".to_string()),
+                        },
+                        _ => {}
+                    }
+                }
+                i += 2;
+            }
+
+            let chars: Vec<char> = match sequence {
+                EvalResult::String(s) => s.chars().collect(),
+                EvalResult::Array(arr) => {
+                    let cells = arr.borrow();
+                    let mut out = Vec::with_capacity(cells.len());
+                    for item in cells.iter() {
+                        match item {
+                            EvalResult::Character(c) => out.push(*c),
+                            EvalResult::String(s) if s.chars().count() == 1 => {
+                                out.push(s.chars().next().unwrap())
+                            }
+                            _ => {
+                                return Err(
+                                    "write-sequence to character stream requires character elements"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                    }
+                    out
+                }
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    let mut out = Vec::new();
+                    let mut current = sequence.clone();
+                    loop {
+                        match current {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(car, cdr) => {
+                                match &*car.borrow() {
+                                    EvalResult::Character(c) => out.push(*c),
+                                    EvalResult::String(s) if s.chars().count() == 1 => {
+                                        out.push(s.chars().next().unwrap())
+                                    }
+                                    _ => {
+                                        return Err(
+                                            "write-sequence list elements must be characters".to_string()
+                                        )
+                                    }
+                                }
+                                current = cdr.borrow().clone();
+                            }
+                            _ => {
+                                return Err(
+                                    "write-sequence requires a proper list when sequence is a list"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                    }
+                    out
+                }
+                _ => return Err("write-sequence requires a sequence".to_string()),
+            };
+
+            let len = chars.len();
+            let end_idx = end.unwrap_or(len);
+            if start > len || end_idx > len {
+                return Err("write-sequence start/end out of bounds".to_string());
+            }
+            if start > end_idx {
+                return Err("write-sequence requires start <= end".to_string());
+            }
+
+            let text: String = chars[start..end_idx].iter().collect();
+            stream_write_text(stream, &text)?;
+            Ok(sequence.clone())
+        }
+
+        "read-sequence" => {
+            if args.len() < 2 {
+                return Err("read-sequence requires sequence and stream".to_string());
+            }
+
+            let mut sequence = args[0].clone();
+            let stream = &args[1];
+            let mut start = 0usize;
+            let mut end: Option<usize> = None;
+            let mut i = 2usize;
+            while i + 1 < args.len() {
+                if let Some(key) = keyword_name(&args[i]) {
+                    match key.as_str() {
+                        "start" => match to_fixnum(&args[i + 1]) {
+                            Some(n) if n >= 0 => start = n as usize,
+                            _ => return Err("read-sequence start must be a non-negative integer".to_string()),
+                        },
+                        "end" => match to_fixnum(&args[i + 1]) {
+                            Some(n) if n >= 0 => end = Some(n as usize),
+                            _ => return Err("read-sequence end must be a non-negative integer".to_string()),
+                        },
+                        _ => {}
+                    }
+                }
+                i += 2;
+            }
+
+            let seq_len = match &sequence {
+                EvalResult::String(s) => s.chars().count(),
+                EvalResult::Array(arr) => arr.borrow().len(),
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    let mut len = 0usize;
+                    let mut cur = sequence.clone();
+                    loop {
+                        match cur {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(_, cdr) => {
+                                len += 1;
+                                cur = cdr.borrow().clone();
+                            }
+                            _ => {
+                                return Err(
+                                    "read-sequence requires a proper list when sequence is a list"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                    }
+                    len
+                }
+                _ => return Err("read-sequence requires a sequence".to_string()),
+            };
+
+            let end_idx = end.unwrap_or(seq_len);
+            if start > seq_len || end_idx > seq_len {
+                return Err("read-sequence start/end out of bounds".to_string());
+            }
+            if start > end_idx {
+                return Err("read-sequence requires start <= end".to_string());
+            }
+
+            let read_chars: Vec<char> = stream_read_chars(stream, end_idx - start)?.chars().collect();
+
+            match &mut sequence {
+                EvalResult::String(s) => {
+                    let mut chars: Vec<char> = s.chars().collect();
+                    for (offset, ch) in read_chars.iter().enumerate() {
+                        chars[start + offset] = *ch;
+                    }
+                    *s = chars.into_iter().collect();
+                }
+                EvalResult::Array(arr) => {
+                    let mut cells = arr.borrow_mut();
+                    for (offset, ch) in read_chars.iter().enumerate() {
+                        cells[start + offset] = EvalResult::Character(*ch);
+                    }
+                }
+                EvalResult::Cons(_, _) | EvalResult::Nil => {
+                    let mut car_cells: Vec<Rc<RefCell<EvalResult>>> = Vec::new();
+                    let mut cur = sequence.clone();
+                    loop {
+                        match cur {
+                            EvalResult::Nil => break,
+                            EvalResult::Cons(car, cdr) => {
+                                car_cells.push(car.clone());
+                                cur = cdr.borrow().clone();
+                            }
+                            _ => {
+                                return Err(
+                                    "read-sequence requires a proper list when sequence is a list"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                    }
+                    for (offset, ch) in read_chars.iter().enumerate() {
+                        *car_cells[start + offset].borrow_mut() = EvalResult::Character(*ch);
+                    }
+                }
+                _ => {}
+            }
+
+            Ok(EvalResult::Fixnum((start + read_chars.len()) as i64))
         }
 
         "terpri" => {
@@ -1381,6 +1781,91 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             }
         }
 
+        "read-delimited-list" => {
+            if args.is_empty() {
+                return Err("read-delimited-list requires a delimiter character".to_string());
+            }
+            let delimiter = match args[0] {
+                EvalResult::Character(c) => c,
+                EvalResult::String(ref s) if s.chars().count() == 1 => s.chars().next().unwrap(),
+                _ => return Err("read-delimited-list requires a delimiter character".to_string()),
+            };
+
+            let mut stream = args.get(1).cloned().unwrap_or(EvalResult::Nil);
+            if matches!(stream, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
+                stream = IO_EVAL_ENV_PTR.with(|ptr| {
+                    ptr.borrow()
+                        .map(|env_ptr| unsafe { &*env_ptr })
+                        .and_then(|env| {
+                            env.get("*standard-input*")
+                                .cloned()
+                                .or_else(|| env.get("*STANDARD-INPUT*").cloned())
+                        })
+                        .unwrap_or(EvalResult::Nil)
+                });
+            }
+            if matches!(stream, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
+                return Err("read-delimited-list requires an input stream".to_string());
+            }
+
+            let eof_marker = EvalResult::Symbol("__EOF__".to_string());
+            let parse_token = |token: &str| -> EvalResult {
+                if let Ok(n) = token.parse::<i64>() {
+                    EvalResult::Fixnum(n)
+                } else if let Ok(f) = token.parse::<f64>() {
+                    EvalResult::Float(f)
+                } else {
+                    EvalResult::Symbol(token.to_string())
+                }
+            };
+            let mut out: Vec<EvalResult> = Vec::new();
+
+            loop {
+                let first = loop {
+                    let ch = call_io_builtin(
+                        "read-char",
+                        &[stream.clone(), EvalResult::Boolean(false), eof_marker.clone()],
+                    )?;
+                    match ch {
+                        EvalResult::Symbol(ref s) if s == "__EOF__" => {
+                            return Err("end of file".to_string());
+                        }
+                        EvalResult::Character(c) if c.is_whitespace() => continue,
+                        EvalResult::Character(c) if c == delimiter => {
+                            let mut list = EvalResult::Nil;
+                            for item in out.iter().rev() {
+                                list = EvalResult::Cons(
+                                    Rc::new(RefCell::new(item.clone())),
+                                    Rc::new(RefCell::new(list)),
+                                );
+                            }
+                            return Ok(list);
+                        }
+                        EvalResult::Character(c) => break c,
+                        _ => return Err("reader-error".to_string()),
+                    }
+                };
+
+                let mut token = String::new();
+                token.push(first);
+                loop {
+                    let ch = call_io_builtin(
+                        "read-char",
+                        &[stream.clone(), EvalResult::Boolean(false), eof_marker.clone()],
+                    )?;
+                    match ch {
+                        EvalResult::Symbol(ref s) if s == "__EOF__" => break,
+                        EvalResult::Character(c) if c.is_whitespace() => break,
+                        EvalResult::Character(c) if c == delimiter => break,
+                        EvalResult::Character(c) => token.push(c),
+                        _ => break,
+                    }
+                }
+
+                out.push(parse_token(&token));
+            }
+        }
+
         "peek-char" => {
             // (peek-char &optional peek-type stream eof-error-p eof-value recursive-p)
             let mut stream_index = 1usize;
@@ -1507,7 +1992,10 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         }
 
         "read-byte" => {
-            let stream = args.get(0).ok_or_else(|| "read-byte requires a stream".to_string())?;
+            if args.is_empty() {
+                return Err("PROGRAM-ERROR".to_string());
+            }
+            let stream = &args[0];
             let eof_error_p = args.get(1).map(truthy).unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
             if !matches!(stream, EvalResult::Array(_) | EvalResult::Instance(_)) {
@@ -1530,19 +2018,7 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     }
                 };
             }
-            let as_char = match call_io_builtin(
-                "read-char",
-                &[stream.clone(), EvalResult::Boolean(false), EvalResult::Nil],
-            ) {
-                Ok(v) => v,
-                Err(_) => return Err("TYPE-ERROR".to_string()),
-            };
-            match as_char {
-                EvalResult::Character(c) => Ok(EvalResult::Fixnum(c as u32 as i64)),
-                _ => {
-                    if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) }
-                }
-            }
+            Err("TYPE-ERROR".to_string())
         }
 
         "write-byte" => {
@@ -1581,6 +2057,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         "copy-pprint-dispatch" => {
             if matches!(args.get(0), Some(EvalResult::Nil)) || args.is_empty() {
                 PPRINT_DISPATCH.with(|tbl| tbl.borrow_mut().clear());
+            } else {
+                return Err(
+                    "TYPE-ERROR: copy-pprint-dispatch requires NIL or a pprint dispatch table"
+                        .to_string(),
+                );
             }
             Ok(EvalResult::Nil)
         }
@@ -1645,10 +2126,35 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             }
             // Caller may pre-resolve the symbol to the bound stream value.
             if is_stream(&args[0]) {
-                Ok(args[0].clone())
-            } else {
-                Ok(EvalResult::Nil)
+                return Ok(args[0].clone());
             }
+            if let EvalResult::Symbol(name) = &args[0] {
+                let base = name.rsplit(':').next().unwrap_or(name.as_str());
+                let candidates = [
+                    name.clone(),
+                    base.to_string(),
+                    name.to_ascii_uppercase(),
+                    name.to_ascii_lowercase(),
+                    base.to_ascii_uppercase(),
+                    base.to_ascii_lowercase(),
+                ];
+                let resolved = with_current_io_env(|env| {
+                    candidates
+                        .iter()
+                        .find_map(|candidate| env.get(candidate).cloned())
+                })
+                .flatten()
+                .or_else(|| {
+                    candidates
+                        .iter()
+                        .find_map(|candidate| super::eval_types::get_dynamic_var(candidate))
+                })
+                .unwrap_or(EvalResult::Nil);
+                if is_stream(&resolved) {
+                    return Ok(resolved);
+                }
+            }
+            Err("TYPE-ERROR".to_string())
         }
 
         "make-broadcast-stream" => {
@@ -1671,6 +2177,15 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         "make-concatenated-stream" => {
             if args.is_empty() {
                 Ok(make_input_stream(String::new()))
+            } else if args.len() == 1 {
+                let input_ok = matches!(
+                    call_io_builtin("input-stream-p", &[args[0].clone()])?,
+                    EvalResult::Boolean(true) | EvalResult::Bool(true)
+                );
+                if !input_ok {
+                    return Err("TYPE-ERROR".to_string());
+                }
+                Ok(args[0].clone())
             } else {
                 let mut content = String::new();
                 for arg in args {
@@ -1741,13 +2256,29 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                             }
                         }
                         "if-exists" => {
-                            if let Some(EvalResult::Symbol(s)) = args.get(i + 1) {
-                                if_exists = s.to_ascii_lowercase();
+                            if let Some(value) = args.get(i + 1) {
+                                match value {
+                                    EvalResult::Symbol(s) => {
+                                        if_exists = s.to_ascii_lowercase();
+                                    }
+                                    EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => {
+                                        if_exists = "nil".to_string();
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         "if-does-not-exist" => {
-                            if let Some(EvalResult::Symbol(s)) = args.get(i + 1) {
-                                if_does_not_exist = s.to_ascii_lowercase();
+                            if let Some(value) = args.get(i + 1) {
+                                match value {
+                                    EvalResult::Symbol(s) => {
+                                        if_does_not_exist = s.to_ascii_lowercase();
+                                    }
+                                    EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => {
+                                        if_does_not_exist = "nil".to_string();
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         "element-type" => {
@@ -1775,6 +2306,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 }
             }
             if existing.is_none() && direction == FILE_DIR_INPUT && !if_does_not_exist.contains("create") {
+                if if_does_not_exist == "nil" {
+                    return Ok(EvalResult::Nil);
+                }
                 return Err(format!("FILE-ERROR: open {} (No such file)", path));
             }
             if direction == FILE_DIR_OUTPUT && if_exists.contains("supersede") {
@@ -1916,9 +2450,25 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     let cells = arr.borrow();
                     match stream_tag(&cells) {
                         Some(STREAM_FILE_TAG) => {
-                            let len = match cells.get(3) {
-                                Some(EvalResult::String(s)) => char_len(s) as i64,
-                                _ => 0,
+                            let binary = cells.get(9).map(is_binary_element_type).unwrap_or(false);
+                            let len = if binary {
+                                match cells.get(1) {
+                                    Some(EvalResult::String(path)) => std::fs::metadata(path)
+                                        .map(|m| m.len() as i64)
+                                        .unwrap_or_else(|_| match cells.get(3) {
+                                            Some(EvalResult::String(s)) => char_len(s) as i64,
+                                            _ => 0,
+                                        }),
+                                    _ => match cells.get(3) {
+                                        Some(EvalResult::String(s)) => char_len(s) as i64,
+                                        _ => 0,
+                                    },
+                                }
+                            } else {
+                                match cells.get(3) {
+                                    Some(EvalResult::String(s)) => char_len(s) as i64,
+                                    _ => 0,
+                                }
                             };
                             return Ok(EvalResult::Fixnum(len));
                         }
@@ -2024,6 +2574,15 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                         _ => {}
                     }
                 }
+                if std::env::var("RLASP_DEBUG_STREAM_ELEMENT_TYPE").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "[stream-element-type/type-error] stream={} is_stream={} is_array={} is_instance={}",
+                        stream,
+                        is_stream(stream),
+                        matches!(stream, EvalResult::Array(_)),
+                        matches!(stream, EvalResult::Instance(_)),
+                    );
+                }
                 return Err("TYPE-ERROR".to_string());
             }
             Err("TYPE-ERROR".to_string())
@@ -2054,6 +2613,15 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     }
                     _ => {}
                 }
+            }
+            if std::env::var("RLASP_DEBUG_STREAM_ELEMENT_TYPE").ok().as_deref() == Some("1")
+                && !is_stream(&args[0])
+            {
+                eprintln!(
+                    "[set-stream-element-type/non-stream] stream={} new-type={}",
+                    args[0],
+                    args[1]
+                );
             }
             Ok(args[1].clone())
         }
@@ -2129,6 +2697,15 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             match (args.get(0), args.get(1)) {
                 (Some(dest), Some(EvalResult::String(fmt))) => {
                     let output = format_simple(fmt, &args[2..])?;
+                    if std::env::var("RLASP_DEBUG_AOT_PKG_FORMAT").is_ok() {
+                        eprintln!(
+                            "[aot-format] call dest={:?} fmt={:?} args={:?} output={:?}",
+                            dest,
+                            fmt,
+                            &args[2..],
+                            output
+                        );
+                    }
 
                     match dest {
                         EvalResult::Nil => {
@@ -2336,7 +2913,28 @@ fn format_for_prin1(obj: &EvalResult) -> String {
             EvalResult::String(s) => format!("\"{}\"", s),
             EvalResult::Character(c) => format!("#\\{}", c),
             EvalResult::Symbol(s) => s.clone(),
-            EvalResult::Float(n) => n.to_string(),
+            EvalResult::Float(n) => {
+                if n.is_infinite() {
+                    if n.is_sign_negative() {
+                        "#.ext:double-float-negative-infinity".to_string()
+                    } else {
+                        "#.ext:double-float-positive-infinity".to_string()
+                    }
+                } else {
+                    n.to_string()
+                }
+            }
+            EvalResult::FloatSingle(n) => {
+                if n.is_infinite() {
+                    if n.is_sign_negative() {
+                        "#.ext:single-float-negative-infinity".to_string()
+                    } else {
+                        "#.ext:single-float-positive-infinity".to_string()
+                    }
+                } else {
+                    n.to_string()
+                }
+            }
             EvalResult::Fixnum(n) => n.to_string(),
             EvalResult::Bignum(n) => n.to_string(),
             EvalResult::Ratio(r) => format!("{}/{}", r.numerator_ref(), r.denominator_ref()),
@@ -2433,6 +3031,124 @@ fn format_simple(fmt: &str, args: &[EvalResult]) -> Result<String, String> {
     format_with_context(fmt, args, &mut 0)
 }
 
+fn format_fixed_float_simple(value: f64, precision: usize) -> String {
+    if value == 0.0 && value.is_sign_negative() {
+        if precision == 0 {
+            return "-0".to_string();
+        }
+        return format!("-0.{}", "0".repeat(precision));
+    }
+    format!("{:.prec$}", value, prec = precision)
+}
+
+fn format_radix_digits_simple(mut value: u128, radix: u32) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+    let mut digits = Vec::new();
+    let base = radix as u128;
+    while value > 0 {
+        let digit = (value % base) as u8;
+        digits.push(if digit < 10 {
+            (b'0' + digit) as char
+        } else {
+            (b'A' + (digit - 10)) as char
+        });
+        value /= base;
+    }
+    digits.into_iter().rev().collect()
+}
+
+fn format_radix_fixnum_simple(value: i64, radix: u32, min_width: usize, pad_char: char) -> String {
+    let negative = value < 0;
+    let mut body = if negative {
+        format_radix_digits_simple((-(value as i128)) as u128, radix)
+    } else {
+        format_radix_digits_simple(value as u128, radix)
+    };
+    if body.len() < min_width {
+        let mut padded = String::with_capacity(min_width);
+        padded.extend(std::iter::repeat_n(pad_char, min_width - body.len()));
+        padded.push_str(&body);
+        body = padded;
+    }
+    if negative {
+        format!("-{}", body)
+    } else {
+        body
+    }
+}
+
+fn format_aesthetic_argument(
+    arg: &EvalResult,
+    min_width: usize,
+    colon_modifier: bool,
+    at_modifier: bool,
+) -> String {
+    let mut rendered = if colon_modifier && matches!(arg, EvalResult::Nil) {
+        "()".to_string()
+    } else {
+        format_for_princ(arg)
+    };
+    if rendered.len() < min_width {
+        let padding = " ".repeat(min_width - rendered.len());
+        if at_modifier {
+            rendered = format!("{}{}", padding, rendered);
+        } else {
+            rendered.push_str(&padding);
+        }
+    }
+    rendered
+}
+
+fn format_exponential_simple(value: f64, digits: usize, scale: usize) -> String {
+    if value == 0.0 {
+        let shown_digits = digits.saturating_sub(scale).saturating_add(1);
+        let mantissa = format_fixed_float_simple(0.0, shown_digits);
+        return format!("{}e+0", mantissa);
+    }
+
+    let abs_value = value.abs();
+    let exponent = abs_value.log10().floor() as i32;
+    let shown_exponent = exponent - (scale as i32 - 1);
+    let mantissa = value / 10f64.powi(shown_exponent);
+    let shown_digits = digits.saturating_sub(scale).saturating_add(1);
+    let mantissa_text = format_fixed_float_simple(mantissa, shown_digits);
+    if shown_exponent >= 0 {
+        format!("{}e+{}", mantissa_text, shown_exponent)
+    } else {
+        format!("{}e{}", mantissa_text, shown_exponent)
+    }
+}
+
+fn format_character_name_simple(ch: char) -> String {
+    match ch {
+        '\t' => "TAB".to_string(),
+        ' ' => "SPACE".to_string(),
+        '\u{00A0}' => "NO-BREAK_SPACE".to_string(),
+        '\u{1680}' => "OGHAM_SPACE_MARK".to_string(),
+        '\u{2000}' => "EN_QUAD".to_string(),
+        '\u{2001}' => "EM_QUAD".to_string(),
+        '\u{2002}' => "EN_SPACE".to_string(),
+        '\u{2003}' => "EM_SPACE".to_string(),
+        '\u{2004}' => "THREE-PER-EM_SPACE".to_string(),
+        '\u{2005}' => "FOUR-PER-EM_SPACE".to_string(),
+        '\u{2006}' => "SIX-PER-EM_SPACE".to_string(),
+        '\u{2007}' => "FIGURE_SPACE".to_string(),
+        '\u{2008}' => "PUNCTUATION_SPACE".to_string(),
+        '\u{2009}' => "THIN_SPACE".to_string(),
+        '\u{200A}' => "HAIR_SPACE".to_string(),
+        '\u{202F}' => "NARROW_NO-BREAK_SPACE".to_string(),
+        '\u{205F}' => "MEDIUM_MATHEMATICAL_SPACE".to_string(),
+        '\u{3000}' => "IDEOGRAPHIC_SPACE".to_string(),
+        _ => ch.to_string(),
+    }
+}
+
+fn current_line_width(text: &str) -> usize {
+    text.rsplit('\n').next().map(char_len).unwrap_or(0)
+}
+
 fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) -> Result<String, String> {
     let mut result = String::new();
     let mut chars = fmt.chars().peekable();
@@ -2469,7 +3185,12 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                     'A' | 'a' => {
                         // Aesthetic (princ-like)
                         if let Some(arg) = args.get(*arg_index) {
-                            result.push_str(&format_for_princ(arg));
+                            result.push_str(&format_aesthetic_argument(
+                                arg,
+                                0,
+                                colon_modifier,
+                                at_modifier,
+                            ));
                             *arg_index += 1;
                         }
                     }
@@ -2477,6 +3198,21 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                         // Standard (prin1-like)
                         if let Some(arg) = args.get(*arg_index) {
                             result.push_str(&format_for_prin1(arg));
+                            *arg_index += 1;
+                        }
+                    }
+                    'C' | 'c' => {
+                        if let Some(arg) = args.get(*arg_index) {
+                            match arg {
+                                EvalResult::Character(ch) => {
+                                    if colon_modifier {
+                                        result.push_str(&format_character_name_simple(*ch));
+                                    } else {
+                                        result.push(*ch);
+                                    }
+                                }
+                                _ => result.push_str(&format_for_princ(arg)),
+                            }
                             *arg_index += 1;
                         }
                     }
@@ -2500,8 +3236,19 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                         // Fixed-point float
                         if let Some(arg) = args.get(*arg_index) {
                             let num_str = match arg {
-                                EvalResult::Float(n) => format!("{:.3}", n),
-                                EvalResult::Fixnum(i) => format!("{:.3}", *i as f64),
+                                EvalResult::Float(n) => format_fixed_float_simple(*n, 1),
+                                EvalResult::Fixnum(i) => format_fixed_float_simple(*i as f64, 1),
+                                _ => format_for_princ(arg),
+                            };
+                            result.push_str(&num_str);
+                            *arg_index += 1;
+                        }
+                    }
+                    'E' | 'e' => {
+                        if let Some(arg) = args.get(*arg_index) {
+                            let num_str = match arg {
+                                EvalResult::Float(n) => format_exponential_simple(*n, 1, 1),
+                                EvalResult::Fixnum(i) => format_exponential_simple(*i as f64, 1, 1),
                                 _ => format_for_princ(arg),
                             };
                             result.push_str(&num_str);
@@ -2516,6 +3263,13 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                         // Fresh line
                         if !result.is_empty() && !result.ends_with('\n') {
                             result.push('\n');
+                        }
+                    }
+                    'T' | 't' => {
+                        let current_col = current_line_width(&result);
+                        let target = 1usize;
+                        if current_col < target {
+                            result.push_str(&" ".repeat(target - current_col));
                         }
                     }
                     '~' => {
@@ -2748,34 +3502,293 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                         }
                     }
                     ',' | '0'..='9' => {
-                        // Format parameters - skip until directive letter
-                        while let Some(&next_ch) = chars.peek() {
-                            if next_ch.is_alphabetic() {
-                                chars.next();
-                                match next_ch.to_ascii_uppercase() {
-                                    'F' => {
-                                        if let Some(arg) = args.get(*arg_index) {
-                                            let num_str = match arg {
-                                                EvalResult::Float(n) => format!("{:.3}", n),
-                                                EvalResult::Fixnum(i) => format!("{:.3}", *i as f64),
-                                                _ => format_for_princ(arg),
-                                            };
-                                            result.push_str(&num_str);
-                                            *arg_index += 1;
-                                        }
+                        let mut params: Vec<Option<EvalResult>> = Vec::new();
+                        let mut current_param = String::new();
+                        let mut local_at_modifier = at_modifier;
+                        let mut local_colon_modifier = colon_modifier;
+                        let mut actual_directive: Option<char> = None;
+
+                        let mut flush_current_param =
+                            |params: &mut Vec<Option<EvalResult>>, current_param: &mut String| {
+                                if current_param.is_empty() {
+                                    params.push(None);
+                                } else if current_param.eq_ignore_ascii_case("v") {
+                                    if let Some(param_arg) = args.get(*arg_index) {
+                                        params.push(Some(param_arg.clone()));
+                                        *arg_index += 1;
+                                    } else {
+                                        params.push(Some(EvalResult::Nil));
                                     }
-                                    'D' => {
-                                        if let Some(arg) = args.get(*arg_index) {
-                                            result.push_str(&format_for_princ(arg));
-                                            *arg_index += 1;
-                                        }
-                                    }
-                                    _ => {}
+                                } else if let Ok(value) = current_param.parse::<i64>() {
+                                    params.push(Some(EvalResult::Fixnum(value)));
+                                } else {
+                                    params.push(None);
                                 }
-                                break;
-                            } else {
-                                chars.next();
+                                current_param.clear();
+                            };
+
+                        if directive == ',' {
+                            params.push(None);
+                        } else {
+                            current_param.push(directive);
+                        }
+                        while let Some(next_ch) = chars.next() {
+                            match next_ch {
+                                ',' => {
+                                    flush_current_param(&mut params, &mut current_param);
+                                }
+                                '\'' => {
+                                    if !current_param.is_empty() {
+                                        flush_current_param(&mut params, &mut current_param);
+                                    }
+                                    let quoted = chars.next().unwrap_or(' ');
+                                    params.push(Some(EvalResult::Character(quoted)));
+                                }
+                                'v' | 'V' => {
+                                    current_param.push(next_ch);
+                                }
+                                ':' => {
+                                    flush_current_param(&mut params, &mut current_param);
+                                    local_colon_modifier = true;
+                                }
+                                '@' => {
+                                    flush_current_param(&mut params, &mut current_param);
+                                    local_at_modifier = true;
+                                }
+                                '/' | '%' | '<' | '>' => {
+                                    flush_current_param(&mut params, &mut current_param);
+                                    actual_directive = Some(next_ch);
+                                    break;
+                                }
+                                ch if ch.is_ascii_alphabetic() => {
+                                    flush_current_param(&mut params, &mut current_param);
+                                    actual_directive = Some(ch);
+                                    break;
+                                }
+                                other => current_param.push(other),
                             }
+                        }
+
+                        let param_usize = |idx: usize| -> Option<usize> {
+                            params.get(idx).and_then(|entry| match entry {
+                                Some(EvalResult::Fixnum(n)) if *n >= 0 => Some(*n as usize),
+                                _ => None,
+                            })
+                        };
+
+                        let param_char = |idx: usize| -> Option<char> {
+                            params.iter().skip(idx).find_map(|entry| match entry {
+                                Some(EvalResult::Character(ch)) => Some(*ch),
+                                _ => None,
+                            })
+                        };
+
+                        match actual_directive.map(|ch| ch.to_ascii_uppercase()) {
+                            Some('F') => {
+                                if let Some(arg) = args.get(*arg_index) {
+                                    let precision = param_usize(1)
+                                        .or_else(|| param_usize(0))
+                                        .unwrap_or(1);
+                                    let num_str = match arg {
+                                        EvalResult::Float(n) => format_fixed_float_simple(*n, precision),
+                                        EvalResult::Fixnum(i) => format_fixed_float_simple(*i as f64, precision),
+                                        _ => format_for_princ(arg),
+                                    };
+                                    result.push_str(&num_str);
+                                    *arg_index += 1;
+                                }
+                            }
+                            Some('E') => {
+                                if let Some(arg) = args.get(*arg_index) {
+                                    let digits = param_usize(1).unwrap_or(1);
+                                    let scale = param_usize(3).unwrap_or(1);
+                                    let num_str = match arg {
+                                        EvalResult::Float(n) => format_exponential_simple(*n, digits, scale),
+                                        EvalResult::Fixnum(i) => {
+                                            format_exponential_simple(*i as f64, digits, scale)
+                                        }
+                                        _ => format_for_princ(arg),
+                                    };
+                                    result.push_str(&num_str);
+                                    *arg_index += 1;
+                                }
+                            }
+                            Some('A') => {
+                                if at_modifier || colon_modifier {
+                                    return Err(
+                                        "FORMAT parameter modifiers must follow width for ~A".to_string()
+                                    );
+                                }
+                                if let Some(arg) = args.get(*arg_index) {
+                                    let min_width = param_usize(0).unwrap_or(0);
+                                    result.push_str(&format_aesthetic_argument(
+                                        arg,
+                                        min_width,
+                                        local_colon_modifier,
+                                        local_at_modifier,
+                                    ));
+                                    *arg_index += 1;
+                                }
+                            }
+                            Some('D') => {
+                                if let Some(arg) = args.get(*arg_index) {
+                                    result.push_str(&format_for_princ(arg));
+                                    *arg_index += 1;
+                                }
+                            }
+                            Some('R') => {
+                                if let Some(arg) = args.get(*arg_index) {
+                                    let radix = param_usize(0).unwrap_or(10).clamp(2, 36) as u32;
+                                    let min_width = param_usize(1).unwrap_or(0);
+                                    let pad_char = param_char(2).unwrap_or(' ');
+                                    match arg {
+                                        EvalResult::Fixnum(n) => {
+                                            result.push_str(&format_radix_fixnum_simple(*n, radix, min_width, pad_char));
+                                        }
+                                        _ => result.push_str(&format_for_princ(arg)),
+                                    }
+                                    *arg_index += 1;
+                                }
+                            }
+                            Some('%') => {
+                                let repeat = param_usize(0).unwrap_or(1);
+                                for _ in 0..repeat {
+                                    result.push('\n');
+                                }
+                            }
+                            Some('T') => {
+                                let current_col = current_line_width(&result);
+                                if local_at_modifier {
+                                    let colnum = param_usize(0).unwrap_or(1);
+                                    let colinc = param_usize(1).unwrap_or(1).max(1);
+                                    let current_pos = current_col + 1;
+                                    let spaces = if current_pos < colnum {
+                                        colnum - current_pos
+                                    } else {
+                                        let offset = (current_pos - colnum) % colinc;
+                                        if offset == 0 { colinc } else { colinc - offset }
+                                    };
+                                    result.push_str(&" ".repeat(spaces));
+                                } else {
+                                    let target = param_usize(0).unwrap_or(1);
+                                    if current_col < target {
+                                        result.push_str(&" ".repeat(target - current_col));
+                                    }
+                                }
+                            }
+                            Some('<') => {
+                                let mut nesting = 1;
+                                let mut body = String::new();
+                                while let Some(c) = chars.next() {
+                                    if c == '~' {
+                                        if let Some(&next) = chars.peek() {
+                                            if next == '<' {
+                                                nesting += 1;
+                                                body.push('~');
+                                                body.push(chars.next().unwrap());
+                                                continue;
+                                            }
+                                            if next == '>' {
+                                                nesting -= 1;
+                                                chars.next();
+                                                if nesting == 0 {
+                                                    break;
+                                                }
+                                                body.push('~');
+                                                body.push('>');
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    body.push(c);
+                                }
+
+                                let mincol = param_usize(0).unwrap_or(0);
+                                let pad_char = param_char(3).unwrap_or(' ');
+                                let mut rendered = body.clone();
+
+                                if let Some(marker_start) = body.find("~,") {
+                                    if let Some(marker_rel_end) = body[marker_start + 2..].find(":;") {
+                                        let marker_end = marker_start + 2 + marker_rel_end;
+                                        let threshold = body[marker_start + 2..marker_end]
+                                            .trim_matches(',')
+                                            .parse::<usize>()
+                                            .unwrap_or(0);
+                                        let prefix_src = &body[..marker_start];
+                                        let suffix_src = &body[marker_end + 2..];
+                                        let mut pieces = suffix_src.split("~;");
+                                        if let (Some(mid_src), Some(tail_src)) = (pieces.next(), pieces.next()) {
+                                            let prefix = format_with_context(prefix_src, args, arg_index)?;
+                                            let mid = format_with_context(mid_src, args, arg_index)?;
+                                            let tail = format_with_context(tail_src, args, arg_index)?;
+                                            let middle_len = char_len(&mid) + char_len(&tail);
+                                            let pad_len = mincol.saturating_sub(middle_len);
+                                            let core = format!(
+                                                "{}{}{}",
+                                                mid,
+                                                pad_char.to_string().repeat(pad_len),
+                                                tail
+                                            );
+                                            rendered = if current_line_width(&result) + char_len(&core) > threshold {
+                                                format!("{}{}", prefix, core)
+                                            } else {
+                                                core
+                                            };
+                                        }
+                                    }
+                                }
+
+                                result.push_str(&rendered);
+                            }
+                            Some('/') => {
+                                let mut fn_name = String::new();
+                                while let Some(c) = chars.next() {
+                                    if c == '/' {
+                                        break;
+                                    }
+                                    fn_name.push(c);
+                                }
+                                let fn_name = fn_name.trim();
+                                if !fn_name.is_empty() {
+                                    let arg_val = if let Some(arg) = args.get(*arg_index) {
+                                        *arg_index += 1;
+                                        arg.clone()
+                                    } else {
+                                        EvalResult::Nil
+                                    };
+                                    let stream = make_output_stream();
+                                    let mut call_args = vec![
+                                        stream.clone(),
+                                        arg_val.clone(),
+                                        EvalResult::Boolean(local_colon_modifier),
+                                        EvalResult::Boolean(local_at_modifier),
+                                    ];
+                                    for param in params.into_iter().flatten() {
+                                        call_args.push(param);
+                                    }
+                                    let call_result = with_current_io_env(|env| {
+                                        super::eval_system::call_function_with_values(
+                                            EvalResult::Symbol(fn_name.to_string()),
+                                            &call_args,
+                                            env,
+                                        )
+                                    });
+                                    let streamed = get_output_stream_string(&stream).unwrap_or_default();
+                                    match call_result {
+                                        Some(Ok(res)) => {
+                                            if !streamed.is_empty() {
+                                                result.push_str(&streamed);
+                                            } else if !matches!(res, EvalResult::Nil) {
+                                                result.push_str(&format_for_princ(&res));
+                                            }
+                                        }
+                                        Some(Err(_)) | None => {
+                                            result.push_str(&format_for_princ(&arg_val));
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     '(' => {

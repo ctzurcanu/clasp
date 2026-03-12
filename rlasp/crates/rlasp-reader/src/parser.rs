@@ -37,10 +37,20 @@ const DEFAULT_FEATURES: &[&str] = &[
     "OS-MACOSX",
 ];
 
+fn feature_present_in_env(feature_upper: &str) -> bool {
+    let Ok(raw) = std::env::var("RLASP_READER_FEATURES") else {
+        return false;
+    };
+    raw.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .any(|entry| entry.trim_start_matches(':').eq_ignore_ascii_case(feature_upper))
+}
+
 /// Check if a feature is present
 fn feature_present(feature: &str) -> bool {
     let feature_upper = feature.to_uppercase();
     DEFAULT_FEATURES.iter().any(|f| f.eq_ignore_ascii_case(&feature_upper))
+        || feature_present_in_env(&feature_upper)
 }
 
 /// Evaluate a feature expression
@@ -113,6 +123,8 @@ pub struct Parser {
     last_token_end_pos: usize,
     /// Label map for circular references (#n= / #n#)
     label_map: HashMap<u8, LispObject>,
+    /// Backquote nesting depth, so comma forms can signal reader errors outside quasiquote.
+    backquote_depth: usize,
 }
 
 impl Parser {
@@ -138,6 +150,7 @@ impl Parser {
             current_token,
             last_token_end_pos: 0,
             label_map: HashMap::new(),
+            backquote_depth: 0,
         })
     }
 
@@ -157,6 +170,13 @@ impl Parser {
         let _gc_pause = rlasp_runtime::gc::GcPauseGuard::new();
         let obj = self.read_expr()?;
         Ok((obj, self.last_token_end_pos, self.current_token.pos))
+    }
+
+    fn read_expr_suppressed(&mut self) -> ReaderResult<LispObject> {
+        let prev = self.lexer.set_reader_error_suppressed(true);
+        let result = self.read_expr();
+        self.lexer.set_reader_error_suppressed(prev);
+        result
     }
 
     fn read_expr(&mut self) -> ReaderResult<LispObject> {
@@ -261,7 +281,10 @@ impl Parser {
 
             TokenKind::Backquote => {
                 self.advance()?;
-                let expr = self.read_expr()?;
+                self.backquote_depth = self.backquote_depth.saturating_add(1);
+                let expr = self.read_expr();
+                self.backquote_depth = self.backquote_depth.saturating_sub(1);
+                let expr = expr?;
                 // (backquote expr)
                 let backquote_sym = rlasp_runtime::Symbol::allocate("backquote");
                 let list = rlasp_runtime::Cons::list(&[backquote_sym, expr]);
@@ -269,6 +292,12 @@ impl Parser {
             }
 
             TokenKind::Comma => {
+                if self.backquote_depth == 0 {
+                    return Err(ReaderError::InvalidSyntax {
+                        msg: "unquote outside of backquote".to_string(),
+                        pos: self.current_token.pos,
+                    });
+                }
                 self.advance()?;
                 let expr = self.read_expr()?;
                 // (unquote expr)
@@ -278,6 +307,12 @@ impl Parser {
             }
 
             TokenKind::CommaAt => {
+                if self.backquote_depth == 0 {
+                    return Err(ReaderError::InvalidSyntax {
+                        msg: "unquote-splicing outside of backquote".to_string(),
+                        pos: self.current_token.pos,
+                    });
+                }
                 self.advance()?;
                 let expr = self.read_expr()?;
                 // (unquote-splicing expr)
@@ -379,11 +414,13 @@ impl Parser {
                 // Include form only if feature is present
                 self.advance()?; // skip #+
                 let feature_expr = self.read_expr()?; // read feature expression
-                let form = self.read_expr()?; // read the conditional form
-
                 if evaluate_feature_expr(feature_expr) {
+                    let form = self.read_expr()?; // include normally
                     Ok(form) // Feature present - include the form
                 } else {
+                    // Read and discard one form in permissive mode so invalid reader
+                    // syntax inside suppressed branches does not abort file loading.
+                    let _ignored = self.read_expr_suppressed()?;
                     // Feature absent: discard exactly one following form and return a
                     // marker for the caller to filter. Do not recursively read again
                     // here, otherwise one read() can consume multiple top-level forms.
@@ -396,11 +433,13 @@ impl Parser {
                 // Include form only if feature is absent
                 self.advance()?; // skip #-
                 let feature_expr = self.read_expr()?; // read feature expression
-                let form = self.read_expr()?; // read the conditional form
-
                 if !evaluate_feature_expr(feature_expr) {
+                    let form = self.read_expr()?; // include normally
                     Ok(form) // Feature absent - include the form
                 } else {
+                    // Read and discard one form in permissive mode so invalid reader
+                    // syntax inside suppressed branches does not abort file loading.
+                    let _ignored = self.read_expr_suppressed()?;
                     // Feature present: discard exactly one following form and return a
                     // marker for the caller to filter. Do not recursively read again
                     // here, otherwise one read() can consume multiple top-level forms.
@@ -479,7 +518,7 @@ impl Parser {
                         }),
                     }
                 }
-                Ok(RVector::allocate(elements))
+                Ok(RVector::allocate_bit_vector(elements))
             }
 
             TokenKind::HashDigit(dim) => {
@@ -491,11 +530,34 @@ impl Parser {
                 if let TokenKind::Symbol(s) = &self.current_token.kind {
                     if s.eq_ignore_ascii_case("a") {
                         self.advance()?; // skip 'A'
+                    } else if array_rank == 0
+                        && (s.eq_ignore_ascii_case("a0") || s.eq_ignore_ascii_case("a1"))
+                    {
+                        let bit = if s.ends_with('1') { 1 } else { 0 };
+                        self.advance()?;
+                        let array = rlasp_runtime::RVector::allocate_bit_vector(vec![
+                            rlasp_runtime::LispObject::fixnum(bit),
+                        ]);
+                        if let Some(ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
+                            unsafe { (*(ptr as *mut rlasp_runtime::RVector)).set_dims(vec![]) };
+                        }
+                        return Ok(array);
                     }
                 }
                 // Read the array contents (expect a list)
                 let payload = self.read_expr()?;
                 if array_rank == 0 {
+                    if let Some(bit) = payload.as_fixnum() {
+                        if bit == 0 || bit == 1 {
+                            let array = rlasp_runtime::RVector::allocate_bit_vector(vec![
+                                rlasp_runtime::LispObject::fixnum(bit),
+                            ]);
+                            if let Some(ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
+                                unsafe { (*(ptr as *mut rlasp_runtime::RVector)).set_dims(vec![]) };
+                            }
+                            return Ok(array);
+                        }
+                    }
                     Ok(payload)
                 } else {
                     self.array_literal_to_vector(payload, array_rank)
@@ -778,38 +840,80 @@ impl Parser {
     }
 
     fn array_literal_to_vector(&self, obj: LispObject, depth: usize) -> ReaderResult<LispObject> {
-        if depth == 0 {
-            return Ok(obj);
-        }
-        if obj.is_nil() {
-            return Ok(RVector::allocate(Vec::new()));
-        }
-        if !obj.is_cons() {
-            return Ok(obj);
+        fn flatten_array_literal(
+            parser: &Parser,
+            obj: LispObject,
+            depth: usize,
+        ) -> ReaderResult<(Vec<LispObject>, Vec<usize>)> {
+            if depth == 0 {
+                return Ok((vec![obj], Vec::new()));
+            }
+
+            if obj.is_nil() {
+                return Ok((Vec::new(), vec![0; depth]));
+            }
+
+            if !obj.is_cons() {
+                return Err(ReaderError::InvalidSyntax {
+                    msg: "Array literal must be a proper list".to_string(),
+                    pos: parser.current_token.pos,
+                });
+            }
+
+            let mut flat_elements = Vec::new();
+            let mut child_dims: Option<Vec<usize>> = None;
+            let mut count = 0usize;
+            let mut current = obj;
+
+            while let Some(cons_ptr) = current.as_cons_ptr() {
+                let cons = unsafe { &*cons_ptr };
+                let raw_elem = cons.car();
+
+                if depth == 1 {
+                    flat_elements.push(raw_elem);
+                } else {
+                    let (mut child_flat, dims) = flatten_array_literal(parser, raw_elem, depth - 1)?;
+                    if let Some(expected) = &child_dims {
+                        if *expected != dims {
+                            return Err(ReaderError::InvalidSyntax {
+                                msg: "Array literal must be rectangular".to_string(),
+                                pos: parser.current_token.pos,
+                            });
+                        }
+                    } else {
+                        child_dims = Some(dims);
+                    }
+                    flat_elements.append(&mut child_flat);
+                }
+
+                count += 1;
+                current = cons.cdr();
+            }
+
+            if !current.is_nil() {
+                return Err(ReaderError::InvalidSyntax {
+                    msg: "Array literal must be a proper list".to_string(),
+                    pos: parser.current_token.pos,
+                });
+            }
+
+            let mut dims = vec![count];
+            if depth > 1 {
+                dims.extend(child_dims.unwrap_or_else(|| vec![0; depth - 1]));
+            }
+
+            Ok((flat_elements, dims))
         }
 
-        let mut elements = Vec::new();
-        let mut current = obj;
-        while let Some(cons_ptr) = current.as_cons_ptr() {
-            let cons = unsafe { &*cons_ptr };
-            let raw_elem = cons.car();
-            let elem = if depth > 1 {
-                self.array_literal_to_vector(raw_elem, depth - 1)?
-            } else {
-                raw_elem
-            };
-            elements.push(elem);
-            current = cons.cdr();
+        let (elements, dims) = flatten_array_literal(self, obj, depth)?;
+        let out = RVector::allocate(elements);
+        if let Some(vec_ptr) = out.as_general_ptr::<RVector>() {
+            if !vec_ptr.is_null() {
+                let vec_ptr = vec_ptr as *mut RVector;
+                unsafe { (*vec_ptr).set_dims(dims); }
+            }
         }
-
-        if !current.is_nil() {
-            return Err(ReaderError::InvalidSyntax {
-                msg: "Array literal must be a proper list".to_string(),
-                pos: self.current_token.pos,
-            });
-        }
-
-        Ok(RVector::allocate(elements))
+        Ok(out)
     }
 
     fn advance(&mut self) -> ReaderResult<()> {

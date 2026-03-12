@@ -59,15 +59,34 @@ fn to_complex(val: &EvalResult) -> Option<(f64, f64)> {
 pub(super) fn eval_add_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
     use malachite::Rational;
 
-    // First pass: check if any complex numbers
+    // Fast path: pure fixnum/nil addition is the dominant interpreter numeric workload.
     let mut has_complex = false;
-    let mut evaluated_args = Vec::new();
+    let mut all_fixnums_or_nil = true;
+    let mut fixnum_sum: i64 = 0;
+    let mut overflowed_fixnum_sum = false;
+    let mut evaluated_args = Vec::with_capacity(args.len());
     for arg in args {
         let val = primary_value(eval_with_env(arg, env)?);
         if matches!(val, EvalResult::Complex(_, _)) {
             has_complex = true;
         }
+        match &val {
+            EvalResult::Fixnum(n) => {
+                if all_fixnums_or_nil && !overflowed_fixnum_sum {
+                    match fixnum_sum.checked_add(*n) {
+                        Some(sum) => fixnum_sum = sum,
+                        None => overflowed_fixnum_sum = true,
+                    }
+                }
+            }
+            EvalResult::Nil => {}
+            _ => all_fixnums_or_nil = false,
+        }
         evaluated_args.push(val);
+    }
+
+    if all_fixnums_or_nil && !has_complex && !overflowed_fixnum_sum {
+        return Ok(EvalResult::Fixnum(fixnum_sum));
     }
 
     // If any complex, do complex arithmetic
@@ -145,6 +164,54 @@ pub(super) fn eval_sub_with_env(args: &[ASTNode], env: &mut HashMap<String, Eval
 
     if args.is_empty() {
         return Err("- requires at least one argument".to_string());
+    }
+
+    if args.len() == 1 {
+        let value = primary_value(eval_with_env(&args[0], env)?);
+        return match value {
+            EvalResult::Fixnum(n) => match 0_i64.checked_sub(n) {
+                Some(v) => Ok(EvalResult::Fixnum(v)),
+                None => Ok(EvalResult::Bignum(-Integer::from(n))),
+            },
+            EvalResult::Nil => Ok(EvalResult::Fixnum(0)),
+            other => {
+                if matches!(other, EvalResult::Complex(_, _)) {
+                    let had_float = matches!(other, EvalResult::Float(_));
+                    let (re, im) =
+                        to_complex(&other).ok_or_else(|| "- requires numeric arguments".to_string())?;
+                    Ok(canonicalize_complex(-re, -im, had_float))
+                } else {
+                    match other {
+                        EvalResult::Float(f) => Ok(EvalResult::Float(-f)),
+                        EvalResult::Bignum(b) => Ok(EvalResult::Bignum(-b)),
+                        EvalResult::Ratio(r) => Ok(EvalResult::Ratio(-r)),
+                        _ => Err("- requires numeric arguments".to_string()),
+                    }
+                }
+            }
+        };
+    }
+
+    if args.len() == 2 {
+        let left = primary_value(eval_with_env(&args[0], env)?);
+        let right = primary_value(eval_with_env(&args[1], env)?);
+        match (&left, &right) {
+            (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => {
+                return match a.checked_sub(*b) {
+                    Some(v) => Ok(EvalResult::Fixnum(v)),
+                    None => Ok(EvalResult::Bignum(Integer::from(*a) - Integer::from(*b))),
+                };
+            }
+            (EvalResult::Fixnum(a), EvalResult::Nil) => return Ok(EvalResult::Fixnum(*a)),
+            (EvalResult::Nil, EvalResult::Fixnum(b)) => {
+                return match 0_i64.checked_sub(*b) {
+                    Some(v) => Ok(EvalResult::Fixnum(v)),
+                    None => Ok(EvalResult::Bignum(-Integer::from(*b))),
+                };
+            }
+            (EvalResult::Nil, EvalResult::Nil) => return Ok(EvalResult::Fixnum(0)),
+            _ => {}
+        }
     }
 
     // First pass: evaluate all args and check for complex
@@ -657,6 +724,15 @@ pub(super) fn eval_ne_with_env(args: &[ASTNode], env: &mut HashMap<String, EvalR
     if args.len() < 2 {
         return Err("/= requires at least two arguments".to_string());
     }
+    if args.len() == 2 {
+        let left = primary_value(eval_with_env(&args[0], env)?);
+        let right = primary_value(eval_with_env(&args[1], env)?);
+        return if numeric_equal(&left, &right)? {
+            Ok(EvalResult::Nil)
+        } else {
+            Ok(EvalResult::Bool(true))
+        };
+    }
     // /= returns true if no two arguments are equal
     for i in 0..args.len() {
         for j in i+1..args.len() {
@@ -683,6 +759,18 @@ pub(super) fn eval_eq_lisp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
+        (EvalResult::Bool(a), EvalResult::Boolean(b))
+        | (EvalResult::Boolean(a), EvalResult::Bool(b)) => a == b,
+        (EvalResult::Bool(true), EvalResult::Symbol(s))
+        | (EvalResult::Boolean(true), EvalResult::Symbol(s))
+        | (EvalResult::Symbol(s), EvalResult::Bool(true))
+        | (EvalResult::Symbol(s), EvalResult::Boolean(true)) => s.eq_ignore_ascii_case("T"),
+        (EvalResult::Nil, EvalResult::Symbol(s))
+        | (EvalResult::Symbol(s), EvalResult::Nil)
+        | (EvalResult::Bool(false), EvalResult::Symbol(s))
+        | (EvalResult::Boolean(false), EvalResult::Symbol(s))
+        | (EvalResult::Symbol(s), EvalResult::Bool(false))
+        | (EvalResult::Symbol(s), EvalResult::Boolean(false)) => s.eq_ignore_ascii_case("NIL"),
         (EvalResult::BuiltinFunction(a), EvalResult::BuiltinFunction(b)) => a == b,
         (
             EvalResult::Lambda { env: a_env, .. },
@@ -692,6 +780,7 @@ pub(super) fn eval_eq_lisp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         (EvalResult::ForeignFunction(a), EvalResult::ForeignFunction(b)) => Rc::ptr_eq(a, b),
         (EvalResult::Array(a), EvalResult::Array(b)) => Rc::ptr_eq(a, b),
         (EvalResult::HashTable(a), EvalResult::HashTable(b)) => Rc::ptr_eq(a, b),
+        (EvalResult::Instance(a), EvalResult::Instance(b)) => a.id == b.id,
         (EvalResult::Cons(ac, ad), EvalResult::Cons(bc, bd)) => Rc::ptr_eq(ac, bc) && Rc::ptr_eq(ad, bd),
         _ => false,
     };

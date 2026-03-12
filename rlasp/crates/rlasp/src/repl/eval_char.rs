@@ -94,11 +94,11 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         "digit-char-p" => match args.get(0) {
             Some(EvalResult::Character(c)) => {
                 if c.is_ascii_digit() {
-                    Ok(EvalResult::Float(c.to_digit(10).unwrap() as f64))
+                    Ok(EvalResult::Fixnum(c.to_digit(10).unwrap() as i64))
                 } else {
                     Ok(EvalResult::Nil)
                 }
-            },
+            }
             _ => Err("digit-char-p requires a character".to_string()),
         },
 
@@ -138,148 +138,121 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         },
 
         "char-code" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Float(*c as u32 as f64)),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Fixnum(*c as u32 as i64)),
             _ => Err("char-code requires a character".to_string()),
         },
 
         "code-char" => match args.get(0) {
-            Some(EvalResult::Float(n)) if *n >= 0.0 && *n < 128.0 => {
-                Ok(EvalResult::Character(*n as u8 as char))
-            },
-            _ => Err("code-char requires a valid character code".to_string()),
+            Some(EvalResult::Fixnum(n)) if *n >= 0 => {
+                match char::from_u32(*n as u32) {
+                    Some(c) => Ok(EvalResult::Character(c)),
+                    None => Ok(EvalResult::Nil),
+                }
+            }
+            Some(EvalResult::Bignum(_)) => Ok(EvalResult::Nil),
+            _ => Err("code-char requires an integer character code".to_string()),
         },
 
         "char-int" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Float(*c as u32 as f64)),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Fixnum(*c as u32 as i64)),
             _ => Err("char-int requires a character".to_string()),
         },
 
-        // Character comparison
-        "char=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a == b))
-            },
-            _ => Err("char= requires two characters".to_string()),
-        },
+        // Character comparison (CL semantics: at least one argument).
+        "char="
+        | "char/="
+        | "char<"
+        | "char>"
+        | "char<="
+        | "char>="
+        | "char-equal"
+        | "char-not-equal"
+        | "char-lessp"
+        | "char-greaterp"
+        | "char-not-greaterp"
+        | "char-not-lessp"
+        | "char-EQ-"
+        | "char-NE-"
+        | "char-LT-"
+        | "char-GT-"
+        | "char-LE-"
+        | "char-GE-" => {
+            if args.is_empty() {
+                return Err(format!("{name} requires at least one argument"));
+            }
 
-        "char/=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a != b))
-            },
-            _ => Err("char/= requires two characters".to_string()),
-        },
+            let mut chars = Vec::with_capacity(args.len());
+            for arg in args {
+                if let EvalResult::Character(c) = arg {
+                    chars.push(*c);
+                } else {
+                    return Err("character comparison requires character arguments".to_string());
+                }
+            }
 
-        "char<" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a < b))
-            },
-            _ => Err("char< requires two characters".to_string()),
-        },
+            let canonical = match name {
+                "char-EQ-" => "char=",
+                "char-NE-" => "char/=",
+                "char-LT-" => "char<",
+                "char-GT-" => "char>",
+                "char-LE-" => "char<=",
+                "char-GE-" => "char>=",
+                other => other,
+            };
 
-        "char>" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a > b))
-            },
-            _ => Err("char> requires two characters".to_string()),
-        },
+            if chars.len() == 1 {
+                return Ok(EvalResult::Boolean(true));
+            }
 
-        "char<=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a <= b))
-            },
-            _ => Err("char<= requires two characters".to_string()),
-        },
+            let cmp_case = |a: char, b: char| a.cmp(&b);
+            let cmp_folded = |a: char, b: char| lower1(a).cmp(&lower1(b));
+            let pairwise_case = |pred: fn(std::cmp::Ordering) -> bool| -> bool {
+                chars
+                    .windows(2)
+                    .all(|w| pred(cmp_case(w[0], w[1])))
+            };
+            let pairwise_fold = |pred: fn(std::cmp::Ordering) -> bool| -> bool {
+                chars
+                    .windows(2)
+                    .all(|w| pred(cmp_folded(w[0], w[1])))
+            };
+            let all_distinct_case = || -> bool {
+                for i in 0..chars.len() {
+                    for j in (i + 1)..chars.len() {
+                        if cmp_case(chars[i], chars[j]) == std::cmp::Ordering::Equal {
+                            return false;
+                        }
+                    }
+                }
+                true
+            };
+            let all_distinct_fold = || -> bool {
+                for i in 0..chars.len() {
+                    for j in (i + 1)..chars.len() {
+                        if cmp_folded(chars[i], chars[j]) == std::cmp::Ordering::Equal {
+                            return false;
+                        }
+                    }
+                }
+                true
+            };
 
-        "char>=" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a >= b))
-            },
-            _ => Err("char>= requires two characters".to_string()),
-        },
-
-        "char-equal" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(lower1(*a) == lower1(*b)))
-            },
-            _ => Err("char-equal requires two characters".to_string()),
-        },
-
-        "char-not-equal" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(lower1(*a) != lower1(*b)))
-            },
-            _ => Err("char-not-equal requires two characters".to_string()),
-        },
-
-        "char-lessp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(lower1(*a) < lower1(*b)))
-            },
-            _ => Err("char-lessp requires two characters".to_string()),
-        },
-
-        "char-greaterp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(lower1(*a) > lower1(*b)))
-            },
-            _ => Err("char-greaterp requires two characters".to_string()),
-        },
-
-        "char-not-greaterp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(lower1(*a) <= lower1(*b)))
-            },
-            _ => Err("char-not-greaterp requires two characters".to_string()),
-        },
-
-        "char-not-lessp" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(lower1(*a) >= lower1(*b)))
-            },
-            _ => Err("char-not-lessp requires two characters".to_string()),
-        },
-
-        // Aliases with different naming convention
-        "char-EQ-" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a == b))
-            },
-            _ => Err("char-EQ- requires two characters".to_string()),
-        },
-
-        "char-NE-" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a != b))
-            },
-            _ => Err("char-NE- requires two characters".to_string()),
-        },
-
-        "char-LT-" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a < b))
-            },
-            _ => Err("char-LT- requires two characters".to_string()),
-        },
-
-        "char-GT-" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a > b))
-            },
-            _ => Err("char-GT- requires two characters".to_string()),
-        },
-
-        "char-LE-" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a <= b))
-            },
-            _ => Err("char-LE- requires two characters".to_string()),
-        },
-
-        "char-GE-" => match (args.get(0), args.get(1)) {
-            (Some(EvalResult::Character(a)), Some(EvalResult::Character(b))) => {
-                Ok(EvalResult::Boolean(a >= b))
-            },
-            _ => Err("char-GE- requires two characters".to_string()),
+            let result = match canonical {
+                "char=" => pairwise_case(|o| o == std::cmp::Ordering::Equal),
+                "char/=" => all_distinct_case(),
+                "char<" => pairwise_case(|o| o == std::cmp::Ordering::Less),
+                "char>" => pairwise_case(|o| o == std::cmp::Ordering::Greater),
+                "char<=" => pairwise_case(|o| matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
+                "char>=" => pairwise_case(|o| matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+                "char-equal" => pairwise_fold(|o| o == std::cmp::Ordering::Equal),
+                "char-not-equal" => all_distinct_fold(),
+                "char-lessp" => pairwise_fold(|o| o == std::cmp::Ordering::Less),
+                "char-greaterp" => pairwise_fold(|o| o == std::cmp::Ordering::Greater),
+                "char-not-greaterp" => pairwise_fold(|o| matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
+                "char-not-lessp" => pairwise_fold(|o| matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+                _ => false,
+            };
+            Ok(EvalResult::Boolean(result))
         },
 
         "char-name" => match args.get(0) {
@@ -305,31 +278,7 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
 
         "name-char" => match args.get(0) {
             Some(EvalResult::String(s)) | Some(EvalResult::Symbol(s)) => {
-                let name = if s.starts_with(':') && s.len() > 1 { &s[1..] } else { s.as_str() };
-                let ch = match name.to_lowercase().as_str() {
-                    "space" => Some(' '),
-                    "newline" | "linefeed" => Some('\n'),
-                    "tab" => Some('\t'),
-                    "return" => Some('\r'),
-                    "backspace" => Some('\u{0008}'),
-                    "page" | "formfeed" => Some('\u{000C}'),
-                    "rubout" | "delete" => Some('\u{007F}'),
-                    "nul" | "null" => Some('\u{0000}'),
-                    "escape" | "esc" => Some('\u{001B}'),
-                    "bell" | "bel" => Some('\u{0007}'),
-                    _ if name.len() == 1 => Some(name.chars().next().unwrap()),
-                    _ => {
-                        // Try parsing as "U+XXXX" or hex code point
-                        let hex = if name.starts_with("U+") || name.starts_with("u+") {
-                            &name[2..]
-                        } else if name.starts_with("U") || name.starts_with("u") {
-                            &name[1..]
-                        } else {
-                            name
-                        };
-                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
-                    }
-                };
+                let ch = rlasp_runtime::parse_character_name(s);
                 match ch {
                     Some(c) => Ok(EvalResult::Character(c)),
                     None => Ok(EvalResult::Nil),

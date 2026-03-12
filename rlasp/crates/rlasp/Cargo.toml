@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = []
 boehm-gc = ["rlasp-runtime/boehm-gc"]
+cxx-bridge = ["dep:cxx"]
 
 [dependencies]
 # Internal crates
@@ -20,7 +21,7 @@ rlasp-jit = { path = "../rlasp-jit" }
 libffi = { workspace = true }
 libloading = { workspace = true }
 libc = { workspace = true }
-cxx = { workspace = true }
+cxx = { workspace = true, optional = true }
 lazy_static = { workspace = true }
 atty = { workspace = true }
 inkwell = { workspace = true }

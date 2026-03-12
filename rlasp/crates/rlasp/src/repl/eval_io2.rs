@@ -76,7 +76,48 @@ pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
         }
 
         "read-preserving-whitespace" => {
-            Ok(EvalResult::Nil)
+            let stream = args.get(0).cloned().unwrap_or(EvalResult::Nil);
+            let eof_error_p = args
+                .get(1)
+                .map(|v| !matches!(v, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)))
+                .unwrap_or(true);
+            let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
+
+            let input = super::eval_io::stream_remaining_input(&stream).unwrap_or_default();
+            if input.is_empty() {
+                if eof_error_p {
+                    return Err("end of file".to_string());
+                }
+                return Ok(eof_value);
+            }
+
+            match rlasp_reader::reader::read_from_string_with_positions(&input) {
+                Ok((expr, before_trailing_ws, _after_trailing_ws)) => {
+                    let advance = before_trailing_ws.min(input.chars().count());
+                    if advance > 0 {
+                        let _ = super::eval_io::stream_read_chars(&stream, advance)?;
+                    }
+                    use crate::repl::lisp_to_ast::{lisp_to_ast, with_read_time_env};
+                    let ast_result = if let Some(result) = super::eval_io::with_current_io_env(|env| {
+                        with_read_time_env(env, || lisp_to_ast(expr))
+                    }) {
+                        result
+                    } else {
+                        lisp_to_ast(expr)
+                    };
+                    let ast = ast_result
+                        .map_err(|e| format!("read-preserving-whitespace: parse error: {}", e))?;
+                    super::eval_core::ast_to_result(&ast)
+                }
+                Err(rlasp_reader::error::ReaderError::UnexpectedEof) => {
+                    if eof_error_p {
+                        Err("end of file".to_string())
+                    } else {
+                        Ok(eof_value)
+                    }
+                }
+                Err(e) => Err(format!("read-preserving-whitespace: reader error: {:?}", e)),
+            }
         }
 
         "read-delimited-list" => {

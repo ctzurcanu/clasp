@@ -1,2 +1,0 @@
-file,eligible,skip_reason,baseline_engine,sbcl_status,clasp_status,irlasp_interpreter_status,irlasp_mlir_status,sbcl_match,clasp_match,irlasp_interpreter_match,irlasp_mlir_match,sbcl_time_s,clasp_time_s,irlasp_interpreter_time_s,irlasp_mlir_total_time_s,irlasp_mlir_compile_time_s,irlasp_mlir_exec_time_s
-"/Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/bit-array0.lisp",no,"baseline_failed(failed=sbcl sbcl=1 clasp=0)",none,1,0,125,125,SKIP,SKIP,SKIP,SKIP,0.093842,5.033197,0.000000,0.000000,0.000000,0.000000

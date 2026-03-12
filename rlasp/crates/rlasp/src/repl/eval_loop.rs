@@ -256,6 +256,13 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
         ASTNode::Vector(items) => {
             ASTNode::Vector(items.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect())
         }
+        ASTNode::ArrayLiteral { dims, elements } => ASTNode::ArrayLiteral {
+            dims: dims.clone(),
+            elements: elements
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
+        },
         ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => ASTNode::Defmethod {
             generic_name: generic_name.clone(),
             qualifier: qualifier.clone(),
@@ -323,6 +330,7 @@ fn contains_loop_return_state(nodes: &[ASTNode]) -> bool {
             ASTNode::CppMethodCall { object, args, .. } => walk(object) || args.iter().any(walk),
             ASTNode::HashTable { entries } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
             ASTNode::Vector(items) => items.iter().any(walk),
+            ASTNode::ArrayLiteral { elements, .. } => elements.iter().any(walk),
             ASTNode::Defmethod { body, .. } => body.iter().any(walk),
             ASTNode::Defclass { .. } | ASTNode::Defgeneric { .. } | ASTNode::Constant(_) | ASTNode::Variable(_) => false,
         }
@@ -488,6 +496,9 @@ enum LoopClause {
     /// :with (var1 var2 ...) = init - destructuring with
     WithDestructure { vars: Vec<String>, init: ASTNode },
 
+    /// :with (car . cdr) = init - dotted pair destructuring with
+    WithDotted { car_var: String, cdr_var: String, init: ASTNode },
+
     /// :for var :in list [:by step] - simple iteration
     ForIn { var: String, list: ASTNode, by: Option<ASTNode> },
 
@@ -499,6 +510,9 @@ enum LoopClause {
 
     /// :for var :on list [:by step] - iterate over successive cdrs
     ForOn { var: String, list: ASTNode, by: Option<ASTNode> },
+
+    /// :for (var1 . var2) :on list [:by step] - bind car/cdr from successive cdrs
+    ForOnDotted { car_var: String, cdr_var: String, list: ASTNode, by: Option<ASTNode> },
 
     /// :for (var1 var2 ...) :on list [:by step] - bind vars from successive cdrs
     ForOnDestructure { vars: Vec<String>, list: ASTNode, by: Option<ASTNode> },
@@ -690,6 +704,27 @@ impl<'a> LoopParser<'a> {
     fn parse_with(&mut self) -> Option<LoopClause> {
         self.advance(); // consume :with
 
+        // Check for dotted-pair destructuring pattern (car . cdr)
+        if let Some(ASTNode::DottedPair { car, cdr }) = self.current() {
+            if let (ASTNode::Variable(car_var), ASTNode::Variable(cdr_var)) = (car.as_ref(), cdr.as_ref()) {
+                let car_var = car_var.clone();
+                let cdr_var = cdr_var.clone();
+                self.advance(); // consume (car . cdr) pattern
+                if let Some(ASTNode::Variable(eq)) = self.current() {
+                    if eq == "=" {
+                        self.advance(); // consume =
+                        let init = self.advance()?.clone();
+                        return Some(LoopClause::WithDotted { car_var, cdr_var, init });
+                    }
+                }
+                return Some(LoopClause::WithDotted {
+                    car_var,
+                    cdr_var,
+                    init: ASTNode::nil(),
+                });
+            }
+        }
+
         // Check for destructuring pattern (var1 var2 ...)
         if let Some(next) = self.current() {
             if let ASTNode::Call { function, args } = next {
@@ -806,6 +841,18 @@ impl<'a> LoopParser<'a> {
                             let list = self.advance()?.clone();
                             let by = self.parse_optional_by();
                             return Some(LoopClause::ForInDestructure {
+                                car_var,
+                                cdr_var,
+                                list,
+                                by,
+                            });
+                        }
+                        // Dotted pair also works with :on
+                        if is_loop_keyword(kw, "on") {
+                            self.advance(); // consume :on
+                            let list = self.advance()?.clone();
+                            let by = self.parse_optional_by();
+                            return Some(LoopClause::ForOnDotted {
                                 car_var,
                                 cdr_var,
                                 list,
@@ -1429,7 +1476,10 @@ impl<'a> LoopParser<'a> {
         let mut all_list_vars: HashSet<String> = HashSet::new();  // All :into vars for list ops
         let mut all_sum_vars: HashSet<String> = HashSet::new();   // All :into vars for sum ops
         let mut all_count_vars: HashSet<String> = HashSet::new(); // All :into vars for count ops
-        let mut needs_sequential_bindings = false;
+        // LOOP bindings frequently depend on earlier LOOP variables
+        // (e.g. :with lineage = ... then :for x :in lineage), so use
+        // sequential semantics by default.
+        let mut needs_sequential_bindings = true;
         // Multiple parallel :in iterators are allowed (e.g. FOR x IN ... FOR y IN ...).
         // Tuple: (loop var, hidden list var, optional :by step function)
         let mut in_iters: Vec<(String, String, Option<ASTNode>)> = Vec::new();
@@ -1438,6 +1488,7 @@ impl<'a> LoopParser<'a> {
         let mut across_iter: Option<(String, ASTNode)> = None;
         let mut destructure: Option<(String, String)> = None;
         let mut on_iter: Option<(String, ASTNode, Option<ASTNode>)> = None; // Simple :on iteration
+        let mut on_dotted: Option<(String, String, ASTNode, Option<ASTNode>)> = None; // :on with dotted pair
         let mut on_destructure: Option<(Vec<String>, ASTNode, Option<ASTNode>)> = None; // :on with list pattern
         // (var, start, end, step, inclusive, down)
         let mut numeric_iters: Vec<(String, ASTNode, ASTNode, Option<ASTNode>, bool, bool)> = Vec::new();
@@ -1481,6 +1532,20 @@ impl<'a> LoopParser<'a> {
                         }));
                     }
                 }
+                LoopClause::WithDotted { car_var, cdr_var, init } => {
+                    // WITH (a . b) = expr → a=(car tmp), b=(cdr tmp)
+                    needs_sequential_bindings = true;
+                    let tmp_var = format!("__loop_with_tmp_{}__", bindings.len());
+                    bindings.push((tmp_var.clone(), init.clone()));
+                    bindings.push((car_var.clone(), ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("car".to_string())),
+                        args: vec![ASTNode::Variable(tmp_var.clone())],
+                    }));
+                    bindings.push((cdr_var.clone(), ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("cdr".to_string())),
+                        args: vec![ASTNode::Variable(tmp_var)],
+                    }));
+                }
                 LoopClause::ForIn { var, list, by } => {
                     ensure_binding(&mut bindings, var, ASTNode::nil());
                     let list_var = format!("__loop_list_{}__", in_iters.len());
@@ -1504,6 +1569,12 @@ impl<'a> LoopParser<'a> {
                 LoopClause::ForOn { var, list, by } => {
                     on_iter = Some((var.clone(), list.clone(), by.clone()));
                     ensure_binding(&mut bindings, var, ASTNode::nil());
+                    bindings.push(("__loop_list__".to_string(), list.clone()));
+                }
+                LoopClause::ForOnDotted { car_var, cdr_var, list, by } => {
+                    on_dotted = Some((car_var.clone(), cdr_var.clone(), list.clone(), by.clone()));
+                    ensure_binding(&mut bindings, car_var, ASTNode::nil());
+                    ensure_binding(&mut bindings, cdr_var, ASTNode::nil());
                     bindings.push(("__loop_list__".to_string(), list.clone()));
                 }
                 LoopClause::ForOnDestructure { vars, list, by } => {
@@ -1895,6 +1966,61 @@ impl<'a> LoopParser<'a> {
             ASTNode::Call {
                 function: Box::new(ASTNode::Variable("sys::while".to_string())),
                 args: std::iter::once(condition).chain(while_body).collect(),
+            }
+        } else if let Some((car_var, cdr_var, _list, on_by)) = &on_dotted {
+            // :on iteration with dotted destructuring:
+            //   (for (a . b) :on list) => a=(car __loop_list__), b=(cdr __loop_list__)
+            let mut iter_body = Vec::new();
+            iter_body.push(loop_list_type_guard("__loop_list__"));
+            iter_body.push(ASTNode::setq(
+                car_var.clone(),
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("car".to_string())),
+                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                },
+            ));
+            iter_body.push(ASTNode::setq(
+                cdr_var.clone(),
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                },
+            ));
+            iter_body.extend(body.clone());
+            let inner_body = ASTNode::progn(iter_body);
+            let next_list = if let Some(step) = on_by {
+                let rewritten = rewrite_loop_return_calls(step, &loop_name);
+                if contains_loop_return_state(std::slice::from_ref(&rewritten)) {
+                    needs_break_var = true;
+                    has_loop_return = true;
+                    ensure_binding(&mut bindings, "__loop_break__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_returned__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_value__", ASTNode::nil());
+                    ensure_binding(&mut bindings, "__loop_return_values__", ASTNode::nil());
+                    rewritten
+                } else {
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("funcall".to_string())),
+                        args: vec![rewritten, ASTNode::Variable("__loop_list__".to_string())],
+                    }
+                }
+            } else {
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("cdr".to_string())),
+                    args: vec![ASTNode::Variable("__loop_list__".to_string())],
+                }
+            };
+
+            ASTNode::Call {
+                function: Box::new(ASTNode::Variable("sys::while".to_string())),
+                args: vec![
+                    ASTNode::Variable("__loop_list__".to_string()),
+                    inner_body,
+                    ASTNode::setq(
+                        "__loop_list__".to_string(),
+                        next_list
+                    ),
+                ],
             }
         } else if let Some((vars, _list, on_by)) = &on_destructure {
             // :on iteration with list destructuring
@@ -2340,10 +2466,7 @@ impl<'a> LoopParser<'a> {
         } else {
             // Default return value
             if let Some(var) = &collect_var {
-                ASTNode::Call {
-                    function: Box::new(ASTNode::Variable("nreverse".to_string())),
-                    args: vec![ASTNode::Variable(var.clone())],
-                }
+                ASTNode::Variable(var.clone())
             } else if let Some(var) = &sum_var {
                 ASTNode::Variable(var.clone())
             } else if let Some(var) = &count_var {
@@ -2373,15 +2496,11 @@ impl<'a> LoopParser<'a> {
             full_body.push(normal_exit_result);
         }
 
-        // Wrap in block for return (use loop_name if given, else nil)
-        let block_name = if let Some(ref name) = loop_name {
-            ASTNode::Variable(name.clone())
-        } else {
-            ASTNode::nil()
-        };
-        let block_body = ASTNode::Call {
-            function: Box::new(ASTNode::Variable("block".to_string())),
-            args: std::iter::once(block_name).chain(full_body).collect(),
+        // Preserve BLOCK as a first-class AST node so compiled backends see
+        // the same structure as parsed source instead of a call-shaped form.
+        let block_body = ASTNode::Block {
+            name: loop_name.clone(),
+            body: full_body,
         };
 
         // Wrap in let with bindings
@@ -2475,11 +2594,20 @@ impl<'a> LoopParser<'a> {
                     let var = into.clone().unwrap_or_else(||
                         collect_var.clone().unwrap_or_else(|| "__loop_result__".to_string())
                     );
-                    let push_expr = ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("push".to_string())),
-                        args: vec![expr.clone(), ASTNode::Variable(var)],
-                    };
-                    add_expr(&mut body, &mut cond_stack, push_expr);
+                    let collect_expr = ASTNode::setq(
+                        var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("append".to_string())),
+                            args: vec![
+                                ASTNode::Variable(var),
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("list".to_string())),
+                                    args: vec![expr.clone()],
+                                },
+                            ],
+                        }
+                    );
+                    add_expr(&mut body, &mut cond_stack, collect_expr);
                 }
                 LoopClause::Append { expr, into } => {
                     // Use specific :into var if provided, else use default collect var
@@ -2646,28 +2774,27 @@ impl<'a> LoopParser<'a> {
                     add_expr(&mut body, &mut cond_stack, thereis_expr);
                 }
                 LoopClause::Until { condition } => {
-                    // UNTIL exits the loop when condition becomes true.
-                    let until_expr = ASTNode::If {
-                        test: Box::new(condition.clone()),
-                        then_branch: Box::new(ASTNode::setq(
-                            "__loop_break__".to_string(),
-                            ASTNode::t(),
-                        )),
-                        else_branch: Box::new(ASTNode::nil()),
-                    };
-                    add_expr(&mut body, &mut cond_stack, until_expr);
+                    // UNTIL gates the rest of the current iteration; if it fails,
+                    // later clauses in this iteration must not run.
+                    cond_stack.push((
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("not".to_string())),
+                            args: vec![condition.clone()],
+                        },
+                        Vec::new(),
+                        vec![ASTNode::setq("__loop_break__".to_string(), ASTNode::t())],
+                        false,
+                    ));
                 }
                 LoopClause::While { condition } => {
-                    // WHILE exits the loop when condition becomes false.
-                    let while_expr = ASTNode::If {
-                        test: Box::new(condition.clone()),
-                        then_branch: Box::new(ASTNode::nil()),
-                        else_branch: Box::new(ASTNode::setq(
-                            "__loop_break__".to_string(),
-                            ASTNode::t(),
-                        )),
-                    };
-                    add_expr(&mut body, &mut cond_stack, while_expr);
+                    // WHILE gates the rest of the current iteration; if it fails,
+                    // later clauses in this iteration must not run.
+                    cond_stack.push((
+                        condition.clone(),
+                        Vec::new(),
+                        vec![ASTNode::setq("__loop_break__".to_string(), ASTNode::t())],
+                        false,
+                    ));
                 }
                 LoopClause::Always { expr } => {
                     // (unless expr (return nil))

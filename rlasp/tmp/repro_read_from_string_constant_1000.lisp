@@ -1,0 +1,6 @@
+(in-package #:cl-user)
+(loop repeat 1000 do (read-from-string "#\\A"))
+(princ (ignore-errors (readtable-case *readtable*)))
+(terpri)
+(write *readtable*)
+(terpri)
