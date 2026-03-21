@@ -68,3 +68,9 @@ pub use eval_list::apply_function;
 pub use eval_system::{result_to_ast, result_to_data_ast};
 pub use eval_system::{array_dims_for_bridge, register_array_dims_for_bridge};
 pub use eval_system::register_raw_jit_object_handle;
+pub use eval_system::{
+    current_bridge_env_snapshot,
+    pop_bridge_env_snapshot,
+    push_bridge_env_snapshot,
+    update_bridge_env_snapshot,
+};

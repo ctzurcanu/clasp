@@ -17,7 +17,14 @@ use malachite::Integer;
 include!("cl_package_exports.rs");
 
 static EVAL_BRIDGE_FN_PTR: AtomicUsize = AtomicUsize::new(0);
+static LAZY_FUNCTION_LOOKUP_FN_PTR: AtomicUsize = AtomicUsize::new(0);
 static FUNCTION_LOOKUP_EPOCH: AtomicUsize = AtomicUsize::new(1);
+
+type LazyFunctionLookupCallback = extern "C" fn(
+    name_ptr: *const i8,
+    out_address: *mut usize,
+    out_expects_args_list: *mut i32,
+) -> bool;
 
 #[derive(Clone, Copy)]
 struct CachedFunctionEntry {
@@ -319,6 +326,12 @@ pub extern "C" fn cc_set_eval_bridge(callback_ptr: usize) {
     EVAL_BRIDGE_FN_PTR.store(callback_ptr, Ordering::SeqCst);
 }
 
+#[no_mangle]
+pub extern "C" fn cc_set_lazy_function_lookup(callback_ptr: usize) {
+    LAZY_FUNCTION_LOOKUP_FN_PTR.store(callback_ptr, Ordering::SeqCst);
+    bump_function_lookup_epoch();
+}
+
 fn try_eval_bridge(form_obj: usize) -> Option<usize> {
     let ptr = EVAL_BRIDGE_FN_PTR.load(Ordering::SeqCst);
     if ptr == 0 {
@@ -532,8 +545,6 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
             | "external-process-error-stream"
             | "argc"
             | "argv"
-            | "make-process"
-            | "process-run-function"
             | "process-start"
             | "process-join"
             | "process-name"
@@ -6587,8 +6598,7 @@ fn function_name_designator_to_string(obj: LispObject, caller: &str) -> Result<S
 }
 
 fn function_registry_has_callable(name: &str) -> bool {
-    let registry = get_registry().lock().unwrap();
-    lookup_function_entry_unlocked(&registry, name).is_some()
+    lookup_function_entry(name).is_some()
 }
 
 fn make_function_ref_for_name(name: &str) -> usize {
@@ -7274,7 +7284,7 @@ pub fn get_dynamic_value(name: &str) -> Option<usize> {
     let b = DYNAMIC_BINDINGS.lock().unwrap();
     for key in dynamic_binding_keys(name) {
         if let Some(value) = b.get(&key) {
-            return Some(*value);
+            return Some(normalize_special_dynamic_value(name, *value));
         }
     }
     None
@@ -10138,7 +10148,8 @@ pub extern "C" fn cc_progv_push(symbols: usize, values: usize) -> usize {
             };
 
                 if let Some(name) = name {
-                    let old_value = capture_dynamic_binding(&map, &name);
+                    let old_value = capture_dynamic_binding(&map, &name)
+                        .map(|raw| normalize_special_dynamic_value(&name, raw));
                     if trace {
                         eprintln!(
                         "[progv-push tid={:?}] bind name={} old={:?} new={:?}",
@@ -10151,6 +10162,7 @@ pub extern "C" fn cc_progv_push(symbols: usize, values: usize) -> usize {
                 });
                 clear_dynamic_binding(&mut map, &name);
                 if let Some(new_value) = value {
+                    let new_value = normalize_special_dynamic_value(&name, new_value);
                     for key in dynamic_binding_keys(&name) {
                         map.insert(key, new_value);
                     }
@@ -10209,6 +10221,7 @@ pub extern "C" fn cc_progv_pop(frame_token: usize) -> usize {
             }
             clear_dynamic_binding(&mut map, &binding.name);
             if let Some(old) = binding.old_value {
+                let old = normalize_special_dynamic_value(&binding.name, old);
                 for key in dynamic_binding_keys(&binding.name) {
                     map.insert(key, old);
                 }
@@ -17570,6 +17583,74 @@ fn lookup_function_entry_unlocked(
     None
 }
 
+fn insert_function_entry_aliases_unlocked(
+    registry: &mut HashMap<String, FunctionEntry>,
+    name: &str,
+    entry: FunctionEntry,
+) {
+    let allow_builtin_override = std::env::var("RLASP_ALLOW_BUILTIN_OVERRIDE")
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        })
+        .unwrap_or(false);
+    let base = strip_package_prefix(name);
+    let base_lower = base.to_ascii_lowercase();
+    let protects_builtin_entry = !allow_builtin_override
+        && !name.starts_with("%FN%")
+        && rlasp_runtime::is_cl_builtin(base_lower.as_str());
+
+    if !protects_builtin_entry {
+        registry.insert(name.to_string(), entry.clone());
+    }
+
+    registry.insert(format!("%FN%{}", name), entry.clone());
+    registry.insert(format!("%FN%{}", name.to_ascii_uppercase()), entry.clone());
+    registry.insert(format!("%FN%{}", name.to_ascii_lowercase()), entry.clone());
+
+    if base != name {
+        registry.insert(format!("%FN%{}", base), entry.clone());
+        registry.insert(format!("%FN%{}", base.to_ascii_uppercase()), entry.clone());
+        registry.insert(format!("%FN%{}", base.to_ascii_lowercase()), entry.clone());
+    }
+}
+
+fn lazy_lookup_function_entry(name: &str) -> Option<FunctionEntry> {
+    let ptr = LAZY_FUNCTION_LOOKUP_FN_PTR.load(Ordering::SeqCst);
+    if ptr == 0 {
+        return None;
+    }
+    let c_name = CString::new(name).ok()?;
+    let callback: LazyFunctionLookupCallback = unsafe { std::mem::transmute(ptr) };
+    let mut address = 0usize;
+    let mut expects_args_list = 0i32;
+    if !callback(c_name.as_ptr(), &mut address, &mut expects_args_list) || address == 0 {
+        return None;
+    }
+    Some(FunctionEntry {
+        address,
+        arity: usize::MAX,
+        expects_args_list: expects_args_list != 0,
+    })
+}
+
+fn lookup_function_entry(name: &str) -> Option<FunctionEntry> {
+    {
+        let registry = get_registry().lock().unwrap();
+        if let Some(entry) = lookup_function_entry_unlocked(&registry, name) {
+            return Some(entry);
+        }
+    }
+
+    let entry = lazy_lookup_function_entry(name)?;
+    {
+        let mut registry = get_registry().lock().unwrap();
+        insert_function_entry_aliases_unlocked(&mut registry, name, entry.clone());
+    }
+    bump_function_lookup_epoch();
+    Some(entry)
+}
+
 fn resolve_fixnum_function_cached(func_id: i64) -> Option<CachedFunctionResolution> {
     let epoch = FUNCTION_LOOKUP_EPOCH.load(Ordering::Acquire);
 
@@ -17591,14 +17672,11 @@ fn resolve_fixnum_function_cached(func_id: i64) -> Option<CachedFunctionResoluti
         id_map.get(&func_id).cloned()
     }?;
 
-    let entry = {
-        let registry = get_registry().lock().unwrap();
-        lookup_function_entry_unlocked(&registry, &name).map(|resolved| CachedFunctionEntry {
-            address: resolved.address,
-            arity: resolved.arity,
-            expects_args_list: resolved.expects_args_list,
-        })
-    };
+    let entry = lookup_function_entry(&name).map(|resolved| CachedFunctionEntry {
+        address: resolved.address,
+        arity: resolved.arity,
+        expects_args_list: resolved.expects_args_list,
+    });
 
     let dispatch_name = strip_package_prefix(&name).to_ascii_lowercase();
     let force_bridge = should_force_bridge_dispatch(&name, &dispatch_name);
@@ -17663,14 +17741,11 @@ fn resolve_non_fixnum_function_cached(
     }
 
     let name = function_name_from_func_obj(value)?;
-    let entry = {
-        let registry = get_registry().lock().unwrap();
-        lookup_function_entry_unlocked(&registry, &name).map(|resolved| CachedFunctionEntry {
-            address: resolved.address,
-            arity: resolved.arity,
-            expects_args_list: resolved.expects_args_list,
-        })
-    };
+    let entry = lookup_function_entry(&name).map(|resolved| CachedFunctionEntry {
+        address: resolved.address,
+        arity: resolved.arity,
+        expects_args_list: resolved.expects_args_list,
+    });
 
     let dispatch_name = strip_package_prefix(&name).to_ascii_lowercase();
     let force_bridge = should_force_bridge_dispatch(&name, &dispatch_name);
@@ -17697,35 +17772,12 @@ pub extern "C" fn cc_register_function_ptr(name_ptr: *const i8, address: usize, 
         .into_owned();
 
     let mut registry = get_registry().lock().unwrap();
-    let entry = FunctionEntry { address, arity, expects_args_list: false };
-    let allow_builtin_override = std::env::var("RLASP_ALLOW_BUILTIN_OVERRIDE")
-        .map(|v| {
-            let t = v.trim().to_ascii_lowercase();
-            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
-        })
-        .unwrap_or(false);
-    let base = strip_package_prefix(&name);
-    let base_lower = base.to_ascii_lowercase();
-    let protects_builtin_entry = !allow_builtin_override
-        && !name.starts_with("%FN%")
-        && rlasp_runtime::is_cl_builtin(base_lower.as_str());
-
-    // Keep intrinsic/builtin dispatch entries stable unless overrides are explicitly enabled.
-    if !protects_builtin_entry {
-        registry.insert(name.clone(), entry.clone());
-    }
-
-    // Keep explicit function-namespace aliases to separate callable entries
-    // from non-function symbols that may be present in the registry.
-    registry.insert(format!("%FN%{}", name), entry.clone());
-    registry.insert(format!("%FN%{}", name.to_ascii_uppercase()), entry.clone());
-    registry.insert(format!("%FN%{}", name.to_ascii_lowercase()), entry.clone());
-
-    if base != name {
-        registry.insert(format!("%FN%{}", base), entry.clone());
-        registry.insert(format!("%FN%{}", base.to_ascii_uppercase()), entry.clone());
-        registry.insert(format!("%FN%{}", base.to_ascii_lowercase()), entry);
-    }
+    let entry = FunctionEntry {
+        address,
+        arity,
+        expects_args_list: false,
+    };
+    insert_function_entry_aliases_unlocked(&mut registry, &name, entry);
     drop(registry);
     bump_function_lookup_epoch();
 }
@@ -17738,34 +17790,12 @@ pub extern "C" fn cc_register_function_with_args_list(name_ptr: *const i8, addre
         .into_owned();
 
     let mut registry = get_registry().lock().unwrap();
-    let entry = FunctionEntry { address, arity, expects_args_list: true };
-    let allow_builtin_override = std::env::var("RLASP_ALLOW_BUILTIN_OVERRIDE")
-        .map(|v| {
-            let t = v.trim().to_ascii_lowercase();
-            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
-        })
-        .unwrap_or(false);
-    let base = strip_package_prefix(&name);
-    let base_lower = base.to_ascii_lowercase();
-    let protects_builtin_entry = !allow_builtin_override
-        && !name.starts_with("%FN%")
-        && rlasp_runtime::is_cl_builtin(base_lower.as_str());
-
-    if !protects_builtin_entry {
-        registry.insert(name.clone(), entry.clone());
-    }
-
-    // Keep explicit function-namespace aliases to separate callable entries
-    // from non-function symbols that may be present in the registry.
-    registry.insert(format!("%FN%{}", name), entry.clone());
-    registry.insert(format!("%FN%{}", name.to_ascii_uppercase()), entry.clone());
-    registry.insert(format!("%FN%{}", name.to_ascii_lowercase()), entry.clone());
-
-    if base != name {
-        registry.insert(format!("%FN%{}", base), entry.clone());
-        registry.insert(format!("%FN%{}", base.to_ascii_uppercase()), entry.clone());
-        registry.insert(format!("%FN%{}", base.to_ascii_lowercase()), entry);
-    }
+    let entry = FunctionEntry {
+        address,
+        arity,
+        expects_args_list: true,
+    };
+    insert_function_entry_aliases_unlocked(&mut registry, &name, entry);
     drop(registry);
     bump_function_lookup_epoch();
 }
@@ -18015,6 +18045,7 @@ pub fn register_builtin_intrinsics() {
     // Three-argument functions (arity 3)
     let arity_3_intrinsics: &[(&str, usize)] = &[
         ("gethash", cc_gethash as usize),
+        ("hash-set", cc_puthash as usize),
         ("puthash", cc_puthash as usize),
         ("subseq", cc_subseq as usize),
         ("set-char", cc_set_char as usize),
@@ -18022,7 +18053,7 @@ pub fn register_builtin_intrinsics() {
     ];
 
     for (name, addr) in arity_3_intrinsics {
-        if rlasp_runtime::is_cl_builtin(name) {
+        if rlasp_runtime::is_cl_builtin(name) || matches!(*name, "hash-set" | "puthash") {
             registry.insert(name.to_string(), FunctionEntry { address: *addr, arity: 3, expects_args_list: false });
         }
     }
@@ -18598,10 +18629,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                 let lambda_id = closure.function_id();
                 let name = format!("__lambda_{}", lambda_id);
 
-                let func_entry = {
-                    let registry = get_registry().lock().unwrap();
-                    registry.get(&name).cloned()
-                };
+                let func_entry = lookup_function_entry(&name);
 
                 if let Some(entry) = func_entry {
                     let frame_name = format!("__lambda_{}", lambda_id);
@@ -19114,8 +19142,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                                 let value_obj = unsafe { LispObject::from_raw(value) };
                                 if value_obj.as_fixnum().is_some() {
                                     if let Some(source_name) = extract_function_name(value) {
-                                        let registry = get_registry().lock().unwrap();
-                                        maybe_entry = lookup_function_entry_unlocked(&registry, &source_name);
+                                        maybe_entry = lookup_function_entry(&source_name);
                                     }
                                 }
                                 if let Some(entry) = maybe_entry {
@@ -22635,7 +22662,11 @@ pub extern "C" fn cc_read_from_string(args_and_env: usize) -> usize {
     struct DynamicReadtableGuard(Option<usize>);
     impl Drop for DynamicReadtableGuard {
         fn drop(&mut self) {
-            let sym = rlasp_runtime::Symbol::allocate("*readtable*".to_string()).raw();
+            // Restore the actual special variable, not an uninterned symbol with the
+            // same print-name, otherwise the dynamic binding table is left corrupted.
+            let sym = rlasp_runtime::PACKAGE_MANAGER
+                .intern_in_package("COMMON-LISP", "*readtable*")
+                .raw();
             match self.0 {
                 Some(raw) => {
                     cc_set_symbol_value(sym, raw);

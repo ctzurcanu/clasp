@@ -11,7 +11,7 @@
 
 (in-package #:clasp-tests)
 
-(reset-clasp-tests)
+(clasp-tests::reset-clasp-tests)
 
 (defparameter *irlasp-suites*
   '("defcallback-native"
@@ -68,12 +68,24 @@
   ;; failures in complex top-level suite selection forms.
   (if (string= requested "")
       (progn
-        (message :err "TEST_SUITES is required for run-all-irlasp.lisp")
+        (clasp-tests::message :err "TEST_SUITES is required for run-all-irlasp.lisp")
         (sys:quit 2))
       (progn
-        (message :emph "~%Running ~a suite..." requested)
-        (load-if-compiled-correctly
-         (concatenate 'string *runner-dir* requested ".lisp")))))
+        (clasp-tests::message :emph "~%Running ~a suite..." requested)
+        (let ((suite-file (concatenate 'string *runner-dir* requested ".lisp")))
+          (handler-case
+              (multiple-value-bind (fasl warnings-p failure-p)
+                  (compile-file suite-file)
+                (declare (ignore warnings-p failure-p))
+                (when fasl
+                  (load fasl)))
+            (error (e)
+              (clasp-tests::note-compile-error (list suite-file e))
+              (clasp-tests::message
+               :err
+               "Regression: compile-file of ~a failed with ~a"
+               suite-file
+               e)))))))
 
-(show-test-summary)
+(clasp-tests::show-test-summary)
 (sys:quit 0)

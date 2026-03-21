@@ -279,6 +279,167 @@ fn wildcard_match_component(pattern: &str, text: &str) -> bool {
     dp[pattern.len()][text.len()]
 }
 
+fn wildcard_captures_for_component(pattern: &str, text: &str) -> Option<Vec<String>> {
+    fn rec(
+        pattern: &[char],
+        text: &[char],
+        pi: usize,
+        ti: usize,
+        captures: &mut Vec<String>,
+    ) -> bool {
+        if pi == pattern.len() {
+            return ti == text.len();
+        }
+
+        match pattern[pi] {
+            '*' => {
+                for end in ti..=text.len() {
+                    captures.push(text[ti..end].iter().collect());
+                    if rec(pattern, text, pi + 1, end, captures) {
+                        return true;
+                    }
+                    captures.pop();
+                }
+                false
+            }
+            '?' => {
+                if ti >= text.len() {
+                    return false;
+                }
+                captures.push(text[ti..ti + 1].iter().collect());
+                let matched = rec(pattern, text, pi + 1, ti + 1, captures);
+                if !matched {
+                    captures.pop();
+                }
+                matched
+            }
+            literal => {
+                if ti >= text.len() || text[ti] != literal {
+                    return false;
+                }
+                rec(pattern, text, pi + 1, ti + 1, captures)
+            }
+        }
+    }
+
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    let text_chars: Vec<char> = text.chars().collect();
+    let mut captures = Vec::new();
+    if rec(&pattern_chars, &text_chars, 0, 0, &mut captures) {
+        Some(captures)
+    } else {
+        None
+    }
+}
+
+fn split_path_parts(path: &str) -> (bool, bool, Vec<String>) {
+    let normalized = normalize_path_designator(path);
+    let is_absolute = normalized.starts_with('/');
+    let is_directory = normalized.ends_with('/') && normalized != "/";
+    let trimmed = normalized.trim_matches('/');
+    let parts = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        trimmed.split('/').map(|part| part.to_string()).collect()
+    };
+    (is_absolute, is_directory, parts)
+}
+
+fn pathname_captures_from_pattern(path: &str, pattern: &str) -> Option<Vec<String>> {
+    fn rec(
+        pattern_parts: &[String],
+        path_parts: &[String],
+        pi: usize,
+        ti: usize,
+        captures: &mut Vec<String>,
+    ) -> bool {
+        if pi == pattern_parts.len() {
+            return ti == path_parts.len();
+        }
+
+        let pattern_part = &pattern_parts[pi];
+        if pattern_part == "**" {
+            for end in ti..=path_parts.len() {
+                captures.push(path_parts[ti..end].join("/"));
+                if rec(pattern_parts, path_parts, pi + 1, end, captures) {
+                    return true;
+                }
+                captures.pop();
+            }
+            return false;
+        }
+
+        if ti >= path_parts.len() {
+            return false;
+        }
+
+        let Some(component_captures) =
+            wildcard_captures_for_component(pattern_part, &path_parts[ti])
+        else {
+            return false;
+        };
+
+        let original_len = captures.len();
+        captures.extend(component_captures);
+        if rec(pattern_parts, path_parts, pi + 1, ti + 1, captures) {
+            return true;
+        }
+        captures.truncate(original_len);
+        false
+    }
+
+    let (path_abs, path_dir, path_parts) = split_path_parts(path);
+    let (pattern_abs, pattern_dir, pattern_parts) = split_path_parts(pattern);
+    if path_abs != pattern_abs {
+        return None;
+    }
+    if pattern_dir && !path_dir {
+        return None;
+    }
+
+    let mut captures = Vec::new();
+    if rec(&pattern_parts, &path_parts, 0, 0, &mut captures) {
+        Some(captures)
+    } else {
+        None
+    }
+}
+
+fn apply_captures_to_path_pattern(pattern: &str, captures: &[String]) -> String {
+    let (is_absolute, is_directory, parts) = split_path_parts(pattern);
+    let mut capture_index = 0usize;
+    let mut out_parts = Vec::new();
+
+    for part in parts {
+        if part == "**" {
+            let capture = captures.get(capture_index).cloned().unwrap_or_default();
+            capture_index += 1;
+            if !capture.is_empty() {
+                out_parts.push(capture);
+            }
+            continue;
+        }
+
+        let mut rebuilt = String::new();
+        for ch in part.chars() {
+            if ch == '*' || ch == '?' {
+                rebuilt.push_str(captures.get(capture_index).map(|s| s.as_str()).unwrap_or(""));
+                capture_index += 1;
+            } else {
+                rebuilt.push(ch);
+            }
+        }
+        out_parts.push(rebuilt);
+    }
+
+    let mut result = if is_absolute { "/".to_string() } else { String::new() };
+    result.push_str(&out_parts.join("/"));
+    if is_directory && !result.ends_with('/') {
+        result.push('/');
+    }
+    result
+}
+
 fn pathname_string_for_entry(path: &Path, is_dir: bool) -> String {
     let mut s = path.to_string_lossy().to_string();
     if is_dir && !s.ends_with('/') {
@@ -864,8 +1025,39 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
         }
 
-        "wild-pathname-p" | "pathname-match-p" | "translate-pathname" => {
-            Ok(EvalResult::Nil)
+        "wild-pathname-p" => {
+            let is_wild = args
+                .get(0)
+                .and_then(extract_pathname_string)
+                .map(|s| contains_wildcard_component(&s))
+                .unwrap_or(false);
+            Ok(EvalResult::Boolean(is_wild))
+        }
+
+        "pathname-match-p" => {
+            let path = args.get(0).and_then(extract_pathname_string);
+            let pattern = args.get(1).and_then(extract_pathname_string);
+            let matches = match (path, pattern) {
+                (Some(path), Some(pattern)) => pathname_captures_from_pattern(&path, &pattern).is_some(),
+                _ => false,
+            };
+            Ok(EvalResult::Boolean(matches))
+        }
+
+        "translate-pathname" => {
+            let source = args.get(0).and_then(extract_pathname_string);
+            let from = args.get(1).and_then(extract_pathname_string);
+            let to = args.get(2).and_then(extract_pathname_string);
+            match (source, from, to) {
+                (Some(source), Some(from), Some(to)) => {
+                    let captures = pathname_captures_from_pattern(&source, &from)
+                        .ok_or_else(|| format!("translate-pathname: source {} does not match {}", source, from))?;
+                    Ok(make_pathname_object_from_string(
+                        &apply_captures_to_path_pattern(&to, &captures),
+                    ))
+                }
+                _ => Err("translate-pathname requires source, from-wildcard, and to-wildcard pathnames".to_string()),
+            }
         }
 
         "translate-logical-pathname" => {

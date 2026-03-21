@@ -1645,75 +1645,39 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             } else {
                 stream_remaining_input(stream).unwrap_or_default()
             };
-            let chars: Vec<char> = input.chars().collect();
-            let mut idx = 0usize;
-            while idx < chars.len() && chars[idx].is_whitespace() {
-                idx += 1;
-            }
-            if idx >= chars.len() {
+            if input.is_empty() {
                 if eof_error_p {
                     return Err("end of file".to_string());
                 }
                 return Ok(eof_value);
             }
-            let token: String = chars[idx..]
-                .iter()
-                .take_while(|c| !c.is_whitespace())
-                .collect();
-            let consumed = idx + token.chars().count();
-            if let EvalResult::Array(arr) = stream {
-                let mut cells = arr.borrow_mut();
-                match stream_tag(&cells) {
-                    Some(STREAM_INPUT_TAG) => {
-                        cells[2] = EvalResult::Fixnum(consumed as i64);
-                    }
-                    Some(STREAM_FILE_TAG) => {
-                        cells[4] = EvalResult::Fixnum(consumed as i64);
-                    }
-                    _ => {}
-                }
-            }
 
-            let read_base = match rlasp_runtime::io_syntax::get_io_syntax_var("*read-base*") {
-                Some(rlasp_runtime::io_syntax::IoSyntaxValue::Fixnum(n)) if (2..=36).contains(&n) => n as u32,
-                _ => 10u32,
-            };
-            let parse_signed = |raw: &str| -> Option<i128> {
-                if raw.is_empty() {
-                    return None;
+            match rlasp_reader::reader::read_from_string_with_positions(&input) {
+                Ok((expr, _before_trailing_ws, after_trailing_ws)) => {
+                    let advance = after_trailing_ws.min(input.chars().count());
+                    if advance > 0 && !standard_input_symbol {
+                        let _ = stream_read_chars(stream, advance)?;
+                    }
+                    use crate::repl::lisp_to_ast::{lisp_to_ast, with_read_time_env};
+                    let ast_result = if let Some(result) = with_current_io_env(|env| {
+                        with_read_time_env(env, || lisp_to_ast(expr))
+                    }) {
+                        result
+                    } else {
+                        lisp_to_ast(expr)
+                    };
+                    let ast = ast_result.map_err(|e| format!("read: parse error: {}", e))?;
+                    super::eval_core::ast_to_result(&ast)
                 }
-                let (sign, digits) = if let Some(rest) = raw.strip_prefix('-') {
-                    (-1i128, rest)
-                } else if let Some(rest) = raw.strip_prefix('+') {
-                    (1i128, rest)
-                } else {
-                    (1i128, raw)
-                };
-                i128::from_str_radix(digits, read_base).ok().map(|n| sign * n)
-            };
-            if let Some((num_s, den_s)) = token.split_once('/') {
-                if let (Some(num), Some(den)) = (parse_signed(num_s), parse_signed(den_s)) {
-                    if den != 0 {
-                        let ratio = malachite::Rational::from_signeds(num as i64, den as i64);
-                        if ratio.denominator_ref() == &1u32 {
-                            if let Ok(n) = ratio.numerator_ref().to_string().parse::<i64>() {
-                                return Ok(EvalResult::Fixnum(n));
-                            }
-                        }
-                        return Ok(EvalResult::Ratio(ratio));
+                Err(rlasp_reader::error::ReaderError::UnexpectedEof) => {
+                    if eof_error_p {
+                        Err("end of file".to_string())
+                    } else {
+                        Ok(eof_value)
                     }
                 }
+                Err(e) => Err(format!("read: parse error: {:?}", e)),
             }
-            if let Ok(n) = i64::from_str_radix(&token, read_base) {
-                return Ok(EvalResult::Fixnum(n));
-            }
-            if token.starts_with("#\\") {
-                let body = &token[2..];
-                if body.chars().count() == 1 {
-                    return Ok(EvalResult::Character(body.chars().next().unwrap()));
-                }
-            }
-            Ok(EvalResult::Symbol(token))
         }
 
         "read-line" => {

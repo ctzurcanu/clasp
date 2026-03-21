@@ -6,6 +6,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use rlasp::ir::{ASTNode, ConstantValue};
 use rlasp::repl::eval::eval_loop;
 
@@ -1157,6 +1158,13 @@ impl StackMLIRCodegen {
                 (**then_branch).clone(),
                 (**else_branch).clone(),
             ])),
+            ASTNode::Cond { clauses } => {
+                let mut items = vec![ASTNode::Variable("cond".to_string())];
+                for (test, result) in clauses {
+                    items.push(Self::quote_list_ast(vec![test.clone(), result.clone()]));
+                }
+                Some(Self::quote_list_ast(items))
+            }
             ASTNode::Let { bindings, body } => {
                 let mut items = vec![
                     ASTNode::Variable("let".to_string()),
@@ -1305,6 +1313,10 @@ impl StackMLIRCodegen {
     /// Get current output length (for save/restore on failure)
     pub fn output_len(&self) -> usize {
         self.output.len()
+    }
+
+    pub fn special_param_function_names(&self) -> HashSet<String> {
+        self.special_param_functions.clone()
     }
 
     /// Truncate output to a previously saved length (to discard partial output on failure)
@@ -4270,27 +4282,6 @@ impl StackMLIRCodegen {
 
             // Block - establishes a named exit point
             ASTNode::Block { name, body } => {
-                if body.iter().any(|expr| {
-                    Self::ast_contains_named_call(
-                        expr,
-                        &[
-                            "with-stack",
-                            "map-stack",
-                            "map-backtrace",
-                            "frame-function-name",
-                            "frame-function",
-                            "frame-function-lambda-list",
-                            "frame-function-documentation",
-                            "frame-locals",
-                            "frame-language",
-                            "print-backtrace",
-                            "with-truncated-stack",
-                            "with-capped-stack",
-                        ],
-                    )
-                }) {
-                    return self.compile_eval_of_original_ast(ast);
-                }
                 let mut call_args = Vec::with_capacity(body.len() + 1);
                 match name {
                     Some(n) => call_args.push(ASTNode::Variable(n.clone())),
@@ -4416,6 +4407,7 @@ impl StackMLIRCodegen {
                 let saved_symbols = self.symbol_table.clone();
                 let saved_indent = self.indent_level;
                 let saved_output = std::mem::take(&mut self.output);
+                let saved_local_function_values = self.local_function_value_map.clone();
 
                 // Generate the lambda function definition
                 self.indent_level = 1;
@@ -4424,6 +4416,10 @@ impl StackMLIRCodegen {
 
                 // Clear symbol table for lambda scope
                 self.symbol_table.clear();
+                // Nested lambda bodies are separate MLIR functions. Any lexical local
+                // closures referenced here must be rebuilt in-region from lambda ids
+                // and captured cells, not by reusing outer-region SSA values.
+                self.local_function_value_map.clear();
 
                 // Pop parameters from stack (in reverse order)
                 for param in params.iter().rev() {
@@ -4519,6 +4515,7 @@ impl StackMLIRCodegen {
                 self.output = saved_output;
                 self.indent_level = saved_indent;
                 self.symbol_table = saved_symbols;
+                self.local_function_value_map = saved_local_function_values;
 
                 // Push captured variables onto the stack (in order)
                 for var in &free_vars {
@@ -5878,7 +5875,6 @@ impl StackMLIRCodegen {
                                 | "find-restart"
                                 | "compute-restarts"
                                 | "restart-name"
-                                | "frame-function-lambda-list"
                         )
                     }
                     _ => false,
@@ -6545,10 +6541,6 @@ impl StackMLIRCodegen {
             return self.compile_user_function_call(func_name, args);
         }
 
-        if base_name_lower == "process-run-function" {
-            return self.compile_eval_of_original_form(func_name, args);
-        }
-
         // Allow a small set of non-CL macros that should have been expanded to reach
         // the special-form handling below. This avoids evaluating their arguments
         // as ordinary function calls when macro expansion is missing.
@@ -6560,13 +6552,17 @@ impl StackMLIRCodegen {
             | "atomic" | "atomic-incf" | "atomic-incf-explicit" | "atomic-push" | "cas" | "with-profiling"
             | "with-float-traps-masked"
         );
-        if !rlasp::is_cl_builtin(base_name_lower.as_str()) && !is_non_cl_macro_stub {
-            // Preserve package-qualified names for extension/runtime calls.
-            return self.compile_user_function_call(func_name, args);
-        }
-
+        let is_runtime_helper_builtin = matches!(base_name_lower.as_str(), "hash-set" | "puthash");
         if matches!(base_name_lower.as_str(), "frame-function-lambda-list") {
             return self.compile_eval_of_original_form(func_name, args);
+        }
+
+        if !rlasp::is_cl_builtin(base_name_lower.as_str())
+            && !is_non_cl_macro_stub
+            && !is_runtime_helper_builtin
+        {
+            // Preserve package-qualified names for extension/runtime calls.
+            return self.compile_user_function_call(func_name, args);
         }
 
         match base_name_lower.as_str() {
@@ -8853,7 +8849,10 @@ impl StackMLIRCodegen {
             }
 
             "etypecase" | "ctypecase" | "ecase" | "ccase" => {
-                return self.compile_user_function_call(base_name, args);
+                // Clause forms must preserve their original structure. Treating them as a
+                // plain call recursively compiles clause lists as arguments, which breaks
+                // bodies such as (function (funcall ...)) seen in ASDF/UIOP.
+                return self.compile_eval_of_original_form(base_name, args);
             }
 
             "pprint-logical-block" | "pprint-exit-if-list-exhausted" |
@@ -9377,6 +9376,56 @@ impl StackMLIRCodegen {
                 let ht = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", ht));
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", ht));
+                Ok(())
+            }
+
+            "hash-set" => {
+                if args.len() != 3 {
+                    anyhow::bail!("hash-set requires exactly 3 arguments");
+                }
+
+                self.compile_expr(&args[0])?; // key
+                self.compile_expr(&args[1])?; // table
+                self.compile_expr(&args[2])?; // value
+
+                let value = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", value));
+                let table = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", table));
+                let key = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key));
+
+                let result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_puthash({}, {}, {}) : (i64, i64, i64) -> i64",
+                    result, key, value, table
+                ));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                Ok(())
+            }
+
+            "puthash" => {
+                if args.len() != 3 {
+                    anyhow::bail!("puthash requires exactly 3 arguments");
+                }
+
+                self.compile_expr(&args[0])?; // key
+                self.compile_expr(&args[1])?; // value
+                self.compile_expr(&args[2])?; // table
+
+                let table = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", table));
+                let value = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", value));
+                let key = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key));
+
+                let result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_puthash({}, {}, {}) : (i64, i64, i64) -> i64",
+                    result, key, value, table
+                ));
+                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
             }
 
@@ -12513,19 +12562,6 @@ impl StackMLIRCodegen {
                 if args.iter().skip(1).any(Self::ast_contains_bridge_only_control) {
                     return self.compile_eval_of_original_form(base_name, args);
                 }
-                if args.iter().skip(1).any(|expr| {
-                    Self::ast_contains_named_call(
-                        expr,
-                        &[
-                            "with-stack",
-                            "map-stack",
-                            "map-backtrace",
-                            "frame-function-lambda-list",
-                        ],
-                    )
-                }) {
-                    return self.compile_eval_of_original_form(base_name, args);
-                }
                 let block_name = args.get(0).and_then(Self::block_name_from_ast);
                 let block_id = self.fresh_id();
                 let returned_var = format!("*__MLIR_BLOCK_RETFLAG_{}*", block_id);
@@ -14860,16 +14896,21 @@ impl StackMLIRCodegen {
 
             // MOP Introspection functions
             "find-class" => {
-                if args.len() != 1 {
-                    anyhow::bail!("find-class requires exactly 1 argument");
+                if args.is_empty() || args.len() > 3 {
+                    anyhow::bail!("find-class requires 1 to 3 arguments");
                 }
-                self.compile_expr(&args[0])?;
-                let class_name = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class_name));
-                let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_find_class({}) : (i64) -> i64", result, class_name));
-                self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
-                Ok(())
+                if args.len() == 1 {
+                    self.compile_expr(&args[0])?;
+                    let class_name = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", class_name));
+                    let result = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_find_class({}) : (i64) -> i64", result, class_name));
+                    self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
+                    Ok(())
+                } else {
+                    // Respect the CL optional ERRORP/ENV parameters instead of rejecting them.
+                    self.compile_eval_of_original_form(base_name, args)
+                }
             }
 
             "class-of" => {
@@ -16185,7 +16226,9 @@ impl StackMLIRCodegen {
 
         // Save and clear symbol table for this function scope
         let saved_symbols = self.symbol_table.clone();
+        let saved_local_function_values = self.local_function_value_map.clone();
         self.symbol_table.clear();
+        self.local_function_value_map.clear();
 
         if has_special_params {
             // For functions with &optional, &key, or supplied-p parameters:
@@ -16401,6 +16444,7 @@ impl StackMLIRCodegen {
 
         // Always restore symbol table and close function properly
         self.symbol_table = saved_symbols;
+        self.local_function_value_map = saved_local_function_values;
 
         // If compilation failed, write a stub body
         if compile_result.is_err() {
@@ -16564,12 +16608,14 @@ impl StackMLIRCodegen {
             let saved_output = std::mem::take(&mut self.output);
             let saved_indent = self.indent_level;
             let saved_symbols_for_local = self.symbol_table.clone();
+            let saved_local_function_values_for_local = self.local_function_value_map.clone();
 
             // Set indent to module level (1)
             self.indent_level = 1;
             // Local function bodies must not directly reuse enclosing lexical SSA
             // bindings; captured vars are routed via dynamic storage.
             self.symbol_table.clear();
+            self.local_function_value_map.clear();
 
             let compile_result = if use_closure {
                 self.writeln(&format!("func.func @\"{}\"() {{", unique_name));
@@ -16625,6 +16671,7 @@ impl StackMLIRCodegen {
             let func_code = std::mem::replace(&mut self.output, saved_output);
             self.indent_level = saved_indent;
             self.symbol_table = saved_symbols_for_local;
+            self.local_function_value_map = saved_local_function_values_for_local;
 
             // Handle compilation result - propagate errors instead of silently ignoring
             match compile_result {
@@ -16903,5 +16950,68 @@ impl StackMLIRCodegen {
         self.writeln("}");
 
         self.output
+    }
+
+    pub fn finalize_to_path(mut self, path: &str) -> Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        writer.write_all(self.output.as_bytes())?;
+        self.output.clear();
+        self.output.shrink_to_fit();
+
+        for func in std::mem::take(&mut self.pending_functions) {
+            writer.write_all(func.as_bytes())?;
+        }
+
+        for (name, value) in std::mem::take(&mut self.pending_string_constants) {
+            let mut escaped = String::new();
+            for c in value.chars() {
+                match c {
+                    '"' => escaped.push_str("\\22"),
+                    '\\' => escaped.push_str("\\5C"),
+                    '\n' => escaped.push_str("\\0A"),
+                    '\r' => escaped.push_str("\\0D"),
+                    '\t' => escaped.push_str("\\09"),
+                    c if c.is_ascii() && !c.is_ascii_control() => escaped.push(c),
+                    c => {
+                        for byte in c.to_string().as_bytes() {
+                            escaped.push_str(&format!("\\{:02X}", byte));
+                        }
+                    }
+                }
+            }
+            let c_str = format!("{}\\00", escaped);
+            let len = value.len() + 1;
+            write!(writer, "  llvm.mlir.global private constant {}(\"{}\") : !llvm.array<{} x i8>\n", name, c_str, len)?;
+        }
+
+        if !self.special_param_functions.is_empty() {
+            let names: Vec<&String> = self.special_param_functions.iter().collect();
+            let mut data = String::new();
+            let mut total_len = 0;
+            for name in &names {
+                let key = if name.starts_with("%FN%") {
+                    name.to_string()
+                } else {
+                    format!("%FN%{}", name)
+                };
+                data.push_str(&key);
+                data.push_str("\\00");
+                total_len += key.len() + 1;
+            }
+            data.push_str("\\00");
+            total_len += 1;
+            write!(
+                writer,
+                "  llvm.mlir.global constant @__argslist_functions(\"{}\") : !llvm.array<{} x i8>\n",
+                data,
+                total_len
+            )?;
+        }
+
+        writer.write_all(b"}\n")?;
+        writer.flush()?;
+        Ok(())
     }
 }

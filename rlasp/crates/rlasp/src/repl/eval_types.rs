@@ -10,6 +10,8 @@ use malachite::Rational;
 // Thread-local storage for complex return values and gensym counter
 thread_local! {
     pub(super) static RETURN_VALUE: RefCell<Option<EvalResult>> = RefCell::new(None);
+    pub(super) static NONLOCAL_RETURN_VALUES: RefCell<HashMap<u64, EvalResult>> = RefCell::new(HashMap::new());
+    pub(super) static NEXT_NONLOCAL_RETURN_ID: Cell<u64> = Cell::new(1);
     pub(super) static GENSYM_COUNTER: RefCell<u64> = RefCell::new(0);
     pub(super) static ACTIVE_BLOCK_STACK: RefCell<Vec<(String, u64)>> = RefCell::new(Vec::new());
     pub(super) static NEXT_BLOCK_ID: Cell<u64> = Cell::new(1);
@@ -19,6 +21,27 @@ thread_local! {
     pub(super) static DYNAMIC_VARS: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
     /// Additional globally special variables declared via DEFVAR/DEFPARAMETER/DEFCONSTANT/DECLARE.
     pub(super) static DECLARED_SPECIAL_VARS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+pub(super) fn stash_nonlocal_return_value(value: &EvalResult) -> String {
+    let id = NEXT_NONLOCAL_RETURN_ID.with(|next| {
+        let id = next.get();
+        next.set(id.saturating_add(1));
+        id
+    });
+    NONLOCAL_RETURN_VALUES.with(|values| {
+        values.borrow_mut().insert(id, value.clone());
+    });
+    format!("COMPLEX:{}", id)
+}
+
+pub(super) fn take_nonlocal_return_value(encoded: &str) -> Option<EvalResult> {
+    if let Some(id_str) = encoded.strip_prefix("COMPLEX:") {
+        if let Ok(id) = id_str.parse::<u64>() {
+            return NONLOCAL_RETURN_VALUES.with(|values| values.borrow_mut().remove(&id));
+        }
+    }
+    RETURN_VALUE.with(|rv| rv.borrow_mut().take())
 }
 
 fn base_symbol_name(name: &str) -> &str {

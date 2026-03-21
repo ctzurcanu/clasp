@@ -372,10 +372,7 @@ fn encode_return_value(val: &EvalResult) -> String {
         EvalResult::Nil => "NIL".to_string(),
         EvalResult::String(s) => format!("STRING:{}", s),
         EvalResult::Symbol(s) => format!("SYMBOL:{}", s),
-        _ => {
-            RETURN_VALUE.with(|rv| *rv.borrow_mut() = Some(val.clone()));
-            "COMPLEX".to_string()
-        }
+        _ => super::eval_types::stash_nonlocal_return_value(val),
     }
 }
 
@@ -406,9 +403,9 @@ fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
     } else if e.starts_with("RETURN:SYMBOL:") {
         Ok(EvalResult::Symbol(e[14..].to_string()))
     } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e.starts_with("RETURN:COMPLEX") {
-        RETURN_VALUE.with(|rv| {
-            rv.borrow_mut().take().ok_or_else(|| "return value not found".to_string())
-        })
+        let encoded = e.strip_prefix("RETURN:").unwrap_or(e);
+        super::eval_types::take_nonlocal_return_value(encoded)
+            .ok_or_else(|| "return value not found".to_string())
     } else {
         Ok(EvalResult::Nil)
     }
@@ -441,10 +438,8 @@ pub(super) fn decode_return_value(encoded: String) -> Result<EvalResult, String>
     } else if encoded.starts_with("SYMBOL:") {
         Ok(EvalResult::Symbol(encoded[7..].to_string()))
     } else if encoded.starts_with("COMPLEX") {
-        RETURN_VALUE.with(|rv| {
-            rv.borrow_mut().take()
-                .ok_or_else(|| "return value not found".to_string())
-        })
+        super::eval_types::take_nonlocal_return_value(&encoded)
+            .ok_or_else(|| "return value not found".to_string())
     } else {
         Err(format!("Unknown return encoding: {}", encoded))
     }
@@ -582,11 +577,10 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
                     } else if e.starts_with("RETURN:SYMBOL:") {
                         let s = &e[14..];
                         return Ok(EvalResult::Symbol(s.to_string()));
-                    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e == "RETURN:COMPLEX" {
-                        // Get from thread-local storage
-                        return RETURN_VALUE.with(|rv| {
-                            rv.borrow_mut().take().ok_or_else(|| "return value not found".to_string())
-                        });
+                    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e.starts_with("RETURN:COMPLEX") {
+                        let encoded = e.strip_prefix("RETURN:").unwrap_or(e.as_str());
+                        return super::eval_types::take_nonlocal_return_value(encoded)
+                            .ok_or_else(|| "return value not found".to_string());
                     }
                     return Ok(EvalResult::Nil);
                 }
@@ -1961,8 +1955,15 @@ pub(super) fn eval_destructuring_bind(args: &[ASTNode], env: &mut HashMap<String
     // Convert data to a list for easier processing
     let data_list = result_to_list(&data);
 
+    // Save only the bindings introduced by the destructuring lambda-list.
+    let mut bound_names = Vec::new();
+    collect_destructure_binding_names(lambda_list, &mut bound_names);
+    let old_values: Vec<(String, Option<EvalResult>)> = bound_names
+        .iter()
+        .map(|name| (name.clone(), env.get(name).cloned()))
+        .collect();
+
     // Parse lambda-list and bind variables
-    let old_env = env.clone();
     destructure_bind(lambda_list, &data_list, env)?;
 
     // Execute body forms
@@ -1971,10 +1972,54 @@ pub(super) fn eval_destructuring_bind(args: &[ASTNode], env: &mut HashMap<String
         result = eval_with_env(form, env)?;
     }
 
-    // Restore environment
-    *env = old_env;
+    // Restore only the lexical bindings introduced by destructuring-bind.
+    for (name, old_value) in old_values {
+        match old_value {
+            Some(value) => {
+                env.insert(name, value);
+            }
+            None => {
+                env.remove(&name);
+            }
+        }
+    }
 
     Ok(result)
+}
+
+fn collect_destructure_binding_names(pattern: &ASTNode, out: &mut Vec<String>) {
+    match pattern {
+        ASTNode::Variable(name) => {
+            if !name.starts_with('&') && !out.iter().any(|existing| existing == name) {
+                out.push(name.clone());
+            }
+        }
+        ASTNode::Call { function, args } => {
+            if let ASTNode::Variable(name) = function.as_ref() {
+                if name.eq_ignore_ascii_case("&optional")
+                    || name.eq_ignore_ascii_case("&rest")
+                    || name.eq_ignore_ascii_case("&body")
+                    || name.eq_ignore_ascii_case("&key")
+                    || name.eq_ignore_ascii_case("&allow-other-keys")
+                    || name.eq_ignore_ascii_case("&aux")
+                {
+                    for arg in args {
+                        collect_destructure_binding_names(arg, out);
+                    }
+                    return;
+                }
+            }
+            collect_destructure_binding_names(function, out);
+            for arg in args {
+                collect_destructure_binding_names(arg, out);
+            }
+        }
+        ASTNode::DottedPair { car, cdr } => {
+            collect_destructure_binding_names(car, out);
+            collect_destructure_binding_names(cdr, out);
+        }
+        _ => {}
+    }
 }
 
 fn result_to_list(result: &EvalResult) -> Vec<EvalResult> {

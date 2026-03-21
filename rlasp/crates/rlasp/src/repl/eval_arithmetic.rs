@@ -755,7 +755,7 @@ pub(super) fn eval_eq_lisp(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 
     let result = match (&first, &second) {
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
-        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a == b,
+        (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a.eq_ignore_ascii_case(b),
         (EvalResult::Nil, EvalResult::Nil) => true,
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,

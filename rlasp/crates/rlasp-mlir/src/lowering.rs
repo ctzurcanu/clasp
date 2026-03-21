@@ -2,9 +2,10 @@
 /// Converts generated MLIR text to LLVM IR that can be executed with ORC JIT
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::Command;
-use std::io::Write;
+use std::process::Stdio;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,32 +30,60 @@ pub fn lower_mlir_to_llvm(mlir_text: &str) -> Result<String> {
     translate_llvm_dialect_to_ir(&lowered_mlir)
 }
 
-/// Merge user MLIR with runtime declarations into a complete module
-fn merge_with_runtime_decls(mlir_text: &str) -> String {
+/// Stream user MLIR with runtime declarations into a complete module file.
+fn write_merged_mlir_to_path(mlir_text: &str, path: &std::path::Path) -> Result<()> {
     let runtime_decls = include_str!("../runtime-decls.mlir");
-    let user_lines: Vec<&str> = mlir_text.lines().collect();
-    let mut merged_mlir = String::from("module {\n");
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(b"module {\n")?;
+    writer.write_all(runtime_decls.as_bytes())?;
+    writer.write_all(b"\n")?;
 
-    merged_mlir.push_str(runtime_decls);
-    merged_mlir.push_str("\n");
-
-    if user_lines.len() > 2 {
-        for line in &user_lines[1..user_lines.len()-1] {
-            merged_mlir.push_str(line.trim_start());
-            merged_mlir.push('\n');
+    let mut lines = mlir_text.lines().peekable();
+    let _ = lines.next(); // Skip the opening `module {`
+    while let Some(line) = lines.next() {
+        if lines.peek().is_none() {
+            break; // Skip the closing `}`
         }
+        writer.write_all(line.trim_start().as_bytes())?;
+        writer.write_all(b"\n")?;
     }
-    merged_mlir.push_str("}\n");
-    merged_mlir
+
+    writer.write_all(b"}\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_merged_mlir_file_to_path(input_mlir_path: &str, path: &std::path::Path) -> Result<()> {
+    let runtime_decls = include_str!("../runtime-decls.mlir");
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(b"module {\n")?;
+    writer.write_all(runtime_decls.as_bytes())?;
+    writer.write_all(b"\n")?;
+
+    let input = File::open(input_mlir_path)?;
+    let mut lines = BufReader::new(input).lines().peekable();
+    let _ = lines.next(); // Skip opening `module {`
+    while let Some(line) = lines.next() {
+        let line = line?;
+        if lines.peek().is_none() {
+            break; // Skip closing `}`
+        }
+        writer.write_all(line.trim_start().as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+
+    writer.write_all(b"}\n")?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Emit MLIR bytecode (.mlirbc) from MLIR text
 pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
-    let merged_mlir = merge_with_runtime_decls(mlir_text);
-
     let input_path = unique_temp_path("mlirbc_input", "mlir");
     let output_tmp = unique_temp_path("mlirbc_output", "mlirbc");
-    std::fs::write(&input_path, &merged_mlir)?;
+    write_merged_mlir_to_path(mlir_text, &input_path)?;
 
     let mlir_opt_paths = [
         "/opt/homebrew/opt/llvm/bin/mlir-opt",
@@ -66,16 +95,62 @@ pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
         .find(|p| std::path::Path::new(p).exists())
         .ok_or_else(|| anyhow::anyhow!("mlir-opt not found"))?;
 
-    let output = Command::new(mlir_opt)
+    let status = Command::new(mlir_opt)
         .arg("--emit-bytecode")
         .arg("-o")
         .arg(output_tmp.to_str().unwrap())
         .arg(input_path.to_str().unwrap())
-        .output()?;
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
 
-    let result = if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(anyhow::anyhow!("mlir-opt --emit=bytecode failed: {}", stderr))
+    let result = if !status.success() {
+        Err(anyhow::anyhow!(
+            "mlir-opt --emit-bytecode failed with status {}",
+            status
+        ))
+    } else {
+        if let Some(parent) = std::path::Path::new(output_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&output_tmp, output_path)?;
+        Ok(())
+    };
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_tmp);
+    result
+}
+
+pub fn emit_mlir_bytecode_from_file(input_mlir_path: &str, output_path: &str) -> Result<()> {
+    let input_path = unique_temp_path("mlirbc_input", "mlir");
+    let output_tmp = unique_temp_path("mlirbc_output", "mlirbc");
+    write_merged_mlir_file_to_path(input_mlir_path, &input_path)?;
+
+    let mlir_opt_paths = [
+        "/opt/homebrew/opt/llvm/bin/mlir-opt",
+        "/usr/local/opt/llvm/bin/mlir-opt",
+        "mlir-opt",
+    ];
+
+    let mlir_opt = mlir_opt_paths.iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .ok_or_else(|| anyhow::anyhow!("mlir-opt not found"))?;
+
+    let status = Command::new(mlir_opt)
+        .arg("--emit-bytecode")
+        .arg("-o")
+        .arg(output_tmp.to_str().unwrap())
+        .arg(input_path.to_str().unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+
+    let result = if !status.success() {
+        Err(anyhow::anyhow!(
+            "mlir-opt --emit-bytecode failed with status {}",
+            status
+        ))
     } else {
         if let Some(parent) = std::path::Path::new(output_path).parent() {
             std::fs::create_dir_all(parent)?;
@@ -113,6 +188,33 @@ fn find_mlir_translate() -> Result<&'static str> {
         .ok_or_else(|| anyhow::anyhow!("mlir-translate not found. Install with: brew install llvm"))
 }
 
+fn find_llvm_as() -> Result<&'static str> {
+    let paths = [
+        "/opt/homebrew/opt/llvm/bin/llvm-as",
+        "/usr/local/opt/llvm/bin/llvm-as",
+        "llvm-as",
+    ];
+    paths
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("llvm-as not found. Install with: brew install llvm"))
+}
+
+fn find_clang() -> Result<&'static str> {
+    let paths = [
+        "/usr/bin/clang",
+        "/opt/homebrew/opt/llvm/bin/clang",
+        "/usr/local/opt/llvm/bin/clang",
+        "clang",
+    ];
+    paths
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("clang not found"))
+}
+
 fn run_mlir_opt_lowering(input_path: &str) -> Result<String> {
     let mlir_opt = find_mlir_opt()?;
     let output = Command::new(mlir_opt)
@@ -132,6 +234,27 @@ fn run_mlir_opt_lowering(input_path: &str) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
+fn run_mlir_opt_lowering_to_file(input_path: &str, output_path: &str) -> Result<()> {
+    let mlir_opt = find_mlir_opt()?;
+    let output = Command::new(mlir_opt)
+        .arg("--convert-scf-to-cf")
+        .arg("--convert-arith-to-llvm")
+        .arg("--convert-index-to-llvm")
+        .arg("--convert-func-to-llvm")
+        .arg("--convert-cf-to-llvm")
+        .arg("--reconcile-unrealized-casts")
+        .arg("-o")
+        .arg(output_path)
+        .arg(input_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("mlir-opt failed: {}", stderr));
+    }
+    Ok(())
+}
+
 /// Lower an MLIR or MLIRBC file (with runtime decls already included) to LLVM IR
 pub fn lower_mlir_file_to_llvm(file_path: &str) -> Result<String> {
     // The file already has runtime decls (bytecode was generated from merged MLIR)
@@ -140,13 +263,77 @@ pub fn lower_mlir_file_to_llvm(file_path: &str) -> Result<String> {
     translate_llvm_dialect_to_ir(&lowered_mlir)
 }
 
-fn lower_to_llvm_dialect(mlir_text: &str) -> Result<String> {
-    let merged_mlir = merge_with_runtime_decls(mlir_text);
+pub fn lower_mlir_file_to_llvm_path(file_path: &str, output_path: &str) -> Result<()> {
+    let lowered_path = unique_temp_path("llvm_dialect_lowered", "mlir");
+    run_mlir_opt_lowering_to_file(file_path, lowered_path.to_str().unwrap())?;
 
+    let mlir_translate = find_mlir_translate()?;
+    let output = Command::new(mlir_translate)
+        .arg("--mlir-to-llvmir")
+        .arg("-o")
+        .arg(output_path)
+        .arg(lowered_path.to_str().unwrap())
+        .output()?;
+
+    let result = if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow::anyhow!("mlir-translate failed: {}", stderr))
+    } else {
+        Ok(())
+    };
+    let _ = std::fs::remove_file(&lowered_path);
+    result
+}
+
+pub fn lower_mlir_file_to_llvm_bitcode_path(file_path: &str, output_path: &str) -> Result<()> {
+    let llvm_ir_path = unique_temp_path("llvm_ir_text", "ll");
+    lower_mlir_file_to_llvm_path(file_path, llvm_ir_path.to_str().unwrap())?;
+
+    let llvm_as = find_llvm_as()?;
+    let output = Command::new(llvm_as)
+        .arg("-o")
+        .arg(output_path)
+        .arg(llvm_ir_path.to_str().unwrap())
+        .output()?;
+
+    let result = if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow::anyhow!("llvm-as failed: {}", stderr))
+    } else {
+        Ok(())
+    };
+    let _ = std::fs::remove_file(&llvm_ir_path);
+    result
+}
+
+pub fn lower_mlir_file_to_native_object_path(file_path: &str, output_path: &str) -> Result<()> {
+    let llvm_bc_path = unique_temp_path("llvm_ir_bitcode", "bc");
+    lower_mlir_file_to_llvm_bitcode_path(file_path, llvm_bc_path.to_str().unwrap())?;
+
+    let clang = find_clang()?;
+    let output = Command::new(clang)
+        .arg("-Wno-override-module")
+        .arg("-c")
+        .arg("-o")
+        .arg(output_path)
+        .arg(llvm_bc_path.to_str().unwrap())
+        .output()?;
+
+    let result = if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow::anyhow!("clang failed: {}", stderr))
+    } else {
+        Ok(())
+    };
+    let _ = std::fs::remove_file(&llvm_bc_path);
+    result
+}
+
+fn lower_to_llvm_dialect(mlir_text: &str) -> Result<String> {
     let input_path = unique_temp_path("scf_input", "mlir");
-    std::fs::write(&input_path, &merged_mlir)?;
+    write_merged_mlir_to_path(mlir_text, &input_path)?;
     if std::env::var("RLASP_SAVE_DEBUG_SCF").is_ok() {
-        let _ = std::fs::write("/tmp/debug_scf.mlir", &merged_mlir);
+        let _ = write_merged_mlir_to_path(mlir_text, std::path::Path::new("/tmp/debug_scf.mlir"));
     }
 
     let result = run_mlir_opt_lowering(input_path.to_str().unwrap());

@@ -373,10 +373,23 @@ build_baseline_suite_runner() {
 (load "$BASE_DIR/regression-tests/framework.lisp")
 (load "$BASE_DIR/regression-tests/set-unexpected-failures.lisp")
 (in-package #:clasp-tests)
-(reset-clasp-tests)
-(message :emph "~%Running $suite suite...")
-(load-if-compiled-correctly "$BASE_DIR/regression-tests/$suite.lisp")
-(show-test-summary)
+(clasp-tests::reset-clasp-tests)
+(clasp-tests::message :emph "~%Running $suite suite...")
+(let ((suite-file "$BASE_DIR/regression-tests/$suite.lisp"))
+  (handler-case
+      (multiple-value-bind (fasl warnings-p failure-p)
+          (compile-file suite-file)
+        (declare (ignore warnings-p failure-p))
+        (when fasl
+          (load fasl)))
+    (error (e)
+      (clasp-tests::note-compile-error (list suite-file e))
+      (clasp-tests::message
+       :err
+       "Regression: compile-file of ~a failed with ~a"
+       suite-file
+       e))))
+(clasp-tests::show-test-summary)
 $quit_form
 EOF
   echo "$runner_file"
@@ -519,15 +532,6 @@ build_single_suite_runner() {
   local mode="$1"
   local suite="$2"
   local runner_file
-  local suite_load_form
-  if [[ "$mode" == "mlir" ]]; then
-    # Keep suite load on runtime path in MLIR mode (not compile-time pre-eval
-    # through load-if-compiled-correctly/FASL path).
-    suite_load_form="(defun irlasp-runtime-suite-load () (load \"$BASE_DIR/regression-tests/$suite.lisp\"))
-(irlasp-runtime-suite-load)"
-  else
-    suite_load_form="(load-if-compiled-correctly \"$BASE_DIR/regression-tests/$suite.lisp\")"
-  fi
   runner_file="$(mktemp -t "irlasp-suite-runner-${suite}")"
   runner_file="${runner_file}.lisp"
   cat > "$runner_file" <<EOF
@@ -535,10 +539,23 @@ build_single_suite_runner() {
 (load "$BASE_DIR/regression-tests/framework.lisp")
 (load "$BASE_DIR/regression-tests/set-unexpected-failures.lisp")
 (in-package #:clasp-tests)
-(reset-clasp-tests)
-(message :emph "~%Running $suite suite...")
-$suite_load_form
-(show-test-summary)
+(clasp-tests::reset-clasp-tests)
+(clasp-tests::message :emph "~%Running $suite suite...")
+(let ((suite-file "$BASE_DIR/regression-tests/$suite.lisp"))
+  (handler-case
+      (multiple-value-bind (fasl warnings-p failure-p)
+          (compile-file suite-file)
+        (declare (ignore warnings-p failure-p))
+        (when fasl
+          (load fasl)))
+    (error (e)
+      (clasp-tests::note-compile-error (list suite-file e))
+      (clasp-tests::message
+       :err
+       "Regression: compile-file of ~a failed with ~a"
+       suite-file
+       e))))
+(clasp-tests::show-test-summary)
 EOF
   echo "$runner_file"
 }
@@ -605,12 +622,15 @@ run_jit_suite_with_phase_timing() {
     compile_end="$(now_mono_ts)"
     RUN_PHASE_COMPILE="$(float_sub "$compile_end" "$compile_start")"
 
-    # Prefer suite artifacts over runner artifacts. Suite artifacts execute the
-    # compiled test file directly and avoid re-running framework preload forms.
-    if [[ -f "$suite_artifact_path_lower" ]]; then
-      artifact_path="$suite_artifact_path_lower"
-    elif [[ -f "$suite_artifact_path_upper" ]]; then
-      artifact_path="$suite_artifact_path_upper"
+    # Execute the compiled runner artifact by default. It includes framework
+    # preload forms and the suite load in one image, so runtime has the same
+    # bindings as interpreter mode.
+    if [[ "${RLASP_MLIR_PREFER_SUITE_ARTIFACT:-0}" == "1" ]]; then
+      if [[ -f "$suite_artifact_path_lower" ]]; then
+        artifact_path="$suite_artifact_path_lower"
+      elif [[ -f "$suite_artifact_path_upper" ]]; then
+        artifact_path="$suite_artifact_path_upper"
+      fi
     fi
 
     if [[ ! -f "$artifact_path" ]]; then

@@ -43,7 +43,7 @@ pub fn register_char_builtins(env: &mut HashMap<String, EvalResult>) {
 
 pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     let simple_upcase = |c: char| {
-        if !(c.is_lowercase() || c.is_uppercase()) {
+        if !c.is_lowercase() {
             return c;
         }
         let mut mapped = c.to_uppercase();
@@ -55,7 +55,7 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         }
     };
     let simple_downcase = |c: char| {
-        if !(c.is_lowercase() || c.is_uppercase()) {
+        if !c.is_uppercase() {
             return c;
         }
         let mut mapped = c.to_lowercase();
@@ -65,16 +65,6 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         } else {
             first
         }
-    };
-    let is_upper_case = |c: char| {
-        let up = simple_upcase(c);
-        let down = simple_downcase(c);
-        c == up && c != down
-    };
-    let is_lower_case = |c: char| {
-        let up = simple_upcase(c);
-        let down = simple_downcase(c);
-        c == down && c != up
     };
     let lower1 = |c: char| simple_downcase(c);
 
@@ -113,17 +103,17 @@ pub fn call_char_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, 
         },
 
         "upper-case-p" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(is_upper_case(*c))),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(c.is_uppercase())),
             _ => Err("upper-case-p requires a character".to_string()),
         },
 
         "lower-case-p" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(is_lower_case(*c))),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(c.is_lowercase())),
             _ => Err("lower-case-p requires a character".to_string()),
         },
 
         "both-case-p" => match args.get(0) {
-            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(is_upper_case(*c) || is_lower_case(*c))),
+            Some(EvalResult::Character(c)) => Ok(EvalResult::Boolean(c.is_uppercase() || c.is_lowercase())),
             _ => Err("both-case-p requires a character".to_string()),
         },
 

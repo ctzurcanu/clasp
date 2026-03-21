@@ -80,7 +80,7 @@ fn readtable_token(id: u64) -> EvalResult {
 }
 
 fn parse_readtable_token(raw: &str) -> Option<u64> {
-    let s = raw.trim();
+    let s = raw.trim().rsplit(':').next().unwrap_or(raw.trim());
     let inner = s.strip_prefix("__RLASP_READTABLE__")?;
     inner.parse::<u64>().ok()
 }
@@ -109,6 +109,11 @@ fn resolve_readtable_id(arg: Option<&EvalResult>) -> Result<u64, String> {
                 || s.eq_ignore_ascii_case("READTABLE::*STANDARD-READTABLE*")
                 || s.eq_ignore_ascii_case("ECLECTOR.READTABLE:*STANDARD-READTABLE*")
             {
+                return Ok(0);
+            }
+            // Internal bridge sentinels must never escape as observable CL
+            // readtable values. Treat them as the default/current readtable.
+            if s.starts_with("__RLASP_") {
                 return Ok(0);
             }
             if debug_invalid {

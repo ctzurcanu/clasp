@@ -69,7 +69,30 @@ pub fn call_sequence_builtin(
                                 _ => Err("Index out of bounds".to_string()),
                             }
                         }
-                        _ => Err("elt requires a sequence".to_string()),
+                        _ => {
+                            if std::env::var("RLASP_DEBUG_ELT_TYPE").is_ok() {
+                                let mut interesting: Vec<(String, String)> = env
+                                    .iter()
+                                    .filter(|(k, _)| {
+                                        k.eq_ignore_ascii_case("fun")
+                                            || k.eq_ignore_ascii_case("thunk")
+                                            || k.eq_ignore_ascii_case("object")
+                                            || k.eq_ignore_ascii_case("at")
+                                            || k.eq_ignore_ascii_case("accessor")
+                                    })
+                                    .map(|(k, v)| (k.clone(), format!("{:?}", v)))
+                                    .collect();
+                                interesting.sort_by(|a, b| a.0.cmp(&b.0));
+                                eprintln!(
+                                    "[elt-type-error] seq={:?} index={} locals={:?} stack=[{}]",
+                                    seq,
+                                    index,
+                                    interesting,
+                                    super::eval_core::debug_call_stack_summary()
+                                );
+                            }
+                            Err("elt requires a sequence".to_string())
+                        }
                     }
                 }
                 _ => Err("elt requires a sequence and non-negative index".to_string()),

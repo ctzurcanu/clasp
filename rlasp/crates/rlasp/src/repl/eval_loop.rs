@@ -649,8 +649,10 @@ impl<'a> LoopParser<'a> {
 
         if is_loop_keyword(node, "with") {
             self.parse_with()
-        } else if is_loop_keyword(node, "for") || is_loop_keyword(node, "as") || is_loop_keyword(node, "and") {
+        } else if is_loop_keyword(node, "for") || is_loop_keyword(node, "as") {
             self.parse_for()
+        } else if is_loop_keyword(node, "and") {
+            self.parse_and()
         } else if is_loop_keyword(node, "when") || is_loop_keyword(node, "if") {
             self.parse_when()
         } else if is_loop_keyword(node, "unless") {
@@ -698,6 +700,64 @@ impl<'a> LoopParser<'a> {
             self.parse_named()
         } else {
             None
+        }
+    }
+
+    fn parse_and(&mut self) -> Option<LoopClause> {
+        self.advance(); // consume :and
+
+        let next = self.current()?;
+        if is_loop_keyword(next, "with") {
+            self.parse_with()
+        } else if is_loop_keyword(next, "for") || is_loop_keyword(next, "as") {
+            self.parse_for()
+        } else if is_loop_keyword(next, "when") || is_loop_keyword(next, "if") {
+            self.parse_when()
+        } else if is_loop_keyword(next, "unless") {
+            self.parse_unless()
+        } else if is_loop_keyword(next, "do") || is_loop_keyword(next, "doing") {
+            self.parse_do()
+        } else if is_loop_keyword(next, "else") {
+            self.parse_else()
+        } else if is_loop_keyword(next, "collect") || is_loop_keyword(next, "collecting") {
+            self.parse_collect()
+        } else if is_loop_keyword(next, "append") || is_loop_keyword(next, "appending") {
+            self.parse_append()
+        } else if is_loop_keyword(next, "sum") || is_loop_keyword(next, "summing") {
+            self.parse_sum()
+        } else if is_loop_keyword(next, "count") || is_loop_keyword(next, "counting") {
+            self.parse_count()
+        } else if is_loop_keyword(next, "while") {
+            self.parse_while()
+        } else if is_loop_keyword(next, "until") {
+            self.parse_until()
+        } else if is_loop_keyword(next, "finally") {
+            self.parse_finally()
+        } else if is_loop_keyword(next, "return") {
+            self.parse_return()
+        } else if is_loop_keyword(next, "end") {
+            self.advance(); // consume :end
+            Some(LoopClause::End)
+        } else if is_loop_keyword(next, "thereis") {
+            self.parse_thereis()
+        } else if is_loop_keyword(next, "always") {
+            self.parse_always()
+        } else if is_loop_keyword(next, "never") {
+            self.parse_never()
+        } else if is_loop_keyword(next, "maximize") || is_loop_keyword(next, "maximizing") {
+            self.parse_maximize()
+        } else if is_loop_keyword(next, "minimize") || is_loop_keyword(next, "minimizing") {
+            self.parse_minimize()
+        } else if is_loop_keyword(next, "nconc") || is_loop_keyword(next, "nconcing") {
+            self.parse_nconc()
+        } else if is_loop_keyword(next, "repeat") {
+            self.parse_repeat()
+        } else if is_loop_keyword(next, "initially") {
+            self.parse_initially()
+        } else if is_loop_keyword(next, "named") {
+            self.parse_named()
+        } else {
+            self.parse_for_tail()
         }
     }
 
@@ -782,7 +842,10 @@ impl<'a> LoopParser<'a> {
 
     fn parse_for(&mut self) -> Option<LoopClause> {
         self.advance(); // consume :for
+        self.parse_for_tail()
+    }
 
+    fn parse_for_tail(&mut self) -> Option<LoopClause> {
         // Check for destructuring patterns:
         // - (var1 . var2) - DottedPair for :in
         // - (var1 var2 ...) - Call/list for :on

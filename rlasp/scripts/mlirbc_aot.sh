@@ -275,7 +275,7 @@ if wants_kind exe; then
     local_sym_escaped="${local_sym//\\/\\\\}"
     local_sym_escaped="${local_sym_escaped//\"/\\\"}"
     echo "extern void ${fn_alias}(void) __asm__(\"${local_sym_escaped}\");" >> "$REGISTER_DECLS_C"
-    if grep -Fxq -- "$fn_name" "$ARGSLIST_FUNCS_TXT"; then
+    if grep -Fxq -- "$fn_name" "$ARGSLIST_FUNCS_TXT" || grep -Fxq -- "%FN%$fn_name" "$ARGSLIST_FUNCS_TXT"; then
       echo "  cc_register_function_with_args_list(\"${fn_name_escaped}\", (uintptr_t)&${fn_alias}, (uintptr_t)-1);" >> "$REGISTER_CALLS_C"
     else
       echo "  cc_register_function_ptr(\"${fn_name_escaped}\", (uintptr_t)&${fn_alias}, (uintptr_t)-1);" >> "$REGISTER_CALLS_C"

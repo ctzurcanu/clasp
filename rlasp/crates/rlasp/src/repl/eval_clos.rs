@@ -779,7 +779,18 @@ pub fn call_clos_builtin(
                     hash.insert(key, new_value.clone());
                     Ok(new_value)
                 }
-                _ => Err("set-slot-value: object must be an instance".to_string()),
+                _ => {
+                    if std::env::var("RLASP_DEBUG_SET_SLOT").is_ok() {
+                        eprintln!(
+                            "[set-slot-debug] object={:?} slot={} new_value={:?} stack=[{}]",
+                            object,
+                            slot_name,
+                            new_value,
+                            super::eval_core::debug_call_stack_summary()
+                        );
+                    }
+                    Err("set-slot-value: object must be an instance".to_string())
+                },
             }
         }
 
@@ -924,8 +935,10 @@ pub fn call_clos_builtin(
                 _ => return Err("change-class: new class must be a symbol or string".to_string()),
             };
 
-            let mut new_slots = inst.slots.borrow().clone();
+            let old_slots = inst.slots.borrow().clone();
+            let mut new_slots = HashMap::new();
             let mut initarg_to_slot: HashMap<String, String> = HashMap::new();
+            let mut allowed_slots = std::collections::HashSet::new();
 
             let mut lineage = Vec::new();
             let mut visiting = std::collections::HashSet::new();
@@ -942,19 +955,22 @@ pub fn call_clos_builtin(
                         Vec::new()
                     };
                 for (slot_name, default_val) in default_entries {
+                    let slot_key = normalize_slot_name(&slot_name);
+                    allowed_slots.insert(slot_key.clone());
+                    if let Some(existing) = old_slots.get(&slot_key).cloned() {
+                        new_slots.insert(slot_key, existing);
+                        continue;
+                    }
                     if matches!(default_val, EvalResult::Symbol(ref s) if s.eq_ignore_ascii_case(":unbound")) {
                         continue;
                     }
-                    let slot_key = normalize_slot_name(&slot_name);
-                    if !new_slots.contains_key(&slot_key) {
-                        let evaluated_default = match default_val {
-                            EvalResult::InitForm(ast) => {
-                                primary_value(super::eval_core::eval_with_env(&ast, env)?)
-                            }
-                            other => other,
-                        };
-                        new_slots.insert(slot_key, evaluated_default);
-                    }
+                    let evaluated_default = match default_val {
+                        EvalResult::InitForm(ast) => {
+                            primary_value(super::eval_core::eval_with_env(&ast, env)?)
+                        }
+                        other => other,
+                    };
+                    new_slots.insert(slot_key, evaluated_default);
                 }
                 if let Some(EvalResult::HashTable(initargs_map)) = lookup_class_initargs(env, cls) {
                     for (initarg_name, slot_name_val) in initargs_map.borrow().iter() {
@@ -966,6 +982,9 @@ pub fn call_clos_builtin(
                         }
                     }
                 }
+            }
+            if allowed_slots.is_empty() {
+                new_slots = old_slots.clone();
             }
 
             let mut i = 2;

@@ -33,6 +33,48 @@ fn set_generalized_place_from_value(
     Ok(value)
 }
 
+fn materialize_generalized_place(
+    place: &ASTNode,
+    env: &mut HashMap<String, EvalResult>,
+    temp_prefix: &str,
+) -> Result<(ASTNode, Vec<(String, Option<EvalResult>)>), String> {
+    let ASTNode::Call { function, args } = place else {
+        return Ok((place.clone(), Vec::new()));
+    };
+
+    let mut saved_bindings = Vec::with_capacity(args.len());
+    let mut materialized_args = Vec::with_capacity(args.len());
+
+    for (idx, arg) in args.iter().enumerate() {
+        let arg_value = eval_with_env(arg, env)?;
+        let temp_name = format!("{}{}_{}", temp_prefix, env.len() + idx, idx);
+        let saved = env.insert(temp_name.clone(), arg_value);
+        saved_bindings.push((temp_name.clone(), saved));
+        materialized_args.push(ASTNode::Variable(temp_name));
+    }
+
+    Ok((
+        ASTNode::Call {
+            function: function.clone(),
+            args: materialized_args,
+        },
+        saved_bindings,
+    ))
+}
+
+fn restore_materialized_place_bindings(
+    env: &mut HashMap<String, EvalResult>,
+    saved_bindings: Vec<(String, Option<EvalResult>)>,
+) {
+    for (name, saved) in saved_bindings.into_iter().rev() {
+        if let Some(old) = saved {
+            env.insert(name, old);
+        } else {
+            env.remove(&name);
+        }
+    }
+}
+
 fn is_non_list_tagged_object(value: &EvalResult) -> bool {
     super::eval_pathname::is_pathname_object(value)
 }
@@ -710,7 +752,7 @@ pub fn apply_function(
     match func {
         EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
             // Use the full lambda call handler that supports &optional, &rest, &key, etc.
-            eval_lambda_call_with_values(params.clone(), defaults.clone(), supplied_p_vars.clone(), key_params.clone(), body.clone(), *dynamic_env, closure_env.clone(), args, env)
+            eval_lambda_call_with_values(&params, &defaults, &supplied_p_vars, &key_params, &body, *dynamic_env, closure_env.clone(), args, env)
         }
         EvalResult::BuiltinFunction(name) => {
             super::eval_system::call_function_with_values(EvalResult::BuiltinFunction(name.clone()), args, env)
@@ -754,7 +796,7 @@ pub fn apply_function(
                         eprintln!("[bridge-interpret-apply-lambda] body={:?}", body);
                     }
                     // User-defined function - use full lambda call handler
-                    return eval_lambda_call_with_values(params, defaults, supplied_p_vars, key_params, body, dynamic_env, closure_env, args, env);
+                    return eval_lambda_call_with_values(&params, &defaults, &supplied_p_vars, &key_params, &body, dynamic_env, closure_env, args, env);
                 }
             }
             // apply-function receives already evaluated values. Route symbol
@@ -1076,11 +1118,11 @@ fn apply_key_fn(key_fn: &EvalResult, value: &EvalResult, env: &mut HashMap<Strin
         }
         EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
             let result = eval_lambda_call_with_values(
-                params.clone(),
-                defaults.clone(),
-                supplied_p_vars.clone(),
-                key_params.clone(),
-                body.clone(),
+                params,
+                defaults,
+                supplied_p_vars,
+                key_params,
+                body,
                 *dynamic_env,
                 closure_env.clone(),
                 &[value.clone()],
@@ -1117,11 +1159,11 @@ fn call_test_fn(test_fn: &EvalResult, a: &EvalResult, b: &EvalResult, env: &mut 
         }
         EvalResult::Lambda { params, defaults, supplied_p_vars, key_params, body, env: closure_env, dynamic_env } => {
             let result = eval_lambda_call_with_values(
-                params.clone(),
-                defaults.clone(),
-                supplied_p_vars.clone(),
-                key_params.clone(),
-                body.clone(),
+                params,
+                defaults,
+                supplied_p_vars,
+                key_params,
+                body,
                 *dynamic_env,
                 closure_env.clone(),
                 &[a.clone(), b.clone()],
@@ -1517,16 +1559,23 @@ pub(super) fn eval_push(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
         }
         // Complex place form - use setf expansion
         place => {
-            // Read current value from place
-            let current = eval_with_env(place, env)?;
-
-            // Create new cons
-            let new_list = EvalResult::Cons(
-                Rc::new(RefCell::new(item.clone())),
-                Rc::new(RefCell::new(current))
-            );
-
-            set_generalized_place_from_value(place, new_list, env, "__PUSH_VALUE__")
+            let (materialized_place, saved_bindings) =
+                materialize_generalized_place(place, env, "__PUSH_PLACE_ARG__")?;
+            let result = (|| {
+                let current = eval_with_env(&materialized_place, env)?;
+                let new_list = EvalResult::Cons(
+                    Rc::new(RefCell::new(item.clone())),
+                    Rc::new(RefCell::new(current))
+                );
+                set_generalized_place_from_value(
+                    &materialized_place,
+                    new_list,
+                    env,
+                    "__PUSH_VALUE__",
+                )
+            })();
+            restore_materialized_place_bindings(env, saved_bindings);
+            result
         }
     }
 }
@@ -1571,24 +1620,38 @@ pub(super) fn eval_pop(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) 
         }
         // Complex place form - use setf expansion
         place => {
-            // Read current value from place
-            let current = eval_with_env(place, env)?;
+            let (materialized_place, saved_bindings) =
+                materialize_generalized_place(place, env, "__POP_PLACE_ARG__")?;
+            let result = (|| {
+                let current = eval_with_env(&materialized_place, env)?;
+                match current {
+                    EvalResult::Nil => {
+                        set_generalized_place_from_value(
+                            &materialized_place,
+                            EvalResult::Nil,
+                            env,
+                            "__POP_VALUE__",
+                        )?;
+                        Ok(EvalResult::Nil)
+                    }
+                    EvalResult::Cons(car, cdr) => {
+                        let result = car.borrow().clone();
+                        let new_list = cdr.borrow().clone();
 
-            match current {
-                EvalResult::Nil => {
-                    set_generalized_place_from_value(place, EvalResult::Nil, env, "__POP_VALUE__")?;
-                    Ok(EvalResult::Nil)
+                        set_generalized_place_from_value(
+                            &materialized_place,
+                            new_list,
+                            env,
+                            "__POP_VALUE__",
+                        )?;
+
+                        Ok(result)
+                    }
+                    _ => Err("pop: argument must be a list".to_string()),
                 }
-                EvalResult::Cons(car, cdr) => {
-                    let result = car.borrow().clone();
-                    let new_list = cdr.borrow().clone();
-
-                    set_generalized_place_from_value(place, new_list, env, "__POP_VALUE__")?;
-
-                    Ok(result)
-                }
-                _ => Err("pop: argument must be a list".to_string()),
-            }
+            })();
+            restore_materialized_place_bindings(env, saved_bindings);
+            result
         }
     }
 }
@@ -1683,21 +1746,29 @@ pub(super) fn eval_pushnew(args: &[ASTNode], env: &mut HashMap<String, EvalResul
         }
         // Complex place form - use setf expansion
         place => {
-            // Read current value from place
-            let current = eval_with_env(place, env)?;
+            let (materialized_place, saved_bindings) =
+                materialize_generalized_place(place, env, "__PUSHNEW_PLACE_ARG__")?;
+            let result = (|| {
+                let current = eval_with_env(&materialized_place, env)?;
 
-            // Check if item is already in the list
-            if list_contains_with_key(&item, &current, test_fn.as_ref(), key_fn.as_ref(), env)? {
-                return Ok(current);
-            }
+                if list_contains_with_key(&item, &current, test_fn.as_ref(), key_fn.as_ref(), env)? {
+                    return Ok(current);
+                }
 
-            // Item not found, cons it onto the list
-            let new_list = EvalResult::Cons(
-                Rc::new(RefCell::new(item)),
-                Rc::new(RefCell::new(current))
-            );
+                let new_list = EvalResult::Cons(
+                    Rc::new(RefCell::new(item)),
+                    Rc::new(RefCell::new(current))
+                );
 
-            set_generalized_place_from_value(place, new_list, env, "__PUSHNEW_VALUE__")
+                set_generalized_place_from_value(
+                    &materialized_place,
+                    new_list,
+                    env,
+                    "__PUSHNEW_VALUE__",
+                )
+            })();
+            restore_materialized_place_bindings(env, saved_bindings);
+            result
         }
     }
 }

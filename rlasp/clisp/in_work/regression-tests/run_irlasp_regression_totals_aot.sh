@@ -17,7 +17,7 @@ IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 MLIR_EVAL_LOAD_FOR_COMPILE="${RLASP_MLIR_EVAL_LOAD_FOR_COMPILE:-0}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
 FORCE_BRIDGE_BUILTINS="${RLASP_FORCE_BRIDGE_BUILTINS:-1}"
-AOT_DISABLE_GC="${RLASP_DISABLE_GC:-1}"
+AOT_DISABLE_GC="${RLASP_DISABLE_GC:-0}"
 AOT_KEEP_SUITE_ARTIFACTS="${AOT_KEEP_SUITE_ARTIFACTS:-0}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for AOT harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
@@ -119,8 +119,9 @@ create_suite_runner() {
   local runner_path="$LOG_DIR/irlasp-aot-suite-${STAMP}-${run_id}-${suite}.lisp"
   {
     echo "(in-package :cl-user)"
-    echo "(load \"$BASE_DIR/regression-tests/framework.lisp\")"
-    echo "(load \"$BASE_DIR/regression-tests/set-unexpected-failures.lisp\")"
+    cat "$BASE_DIR/regression-tests/framework.lisp"
+    cat "$BASE_DIR/regression-tests/set-unexpected-failures.lisp"
+    echo ""
     echo "(in-package #:clasp-tests)"
     if [[ "$AOT_TRACE_TEST_PROGRESS" == "1" || "$AOT_TRACE_TEST_PROGRESS" == "true" ]]; then
       echo "(setf *trace-test-progress* t)"
@@ -129,7 +130,7 @@ create_suite_runner() {
     fi
     echo "(reset-clasp-tests)"
     echo "(message :emph \"~%Running $suite suite...\")"
-    echo "(load \"$BASE_DIR/regression-tests/$suite.lisp\")"
+    cat "$BASE_DIR/regression-tests/$suite.lisp"
     echo "(show-test-summary)"
     # Emit machine-readable counts to stderr so harness parsing is robust even if
     # suites dynamically rebind *standard-output*.
