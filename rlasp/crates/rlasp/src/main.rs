@@ -33,28 +33,30 @@ fn main() {
                 println!();
                 println!("Options:");
                 println!("  -e, --eval EXPR   Evaluate EXPR after loading files");
-                println!("  --no-repl         Exit after loading files and evaluating -e expressions");
+                println!(
+                    "  --no-repl         Exit after loading files and evaluating -e expressions"
+                );
                 println!("  -h, --help        Show this help");
                 println!();
                 println!("Examples:");
                 println!("  rlasp                          Start interactive REPL");
                 println!("  rlasp foo.lisp                 Load foo.lisp then start REPL");
-                println!("  rlasp foo.lisp -e '(test)'     Load foo.lisp, evaluate (test), then REPL");
+                println!(
+                    "  rlasp foo.lisp -e '(test)'     Load foo.lisp, evaluate (test), then REPL"
+                );
                 println!("  rlasp foo.lisp --no-repl       Load foo.lisp and exit");
                 return;
             }
             file => {
                 // Load file
                 match fs::read_to_string(file) {
-                    Ok(content) => {
-                        match repl.eval_file(&content) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                eprintln!("Error loading {}: {}", file, e);
-                                std::process::exit(1);
-                            }
+                    Ok(content) => match repl.eval_file(&content) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("Error loading {}: {}", file, e);
+                            std::process::exit(1);
                         }
-                    }
+                    },
                     Err(e) => {
                         eprintln!("Error reading {}: {}", file, e);
                         std::process::exit(1);

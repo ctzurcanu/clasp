@@ -1,14 +1,17 @@
-/// Convert LispObject from rlasp-reader to ASTNode for evaluation
-
-use crate::ir::{ASTNode, ConstantValue, SlotSpec};
 use super::eval::{eval_with_persistent_env, result_to_ast, result_to_data_ast, EvalResult};
-use rlasp_runtime::{FloatFormat, LispObject, RVector, header::{TypeHeader, ObjectType}};
+/// Convert LispObject from rlasp-reader to ASTNode for evaluation
+use crate::ir::{ASTNode, ConstantValue, SlotSpec};
+use rlasp_runtime::{
+    header::{ObjectType, TypeHeader},
+    FloatFormat, LispObject, RVector,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 thread_local! {
     static READ_TIME_ENV_PTR: RefCell<Option<*mut HashMap<String, EvalResult>>> = RefCell::new(None);
+    static PACKAGE_AWARE_SYMBOL_IDENTITIES: RefCell<bool> = const { RefCell::new(false) };
 }
 
 static PSETQ_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -30,6 +33,49 @@ where
     let prev = READ_TIME_ENV_PTR.with(|ptr| ptr.replace(Some(env as *mut _)));
     let _guard = ResetGuard(prev);
     f()
+}
+
+pub fn with_package_aware_symbol_identities<F, R>(enabled: bool, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    struct ResetGuard(bool);
+
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            PACKAGE_AWARE_SYMBOL_IDENTITIES.with(|flag| {
+                *flag.borrow_mut() = self.0;
+            });
+        }
+    }
+
+    let prev = PACKAGE_AWARE_SYMBOL_IDENTITIES.with(|flag| flag.replace(enabled));
+    let _guard = ResetGuard(prev);
+    f()
+}
+
+fn ast_symbol_name(symbol_obj: LispObject, symbol: &rlasp_runtime::Symbol) -> String {
+    let raw_name = symbol.name().to_string();
+    let identity = rlasp_jit::intrinsics::ast_symbol_identity(symbol_obj.raw());
+    if let Some(identity_name) = identity.as_ref() {
+        let trimmed = identity_name.trim();
+        let is_keyword = trimmed.starts_with(':')
+            || trimmed
+                .split(':')
+                .next()
+                .map(|pkg| pkg.eq_ignore_ascii_case("keyword"))
+                .unwrap_or(false);
+        if is_keyword {
+            return identity_name.clone();
+        }
+    }
+
+    let qualify = PACKAGE_AWARE_SYMBOL_IDENTITIES.with(|flag| *flag.borrow());
+    if qualify {
+        identity.unwrap_or(raw_name)
+    } else {
+        raw_name
+    }
 }
 
 fn eval_read_time_form(form: LispObject, as_data: bool) -> Result<ASTNode, String> {
@@ -148,6 +194,9 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                 // not variable references.
                                 elements.push(lisp_to_ast_as_data(*elem)?);
                             }
+                            if dims.is_empty() && elements.len() != 1 {
+                                return Ok(ASTNode::Vector(elements));
+                            }
                             if dims.len() != 1 {
                                 return Ok(ASTNode::ArrayLiteral { dims, elements });
                             }
@@ -155,17 +204,21 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         ObjectType::Symbol => {
                             let symbol = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                            let name = symbol.name().to_string();
+                            let name = ast_symbol_name(obj, symbol);
 
                             // Check if it's a string disguised as a symbol (starts and ends with ")
                             if name.starts_with('"') && name.ends_with('"') {
-                                let string_content = &name[1..name.len()-1];
-                                return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
+                                let string_content = &name[1..name.len() - 1];
+                                return Ok(ASTNode::Constant(ConstantValue::String(
+                                    string_content.to_string(),
+                                )));
                             }
 
                             // Keywords are self-evaluating constants
                             if name.starts_with(':') {
-                                return Ok(ASTNode::Constant(ConstantValue::Symbol(name.to_string())));
+                                return Ok(ASTNode::Constant(ConstantValue::Symbol(
+                                    name.to_string(),
+                                )));
                             }
 
                             // Special case: the symbol 'nil' should be treated as NIL constant
@@ -194,7 +247,9 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                     return Ok(ASTNode::Constant(ConstantValue::Float(*f, format)));
                                 }
                                 rlasp_runtime::NumberValue::Bignum(b) => {
-                                    return Ok(ASTNode::Constant(ConstantValue::Bignum(b.to_string())));
+                                    return Ok(ASTNode::Constant(ConstantValue::Bignum(
+                                        b.to_string(),
+                                    )));
                                 }
                                 rlasp_runtime::NumberValue::Ratio(r) => {
                                     let mut num_s = r.numerator_ref().to_string();
@@ -202,10 +257,14 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                         num_s = format!("-{}", num_s);
                                     }
                                     let den_s = r.denominator_ref().to_string();
-                                    return Ok(ASTNode::Constant(ConstantValue::Ratio(num_s, den_s)));
+                                    return Ok(ASTNode::Constant(ConstantValue::Ratio(
+                                        num_s, den_s,
+                                    )));
                                 }
                                 rlasp_runtime::NumberValue::Complex(c) => {
-                                    return Ok(ASTNode::Constant(ConstantValue::Complex(c.re, c.im)));
+                                    return Ok(ASTNode::Constant(ConstantValue::Complex(
+                                        c.re, c.im,
+                                    )));
                                 }
                             }
                         }
@@ -235,9 +294,7 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     if debug_str.starts_with("HashTable") || debug_str.contains("HASH-TABLE") {
         // For now, return an empty hash table
         // TODO: extract actual entries if the runtime provides access
-        return Ok(ASTNode::HashTable {
-            entries: vec![],
-        });
+        return Ok(ASTNode::HashTable { entries: vec![] });
     }
 
     let mut details = String::new();
@@ -255,7 +312,10 @@ pub fn lisp_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         }
     }
 
-    Err(format!("Cannot convert LispObject to AST: {:?}{}", obj, details))
+    Err(format!(
+        "Cannot convert LispObject to AST: {:?}{}",
+        obj, details
+    ))
 }
 
 fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
@@ -275,16 +335,25 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
     let car_is_symbol = if car.is_general() && !car.is_number() {
         if let Some(ptr) = car.as_general_ptr::<u8>() {
             if !ptr.is_null() {
-                matches!(unsafe { TypeHeader::from_ptr(ptr) }, Some(ObjectType::Symbol))
-            } else { false }
-        } else { false }
-    } else { false };
+                matches!(
+                    unsafe { TypeHeader::from_ptr(ptr) },
+                    Some(ObjectType::Symbol)
+                )
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
     if car_is_symbol {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
-                let name = symbol.name().to_string();
+                let name = ast_symbol_name(car, symbol);
 
                 let base = name.rsplit(':').next().unwrap_or(name.as_str());
 
@@ -303,7 +372,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     }
                 }
 
-                if base.eq_ignore_ascii_case("backquote") || base.eq_ignore_ascii_case("quasiquote") {
+                if base.eq_ignore_ascii_case("backquote") || base.eq_ignore_ascii_case("quasiquote")
+                {
                     // (backquote x) -> Backquote(x)
                     // The inner form is DATA, not executable code. Parsing it as code
                     // breaks macro templates by trying to validate forms like dolist/funcall
@@ -356,14 +426,24 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         if let Some(symbol_ptr) = car.as_general_ptr::<rlasp_runtime::Symbol>() {
             if !symbol_ptr.is_null() {
                 let symbol = unsafe { &*symbol_ptr };
-                let raw_name = symbol.name().to_string();
+                let raw_name = ast_symbol_name(car, symbol);
 
                 // Normalize name by stripping common package prefixes (case-insensitive)
                 let name_lower = raw_name.to_lowercase();
                 let name = if name_lower.starts_with("cl:") || name_lower.starts_with("cl::") {
-                    raw_name.splitn(2, ':').last().unwrap_or(raw_name.as_str()).trim_start_matches(':')
-                } else if name_lower.starts_with("common-lisp:") || name_lower.starts_with("common-lisp::") {
-                    raw_name.splitn(2, ':').last().unwrap_or(raw_name.as_str()).trim_start_matches(':')
+                    raw_name
+                        .splitn(2, ':')
+                        .last()
+                        .unwrap_or(raw_name.as_str())
+                        .trim_start_matches(':')
+                } else if name_lower.starts_with("common-lisp:")
+                    || name_lower.starts_with("common-lisp::")
+                {
+                    raw_name
+                        .splitn(2, ':')
+                        .last()
+                        .unwrap_or(raw_name.as_str())
+                        .trim_start_matches(':')
                 } else {
                     raw_name.as_str()
                 };
@@ -391,7 +471,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     if cdr_ptr.is_null() {
                         return Err("read-time-eval requires one argument".to_string());
                     }
-                let cdr_cons = unsafe { &*cdr_ptr };
+                    let cdr_cons = unsafe { &*cdr_ptr };
                     let eval_arg = cdr_cons.car();
                     let rest = cdr_cons.cdr();
                     if !rest.is_nil() {
@@ -431,7 +511,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                 if base.eq_ignore_ascii_case("with-float-traps-masked") {
                     let raw_args = raw_cdr_to_vec(cdr.clone())?;
                     if raw_args.len() < 2 {
-                        return Err("with-float-traps-masked requires trap mask and body".to_string());
+                        return Err(
+                            "with-float-traps-masked requires trap mask and body".to_string()
+                        );
                     }
                     let mut args = Vec::with_capacity(raw_args.len());
                     args.push(lisp_to_ast_as_data(raw_args[0].clone())?);
@@ -444,8 +526,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     });
                 }
 
-                if std::env::var("RLASP_DEBUG_DEFUN").is_ok()
-                    && name.eq_ignore_ascii_case("defun")
+                if std::env::var("RLASP_DEBUG_DEFUN").is_ok() && name.eq_ignore_ascii_case("defun")
                 {
                     let args = cdr_to_vec(cdr.clone())?;
                     eprintln!("[defun-raw] args={:?}", args);
@@ -460,7 +541,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         return Ok(ASTNode::if_then_else(
                             args[0].clone(),
                             args[1].clone(),
-                            args.get(2).cloned().unwrap_or(ASTNode::nil())
+                            args.get(2).cloned().unwrap_or(ASTNode::nil()),
                         ));
                     }
                     "when" => {
@@ -470,7 +551,11 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             return Err("when requires at least 1 argument (test)".to_string());
                         }
                         if std::env::var("RLASP_DEBUG_WHEN").is_ok() {
-                            if let ASTNode::Call { function, args: test_args } = &args[0] {
+                            if let ASTNode::Call {
+                                function,
+                                args: test_args,
+                            } = &args[0]
+                            {
                                 if let ASTNode::Variable(fn_name) = function.as_ref() {
                                     if fn_name.eq_ignore_ascii_case("null")
                                         && test_args.len() == 1
@@ -496,10 +581,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             return Err("unless requires at least 1 argument (test)".to_string());
                         }
                         let test = args[0].clone();
-                        let negated_test = ASTNode::call(
-                            ASTNode::variable("not"),
-                            vec![test]
-                        );
+                        let negated_test = ASTNode::call(ASTNode::variable("not"), vec![test]);
                         let body = if args.len() > 1 {
                             ASTNode::progn(args[1..].to_vec())
                         } else {
@@ -536,7 +618,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                                 let cons = unsafe { &*cons_ptr };
                                                 clause_keys.push(debug_key_list(&cons.car()));
                                             } else {
-                                                clause_keys.push(format!("non-cons: {:?}", raw_clause));
+                                                clause_keys
+                                                    .push(format!("non-cons: {:?}", raw_clause));
                                             }
                                         }
                                         eprintln!(
@@ -566,9 +649,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                                 // Convert body forms
                                 let body_forms = raw_cdr_to_vec(body_cdr)?;
-                                let body_asts: Result<Vec<_>, _> = body_forms.iter()
-                                    .map(|o| lisp_to_ast(o.clone()))
-                                    .collect();
+                                let body_asts: Result<Vec<_>, _> =
+                                    body_forms.iter().map(|o| lisp_to_ast(o.clone())).collect();
                                 let body_asts = body_asts?;
 
                                 let result = if body_asts.len() == 1 {
@@ -593,7 +675,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
 
                         // Build (let ((tmp keyform)) (cond ...))
-                        let cond_node = ASTNode::Cond { clauses: cond_clauses };
+                        let cond_node = ASTNode::Cond {
+                            clauses: cond_clauses,
+                        };
                         if std::env::var("RLASP_DEBUG_CASE").is_ok() {
                             if let ASTNode::Call { function, args } = &keyform {
                                 if let ASTNode::Variable(fn_name) = function.as_ref() {
@@ -608,7 +692,7 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         return Ok(ASTNode::let_bindings(
                             vec![(tmp_var, keyform)],
-                            vec![cond_node]
+                            vec![cond_node],
                         ));
                     }
                     "progn" => {
@@ -643,29 +727,45 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             ASTNode::Quote(inner) => {
                                 if let ASTNode::Variable(n) = inner.as_ref() {
                                     Some(n.clone())
-                                } else if let ASTNode::Constant(ConstantValue::Symbol(s)) = inner.as_ref() {
+                                } else if let ASTNode::Constant(ConstantValue::Symbol(s)) =
+                                    inner.as_ref()
+                                {
                                     Some(s.clone())
                                 } else {
                                     return Err("block name must be a symbol or nil".to_string());
                                 }
                             }
                             // Handle (setf name) form for setf functions
-                            ASTNode::Call { function, args: call_args } if call_args.len() == 1 => {
+                            ASTNode::Call {
+                                function,
+                                args: call_args,
+                            } if call_args.len() == 1 => {
                                 if let ASTNode::Variable(fn_name) = function.as_ref() {
-                                    if fn_name.eq_ignore_ascii_case("setf") {
+                                    let fn_base =
+                                        fn_name.rsplit(':').next().unwrap_or(fn_name.as_str());
+                                    if fn_base.eq_ignore_ascii_case("setf") {
                                         if let ASTNode::Variable(setf_name) = &call_args[0] {
                                             Some(format!("(setf {})", setf_name))
                                         } else {
-                                            return Err("block name must be a symbol or nil".to_string());
+                                            return Err(
+                                                "block name must be a symbol or nil".to_string()
+                                            );
                                         }
                                     } else {
-                                        return Err("block name must be a symbol or nil".to_string());
+                                        return Err(
+                                            "block name must be a symbol or nil".to_string()
+                                        );
                                     }
                                 } else {
                                     return Err("block name must be a symbol or nil".to_string());
                                 }
                             }
-                            _ => return Err(format!("block name must be a symbol or nil, got {:?}", &args[0])),
+                            _ => {
+                                return Err(format!(
+                                    "block name must be a symbol or nil, got {:?}",
+                                    &args[0]
+                                ))
+                            }
                         };
                         let body = if args.len() > 1 {
                             args[1..].to_vec()
@@ -685,7 +785,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // (return-from name value)
                         let args = cdr_to_vec(cdr)?;
                         if args.is_empty() {
-                            return Err("return-from requires at least 1 argument (block name)".to_string());
+                            return Err(
+                                "return-from requires at least 1 argument (block name)".to_string()
+                            );
                         }
                         // If name contains unquote (from backquote), keep as Call for later evaluation
                         if contains_unquote(&args[0]) {
@@ -702,29 +804,48 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             ASTNode::Quote(inner) => {
                                 if let ASTNode::Variable(n) = inner.as_ref() {
                                     Some(n.clone())
-                                } else if let ASTNode::Constant(ConstantValue::Symbol(s)) = inner.as_ref() {
+                                } else if let ASTNode::Constant(ConstantValue::Symbol(s)) =
+                                    inner.as_ref()
+                                {
                                     Some(s.clone())
                                 } else {
-                                    return Err("return-from block name must be a symbol or nil".to_string());
+                                    return Err("return-from block name must be a symbol or nil"
+                                        .to_string());
                                 }
                             }
                             // Handle (setf name) form for setf functions
-                            ASTNode::Call { function, args: call_args } if call_args.len() == 1 => {
+                            ASTNode::Call {
+                                function,
+                                args: call_args,
+                            } if call_args.len() == 1 => {
                                 if let ASTNode::Variable(fn_name) = function.as_ref() {
-                                    if fn_name.eq_ignore_ascii_case("setf") {
+                                    let fn_base =
+                                        fn_name.rsplit(':').next().unwrap_or(fn_name.as_str());
+                                    if fn_base.eq_ignore_ascii_case("setf") {
                                         if let ASTNode::Variable(setf_name) = &call_args[0] {
                                             Some(format!("(setf {})", setf_name))
                                         } else {
-                                            return Err("return-from block name must be a symbol or nil".to_string());
+                                            return Err(
+                                                "return-from block name must be a symbol or nil"
+                                                    .to_string(),
+                                            );
                                         }
                                     } else {
-                                        return Err("return-from block name must be a symbol or nil".to_string());
+                                        return Err(
+                                            "return-from block name must be a symbol or nil"
+                                                .to_string(),
+                                        );
                                     }
                                 } else {
-                                    return Err("return-from block name must be a symbol or nil".to_string());
+                                    return Err("return-from block name must be a symbol or nil"
+                                        .to_string());
                                 }
                             }
-                            _ => return Err("return-from block name must be a symbol or nil".to_string()),
+                            _ => {
+                                return Err(
+                                    "return-from block name must be a symbol or nil".to_string()
+                                )
+                            }
                         };
                         let value = args.get(1).cloned().map(Box::new);
                         return Ok(ASTNode::ReturnFrom { block_name, value });
@@ -733,7 +854,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // (return value) => (return-from nil value)
                         let args = cdr_to_vec(cdr)?;
                         let value = args.get(0).cloned().map(Box::new);
-                        return Ok(ASTNode::ReturnFrom { block_name: None, value });
+                        return Ok(ASTNode::ReturnFrom {
+                            block_name: None,
+                            value,
+                        });
                     }
                     "cond" => {
                         // Parse: (cond (test1 result1) (test2 result2) ...)
@@ -758,10 +882,8 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                     // (test) - result is test value itself
                                     test.clone()
                                 } else {
-                                    let body_asts: Result<Vec<_>, _> = elems[1..]
-                                        .iter()
-                                        .map(|o| lisp_to_ast(o.clone()))
-                                        .collect();
+                                    let body_asts: Result<Vec<_>, _> =
+                                        elems[1..].iter().map(|o| lisp_to_ast(o.clone())).collect();
                                     let body_asts = body_asts?;
                                     if body_asts.len() == 1 {
                                         body_asts[0].clone()
@@ -788,7 +910,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                     "setq" => {
                         let args = cdr_to_vec(cdr)?;
                         if args.is_empty() || args.len() % 2 != 0 {
-                            return Err("setq requires an even number of arguments (var value pairs)".to_string());
+                            return Err(
+                                "setq requires an even number of arguments (var value pairs)"
+                                    .to_string(),
+                            );
                         }
                         if args.len() == 2 {
                             // Simple case: (setq var val)
@@ -830,9 +955,16 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         if args.is_empty() {
                             return Err("lambda requires at least 1 argument".to_string());
                         }
-                        let (params, defaults, supplied_p_vars, key_params) = extract_params_with_defaults(&args[0]);
+                        let (params, defaults, supplied_p_vars, key_params) =
+                            extract_params_with_defaults(&args[0]);
                         let body = args[1..].to_vec();
-                        return Ok(ASTNode::lambda_with_supplied_p(params, defaults, supplied_p_vars, key_params, body));
+                        return Ok(ASTNode::lambda_with_supplied_p(
+                            params,
+                            defaults,
+                            supplied_p_vars,
+                            key_params,
+                            body,
+                        ));
                     }
                     "dotimes" => {
                         // Parse: (dotimes (var count [result]) body...)
@@ -846,19 +978,24 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // The control has been parsed by lisp_to_ast, need to extract elements
                         let (var, count_ast, result_ast) = match &cdr_list[0] {
                             // If it's already a Call, we can extract var from first arg
-                            ASTNode::Call { function, args: control_args } if control_args.len() >= 1 => {
+                            ASTNode::Call {
+                                function,
+                                args: control_args,
+                            } if control_args.len() >= 1 => {
                                 let var = if let ASTNode::Variable(v) = &**function {
                                     v.clone()
                                 } else {
                                     return Err("dotimes var must be a symbol".to_string());
                                 };
-                                let count = control_args.get(0)
-                                    .ok_or("dotimes missing count")?
-                                    .clone();
+                                let count =
+                                    control_args.get(0).ok_or("dotimes missing count")?.clone();
                                 let result = control_args.get(1).cloned();
                                 (var, count, result)
                             }
-                            _ => return Err("dotimes control must be a list (var count [result])".to_string()),
+                            _ => {
+                                return Err("dotimes control must be a list (var count [result])"
+                                    .to_string())
+                            }
                         };
 
                         let body = if cdr_list.len() > 1 {
@@ -882,19 +1019,25 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
 
                         // Extract control list as (var list [result])
                         let (var, list_ast, result_ast) = match &cdr_list[0] {
-                            ASTNode::Call { function, args: control_args } if control_args.len() >= 1 => {
+                            ASTNode::Call {
+                                function,
+                                args: control_args,
+                            } if control_args.len() >= 1 => {
                                 let var = if let ASTNode::Variable(v) = &**function {
                                     v.clone()
                                 } else {
                                     return Err("dolist var must be a symbol".to_string());
                                 };
-                                let list = control_args.get(0)
-                                    .ok_or("dolist missing list")?
-                                    .clone();
+                                let list =
+                                    control_args.get(0).ok_or("dolist missing list")?.clone();
                                 let result = control_args.get(1).cloned();
                                 (var, list, result)
                             }
-                            _ => return Err("dolist control must be a list (var list [result])".to_string()),
+                            _ => {
+                                return Err(
+                                    "dolist control must be a list (var list [result])".to_string()
+                                )
+                            }
                         };
 
                         let body = if cdr_list.len() > 1 {
@@ -941,8 +1084,14 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         // Extract bindings from raw to avoid special form interpretation for var names
                         let bindings = extract_bindings_raw(raw_args[0].clone())?;
-                        let body: Result<Vec<ASTNode>, String> = raw_args[1..].iter().map(|obj| lisp_to_ast(obj.clone())).collect();
-                        return Ok(ASTNode::Let { bindings, body: body? });
+                        let body: Result<Vec<ASTNode>, String> = raw_args[1..]
+                            .iter()
+                            .map(|obj| lisp_to_ast(obj.clone()))
+                            .collect();
+                        return Ok(ASTNode::Let {
+                            bindings,
+                            body: body?,
+                        });
                     }
                     "let*" => {
                         // Get raw args to handle bindings specially
@@ -961,35 +1110,50 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         // Extract bindings from raw to avoid special form interpretation for var names
                         let bindings = extract_bindings_raw(raw_args[0].clone())?;
-                        let body: Result<Vec<ASTNode>, String> = raw_args[1..].iter().map(|obj| lisp_to_ast(obj.clone())).collect();
-                        return Ok(ASTNode::LetStar { bindings, body: body? });
+                        let body: Result<Vec<ASTNode>, String> = raw_args[1..]
+                            .iter()
+                            .map(|obj| lisp_to_ast(obj.clone()))
+                            .collect();
+                        return Ok(ASTNode::LetStar {
+                            bindings,
+                            body: body?,
+                        });
                     }
                     "symbol-macrolet" => {
                         // Get raw args to handle bindings specially
                         let raw_args = raw_cdr_to_vec(cdr.clone())?;
                         if raw_args.is_empty() {
-                            return Err("symbol-macrolet requires at least 1 argument (bindings)".to_string());
+                            return Err("symbol-macrolet requires at least 1 argument (bindings)"
+                                .to_string());
                         }
                         // Check for unquote in the bindings to defer evaluation in backquote contexts
                         if contains_unquote_raw(&raw_args[0]) {
                             let args = cdr_to_vec(cdr)?;
                             return Ok(ASTNode::Call {
-                                function: Box::new(ASTNode::variable("symbol-macrolet".to_string())),
+                                function: Box::new(ASTNode::variable(
+                                    "symbol-macrolet".to_string(),
+                                )),
                                 args: args,
                             });
                         }
                         // Extract bindings from raw to avoid special form interpretation for var names
                         let bindings = extract_bindings_raw(raw_args[0].clone())?;
-                        let body: Result<Vec<ASTNode>, String> = raw_args[1..].iter().map(|obj| lisp_to_ast(obj.clone())).collect();
+                        let body: Result<Vec<ASTNode>, String> = raw_args[1..]
+                            .iter()
+                            .map(|obj| lisp_to_ast(obj.clone()))
+                            .collect();
                         let body = body?;
 
                         // Expand symbol macros in the body
-                        let expanded_body: Result<Vec<ASTNode>, String> = body.iter()
+                        let expanded_body: Result<Vec<ASTNode>, String> = body
+                            .iter()
                             .map(|expr| expand_symbol_macros(expr, &bindings))
                             .collect();
 
                         // Return the expanded body as a progn
-                        return Ok(ASTNode::Progn { exprs: expanded_body? });
+                        return Ok(ASTNode::Progn {
+                            exprs: expanded_body?,
+                        });
                     }
                     // "macrolet" is handled in eval_core.rs to properly evaluate macro bodies
                     // (the compile-time approach here couldn't handle (list ...) or other evaluated forms)
@@ -1011,7 +1175,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // (defclass name (superclasses...) ((slot options...) ...) class-options...)
                         let args = cdr_to_vec(cdr)?;
                         if args.len() < 2 {
-                            return Err("defclass requires at least name and superclasses".to_string());
+                            return Err(
+                                "PROGRAM-ERROR: defclass requires at least name and superclasses"
+                                    .to_string(),
+                            );
                         }
 
                         // If name contains unquote (from backquote), keep as Call for later evaluation
@@ -1031,22 +1198,86 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // Parse superclasses
                         let superclasses = match &args[1] {
                             ASTNode::Constant(ConstantValue::Nil) => vec![],
-                            ASTNode::Call { function, args: supers } => {
+                            ASTNode::Call {
+                                function,
+                                args: supers,
+                            } => {
                                 let mut all_supers = vec![*function.clone()];
                                 all_supers.extend(supers.clone());
-                                all_supers.iter().filter_map(|s| {
-                                    if let ASTNode::Variable(name) = s {
-                                        Some(name.clone())
-                                    } else {
-                                        None
-                                    }
-                                }).collect()
+                                all_supers
+                                    .iter()
+                                    .filter_map(|s| {
+                                        if let ASTNode::Variable(name) = s {
+                                            Some(name.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
                             }
                             _ => vec![],
                         };
 
                         // Parse slots (args[2] if it exists, otherwise empty)
-                        let slots_def = if args.len() > 2 { &args[2] } else { &ASTNode::Constant(ConstantValue::Nil) };
+                        let slots_def = if args.len() > 2 {
+                            &args[2]
+                        } else {
+                            &ASTNode::Constant(ConstantValue::Nil)
+                        };
+
+                        fn normalize_defclass_key(raw: &str) -> String {
+                            raw.rsplit(':')
+                                .next()
+                                .unwrap_or(raw)
+                                .trim_start_matches(':')
+                                .to_ascii_lowercase()
+                        }
+
+                        fn ast_symbol_token(node: &ASTNode) -> Option<String> {
+                            match node {
+                                ASTNode::Variable(s) => Some(s.clone()),
+                                ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+                                _ => None,
+                            }
+                        }
+
+                        fn validate_defclass_option(option: &ASTNode) -> Result<(), String> {
+                            let ASTNode::Call { function, args } = option else {
+                                return Err(
+                                    "PROGRAM-ERROR: invalid defclass option form".to_string()
+                                );
+                            };
+                            let Some(raw_name) = ast_symbol_token(function.as_ref()) else {
+                                return Err(
+                                    "PROGRAM-ERROR: invalid defclass option form".to_string()
+                                );
+                            };
+                            match normalize_defclass_key(&raw_name).as_str() {
+                                "documentation" | "metaclass" => {
+                                    if args.len() != 1 {
+                                        return Err(format!(
+                                            "PROGRAM-ERROR: invalid defclass option {}",
+                                            raw_name
+                                        ));
+                                    }
+                                }
+                                "default-initargs" => {
+                                    if args.len() % 2 != 0 {
+                                        return Err(
+                                            "PROGRAM-ERROR: :default-initargs requires keyword/value pairs"
+                                                .to_string(),
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "PROGRAM-ERROR: invalid defclass option {}",
+                                        raw_name
+                                    ));
+                                }
+                            }
+                            Ok(())
+                        }
 
                         let mut slot_specs = Vec::new();
 
@@ -1054,7 +1285,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             ASTNode::Constant(ConstantValue::Nil) => {
                                 // No slots
                             }
-                            ASTNode::Call { function, args: slot_list } => {
+                            ASTNode::Call {
+                                function,
+                                args: slot_list,
+                            } => {
                                 // Process all slots
                                 let mut all_slots = vec![*function.clone()];
                                 all_slots.extend(slot_list.clone());
@@ -1071,9 +1305,13 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                                 accessor: None,
                                                 reader: None,
                                                 writer: None,
+                                                allocation_class: false,
                                             });
                                         }
-                                        ASTNode::Call { function: slot_func, args: slot_options } => {
+                                        ASTNode::Call {
+                                            function: slot_func,
+                                            args: slot_options,
+                                        } => {
                                             let slot_name = match &*slot_func {
                                                 ASTNode::Variable(name) => name.clone(),
                                                 _ => continue,
@@ -1085,11 +1323,14 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                             let mut accessor: Option<String> = None;
                                             let mut reader: Option<String> = None;
                                             let mut writer: Option<String> = None;
+                                            let mut allocation_class = false;
 
                                             fn slot_opt_key(node: &ASTNode) -> Option<String> {
                                                 let raw = match node {
                                                     ASTNode::Variable(s) => s.as_str(),
-                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => s.as_str(),
+                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => {
+                                                        s.as_str()
+                                                    }
                                                     _ => return None,
                                                 };
                                                 let base = raw.rsplit(':').next().unwrap_or(raw);
@@ -1099,47 +1340,140 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                             fn slot_opt_symbol(node: &ASTNode) -> Option<String> {
                                                 match node {
                                                     ASTNode::Variable(s) => Some(s.clone()),
-                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => Some(s.clone()),
+                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => {
+                                                        Some(s.clone())
+                                                    }
+                                                    _ => None,
+                                                }
+                                            }
+
+                                            fn slot_opt_function_name(
+                                                node: &ASTNode,
+                                            ) -> Option<String>
+                                            {
+                                                match node {
+                                                    ASTNode::Variable(s) => Some(s.clone()),
+                                                    ASTNode::Constant(ConstantValue::Symbol(s)) => {
+                                                        Some(s.clone())
+                                                    }
+                                                    ASTNode::Call { function, args } => {
+                                                        if let ASTNode::Variable(name) =
+                                                            function.as_ref()
+                                                        {
+                                                            if name.eq_ignore_ascii_case("setf")
+                                                                && args.len() == 1
+                                                            {
+                                                                if let Some(inner) =
+                                                                    slot_opt_symbol(&args[0])
+                                                                {
+                                                                    return Some(format!(
+                                                                        "(setf {})",
+                                                                        inner
+                                                                    ));
+                                                                }
+                                                            }
+                                                        }
+                                                        None
+                                                    }
                                                     _ => None,
                                                 }
                                             }
 
                                             let mut i = 0;
                                             while i < slot_options.len() {
-                                                if let Some(option_key) = slot_opt_key(&slot_options[i]) {
-                                                    if i + 1 < slot_options.len() {
-                                                        match option_key.as_str() {
-                                                            "initarg" => {
-                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
-                                                                    initarg = Some(val);
-                                                                }
-                                                            }
-                                                            "initform" => {
-                                                                initform = Some(Box::new(slot_options[i + 1].clone()));
-                                                            }
-                                                            "accessor" => {
-                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
-                                                                    accessor = Some(val);
-                                                                }
-                                                            }
-                                                            "reader" => {
-                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
-                                                                    reader = Some(val);
-                                                                }
-                                                            }
-                                                            "writer" => {
-                                                                if let Some(val) = slot_opt_symbol(&slot_options[i + 1]) {
-                                                                    writer = Some(val);
-                                                                }
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                        i += 2;
-                                                    } else {
-                                                        i += 1;
+                                                if let Some(option_key) =
+                                                    slot_opt_key(&slot_options[i])
+                                                {
+                                                    if i + 1 >= slot_options.len() {
+                                                        return Err(format!(
+                                                            "PROGRAM-ERROR: malformed defclass slot option {}",
+                                                            option_key
+                                                        ));
                                                     }
+                                                    match option_key.as_str() {
+                                                        "initarg" => {
+                                                            if let Some(val) = slot_opt_symbol(
+                                                                &slot_options[i + 1],
+                                                            ) {
+                                                                initarg = Some(val);
+                                                            } else {
+                                                                return Err(
+                                                                    "PROGRAM-ERROR: malformed defclass :initarg"
+                                                                        .to_string(),
+                                                                );
+                                                            }
+                                                        }
+                                                        "initform" => {
+                                                            initform = Some(Box::new(
+                                                                slot_options[i + 1].clone(),
+                                                            ));
+                                                        }
+                                                        "accessor" => {
+                                                            if let Some(val) = slot_opt_symbol(
+                                                                &slot_options[i + 1],
+                                                            ) {
+                                                                accessor = Some(val);
+                                                            } else {
+                                                                return Err(
+                                                                    "PROGRAM-ERROR: malformed defclass :accessor"
+                                                                        .to_string(),
+                                                                );
+                                                            }
+                                                        }
+                                                        "reader" => {
+                                                            if let Some(val) = slot_opt_symbol(
+                                                                &slot_options[i + 1],
+                                                            ) {
+                                                                reader = Some(val);
+                                                            } else {
+                                                                return Err(
+                                                                    "PROGRAM-ERROR: malformed defclass :reader"
+                                                                        .to_string(),
+                                                                );
+                                                            }
+                                                        }
+                                                        "writer" => {
+                                                            if let Some(val) =
+                                                                slot_opt_function_name(
+                                                                    &slot_options[i + 1],
+                                                                )
+                                                            {
+                                                                writer = Some(val);
+                                                            } else {
+                                                                return Err(
+                                                                    "PROGRAM-ERROR: malformed defclass :writer"
+                                                                        .to_string(),
+                                                                );
+                                                            }
+                                                        }
+                                                        "allocation" => {
+                                                            if let Some(val) = slot_opt_symbol(
+                                                                &slot_options[i + 1],
+                                                            ) {
+                                                                let base = val
+                                                                    .rsplit(':')
+                                                                    .next()
+                                                                    .unwrap_or(val.as_str())
+                                                                    .trim_start_matches(':')
+                                                                    .to_ascii_lowercase();
+                                                                allocation_class = base == "class";
+                                                            }
+                                                        }
+                                                        "documentation" | "type" => {
+                                                        }
+                                                        _ => {
+                                                            return Err(format!(
+                                                                "PROGRAM-ERROR: invalid defclass slot option {}",
+                                                                option_key
+                                                            ));
+                                                        }
+                                                    }
+                                                    i += 2;
                                                 } else {
-                                                    i += 1;
+                                                    return Err(
+                                                        "PROGRAM-ERROR: malformed defclass slot specification"
+                                                            .to_string(),
+                                                    );
                                                 }
                                             }
 
@@ -1150,19 +1484,48 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                                 accessor,
                                                 reader,
                                                 writer,
+                                                allocation_class,
                                             });
                                         }
                                         _ => {}
                                     }
                                 }
                             }
-                            _ => {}
+                            _ => {
+                                return Err("PROGRAM-ERROR: defclass slots must be a proper list"
+                                    .to_string())
+                            }
+                        }
+
+                        let mut metaclass = None;
+                        if args.len() > 3 {
+                            for option in &args[3..] {
+                                validate_defclass_option(option)?;
+                                let ASTNode::Call { function, args } = option else {
+                                    continue;
+                                };
+                                let Some(raw_name) = ast_symbol_token(function.as_ref()) else {
+                                    continue;
+                                };
+                                if normalize_defclass_key(&raw_name) == "metaclass" {
+                                    if let Some(value) = args.first() {
+                                        metaclass = match value {
+                                            ASTNode::Variable(name) => Some(name.clone()),
+                                            ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                                                Some(name.clone())
+                                            }
+                                            _ => None,
+                                        };
+                                    }
+                                }
+                            }
                         }
 
                         return Ok(ASTNode::Defclass {
                             name: class_name,
                             superclasses,
                             slots: slot_specs,
+                            metaclass,
                         });
                     }
                     "define-condition" => {
@@ -1176,7 +1539,9 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // (defgeneric name lambda-list [:argument-precedence-order ...] [:documentation ...])
                         let args = cdr_to_vec(cdr)?;
                         if args.len() < 2 {
-                            return Err("defgeneric requires at least name and lambda-list".to_string());
+                            return Err(
+                                "defgeneric requires at least name and lambda-list".to_string()
+                            );
                         }
 
                         // If any args contain unquote (from backquote), keep as Call
@@ -1192,54 +1557,79 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         let name = match &args[0] {
                             ASTNode::Variable(n) => n.clone(),
                             ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
-                            ASTNode::Call { function, args: setf_args } => {
+                            ASTNode::Call {
+                                function,
+                                args: setf_args,
+                            } => {
                                 // Handle (setf name) form
                                 if let ASTNode::Variable(fn_name) = &**function {
-                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty()
+                                    {
                                         if let ASTNode::Variable(setf_name) = &setf_args[0] {
                                             format!("(setf {})", setf_name)
-                                        } else if let ASTNode::Constant(ConstantValue::Symbol(setf_name)) = &setf_args[0] {
+                                        } else if let ASTNode::Constant(ConstantValue::Symbol(
+                                            setf_name,
+                                        )) = &setf_args[0]
+                                        {
                                             format!("(setf {})", setf_name)
                                         } else {
-                                            return Err("defgeneric (setf name) requires a symbol name".to_string());
+                                            return Err(
+                                                "defgeneric (setf name) requires a symbol name"
+                                                    .to_string(),
+                                            );
                                         }
                                     } else {
-                                        return Err("defgeneric name must be a symbol or (setf name)".to_string());
+                                        return Err(
+                                            "defgeneric name must be a symbol or (setf name)"
+                                                .to_string(),
+                                        );
                                     }
                                 } else {
-                                    return Err("defgeneric name must be a symbol or (setf name)".to_string());
+                                    return Err("defgeneric name must be a symbol or (setf name)"
+                                        .to_string());
                                 }
                             }
-                            _ => return Err(format!("defgeneric name must be a symbol, got {:?}", &args[0])),
+                            _ => {
+                                return Err(format!(
+                                    "defgeneric name must be a symbol, got {:?}",
+                                    &args[0]
+                                ))
+                            }
                         };
 
                         // Parse lambda list
                         let lambda_list = match &args[1] {
                             ASTNode::Constant(ConstantValue::Nil) => vec![],
-                            ASTNode::Call { function, args: params } => {
+                            ASTNode::Call {
+                                function,
+                                args: params,
+                            } => {
                                 let mut all_params = vec![*function.clone()];
                                 all_params.extend(params.clone());
-                                all_params.iter().filter_map(|p| {
-                                    if let ASTNode::Variable(name) = p {
-                                        Some(name.clone())
-                                    } else {
-                                        None
-                                    }
-                                }).collect()
+                                all_params
+                                    .iter()
+                                    .filter_map(|p| {
+                                        if let ASTNode::Variable(name) = p {
+                                            Some(name.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
                             }
                             _ => vec![],
                         };
 
-                        return Ok(ASTNode::Defgeneric {
-                            name,
-                            lambda_list,
-                        });
+                        return Ok(ASTNode::Defgeneric { name, lambda_list });
                     }
                     "defmethod" => {
                         // (defmethod name [:qualifier] (specialized-lambda-list) body...)
                         let args = cdr_to_vec(cdr)?;
                         if args.len() < 2 {
-                            return Err("defmethod requires at least name and specialized-lambda-list".to_string());
+                            return Err(
+                                "defmethod requires at least name and specialized-lambda-list"
+                                    .to_string(),
+                            );
                         }
 
                         // If any args contain unquote (from backquote), keep as Call
@@ -1255,25 +1645,44 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         let generic_name = match &args[0] {
                             ASTNode::Variable(n) => n.clone(),
                             ASTNode::Constant(ConstantValue::Symbol(s)) => s.clone(),
-                            ASTNode::Call { function, args: setf_args } => {
+                            ASTNode::Call {
+                                function,
+                                args: setf_args,
+                            } => {
                                 // Handle (setf name) form
                                 if let ASTNode::Variable(fn_name) = &**function {
-                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty() {
+                                    if fn_name.eq_ignore_ascii_case("setf") && !setf_args.is_empty()
+                                    {
                                         if let ASTNode::Variable(setf_name) = &setf_args[0] {
                                             format!("(setf {})", setf_name)
-                                        } else if let ASTNode::Constant(ConstantValue::Symbol(setf_name)) = &setf_args[0] {
+                                        } else if let ASTNode::Constant(ConstantValue::Symbol(
+                                            setf_name,
+                                        )) = &setf_args[0]
+                                        {
                                             format!("(setf {})", setf_name)
                                         } else {
-                                            return Err("defmethod (setf name) requires a symbol name".to_string());
+                                            return Err(
+                                                "defmethod (setf name) requires a symbol name"
+                                                    .to_string(),
+                                            );
                                         }
                                     } else {
-                                        return Err("defmethod name must be a symbol or (setf name)".to_string());
+                                        return Err(
+                                            "defmethod name must be a symbol or (setf name)"
+                                                .to_string(),
+                                        );
                                     }
                                 } else {
-                                    return Err("defmethod name must be a symbol or (setf name)".to_string());
+                                    return Err("defmethod name must be a symbol or (setf name)"
+                                        .to_string());
                                 }
                             }
-                            _ => return Err(format!("defmethod name must be a symbol, got {:?}", &args[0])),
+                            _ => {
+                                return Err(format!(
+                                    "defmethod name must be a symbol, got {:?}",
+                                    &args[0]
+                                ))
+                            }
                         };
 
                         // Check for optional qualifier (:before, :after, :around)
@@ -1288,7 +1697,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                             } else {
                                 format!(":{}", raw_kw.to_uppercase())
                             };
-                            if normalized == ":BEFORE" || normalized == ":AFTER" || normalized == ":AROUND" {
+                            if normalized == ":BEFORE"
+                                || normalized == ":AFTER"
+                                || normalized == ":AROUND"
+                            {
                                 (Some(normalized), 2)
                             } else {
                                 (None, 1)
@@ -1305,13 +1717,43 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                         // CLOS specializers apply only to required parameters.
                         let (specializers, params) = match &args[lambda_list_idx] {
                             ASTNode::Constant(ConstantValue::Nil) => (vec![], vec![]),
-                            ASTNode::Call { function, args: param_specs } => {
+                            ASTNode::Call {
+                                function,
+                                args: param_specs,
+                            } => {
                                 let mut all_param_specs = vec![*function.clone()];
                                 all_param_specs.extend(param_specs.clone());
 
                                 let mut spec_vec = Vec::new();
                                 let mut param_vec = Vec::new();
                                 let mut in_required = true;
+                                let encode_eql_value = |node: &ASTNode| -> Option<String> {
+                                    match node {
+                                        ASTNode::Variable(name)
+                                        | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                                            if name.eq_ignore_ascii_case("t") {
+                                                Some("EQL::T".to_string())
+                                            } else if name.eq_ignore_ascii_case("nil") {
+                                                Some("EQL::NIL".to_string())
+                                            } else {
+                                                Some(format!("EQL::SYM:{}", name))
+                                            }
+                                        }
+                                        ASTNode::Constant(ConstantValue::Fixnum(n)) => {
+                                            Some(format!("EQL::FIXNUM:{}", n))
+                                        }
+                                        ASTNode::Constant(ConstantValue::String(s)) => {
+                                            Some(format!("EQL::STRING:{}", s))
+                                        }
+                                        ASTNode::Constant(ConstantValue::Nil) => {
+                                            Some("EQL::NIL".to_string())
+                                        }
+                                        ASTNode::Constant(ConstantValue::T) => {
+                                            Some("EQL::T".to_string())
+                                        }
+                                        _ => None,
+                                    }
+                                };
                                 let extract_eql_specializer = |node: &ASTNode| -> Option<String> {
                                     let ASTNode::Call { function, args } = node else {
                                         return None;
@@ -1323,58 +1765,76 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                         return None;
                                     }
                                     match &args[0] {
-                                        ASTNode::Variable(name) => Some(format!("EQL::SYM:{}", name)),
-                                        ASTNode::Constant(ConstantValue::Symbol(name)) => {
-                                            Some(format!("EQL::SYM:{}", name))
+                                        ASTNode::Variable(_)
+                                        | ASTNode::Constant(ConstantValue::Symbol(_))
+                                        | ASTNode::Constant(ConstantValue::Fixnum(_))
+                                        | ASTNode::Constant(ConstantValue::String(_))
+                                        | ASTNode::Constant(ConstantValue::Nil)
+                                        | ASTNode::Constant(ConstantValue::T) => {
+                                            encode_eql_value(&args[0])
                                         }
                                         ASTNode::Quote(inner) => match inner.as_ref() {
-                                            ASTNode::Variable(name) => Some(format!("EQL::SYM:{}", name)),
-                                            ASTNode::Constant(ConstantValue::Symbol(name)) => {
-                                                Some(format!("EQL::SYM:{}", name))
-                                            }
-                                            ASTNode::Constant(ConstantValue::Fixnum(n)) => {
-                                                Some(format!("EQL::FIXNUM:{}", n))
-                                            }
-                                            ASTNode::Constant(ConstantValue::String(s)) => {
-                                                Some(format!("EQL::STRING:{}", s))
-                                            }
-                                            ASTNode::Constant(ConstantValue::Nil) => {
-                                                Some("EQL::NIL".to_string())
-                                            }
-                                            ASTNode::Constant(ConstantValue::T) => {
-                                                Some("EQL::T".to_string())
+                                            ASTNode::Variable(_)
+                                            | ASTNode::Constant(ConstantValue::Symbol(_))
+                                            | ASTNode::Constant(ConstantValue::Fixnum(_))
+                                            | ASTNode::Constant(ConstantValue::String(_))
+                                            | ASTNode::Constant(ConstantValue::Nil)
+                                            | ASTNode::Constant(ConstantValue::T) => {
+                                                encode_eql_value(inner.as_ref())
                                             }
                                             _ => Some("T".to_string()),
                                         },
-                                        ASTNode::Constant(ConstantValue::Fixnum(n)) => {
-                                            Some(format!("EQL::FIXNUM:{}", n))
-                                        }
-                                        ASTNode::Constant(ConstantValue::String(s)) => {
-                                            Some(format!("EQL::STRING:{}", s))
-                                        }
-                                        ASTNode::Constant(ConstantValue::Nil) => Some("EQL::NIL".to_string()),
-                                        ASTNode::Constant(ConstantValue::T) => Some("EQL::T".to_string()),
                                         _ => Some("T".to_string()),
                                     }
                                 };
+                                let extract_flat_eql_specializer =
+                                    |nodes: &[ASTNode]| -> Option<String> {
+                                        if let [ASTNode::Variable(op), value, ..] = nodes {
+                                            if op.eq_ignore_ascii_case("eql") {
+                                                return encode_eql_value(value);
+                                            }
+                                        }
+                                        if let [ASTNode::Constant(ConstantValue::Symbol(op)), value, ..] =
+                                            nodes
+                                        {
+                                            if op.eq_ignore_ascii_case("eql") {
+                                                return encode_eql_value(value);
+                                            }
+                                        }
+                                        None
+                                    };
 
                                 let extract_nonrequired_name = |node: &ASTNode| -> Option<String> {
                                     match node {
                                         ASTNode::Variable(name) => Some(name.clone()),
-                                        ASTNode::Constant(ConstantValue::Symbol(name)) => Some(name.clone()),
+                                        ASTNode::Constant(ConstantValue::Symbol(name)) => {
+                                            Some(name.clone())
+                                        }
                                         ASTNode::Call { function, args } => {
                                             match function.as_ref() {
-                                                ASTNode::Variable(name) if !name.starts_with(':') => Some(name.clone()),
-                                                ASTNode::Call { function: inner_fn, args: inner_args } => {
+                                                ASTNode::Variable(name)
+                                                    if !name.starts_with(':') =>
+                                                {
+                                                    Some(name.clone())
+                                                }
+                                                ASTNode::Call {
+                                                    function: inner_fn,
+                                                    args: inner_args,
+                                                } => {
                                                     if !inner_args.is_empty() {
-                                                        if let ASTNode::Variable(v) = &inner_args[0] {
+                                                        if let ASTNode::Variable(v) = &inner_args[0]
+                                                        {
                                                             return Some(v.clone());
                                                         }
-                                                        if let ASTNode::Constant(ConstantValue::Symbol(v)) = &inner_args[0] {
+                                                        if let ASTNode::Constant(
+                                                            ConstantValue::Symbol(v),
+                                                        ) = &inner_args[0]
+                                                        {
                                                             return Some(v.clone());
                                                         }
                                                     }
-                                                    if let ASTNode::Variable(v) = inner_fn.as_ref() {
+                                                    if let ASTNode::Variable(v) = inner_fn.as_ref()
+                                                    {
                                                         if !v.starts_with(':') {
                                                             return Some(v.clone());
                                                         }
@@ -1386,7 +1846,10 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                                         if let ASTNode::Variable(v) = &args[0] {
                                                             return Some(v.clone());
                                                         }
-                                                        if let ASTNode::Constant(ConstantValue::Symbol(v)) = &args[0] {
+                                                        if let ASTNode::Constant(
+                                                            ConstantValue::Symbol(v),
+                                                        ) = &args[0]
+                                                        {
                                                             return Some(v.clone());
                                                         }
                                                     }
@@ -1424,16 +1887,105 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                         }
                                         ASTNode::Call { function, args } => {
                                             if in_required {
-                                                if let ASTNode::Variable(param_name) = function.as_ref() {
-                                                    param_vec.push(param_name.clone());
-                                                    if let Some(class_node) = args.first() {
-                                                        if let Some(encoded) = extract_eql_specializer(class_node) {
+                                                let (param_name, type_args): (
+                                                    Option<String>,
+                                                    &[ASTNode],
+                                                ) = if let ASTNode::Variable(param_name) =
+                                                    function.as_ref()
+                                                {
+                                                    (Some(param_name.clone()), args.as_slice())
+                                                } else if let ASTNode::Call {
+                                                    function: inner_function,
+                                                    args: inner_args,
+                                                } = function.as_ref()
+                                                {
+                                                    if let ASTNode::Variable(param_name) =
+                                                        inner_function.as_ref()
+                                                    {
+                                                        (
+                                                            Some(param_name.clone()),
+                                                            inner_args.as_slice(),
+                                                        )
+                                                    } else {
+                                                        (None, &[])
+                                                    }
+                                                } else {
+                                                    (None, &[])
+                                                };
+                                                if let Some(param_name) = param_name {
+                                                    let param_name_for_recovery =
+                                                        param_name.clone();
+                                                    param_vec.push(param_name);
+                                                    if let Some(encoded) =
+                                                        extract_flat_eql_specializer(type_args)
+                                                    {
+                                                        spec_vec.push(encoded);
+                                                    } else if let Some(class_node) =
+                                                        type_args.first()
+                                                    {
+                                                        if let Some(encoded) =
+                                                            extract_eql_specializer(class_node)
+                                                        {
                                                             spec_vec.push(encoded);
                                                         } else {
                                                             match class_node {
-                                                                ASTNode::Variable(class_name) => spec_vec.push(class_name.clone()),
-                                                                ASTNode::Constant(ConstantValue::Symbol(class_name)) => {
-                                                                    spec_vec.push(class_name.clone())
+                                                                ASTNode::Variable(class_name) => {
+                                                                    if class_name
+                                                                        .eq_ignore_ascii_case("t")
+                                                                        && param_name_for_recovery
+                                                                            .eq_ignore_ascii_case(
+                                                                                "true",
+                                                                            )
+                                                                    {
+                                                                        spec_vec.push(
+                                                                            "EQL::T".to_string(),
+                                                                        )
+                                                                    } else if class_name
+                                                                        .eq_ignore_ascii_case("t")
+                                                                        && param_name_for_recovery
+                                                                            .eq_ignore_ascii_case(
+                                                                                "n",
+                                                                            )
+                                                                    {
+                                                                        spec_vec.push(
+                                                                            "EQL::NIL".to_string(),
+                                                                        )
+                                                                    } else {
+                                                                        spec_vec.push(
+                                                                            class_name.clone(),
+                                                                        )
+                                                                    }
+                                                                }
+                                                                ASTNode::Constant(
+                                                                    ConstantValue::Symbol(
+                                                                        class_name,
+                                                                    ),
+                                                                ) => {
+                                                                    if class_name
+                                                                        .eq_ignore_ascii_case("t")
+                                                                        && param_name_for_recovery
+                                                                            .eq_ignore_ascii_case(
+                                                                                "true",
+                                                                            )
+                                                                    {
+                                                                        spec_vec.push(
+                                                                            "EQL::T".to_string(),
+                                                                        )
+                                                                    } else if class_name
+                                                                        .eq_ignore_ascii_case("t")
+                                                                        && param_name_for_recovery
+                                                                            .eq_ignore_ascii_case(
+                                                                                "n",
+                                                                            )
+                                                                    {
+                                                                        spec_vec.push(
+                                                                            "EQL::NIL".to_string(),
+                                                                        )
+                                                                    } else {
+                                                                        spec_vec.push(
+                                                                            class_name.clone(),
+                                                                        )
+                                                                    }
                                                                 }
                                                                 _ => spec_vec.push("T".to_string()),
                                                             }
@@ -1442,7 +1994,12 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
                                                         spec_vec.push("T".to_string());
                                                     }
                                                 }
-                                            } else if let Some(name) = extract_nonrequired_name(&ASTNode::Call { function, args }) {
+                                            } else if let Some(name) =
+                                                extract_nonrequired_name(&ASTNode::Call {
+                                                    function,
+                                                    args,
+                                                })
+                                            {
                                                 param_vec.push(name);
                                             }
                                         }
@@ -1530,9 +2087,16 @@ fn cons_to_ast(obj: LispObject) -> Result<ASTNode, String> {
         });
     }
 
-    // Regular list - convert to Call
+    // Regular list - convert to Call, but preserve improper source forms so
+    // macro arguments keep their exact cons structure.
     let car_ast = lisp_to_ast(car)?;
-    let args = cdr_to_vec(cdr)?;
+    let (args, tail) = cdr_to_vec_with_tail(cdr)?;
+    if let Some(tail_ast) = tail {
+        return Ok(ASTNode::DottedPair {
+            car: Box::new(car_ast),
+            cdr: Box::new(build_data_list_ast(args, Some(tail_ast))),
+        });
+    }
 
     if std::env::var("RLASP_DEBUG_DEFUN_ACTUAL").is_ok() {
         if let ASTNode::Variable(name) = &car_ast {
@@ -1552,7 +2116,14 @@ fn extract_params(ast: &ASTNode) -> Vec<String> {
     params
 }
 
-fn extract_params_with_defaults(ast: &ASTNode) -> (Vec<String>, std::collections::HashMap<String, ASTNode>, std::collections::HashMap<String, String>, std::collections::HashMap<String, String>) {
+fn extract_params_with_defaults(
+    ast: &ASTNode,
+) -> (
+    Vec<String>,
+    std::collections::HashMap<String, ASTNode>,
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, String>,
+) {
     super::eval::extract_params_with_defaults(ast)
 }
 
@@ -1567,7 +2138,11 @@ fn contains_unquote(ast: &ASTNode) -> bool {
         }
         ASTNode::Quote(inner) => contains_unquote(inner),
         ASTNode::Backquote(_) => false, // Don't recurse into backquotes - unquotes inside are expected
-        ASTNode::If { test, then_branch, else_branch } => {
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => {
             contains_unquote(test) || contains_unquote(then_branch) || contains_unquote(else_branch)
         }
         ASTNode::Progn { exprs } => exprs.iter().any(|e| contains_unquote(e)),
@@ -1584,7 +2159,11 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
             let mut bindings = vec![];
 
             // First binding from function position
-            if let ASTNode::Call { function: var, args: val_args } = &**function {
+            if let ASTNode::Call {
+                function: var,
+                args: val_args,
+            } = &**function
+            {
                 if let ASTNode::Variable(var_name) = &**var {
                     if val_args.len() == 1 {
                         bindings.push((var_name.clone(), val_args[0].clone()));
@@ -1603,18 +2182,26 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
                 bindings.push((var_name.clone(), ASTNode::Constant(ConstantValue::Nil)));
             } else {
                 // Unknown binding format - use generic name and bind to nil (lenient)
-                bindings.push(("_genbind_".to_string(), ASTNode::Constant(ConstantValue::Nil)));
+                bindings.push((
+                    "_genbind_".to_string(),
+                    ASTNode::Constant(ConstantValue::Nil),
+                ));
             }
 
             // Remaining bindings from args
             for arg in args {
-                if let ASTNode::Call { function: var, args: val_args } = arg {
+                if let ASTNode::Call {
+                    function: var,
+                    args: val_args,
+                } = arg
+                {
                     if let ASTNode::Variable(var_name) = &**var {
                         if val_args.len() == 1 {
                             bindings.push((var_name.clone(), val_args[0].clone()));
                         } else if val_args.is_empty() {
                             // (var) with no value defaults to nil
-                            bindings.push((var_name.clone(), ASTNode::Constant(ConstantValue::Nil)));
+                            bindings
+                                .push((var_name.clone(), ASTNode::Constant(ConstantValue::Nil)));
                         } else {
                             // Multiple values - take first value, ignore rest (lenient parsing)
                             bindings.push((var_name.clone(), val_args[0].clone()));
@@ -1627,7 +2214,10 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
                     bindings.push((var_name.clone(), ASTNode::Constant(ConstantValue::Nil)));
                 } else {
                     // Unknown binding format - use generic name and bind to nil (lenient)
-                    bindings.push(("_genbind_".to_string(), ASTNode::Constant(ConstantValue::Nil)));
+                    bindings.push((
+                        "_genbind_".to_string(),
+                        ASTNode::Constant(ConstantValue::Nil),
+                    ));
                 }
             }
 
@@ -1640,20 +2230,24 @@ fn extract_bindings(ast: &ASTNode) -> Result<Vec<(String, ASTNode)>, String> {
 /// Check for unquote/unquote-splicing in a raw LispObject
 /// Used to defer evaluation when unquote is found in backquote contexts
 fn contains_unquote_raw(obj: &LispObject) -> bool {
-    fn symbol_base_name(obj: &LispObject) -> Option<String> {
-        let ptr = obj.as_general_ptr::<u8>()?;
+    fn symbol_base_matches(obj: &LispObject, names: &[&str]) -> bool {
+        let Some(ptr) = obj.as_general_ptr::<u8>() else {
+            return false;
+        };
         if ptr.is_null() || unsafe { TypeHeader::from_ptr(ptr) } != Some(ObjectType::Symbol) {
-            return None;
+            return false;
         }
         let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-        let name = sym.name().to_string();
-        Some(name.rsplit(':').next().unwrap_or(name.as_str()).to_ascii_lowercase())
+        let name = sym.name();
+        let base = name.rsplit(':').next().unwrap_or(name);
+        names
+            .iter()
+            .any(|candidate| base.eq_ignore_ascii_case(candidate))
     }
 
     fn contains_unquote_raw_with_depth(obj: &LispObject, quasiquote_depth: usize) -> bool {
-        if let Some(base) = symbol_base_name(obj) {
-            return quasiquote_depth == 0
-                && (base == "unquote" || base == "unquote-splicing");
+        if symbol_base_matches(obj, &["unquote", "unquote-splicing"]) {
+            return quasiquote_depth == 0;
         }
 
         if !obj.is_cons() {
@@ -1671,32 +2265,30 @@ fn contains_unquote_raw(obj: &LispObject) -> bool {
         let car = cons.car();
         let cdr = cons.cdr();
 
-        if let Some(base) = symbol_base_name(&car) {
-            if base == "backquote" || base == "quasiquote" {
-                if let Some(arg_ptr) = cdr.as_cons_ptr() {
-                    if !arg_ptr.is_null() {
-                        let arg_cons = unsafe { &*arg_ptr };
-                        return contains_unquote_raw_with_depth(&arg_cons.car(), quasiquote_depth + 1);
-                    }
+        if symbol_base_matches(&car, &["backquote", "quasiquote"]) {
+            if let Some(arg_ptr) = cdr.as_cons_ptr() {
+                if !arg_ptr.is_null() {
+                    let arg_cons = unsafe { &*arg_ptr };
+                    return contains_unquote_raw_with_depth(&arg_cons.car(), quasiquote_depth + 1);
                 }
-                return false;
             }
+            return false;
+        }
 
-            if base == "unquote" || base == "unquote-splicing" {
-                if quasiquote_depth == 0 {
-                    return true;
-                }
-                if let Some(arg_ptr) = cdr.as_cons_ptr() {
-                    if !arg_ptr.is_null() {
-                        let arg_cons = unsafe { &*arg_ptr };
-                        return contains_unquote_raw_with_depth(
-                            &arg_cons.car(),
-                            quasiquote_depth.saturating_sub(1),
-                        );
-                    }
-                }
-                return false;
+        if symbol_base_matches(&car, &["unquote", "unquote-splicing"]) {
+            if quasiquote_depth == 0 {
+                return true;
             }
+            if let Some(arg_ptr) = cdr.as_cons_ptr() {
+                if !arg_ptr.is_null() {
+                    let arg_cons = unsafe { &*arg_ptr };
+                    return contains_unquote_raw_with_depth(
+                        &arg_cons.car(),
+                        quasiquote_depth.saturating_sub(1),
+                    );
+                }
+            }
+            return false;
         }
 
         contains_unquote_raw_with_depth(&car, quasiquote_depth)
@@ -1723,7 +2315,8 @@ fn expand_symbol_macros(ast: &ASTNode, bindings: &[(String, ASTNode)]) -> Result
         // For calls, recursively expand in function and args
         ASTNode::Call { function, args } => {
             let expanded_func = expand_symbol_macros(function, bindings)?;
-            let expanded_args: Result<Vec<ASTNode>, String> = args.iter()
+            let expanded_args: Result<Vec<ASTNode>, String> = args
+                .iter()
                 .map(|arg| expand_symbol_macros(arg, bindings))
                 .collect();
             Ok(ASTNode::Call {
@@ -1732,20 +2325,26 @@ fn expand_symbol_macros(ast: &ASTNode, bindings: &[(String, ASTNode)]) -> Result
             })
         }
         // For other node types, recursively expand as needed
-        ASTNode::If { test, then_branch, else_branch } => {
-            Ok(ASTNode::If {
-                test: Box::new(expand_symbol_macros(test, bindings)?),
-                then_branch: Box::new(expand_symbol_macros(then_branch, bindings)?),
-                else_branch: Box::new(expand_symbol_macros(else_branch, bindings)?),
-            })
-        }
-        ASTNode::Let { bindings: let_bindings, body } => {
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => Ok(ASTNode::If {
+            test: Box::new(expand_symbol_macros(test, bindings)?),
+            then_branch: Box::new(expand_symbol_macros(then_branch, bindings)?),
+            else_branch: Box::new(expand_symbol_macros(else_branch, bindings)?),
+        }),
+        ASTNode::Let {
+            bindings: let_bindings,
+            body,
+        } => {
             // Don't expand symbols that are bound in this let
             let mut new_bindings = Vec::new();
             for (name, value) in let_bindings {
                 new_bindings.push((name.clone(), expand_symbol_macros(value, bindings)?));
             }
-            let expanded_body: Result<Vec<ASTNode>, String> = body.iter()
+            let expanded_body: Result<Vec<ASTNode>, String> = body
+                .iter()
                 .map(|expr| expand_symbol_macros(expr, bindings))
                 .collect();
             Ok(ASTNode::Let {
@@ -1754,7 +2353,8 @@ fn expand_symbol_macros(ast: &ASTNode, bindings: &[(String, ASTNode)]) -> Result
             })
         }
         ASTNode::Progn { exprs } => {
-            let expanded: Result<Vec<ASTNode>, String> = exprs.iter()
+            let expanded: Result<Vec<ASTNode>, String> = exprs
+                .iter()
                 .map(|expr| expand_symbol_macros(expr, bindings))
                 .collect();
             Ok(ASTNode::Progn { exprs: expanded? })
@@ -1810,7 +2410,7 @@ fn try_parse_simple_loop(cdr_list: &[ASTNode]) -> Option<ASTNode> {
     }
     let limit_keyword = match &cdr_list[idx] {
         ASTNode::Variable(s) if s == "below" => s.clone(),
-        _ => return None,  // Let "to", "upto", etc. fall through to expand_loop
+        _ => return None, // Let "to", "upto", etc. fall through to expand_loop
     };
     idx += 1;
 
@@ -1959,7 +2559,8 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
         // Use TypeHeader to determine exact type before casting
         if let Some(ptr) = obj.as_general_ptr::<u8>() {
             if !ptr.is_null() {
-                if let Some(obj_type) = unsafe { rlasp_runtime::header::TypeHeader::from_ptr(ptr) } {
+                if let Some(obj_type) = unsafe { rlasp_runtime::header::TypeHeader::from_ptr(ptr) }
+                {
                     match obj_type {
                         rlasp_runtime::header::ObjectType::Vector => {
                             let vector = unsafe { &*(ptr as *const rlasp_runtime::RVector) };
@@ -1976,6 +2577,9 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                                 }
                                 elements.push(lisp_to_ast_as_data(*elem)?);
                             }
+                            if dims.is_empty() && elements.len() != 1 {
+                                return Ok(ASTNode::Vector(elements));
+                            }
                             if dims.len() != 1 {
                                 return Ok(ASTNode::ArrayLiteral { dims, elements });
                             }
@@ -1983,12 +2587,14 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                         }
                         rlasp_runtime::header::ObjectType::Symbol => {
                             let symbol = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-                            let name = symbol.name().to_string();
+                            let name = ast_symbol_name(obj, symbol);
                             // Strings are currently encoded by the reader as symbols with quotes.
                             // Preserve them as string constants even in quoted/data context.
                             if name.starts_with('"') && name.ends_with('"') && name.len() >= 2 {
                                 let string_content = &name[1..name.len() - 1];
-                                return Ok(ASTNode::Constant(ConstantValue::String(string_content.to_string())));
+                                return Ok(ASTNode::Constant(ConstantValue::String(
+                                    string_content.to_string(),
+                                )));
                             }
                             // Don't check for T here - T in quoted context is just a symbol
                             return Ok(ASTNode::Variable(name.to_string()));
@@ -2001,7 +2607,9 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                                     return Ok(ASTNode::Constant(ConstantValue::Float(*f, format)));
                                 }
                                 rlasp_runtime::NumberValue::Bignum(b) => {
-                                    return Ok(ASTNode::Constant(ConstantValue::Bignum(b.to_string())));
+                                    return Ok(ASTNode::Constant(ConstantValue::Bignum(
+                                        b.to_string(),
+                                    )));
                                 }
                                 rlasp_runtime::NumberValue::Ratio(r) => {
                                     let mut num_s = r.numerator_ref().to_string();
@@ -2009,10 +2617,14 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                                         num_s = format!("-{}", num_s);
                                     }
                                     let den_s = r.denominator_ref().to_string();
-                                    return Ok(ASTNode::Constant(ConstantValue::Ratio(num_s, den_s)));
+                                    return Ok(ASTNode::Constant(ConstantValue::Ratio(
+                                        num_s, den_s,
+                                    )));
                                 }
                                 rlasp_runtime::NumberValue::Complex(c) => {
-                                    return Ok(ASTNode::Constant(ConstantValue::Complex(c.re, c.im)));
+                                    return Ok(ASTNode::Constant(ConstantValue::Complex(
+                                        c.re, c.im,
+                                    )));
                                 }
                             }
                         }
@@ -2020,7 +2632,9 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
                             // Handle string
                             let str_ptr = ptr as *const rlasp_runtime::RString;
                             let s = unsafe { (*str_ptr).as_str() };
-                            return Ok(ASTNode::Constant(crate::ir::ConstantValue::String(s.to_string())));
+                            return Ok(ASTNode::Constant(crate::ir::ConstantValue::String(
+                                s.to_string(),
+                            )));
                         }
                         _ => {} // Fall through to other checks
                     }
@@ -2124,20 +2738,32 @@ fn lisp_to_ast_as_data(obj: LispObject) -> Result<ASTNode, String> {
 }
 
 fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
+    let (mut result, tail) = cdr_to_vec_with_tail(cdr)?;
+    if let Some(tail_ast) = tail {
+        if let Some(mut tail_items) = ast_list_to_vec(tail_ast.clone()) {
+            result.append(&mut tail_items);
+        } else {
+            result.push(tail_ast);
+        }
+    }
+    Ok(result)
+}
+
+fn cdr_to_vec_with_tail(mut cdr: LispObject) -> Result<(Vec<ASTNode>, Option<ASTNode>), String> {
     let mut result = Vec::new();
 
     while cdr.is_cons() {
         if let Some(eval_arg) = read_time_eval_arg(cdr) {
             let tail_ast = eval_read_time_form(eval_arg, true)?;
             if matches!(tail_ast, ASTNode::Constant(ConstantValue::Nil)) {
-                break;
+                return Ok((result, None));
             }
             if let Some(mut tail_items) = ast_list_to_vec(tail_ast.clone()) {
                 result.append(&mut tail_items);
             } else {
                 result.push(tail_ast);
             }
-            return Ok(result);
+            return Ok((result, None));
         }
         let cons_ptr = cdr.as_cons_ptr().ok_or("Invalid cons pointer")?;
         if cons_ptr.is_null() {
@@ -2160,15 +2786,14 @@ fn cdr_to_vec(mut cdr: LispObject) -> Result<Vec<ASTNode>, String> {
             } else if let Some(mut tail_items) = ast_list_to_vec(tail_ast.clone()) {
                 result.append(&mut tail_items);
             } else {
-                result.push(tail_ast);
+                return Ok((result, Some(tail_ast)));
             }
         } else {
-            // Flatten (a b . c) to [a, b, c]
-            result.push(lisp_to_ast(cdr)?);
+            return Ok((result, Some(lisp_to_ast(cdr)?)));
         }
     }
 
-    Ok(result)
+    Ok((result, None))
 }
 
 /// Get raw LispObjects from a cons list without converting to AST
@@ -2201,7 +2826,7 @@ fn symbol_name_if_symbol(obj: LispObject) -> Option<String> {
         return None;
     }
     let sym = unsafe { &*(ptr as *const rlasp_runtime::Symbol) };
-    Some(sym.name().to_string())
+    Some(ast_symbol_name(obj, sym))
 }
 
 /// Extract bindings from raw LispObject without interpreting special forms for variable names
@@ -2447,12 +3072,18 @@ fn extract_macrolet_bindings(ast: &ASTNode) -> Result<Vec<(String, Vec<String>, 
             let mut bindings = vec![];
 
             // Process first binding
-            if let ASTNode::Call { function: name_node, args: def_parts } = &**function {
+            if let ASTNode::Call {
+                function: name_node,
+                args: def_parts,
+            } = &**function
+            {
                 if let ASTNode::Variable(name) = &**name_node {
                     if def_parts.len() >= 2 {
                         let params = extract_params(&def_parts[0]);
                         let body = if def_parts.len() > 2 {
-                            ASTNode::Progn { exprs: def_parts[1..].to_vec() }
+                            ASTNode::Progn {
+                                exprs: def_parts[1..].to_vec(),
+                            }
                         } else {
                             def_parts[1].clone()
                         };
@@ -2463,12 +3094,18 @@ fn extract_macrolet_bindings(ast: &ASTNode) -> Result<Vec<(String, Vec<String>, 
 
             // Process remaining bindings
             for arg in args {
-                if let ASTNode::Call { function: name_node, args: def_parts } = arg {
+                if let ASTNode::Call {
+                    function: name_node,
+                    args: def_parts,
+                } = arg
+                {
                     if let ASTNode::Variable(name) = &**name_node {
                         if def_parts.len() >= 2 {
                             let params = extract_params(&def_parts[0]);
                             let body = if def_parts.len() > 2 {
-                                ASTNode::Progn { exprs: def_parts[1..].to_vec() }
+                                ASTNode::Progn {
+                                    exprs: def_parts[1..].to_vec(),
+                                }
                             } else {
                                 def_parts[1].clone()
                             };
@@ -2485,11 +3122,15 @@ fn extract_macrolet_bindings(ast: &ASTNode) -> Result<Vec<(String, Vec<String>, 
 }
 
 /// Substitute parameters in a backquoted form
-fn substitute_in_ast(ast: &ASTNode, substitutions: &std::collections::HashMap<String, ASTNode>) -> ASTNode {
+fn substitute_in_ast(
+    ast: &ASTNode,
+    substitutions: &std::collections::HashMap<String, ASTNode>,
+) -> ASTNode {
     match ast {
-        ASTNode::Variable(name) => {
-            substitutions.get(name).cloned().unwrap_or_else(|| ast.clone())
-        }
+        ASTNode::Variable(name) => substitutions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| ast.clone()),
         ASTNode::Unquote(inner) => {
             // In unquote, we evaluate the substitution
             ASTNode::Unquote(Box::new(substitute_in_ast(inner, substitutions)))
@@ -2500,24 +3141,28 @@ fn substitute_in_ast(ast: &ASTNode, substitutions: &std::collections::HashMap<St
         ASTNode::Backquote(inner) => {
             ASTNode::Backquote(Box::new(substitute_in_ast(inner, substitutions)))
         }
-        ASTNode::Call { function, args } => {
-            ASTNode::Call {
-                function: Box::new(substitute_in_ast(function, substitutions)),
-                args: args.iter().map(|a| substitute_in_ast(a, substitutions)).collect(),
-            }
-        }
-        ASTNode::If { test, then_branch, else_branch } => {
-            ASTNode::If {
-                test: Box::new(substitute_in_ast(test, substitutions)),
-                then_branch: Box::new(substitute_in_ast(then_branch, substitutions)),
-                else_branch: Box::new(substitute_in_ast(else_branch, substitutions)),
-            }
-        }
-        ASTNode::Progn { exprs } => {
-            ASTNode::Progn {
-                exprs: exprs.iter().map(|e| substitute_in_ast(e, substitutions)).collect(),
-            }
-        }
+        ASTNode::Call { function, args } => ASTNode::Call {
+            function: Box::new(substitute_in_ast(function, substitutions)),
+            args: args
+                .iter()
+                .map(|a| substitute_in_ast(a, substitutions))
+                .collect(),
+        },
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => ASTNode::If {
+            test: Box::new(substitute_in_ast(test, substitutions)),
+            then_branch: Box::new(substitute_in_ast(then_branch, substitutions)),
+            else_branch: Box::new(substitute_in_ast(else_branch, substitutions)),
+        },
+        ASTNode::Progn { exprs } => ASTNode::Progn {
+            exprs: exprs
+                .iter()
+                .map(|e| substitute_in_ast(e, substitutions))
+                .collect(),
+        },
         ASTNode::Quote(inner) => {
             // Don't substitute inside quotes
             ASTNode::Quote(inner.clone())
@@ -2660,7 +3305,10 @@ fn bind_macro_params(
                         let mut i = arg_idx;
                         while i + 1 < call_args.len() {
                             if let ASTNode::Variable(k) = &call_args[i] {
-                                if k == &key_name || k == &key_name_lower || k.to_uppercase() == key_name {
+                                if k == &key_name
+                                    || k == &key_name_lower
+                                    || k.to_uppercase() == key_name
+                                {
                                     substitutions.insert(param.clone(), call_args[i + 1].clone());
                                     found = true;
                                     break;
@@ -2704,11 +3352,9 @@ fn args_to_list_ast(args: &[ASTNode]) -> ASTNode {
 fn expand_backquote_ast(ast: &ASTNode) -> ASTNode {
     match ast {
         ASTNode::Backquote(inner) => expand_backquote_inner(inner),
-        ASTNode::Progn { exprs } => {
-            ASTNode::Progn {
-                exprs: exprs.iter().map(expand_backquote_ast).collect(),
-            }
-        }
+        ASTNode::Progn { exprs } => ASTNode::Progn {
+            exprs: exprs.iter().map(expand_backquote_ast).collect(),
+        },
         _ => ast.clone(),
     }
 }
@@ -2770,7 +3416,8 @@ fn expand_macrolet_in_ast(
 
             // Not a macro call, recursively expand in function and args
             let expanded_func = expand_macrolet_in_ast(function, macros)?;
-            let expanded_args: Result<Vec<ASTNode>, String> = args.iter()
+            let expanded_args: Result<Vec<ASTNode>, String> = args
+                .iter()
                 .map(|a| expand_macrolet_in_ast(a, macros))
                 .collect();
             Ok(ASTNode::Call {
@@ -2778,24 +3425,29 @@ fn expand_macrolet_in_ast(
                 args: expanded_args?,
             })
         }
-        ASTNode::If { test, then_branch, else_branch } => {
-            Ok(ASTNode::If {
-                test: Box::new(expand_macrolet_in_ast(test, macros)?),
-                then_branch: Box::new(expand_macrolet_in_ast(then_branch, macros)?),
-                else_branch: Box::new(expand_macrolet_in_ast(else_branch, macros)?),
-            })
-        }
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => Ok(ASTNode::If {
+            test: Box::new(expand_macrolet_in_ast(test, macros)?),
+            then_branch: Box::new(expand_macrolet_in_ast(then_branch, macros)?),
+            else_branch: Box::new(expand_macrolet_in_ast(else_branch, macros)?),
+        }),
         ASTNode::Progn { exprs } => {
-            let expanded: Result<Vec<ASTNode>, String> = exprs.iter()
+            let expanded: Result<Vec<ASTNode>, String> = exprs
+                .iter()
                 .map(|e| expand_macrolet_in_ast(e, macros))
                 .collect();
             Ok(ASTNode::Progn { exprs: expanded? })
         }
         ASTNode::Let { bindings, body } => {
-            let expanded_bindings: Result<Vec<(String, ASTNode)>, String> = bindings.iter()
+            let expanded_bindings: Result<Vec<(String, ASTNode)>, String> = bindings
+                .iter()
                 .map(|(name, val)| Ok((name.clone(), expand_macrolet_in_ast(val, macros)?)))
                 .collect();
-            let expanded_body: Result<Vec<ASTNode>, String> = body.iter()
+            let expanded_body: Result<Vec<ASTNode>, String> = body
+                .iter()
                 .map(|e| expand_macrolet_in_ast(e, macros))
                 .collect();
             Ok(ASTNode::Let {

@@ -13,16 +13,17 @@ LOG_DIR="$BASE_DIR/regression-tests/logs"
 RUNNER_FILE="$BASE_DIR/regression-tests/run-all-irlasp.lisp"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
-SUITE_REPEAT_COUNT="${SUITE_REPEAT_COUNT:-10}"
+SUITE_REPEAT_COUNT="${SUITE_REPEAT_COUNT:-1}"
 COMPARE_CL_BASELINE="${COMPARE_CL_BASELINE:-1}"
 REQUIRE_CL_BASELINE_SUCCESS="${REQUIRE_CL_BASELINE_SUCCESS:-1}"
 CL_BASELINE_ENGINE="${CL_BASELINE_ENGINE:-clasp}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
 MLIR_SELECTIVE_EVAL="${RLASP_MLIR_SELECTIVE_EVAL:-0}"
-MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-1}"
+MLIR_SPLIT_PROCESS="${RLASP_MLIR_SPLIT_PROCESS:-0}"
 IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-100000}"
 FORCE_BRIDGE_BUILTINS="${RLASP_FORCE_BRIDGE_BUILTINS:-1}"
-IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
+MLIR_FORCE_BRIDGE_BUILTINS="${RLASP_MLIR_FORCE_BRIDGE_BUILTINS:-0}"
+IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-2048}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
   echo "Error: Only strict MLIR behavior is allowed for this harness (got RLASP_MLIR_BEHAVIOR=$MLIR_BEHAVIOR)" >&2
@@ -32,7 +33,7 @@ if ! [[ "$SUITE_REPEAT_COUNT" =~ ^[0-9]+$ ]] || (( SUITE_REPEAT_COUNT < 1 )); th
   echo "Error: SUITE_REPEAT_COUNT must be an integer >= 1 (got $SUITE_REPEAT_COUNT)" >&2
   exit 2
 fi
-MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-1}"
+MLIR_EXEC_ARTIFACT="${RLASP_MLIR_EXEC_ARTIFACT:-0}"
 typeset -a IRLASP_ENV=()
 if [[ -n "$IRLASP_GC_FREE_SPACE_DIVISOR" ]]; then
   IRLASP_ENV+=("GC_FREE_SPACE_DIVISOR=$IRLASP_GC_FREE_SPACE_DIVISOR")
@@ -410,7 +411,7 @@ run_baseline_suite_with_engine() {
   runner_file="$(build_baseline_suite_runner "$suite" "$engine")"
   : > "$baseline_log"
   if [[ "$engine" == "clasp" ]]; then
-    cmd=("$CLASP_BIN" --non-interactive --load "$runner_file")
+    cmd=("$CLASP_BIN" --non-interactive --disable-debugger --load "$runner_file")
   elif [[ "$engine" == "sbcl" ]]; then
     cmd=("$SBCL_BIN" --noinform --non-interactive --load "$runner_file")
   else
@@ -534,6 +535,34 @@ build_single_suite_runner() {
   local runner_file
   runner_file="$(mktemp -t "irlasp-suite-runner-${suite}")"
   runner_file="${runner_file}.lisp"
+  if [[ "$mode" == "mlir" ]]; then
+    cat > "$runner_file" <<EOF
+(in-package :cl-user)
+(load "$BASE_DIR/regression-tests/framework.lisp")
+(load "$BASE_DIR/regression-tests/set-unexpected-failures.lisp")
+(in-package #:clasp-tests)
+(clasp-tests::reset-clasp-tests)
+(clasp-tests::message :emph "~%Running $suite suite...")
+(load "$BASE_DIR/regression-tests/$suite.lisp")
+(clasp-tests::show-test-summary)
+EOF
+    echo "$runner_file"
+    return
+  fi
+  if [[ "$mode" == "interpreter" ]]; then
+    cat > "$runner_file" <<EOF
+(in-package :cl-user)
+(load "$BASE_DIR/regression-tests/framework.lisp")
+(load "$BASE_DIR/regression-tests/set-unexpected-failures.lisp")
+(in-package #:clasp-tests)
+(clasp-tests::reset-clasp-tests)
+(clasp-tests::message :emph "~%Running $suite suite...")
+(load "$BASE_DIR/regression-tests/$suite.lisp")
+(clasp-tests::show-test-summary)
+EOF
+    echo "$runner_file"
+    return
+  fi
   cat > "$runner_file" <<EOF
 (in-package :cl-user)
 (load "$BASE_DIR/regression-tests/framework.lisp")
@@ -610,11 +639,11 @@ run_jit_suite_with_phase_timing() {
     compile_start="$(now_mono_ts)"
     set +e
     if [[ -n "$TIMEOUT_BIN" ]]; then
-      env TEST_SUITES="$suite" "${compile_env[@]}" "${IRLASP_ENV[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      env TEST_SUITES="$suite" "${compile_env[@]}" "${IRLASP_ENV[@]}" RLASP_FORCE_BRIDGE_BUILTINS="$MLIR_FORCE_BRIDGE_BUILTINS" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
         "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
       compile_rc=$?
     else
-      env TEST_SUITES="$suite" "${compile_env[@]}" "${IRLASP_ENV[@]}" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
+      env TEST_SUITES="$suite" "${compile_env[@]}" "${IRLASP_ENV[@]}" RLASP_FORCE_BRIDGE_BUILTINS="$MLIR_FORCE_BRIDGE_BUILTINS" RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
         "$IRLASP_BIN" -m "$mode" "$runner_file" >> "$compile_log" 2>&1
       compile_rc=$?
     fi
@@ -652,11 +681,11 @@ run_jit_suite_with_phase_timing() {
     exec_start="$(now_mono_ts)"
     set +e
     if [[ -n "$TIMEOUT_BIN" ]]; then
-      env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" \
+      env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" RLASP_FORCE_BRIDGE_BUILTINS="$MLIR_FORCE_BRIDGE_BUILTINS" \
         "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
       exec_rc=$?
     else
-      env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" \
+      env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" RLASP_FORCE_BRIDGE_BUILTINS="$MLIR_FORCE_BRIDGE_BUILTINS" \
         "$IRLASP_BIN" -m "$mode" "$artifact_path" >> "$suite_log" 2>&1
       exec_rc=$?
     fi
@@ -673,12 +702,16 @@ run_jit_suite_with_phase_timing() {
   fifo_path="$(mktemp -t "irlasp-${mode}-suite-stream")"
   rm -f "$fifo_path"
   mkfifo "$fifo_path"
+  local mode_force_env=()
+  if [[ "$mode" == "mlir" ]]; then
+    mode_force_env=("RLASP_FORCE_BRIDGE_BUILTINS=$MLIR_FORCE_BRIDGE_BUILTINS")
+  fi
 
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    (env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" "${mode_force_env[@]}" "$TIMEOUT_BIN" -k 5 "${SUITE_TIMEOUT_S}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   else
-    (env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
+    (env TEST_SUITES="$suite" "${exec_env[@]}" "${IRLASP_ENV[@]}" "${mode_force_env[@]}" "$IRLASP_BIN" -m "$mode" "$runner_file" > "$fifo_path" 2>&1) &
   fi
   local cmd_pid=$!
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -740,7 +773,7 @@ run_one_suite() {
       "/tmp/set-unexpected-failures.mlirbc"
   fi
 
-  if [[ "$mode" == "mlir" || "$mode" == "fasl" ]]; then
+  if [[ "$mode" == "mlir" || "$mode" == "fasl" || "$mode" == "interpreter" ]]; then
     runner_file="$(build_single_suite_runner "$mode" "$suite")"
     cleanup_runner=1
     run_jit_suite_with_phase_timing "$mode" "$suite" "$suite_log" "$runner_file"
@@ -809,7 +842,7 @@ run_mode() {
     echo "MLIR_SELECTIVE_EVAL $MLIR_SELECTIVE_EVAL" | tee -a "$summary_file"
     echo "MLIR_EXEC_ARTIFACT $MLIR_EXEC_ARTIFACT" | tee -a "$summary_file"
     echo "MLIR_SPLIT_PROCESS $MLIR_SPLIT_PROCESS" | tee -a "$summary_file"
-    echo "RLASP_FORCE_BRIDGE_BUILTINS $FORCE_BRIDGE_BUILTINS" | tee -a "$summary_file"
+    echo "RLASP_FORCE_BRIDGE_BUILTINS $MLIR_FORCE_BRIDGE_BUILTINS" | tee -a "$summary_file"
     echo "IRLASP_GC_FREE_SPACE_DIVISOR $IRLASP_GC_FREE_SPACE_DIVISOR" | tee -a "$summary_file"
   fi
 

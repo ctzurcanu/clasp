@@ -58,7 +58,7 @@ impl Expander {
         if !expr.is_cons() {
             return Ok((expr, false));
         }
-        
+
         let cons_ptr = expr.as_cons_ptr().unwrap();
         let cons = unsafe { &*cons_ptr };
         let car = cons.car();
@@ -67,33 +67,33 @@ impl Expander {
         if car.is_general() {
             if let Some(name) = Self::get_symbol_name(car) {
                 if let Some(macro_def) = self.macro_table.get_macro(&name) {
-                // Extract arguments
-                let args_list = cons.cdr();
-                let args = if let Some(args_cons) = args_list.as_cons_ptr() {
-                    let args_ref = unsafe { &*args_cons };
-                    args_ref.to_vec().unwrap_or_default()
-                } else if args_list.is_nil() {
-                    Vec::new()
-                } else {
-                    return Err(CompilerError::InvalidSyntax {
-                        form: name,
-                        msg: "Invalid argument list".to_string(),
-                    });
-                };
-                
-                // Call the macro expander
-                let expanded = (macro_def.expander)(&args)
-                    .map_err(|e| CompilerError::MacroExpansionError { msg: e })?;
+                    // Extract arguments
+                    let args_list = cons.cdr();
+                    let args = if let Some(args_cons) = args_list.as_cons_ptr() {
+                        let args_ref = unsafe { &*args_cons };
+                        args_ref.to_vec().unwrap_or_default()
+                    } else if args_list.is_nil() {
+                        Vec::new()
+                    } else {
+                        return Err(CompilerError::InvalidSyntax {
+                            form: name,
+                            msg: "Invalid argument list".to_string(),
+                        });
+                    };
 
-                return Ok((expanded, true));
+                    // Call the macro expander
+                    let expanded = (macro_def.expander)(&args)
+                        .map_err(|e| CompilerError::MacroExpansionError { msg: e })?;
+
+                    return Ok((expanded, true));
                 }
             }
         }
-        
+
         // Not a macro call
         Ok((expr, false))
     }
-    
+
     /// Fully expand macros (macroexpand)
     pub fn macroexpand(&self, mut expr: LispObject) -> CompilerResult<LispObject> {
         loop {
@@ -104,21 +104,21 @@ impl Expander {
             expr = expanded;
         }
     }
-    
+
     /// Walk an expression and expand all macros recursively
     pub fn expand_all(&self, expr: LispObject) -> CompilerResult<LispObject> {
         // First expand the top level
         let expr = self.macroexpand(expr)?;
-        
+
         // If it's not a list, we're done
         if !expr.is_cons() {
             return Ok(expr);
         }
-        
+
         let cons_ptr = expr.as_cons_ptr().unwrap();
         let cons = unsafe { &*cons_ptr };
         let car = cons.car();
-        
+
         // Check if it's a special form that we should not expand into
         if car.is_general() {
             if let Some(name) = Self::get_symbol_name(car) {
@@ -145,16 +145,14 @@ impl Expander {
                 }
             }
         }
-        
+
         // Regular function call - expand all elements
         let elements = cons.to_vec().unwrap_or_default();
-        let expanded: Result<Vec<_>, _> = elements.iter()
-            .map(|&e| self.expand_all(e))
-            .collect();
-        
+        let expanded: Result<Vec<_>, _> = elements.iter().map(|&e| self.expand_all(e)).collect();
+
         Ok(rlasp_runtime::Cons::list(&expanded?))
     }
-    
+
     /// Get the macro table
     pub fn macro_table(&self) -> &MacroTable {
         &self.macro_table
@@ -171,59 +169,59 @@ impl Default for Expander {
 mod tests {
     use super::*;
     use rlasp_reader::read_from_string;
-    
+
     #[test]
     fn test_macroexpand_1_and() {
         let expander = Expander::new();
-        
+
         let expr = read_from_string("(and x y z)").unwrap();
         let (expanded, changed) = expander.macroexpand_1(expr).unwrap();
-        
+
         assert!(changed);
         assert!(expanded.is_cons());
         // Should expand to (if x (and y z) nil)
     }
-    
+
     #[test]
     fn test_macroexpand_and() {
         let expander = Expander::new();
-        
+
         let expr = read_from_string("(and x y)").unwrap();
         let expanded = expander.macroexpand(expr).unwrap();
-        
+
         assert!(expanded.is_cons());
         // Should fully expand to (if x y nil)
     }
-    
+
     #[test]
     fn test_expand_when() {
         let expander = Expander::new();
-        
+
         let expr = read_from_string("(when t (+ 1 2))").unwrap();
         let expanded = expander.macroexpand(expr).unwrap();
-        
+
         assert!(expanded.is_cons());
         // Should expand to (if t (+ 1 2))
     }
-    
+
     #[test]
     fn test_no_expansion() {
         let expander = Expander::new();
-        
+
         let expr = read_from_string("(+ 1 2)").unwrap();
         let (expanded, changed) = expander.macroexpand_1(expr).unwrap();
-        
+
         assert!(!changed);
         assert_eq!(expanded, expr);
     }
-    
+
     #[test]
     fn test_expand_all_nested() {
         let expander = Expander::new();
-        
+
         let expr = read_from_string("(when t (when nil 42))").unwrap();
         let expanded = expander.expand_all(expr).unwrap();
-        
+
         assert!(expanded.is_cons());
         // Both when forms should be expanded to if
     }

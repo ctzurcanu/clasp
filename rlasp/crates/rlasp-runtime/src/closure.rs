@@ -1,6 +1,6 @@
 //! Closure support for capturing lexical environments
 
-use crate::{LispObject, TypeHeader, ObjectType};
+use crate::{LispObject, ObjectType, TypeHeader};
 use std::alloc::Layout;
 use std::mem::offset_of;
 
@@ -8,9 +8,9 @@ use std::mem::offset_of;
 #[repr(C)]
 pub struct Closure {
     pub header: TypeHeader,
-    pub function_id: i64,  // Lambda ID
-    pub env_size: usize,   // Number of captured variables
-    pub env: [LispObject; 0],  // Flexible array member - captured variables follow
+    pub function_id: i64,     // Lambda ID
+    pub env_size: usize,      // Number of captured variables
+    pub env: [LispObject; 0], // Flexible array member - captured variables follow
 }
 
 impl Closure {

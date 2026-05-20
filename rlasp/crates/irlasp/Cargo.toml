@@ -9,6 +9,7 @@ boehm-gc = ["rlasp-runtime/boehm-gc"]
 
 [dependencies]
 rlasp = { path = "../rlasp" }
+rlasp-compiler = { path = "../rlasp-compiler" }
 rlasp-jit = { path = "../rlasp-jit" }
 rlasp-runtime = { path = "../rlasp-runtime" }
 rlasp-reader = { path = "../rlasp-reader" }

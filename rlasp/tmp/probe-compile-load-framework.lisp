@@ -1,0 +1,8 @@
+(in-package :cl-user)
+(load "clisp/in_work/regression-tests/framework.lisp")
+(in-package #:clasp-tests)
+(reset-clasp-tests)
+(multiple-value-bind (fasl warnings-p failure-p)
+    (compile-file "tmp/probe-framework-misc-fasl.lisp")
+  (declare (ignore warnings-p failure-p))
+  (load fasl))

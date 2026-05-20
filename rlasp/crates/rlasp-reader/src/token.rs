@@ -1,7 +1,7 @@
 //! Lexical tokens for the reader
 
-use std::fmt;
 use rlasp_runtime::FloatFormat;
+use std::fmt;
 
 /// A token in the input stream
 #[derive(Debug, Clone, PartialEq)]
@@ -14,52 +14,52 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Delimiters
-    LeftParen,      // (
-    RightParen,     // )
-    LeftBracket,    // [
-    RightBracket,   // ]
-    LeftBrace,      // {
-    RightBrace,     // }
+    LeftParen,    // (
+    RightParen,   // )
+    LeftBracket,  // [
+    RightBracket, // ]
+    LeftBrace,    // {
+    RightBrace,   // }
 
     // Atoms
     Integer(i64),
-    Bignum(String),  // String representation of large integer
+    Bignum(String), // String representation of large integer
     Float(f64, FloatFormat),
     Ratio(String, String),
     String(String),
     Character(char),
     Symbol(String),
-    Keyword(String),  // :keyword
+    Keyword(String), // :keyword
 
     // Reader macros
-    Quote,           // '
-    Backquote,       // `
-    Comma,           // ,
-    CommaAt,         // ,@
-    Function,        // #'
+    Quote,     // '
+    Backquote, // `
+    Comma,     // ,
+    CommaAt,   // ,@
+    Function,  // #'
 
     // Special prefixes
-    HashLeftParen,   // #( - vector
-    HashDot,         // #. - read-time eval
-    HashPlus,        // #+ - feature conditional
-    HashMinus,       // #- - feature conditional
-    HashBackslash,   // #\ - character
-    HashColon,       // #: - uninterned symbol
+    HashLeftParen,    // #( - vector
+    HashDot,          // #. - read-time eval
+    HashPlus,         // #+ - feature conditional
+    HashMinus,        // #- - feature conditional
+    HashBackslash,    // #\ - character
+    HashColon,        // #: - uninterned symbol
     HashStar(String), // #*<bits> - bit vector literal payload (0/1 chars)
-    HashDigit(u8),   // #0-9 - array dimension or reader macro
-    HashC,           // #C - complex number
-    HashP,           // #P - pathname
-    HashEquals(u8),  // #n= - label definition for circular references
-    HashRef(u8),     // #n# - label reference for circular references
-    HashTilde,       // #~ - custom pathname macro (clisp extension)
-    HashUnderscore,  // #_ - comment out next form
+    HashDigit(u8),    // #0-9 - array dimension or reader macro
+    HashC,            // #C - complex number
+    HashP,            // #P - pathname
+    HashEquals(u8),   // #n= - label definition for circular references
+    HashRef(u8),      // #n# - label reference for circular references
+    HashTilde,        // #~ - custom pathname macro (clisp extension)
+    HashUnderscore,   // #_ - comment out next form
 
     // Package markers
-    DoubleColon,     // ::
-    SingleColon,     // :
+    DoubleColon, // ::
+    SingleColon, // :
 
     // Special
-    Dot,             // . (for dotted pairs)
+    Dot, // . (for dotted pairs)
     Eof,
 }
 

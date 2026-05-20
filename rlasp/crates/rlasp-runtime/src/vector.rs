@@ -1,7 +1,7 @@
 //! Vector type for rlasp runtime
 
-use std::fmt;
 use super::object::LispObject;
+use std::fmt;
 
 #[repr(C)]
 pub struct RVector {

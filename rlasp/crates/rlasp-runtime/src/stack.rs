@@ -202,7 +202,9 @@ pub fn allocate_object(type_tag: TypeTag, data: &[u8]) -> ObjectHandle {
                 data_stack.borrow_mut().allocate(data)
             };
 
-            let metadata_index = meta_stack.borrow_mut().allocate(data.len() as u16, type_tag);
+            let metadata_index = meta_stack
+                .borrow_mut()
+                .allocate(data.len() as u16, type_tag);
 
             ObjectHandle::new(metadata_index, data_offset)
         })

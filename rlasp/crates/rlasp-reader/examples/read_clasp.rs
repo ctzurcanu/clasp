@@ -1,13 +1,14 @@
 //! Test reading actual Clasp source files
 
-use rlasp_reader::{Reader, read_from_string};
+use rlasp_reader::{read_from_string, Reader};
 
 fn main() {
     println!("=== rlasp Reader - Clasp Source Test ===\n");
 
     // Test 1: Simple expression
     println!("Test 1: Simple expression");
-    let expr1 = read_from_string("(defun factorial (n) (if (<= n 1) 1 (* n (factorial (- n 1)))))").unwrap();
+    let expr1 = read_from_string("(defun factorial (n) (if (<= n 1) 1 (* n (factorial (- n 1)))))")
+        .unwrap();
     println!("  Parsed: {}", expr1);
     println!("  ✓ Success!\n");
 
@@ -77,7 +78,9 @@ fn main() {
 
     // Test 8: Nested structures
     println!("Test 8: Nested structures");
-    let expr8 = read_from_string("(defclass point () ((x :accessor point-x) (y :accessor point-y)))").unwrap();
+    let expr8 =
+        read_from_string("(defclass point () ((x :accessor point-x) (y :accessor point-y)))")
+            .unwrap();
     println!("  Defclass: {}", expr8);
     println!("  ✓ Success!\n");
 

@@ -128,7 +128,10 @@ impl Lexer {
                     if c == '\\' {
                         self.advance();
                         let esc = self.current_char();
-                        if esc != '\0' { name.push(esc); self.advance(); }
+                        if esc != '\0' {
+                            name.push(esc);
+                            self.advance();
+                        }
                     } else if self.is_constituent_char(c) {
                         name.push(c);
                         self.advance();
@@ -386,9 +389,15 @@ impl Lexer {
                     if let Some(slash_pos) = num_text.find('/') {
                         let num_str = &num_text[..slash_pos];
                         let den_str = &num_text[slash_pos + 1..];
-                        if let (Ok(num), Ok(den)) = (i64::from_str_radix(num_str, radix), i64::from_str_radix(den_str, radix)) {
+                        if let (Ok(num), Ok(den)) = (
+                            i64::from_str_radix(num_str, radix),
+                            i64::from_str_radix(den_str, radix),
+                        ) {
                             if den != 0 {
-                                return Ok(Token::new(TokenKind::Ratio(num.to_string(), den.to_string()), start_pos));
+                                return Ok(Token::new(
+                                    TokenKind::Ratio(num.to_string(), den.to_string()),
+                                    start_pos,
+                                ));
                             }
                         }
                         return Err(ReaderError::InvalidSyntax {
@@ -406,6 +415,17 @@ impl Lexer {
                             pos: start_pos,
                         })
                     }
+                } else if next_ch == '*' {
+                    // #<n>* reads a bit-vector of length n. The parser only
+                    // needs the raw payload; length validation is handled by
+                    // consumers that care about CL's fill semantics.
+                    self.advance();
+                    let mut bits = String::new();
+                    while matches!(self.current_char(), '0' | '1') {
+                        bits.push(self.current_char());
+                        self.advance();
+                    }
+                    Ok(Token::new(TokenKind::HashStar(bits), start_pos))
                 } else if next_ch == 'A' || next_ch == 'a' {
                     // Array notation: #<dimension>A(...)
                     // For now, just return HashDigit and let parser handle it
@@ -421,6 +441,25 @@ impl Lexer {
                 // Hexadecimal: #xNN
                 self.advance();
                 let num_text = self.read_atom_text();
+                if let Some(slash_pos) = num_text.find('/') {
+                    let num_str = &num_text[..slash_pos];
+                    let den_str = &num_text[slash_pos + 1..];
+                    if let (Ok(num), Ok(den)) = (
+                        i64::from_str_radix(num_str, 16),
+                        i64::from_str_radix(den_str, 16),
+                    ) {
+                        if den != 0 {
+                            return Ok(Token::new(
+                                TokenKind::Ratio(num.to_string(), den.to_string()),
+                                start_pos,
+                            ));
+                        }
+                    }
+                    return Err(ReaderError::InvalidSyntax {
+                        msg: format!("Invalid hexadecimal ratio: {}", num_text),
+                        pos: start_pos,
+                    });
+                }
                 // Try parsing as i64 first, then as u64 and convert
                 if let Ok(val) = i64::from_str_radix(&num_text, 16) {
                     Ok(Token::new(TokenKind::Integer(val), start_pos))
@@ -438,6 +477,25 @@ impl Lexer {
                 // Octal: #oNN
                 self.advance();
                 let num_text = self.read_atom_text();
+                if let Some(slash_pos) = num_text.find('/') {
+                    let num_str = &num_text[..slash_pos];
+                    let den_str = &num_text[slash_pos + 1..];
+                    if let (Ok(num), Ok(den)) = (
+                        i64::from_str_radix(num_str, 8),
+                        i64::from_str_radix(den_str, 8),
+                    ) {
+                        if den != 0 {
+                            return Ok(Token::new(
+                                TokenKind::Ratio(num.to_string(), den.to_string()),
+                                start_pos,
+                            ));
+                        }
+                    }
+                    return Err(ReaderError::InvalidSyntax {
+                        msg: format!("Invalid octal ratio: {}", num_text),
+                        pos: start_pos,
+                    });
+                }
                 if let Ok(val) = i64::from_str_radix(&num_text, 8) {
                     Ok(Token::new(TokenKind::Integer(val), start_pos))
                 } else {
@@ -456,9 +514,15 @@ impl Lexer {
                 if let Some(slash_pos) = num_text.find('/') {
                     let num_str = &num_text[..slash_pos];
                     let den_str = &num_text[slash_pos + 1..];
-                    if let (Ok(num), Ok(den)) = (i64::from_str_radix(num_str, 2), i64::from_str_radix(den_str, 2)) {
+                    if let (Ok(num), Ok(den)) = (
+                        i64::from_str_radix(num_str, 2),
+                        i64::from_str_radix(den_str, 2),
+                    ) {
                         if den != 0 {
-                            return Ok(Token::new(TokenKind::Ratio(num.to_string(), den.to_string()), start_pos));
+                            return Ok(Token::new(
+                                TokenKind::Ratio(num.to_string(), den.to_string()),
+                                start_pos,
+                            ));
                         }
                     }
                     return Err(ReaderError::InvalidSyntax {
@@ -514,7 +578,10 @@ impl Lexer {
                 self.advance();
                 // Read the rest as an atom
                 let text = self.read_atom_text();
-                Ok(Token::new(TokenKind::Symbol(format!("l{}", text)), start_pos))
+                Ok(Token::new(
+                    TokenKind::Symbol(format!("l{}", text)),
+                    start_pos,
+                ))
             }
             _ => Err(ReaderError::InvalidReaderMacro { ch, pos: start_pos }),
         }
@@ -562,9 +629,7 @@ impl Lexer {
         let text = self.read_atom_text();
         let raw_token_contains_escape = self.input[start_pos..self.pos].iter().any(|c| *c == '\\');
 
-        if !raw_token_contains_escape
-            && text.chars().count() > 1
-            && text.chars().all(|c| c == '.')
+        if !raw_token_contains_escape && text.chars().count() > 1 && text.chars().all(|c| c == '.')
         {
             return Err(ReaderError::InvalidSyntax {
                 msg: "A token consisting only of dots is not valid Common Lisp syntax".to_string(),
@@ -626,11 +691,12 @@ impl Lexer {
         };
 
         let mut parsed_float: Option<(f64, FloatFormat)> = None;
-        if let Some((idx, marker)) = text
-            .char_indices()
-            .skip(1)
-            .find(|(_, c)| matches!(*c, 'd' | 'D' | 'e' | 'E' | 'f' | 'F' | 'l' | 'L' | 's' | 'S'))
-        {
+        if let Some((idx, marker)) = text.char_indices().skip(1).find(|(_, c)| {
+            matches!(
+                *c,
+                'd' | 'D' | 'e' | 'E' | 'f' | 'F' | 'l' | 'L' | 's' | 'S'
+            )
+        }) {
             let (mantissa, marker_and_exp) = text.split_at(idx);
             let exp_part = &marker_and_exp[1..];
             if !mantissa.is_empty() && valid_exp(exp_part) {
@@ -642,7 +708,10 @@ impl Lexer {
                         .ok()
                         .map(|v| (v as f64, FloatFormat::Single)),
                     // D/L are double-float semantics.
-                    'd' | 'l' => normalized.parse::<f64>().ok().map(|v| (v, FloatFormat::Double)),
+                    'd' | 'l' => normalized
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| (v, FloatFormat::Double)),
                     _ => None,
                 };
             }
@@ -669,17 +738,51 @@ impl Lexer {
             return Ok(Token::new(TokenKind::Float(f, format), start_pos));
         }
 
-        // Check for ratio (e.g., 3/4)
+        let current_read_base = || -> u32 {
+            match rlasp_runtime::io_syntax::get_io_syntax_var("*read-base*") {
+                Some(rlasp_runtime::io_syntax::IoSyntaxValue::Fixnum(n))
+                    if (2..=36).contains(&n) =>
+                {
+                    n as u32
+                }
+                _ => 10,
+            }
+        };
+        let parse_signed_integer_radix = |raw: &str, base: u32| -> Option<malachite::Integer> {
+            let (negative, digits) = if let Some(rest) = raw.strip_prefix('-') {
+                (true, rest)
+            } else if let Some(rest) = raw.strip_prefix('+') {
+                (false, rest)
+            } else {
+                (false, raw)
+            };
+            if digits.is_empty() {
+                return None;
+            }
+            let mut value = malachite::Integer::from(0);
+            for ch in digits.chars() {
+                let digit = ch.to_digit(base)?;
+                value = value * malachite::Integer::from(base) + malachite::Integer::from(digit);
+            }
+            if negative {
+                Some(-value)
+            } else {
+                Some(value)
+            }
+        };
+
+        // Check for ratio (e.g., 3/4). Plain ratios respect the active *READ-BASE*.
         if let Some(slash_pos) = text.find('/') {
             let num_str = &text[..slash_pos];
             let den_str = &text[slash_pos + 1..];
-            if let (Ok(_num), Ok(den)) = (
-                num_str.parse::<malachite::Integer>(),
-                den_str.parse::<malachite::Integer>(),
+            let read_base = current_read_base();
+            if let (Some(num), Some(den)) = (
+                parse_signed_integer_radix(num_str, read_base),
+                parse_signed_integer_radix(den_str, read_base),
             ) {
                 if den != malachite::Integer::from(0) {
                     return Ok(Token::new(
-                        TokenKind::Ratio(num_str.to_string(), den_str.to_string()),
+                        TokenKind::Ratio(num.to_string(), den.to_string()),
                         start_pos,
                     ));
                 }
@@ -754,7 +857,12 @@ impl Lexer {
             } else {
                 // Normalize to lowercase to match Common Lisp convention
                 // (CL readers normally convert to uppercase, but we use lowercase for compatibility)
-                result.push(self.current_char().to_lowercase().next().unwrap_or(self.current_char()));
+                result.push(
+                    self.current_char()
+                        .to_lowercase()
+                        .next()
+                        .unwrap_or(self.current_char()),
+                );
                 self.advance();
             }
         }
@@ -780,7 +888,12 @@ impl Lexer {
                         self.advance();
                     }
                 } else {
-                    result.push(self.current_char().to_lowercase().next().unwrap_or(self.current_char()));
+                    result.push(
+                        self.current_char()
+                            .to_lowercase()
+                            .next()
+                            .unwrap_or(self.current_char()),
+                    );
                     self.advance();
                 }
             }
@@ -806,7 +919,7 @@ impl Lexer {
             && ch != '`'
             && ch != ','
             && ch != ';'
-            && ch != '\0'
+            && (ch != '\0' || !self.is_eof())
     }
 }
 
@@ -920,14 +1033,8 @@ mod tests {
     fn test_characters() {
         let mut lexer = Lexer::new(r"#\a #\newline #\space");
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Character('a'));
-        assert_eq!(
-            lexer.next_token().unwrap().kind,
-            TokenKind::Character('\n')
-        );
-        assert_eq!(
-            lexer.next_token().unwrap().kind,
-            TokenKind::Character(' ')
-        );
+        assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Character('\n'));
+        assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Character(' '));
     }
 
     #[test]

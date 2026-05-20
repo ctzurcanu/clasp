@@ -3,14 +3,14 @@
 //! Uses atomic pointers for thread-safe car/cdr operations
 
 use crate::object::LispObject;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Cons cell with atomic car/cdr
 ///
 /// Following Clasp's design, we use atomic pointers to allow
 /// thread-safe mutations without locks.
-#[repr(C, align(4))]  // 4-byte alignment ensures low 2 bits are zero
+#[repr(C, align(4))] // 4-byte alignment ensures low 2 bits are zero
 pub struct Cons {
     car: AtomicUsize,
     cdr: AtomicUsize,

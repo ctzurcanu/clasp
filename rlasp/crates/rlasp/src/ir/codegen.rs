@@ -1,3 +1,6 @@
+use super::datum::Datum;
+use super::iblock::IBlockId;
+use super::instruction::{Instruction, InstructionKind};
 /// Code generation - LLVM IR and WASM targets
 ///
 /// This module provides the framework for generating executable code from BIR.
@@ -7,11 +10,7 @@
 ///
 /// Currently provides stubs and documentation for implementation when
 /// LLVM dependencies are available.
-
 use super::module::Module;
-use super::instruction::{Instruction, InstructionKind};
-use super::datum::Datum;
-use super::iblock::IBlockId;
 use std::collections::HashMap;
 
 /// Code generation target
@@ -173,7 +172,10 @@ impl Intrinsics {
         functions.insert("box_fixnum".to_string(), "cc_box_fixnum".to_string());
         functions.insert("unbox_fixnum".to_string(), "cc_unbox_fixnum".to_string());
         functions.insert("box_float".to_string(), "cc_box_double_float".to_string());
-        functions.insert("unbox_float".to_string(), "cc_unbox_double_float".to_string());
+        functions.insert(
+            "unbox_float".to_string(),
+            "cc_unbox_double_float".to_string(),
+        );
 
         // Cons operations
         functions.insert("car".to_string(), "cc_car".to_string());

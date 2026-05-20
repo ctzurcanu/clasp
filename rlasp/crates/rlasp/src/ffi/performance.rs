@@ -40,9 +40,20 @@ mod tests {
         let cxx_duration = start.elapsed();
 
         println!("\nPerformance comparison ({} iterations):", ITERATIONS);
-        println!("  libffi: {:?} ({:.2} ns/call)", libffi_duration, libffi_duration.as_nanos() as f64 / ITERATIONS as f64);
-        println!("  cxx:    {:?} ({:.2} ns/call)", cxx_duration, cxx_duration.as_nanos() as f64 / ITERATIONS as f64);
-        println!("  Speedup: {:.2}x", libffi_duration.as_nanos() as f64 / cxx_duration.as_nanos() as f64);
+        println!(
+            "  libffi: {:?} ({:.2} ns/call)",
+            libffi_duration,
+            libffi_duration.as_nanos() as f64 / ITERATIONS as f64
+        );
+        println!(
+            "  cxx:    {:?} ({:.2} ns/call)",
+            cxx_duration,
+            cxx_duration.as_nanos() as f64 / ITERATIONS as f64
+        );
+        println!(
+            "  Speedup: {:.2}x",
+            libffi_duration.as_nanos() as f64 / cxx_duration.as_nanos() as f64
+        );
 
         // cxx should be at least 2x faster
         assert!(cxx_duration < libffi_duration);
@@ -69,8 +80,19 @@ mod tests {
         let cxx_duration = start.elapsed();
 
         println!("\nMethod call benchmark ({} calls):", CALLS);
-        println!("  libffi: {:?} ({:.2} ns/call)", libffi_duration, libffi_duration.as_nanos() as f64 / CALLS as f64);
-        println!("  cxx:    {:?} ({:.2} ns/call)", cxx_duration, cxx_duration.as_nanos() as f64 / CALLS as f64);
-        println!("  Speedup: {:.2}x", libffi_duration.as_nanos() as f64 / cxx_duration.as_nanos() as f64);
+        println!(
+            "  libffi: {:?} ({:.2} ns/call)",
+            libffi_duration,
+            libffi_duration.as_nanos() as f64 / CALLS as f64
+        );
+        println!(
+            "  cxx:    {:?} ({:.2} ns/call)",
+            cxx_duration,
+            cxx_duration.as_nanos() as f64 / CALLS as f64
+        );
+        println!(
+            "  Speedup: {:.2}x",
+            libffi_duration.as_nanos() as f64 / cxx_duration.as_nanos() as f64
+        );
     }
 }

@@ -1,9 +1,9 @@
 //! Stream representation for Common Lisp streams
 
-use crate::header::{TypeHeader, ObjectType};
+use crate::header::{ObjectType, TypeHeader};
 use crate::object::LispObject;
-use std::io::{Read, Write, BufReader, BufWriter};
 use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
 
 /// Stream direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,11 @@ pub struct Stream {
 
 impl Stream {
     /// Create a new stream
-    pub fn new(direction: StreamDirection, element_type: StreamElementType, data: StreamData) -> Self {
+    pub fn new(
+        direction: StreamDirection,
+        element_type: StreamElementType,
+        data: StreamData,
+    ) -> Self {
         Stream {
             header: TypeHeader::new(ObjectType::Stream),
             direction,
@@ -65,17 +69,29 @@ impl Stream {
 
     /// Create stdin stream
     pub fn stdin() -> Self {
-        Stream::new(StreamDirection::Input, StreamElementType::Character, StreamData::Stdin)
+        Stream::new(
+            StreamDirection::Input,
+            StreamElementType::Character,
+            StreamData::Stdin,
+        )
     }
 
     /// Create stdout stream
     pub fn stdout() -> Self {
-        Stream::new(StreamDirection::Output, StreamElementType::Character, StreamData::Stdout)
+        Stream::new(
+            StreamDirection::Output,
+            StreamElementType::Character,
+            StreamData::Stdout,
+        )
     }
 
     /// Create stderr stream
     pub fn stderr() -> Self {
-        Stream::new(StreamDirection::Output, StreamElementType::Character, StreamData::Stderr)
+        Stream::new(
+            StreamDirection::Output,
+            StreamElementType::Character,
+            StreamData::Stderr,
+        )
     }
 
     /// Check if stream is open
@@ -85,12 +101,18 @@ impl Stream {
 
     /// Check if stream is an input stream
     pub fn is_input(&self) -> bool {
-        matches!(self.direction, StreamDirection::Input | StreamDirection::InputOutput)
+        matches!(
+            self.direction,
+            StreamDirection::Input | StreamDirection::InputOutput
+        )
     }
 
     /// Check if stream is an output stream
     pub fn is_output(&self) -> bool {
-        matches!(self.direction, StreamDirection::Output | StreamDirection::InputOutput)
+        matches!(
+            self.direction,
+            StreamDirection::Output | StreamDirection::InputOutput
+        )
     }
 }
 
@@ -102,9 +124,7 @@ impl LispObject {
             if ptr.is_null() {
                 return false;
             }
-            unsafe {
-                TypeHeader::from_ptr(ptr) == Some(ObjectType::Stream)
-            }
+            unsafe { TypeHeader::from_ptr(ptr) == Some(ObjectType::Stream) }
         } else {
             false
         }

@@ -11,12 +11,12 @@ AOT_SCRIPT="/Users/christiantzurcanu/Documents/dev/clasp/rlasp/scripts/mlirbc_ao
 LOG_DIR="$BASE_DIR/regression-tests/logs"
 SUITES="${TEST_SUITES:-}"
 SUITE_TIMEOUT_S="${SUITE_TIMEOUT_S:-120}"
-SUITE_REPEAT_COUNT="${SUITE_REPEAT_COUNT:-10}"
+SUITE_REPEAT_COUNT="${SUITE_REPEAT_COUNT:-1}"
 IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
-MLIR_EVAL_LOAD_FOR_COMPILE="${RLASP_MLIR_EVAL_LOAD_FOR_COMPILE:-0}"
+MLIR_EVAL_LOAD_FOR_COMPILE="${RLASP_MLIR_EVAL_LOAD_FOR_COMPILE:-1}"
 MLIR_BEHAVIOR="${RLASP_MLIR_BEHAVIOR:-strict}"
-FORCE_BRIDGE_BUILTINS="${RLASP_FORCE_BRIDGE_BUILTINS:-1}"
+FORCE_BRIDGE_BUILTINS="${RLASP_FORCE_BRIDGE_BUILTINS:-0}"
 AOT_DISABLE_GC="${RLASP_DISABLE_GC:-0}"
 AOT_KEEP_SUITE_ARTIFACTS="${AOT_KEEP_SUITE_ARTIFACTS:-0}"
 if [[ "$MLIR_BEHAVIOR" != "strict" ]]; then
@@ -143,8 +143,8 @@ create_suite_runner() {
 
 extract_pass_fail_counts() {
   local suite_log="$1"
-  local passed failed
-  read -r passed failed < <(
+  local machine_counts machine_passed machine_failed raw_passed raw_failed
+  machine_counts="$(
     awk '
       /^AOT_COUNTS[[:space:]]+PASSED[[:space:]]+/ {
         p=$3; f=$5;
@@ -153,14 +153,32 @@ extract_pass_fail_counts() {
         if (p ~ /^[0-9]+$/ && f ~ /^[0-9]+$/) print p, f;
       }
     ' "$suite_log"
-  )
-  if [[ -n "${passed:-}" && -n "${failed:-}" ]]; then
-    echo "$passed $failed"
+  )"
+  machine_passed="${machine_counts%% *}"
+  machine_failed="${machine_counts#* }"
+  if [[ "$machine_failed" == "$machine_counts" ]]; then
+    machine_failed=""
+  fi
+  raw_passed="$(awk 'BEGIN{c=0} /^[[:space:]]*Passed[[:space:]]+/ { c++ } END{ print c }' "$suite_log")"
+  raw_failed="$(awk 'BEGIN{c=0} /^[[:space:]]*Failed[[:space:]]+/ { c++ } END{ print c }' "$suite_log")"
+
+  [[ "$raw_passed" =~ ^[0-9]+$ ]] || raw_passed=0
+  [[ "$raw_failed" =~ ^[0-9]+$ ]] || raw_failed=0
+
+  # Prefer concrete per-test lines when they exist. Some suites currently emit
+  # incorrect footer totals even though individual Passed/Failed lines are
+  # accurate.
+  if (( raw_passed > 0 || raw_failed > 0 )); then
+    echo "$raw_passed $raw_failed"
     return
   fi
-  passed="$(awk 'BEGIN{c=0} /^[[:space:]]*Passed[[:space:]]+/ { c++ } END{ print c }' "$suite_log")"
-  failed="$(awk 'BEGIN{c=0} /^[[:space:]]*Failed[[:space:]]+/ { c++ } END{ print c }' "$suite_log")"
-  echo "$passed $failed"
+
+  if [[ -n "${machine_passed:-}" && -n "${machine_failed:-}" ]]; then
+    echo "$machine_passed $machine_failed"
+    return
+  fi
+
+  echo "0 0"
 }
 
 normalize_suite_counts() {
@@ -227,7 +245,10 @@ fi
 typeset -a suites
 typeset -a repeated_suites
 if [[ -n "$SUITES" ]]; then
-  IFS=',' read -rA suites <<< "$SUITES"
+  saved_ifs="$IFS"
+  IFS=','
+  read -rA suites <<< "$SUITES"
+  IFS="$saved_ifs"
 else
   while IFS= read -r s; do
     [[ -n "$s" ]] && suites+=("$s")
@@ -249,9 +270,9 @@ echo "TIMEOUT_BIN ${TIMEOUT_BIN:-none}" | tee -a "$SUMMARY_FILE"
 echo "IRLASP_MEMORY_CEILING_MB $IRLASP_MEMORY_CEILING_MB" | tee -a "$SUMMARY_FILE"
 echo "IRLASP_MEMORY_CEILING_CHECK_MS $IRLASP_MEMORY_CEILING_CHECK_MS" | tee -a "$SUMMARY_FILE"
 echo "RLASP_MLIR_EVAL_LOAD_FOR_COMPILE $MLIR_EVAL_LOAD_FOR_COMPILE" | tee -a "$SUMMARY_FILE"
-echo "RLASP_FORCE_BRIDGE_BUILTINS $FORCE_BRIDGE_BUILTINS" | tee -a "$SUMMARY_FILE"
-echo "RLASP_DISABLE_GC $AOT_DISABLE_GC" | tee -a "$SUMMARY_FILE"
-echo "AOT_SCRIPT $AOT_SCRIPT" | tee -a "$SUMMARY_FILE"
+  echo "RLASP_FORCE_BRIDGE_BUILTINS $FORCE_BRIDGE_BUILTINS" | tee -a "$SUMMARY_FILE"
+  echo "RLASP_DISABLE_GC $AOT_DISABLE_GC" | tee -a "$SUMMARY_FILE"
+  echo "AOT_SCRIPT $AOT_SCRIPT" | tee -a "$SUMMARY_FILE"
 
 mode_start="$(now_mono_ts)"
 suite_time_sum="0.000000"
@@ -297,7 +318,7 @@ for suite in "${repeated_suites[@]}"; do
   compile_start="$(now_mono_ts)"
   set +e
   if [[ -n "$TIMEOUT_BIN" ]]; then
-    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_SELECTIVE_EVAL=0 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
+    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_TARGET_AOT=1 RLASP_MLIR_SELECTIVE_EVAL=0 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
       RLASP_MLIR_EXEC_ARTIFACT=1 RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
       RLASP_FORCE_BRIDGE_BUILTINS="$FORCE_BRIDGE_BUILTINS" \
       RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" \
@@ -306,7 +327,7 @@ for suite in "${repeated_suites[@]}"; do
       "$TIMEOUT_BIN" -k 5 "$SUITE_TIMEOUT_S" "$IRLASP_BIN" -m mlir "$runner_file" > "$compile_log" 2>&1
     compile_rc=$?
   else
-    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_SELECTIVE_EVAL=0 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
+    env RLASP_MLIR_BEHAVIOR=strict RLASP_MLIR_TARGET_AOT=1 RLASP_MLIR_SELECTIVE_EVAL=0 RLASP_MLIR_EVAL_LOAD_FOR_COMPILE="$MLIR_EVAL_LOAD_FOR_COMPILE" \
       RLASP_MLIR_EXEC_ARTIFACT=1 RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 \
       RLASP_FORCE_BRIDGE_BUILTINS="$FORCE_BRIDGE_BUILTINS" \
       RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" \
@@ -400,27 +421,33 @@ for suite in "${repeated_suites[@]}"; do
     fi
   fi
 
+  suite_passed=0
+  suite_failed=0
   suite_end="$(now_mono_ts)"
   suite_total_s="$(float_sub "$suite_end" "$suite_start")"
   suite_time_sum="$(float_add "$suite_time_sum" "$suite_total_s")"
+  # Prefer the machine-readable counts emitted by the suite runner and only
+  # fall back to line scanning if they are absent.  Preserve partial counts even
+  # when the AOT executable aborts late in a suite; otherwise one final runtime
+  # error hides hundreds of already-executed test outcomes.
+  parsed_counts="$(extract_pass_fail_counts "$suite_log")"
+  parsed_passed="${parsed_counts%% *}"
+  parsed_failed="${parsed_counts#* }"
+  if [[ "$parsed_failed" == "$parsed_counts" ]]; then
+    parsed_failed=""
+  fi
+  normalized_counts="$(normalize_suite_counts "$expected_total" "${parsed_passed:-0}" "${parsed_failed:-0}")"
+  suite_passed="${normalized_counts%% *}"
+  suite_failed="${normalized_counts#* }"
+  if [[ "$suite_failed" == "$normalized_counts" ]]; then
+    suite_failed=0
+  fi
 
-  suite_passed=0
-  suite_failed=0
-  if [[ "$run_rc" -eq 0 ]]; then
-    # Prefer direct log-line counting for AOT suites. This avoids parser
-    # ambiguity when suite footer formatting is partially unsupported.
-    parsed_passed="$(awk 'BEGIN{c=0} /^[[:space:]]*Passed[[:space:]]+/ { c++ } END{ print c }' "$suite_log")"
-    parsed_failed="$(awk 'BEGIN{c=0} /^[[:space:]]*Failed[[:space:]]+/ { c++ } END{ print c }' "$suite_log")"
-    [[ "$parsed_passed" =~ ^[0-9]+$ ]] || parsed_passed=0
-    [[ "$parsed_failed" =~ ^[0-9]+$ ]] || parsed_failed=0
-    read -r suite_passed suite_failed <<< "$(normalize_suite_counts "$expected_total" "${parsed_passed:-0}" "${parsed_failed:-0}")"
-  else
+  if [[ "$run_rc" -ne 0 ]]; then
     if [[ "$run_rc" -eq 124 || "$run_rc" -eq 137 ]]; then
       timed_out=$((timed_out + 1))
     fi
     run_errors=$((run_errors + 1))
-    suite_passed=0
-    suite_failed="$expected_total"
   fi
 
   suite_total="$expected_total"

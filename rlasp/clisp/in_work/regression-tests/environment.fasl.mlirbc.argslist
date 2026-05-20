@@ -1,0 +1,10 @@
+%FN%make-silly-struct-list
+%FN%make-silly-struct-normal
+%FN%make-silly-struct-vector
+%FN%test-documentation-with-args
+%FN%test-documentation-without-args
+make-silly-struct-list
+make-silly-struct-normal
+make-silly-struct-vector
+test-documentation-with-args
+test-documentation-without-args

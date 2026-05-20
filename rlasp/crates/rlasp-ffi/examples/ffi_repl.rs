@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --example ffi_repl
 
-use rlasp_ffi::{Library, ForeignFunction, ForeignSignature, ForeignType};
 use rlasp_ffi::types::{FromLisp, ToLisp};
+use rlasp_ffi::{ForeignFunction, ForeignSignature, ForeignType, Library};
 use rlasp_runtime::LispObject;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -61,20 +61,18 @@ impl FFIRepl {
     fn eval(&mut self, expr: &Expr) -> Result<String, String> {
         match expr {
             Expr::Symbol(s) if s == "help" => Ok(self.help()),
-            Expr::List(items) if !items.is_empty() => {
-                match &items[0] {
-                    Expr::Symbol(s) => match s.as_str() {
-                        "quit" | "exit" => std::process::exit(0),
-                        "help" => Ok(self.help()),
-                        "load-library" => self.load_library(&items[1..]),
-                        "defforeign" => self.defforeign(&items[1..]),
-                        "list-libraries" => Ok(self.list_libraries()),
-                        "list-functions" => Ok(self.list_functions()),
-                        _ => self.call_function(s, &items[1..]),
-                    }
-                    _ => Err("Invalid form".to_string()),
-                }
-            }
+            Expr::List(items) if !items.is_empty() => match &items[0] {
+                Expr::Symbol(s) => match s.as_str() {
+                    "quit" | "exit" => std::process::exit(0),
+                    "help" => Ok(self.help()),
+                    "load-library" => self.load_library(&items[1..]),
+                    "defforeign" => self.defforeign(&items[1..]),
+                    "list-libraries" => Ok(self.list_libraries()),
+                    "list-functions" => Ok(self.list_functions()),
+                    _ => self.call_function(s, &items[1..]),
+                },
+                _ => Err("Invalid form".to_string()),
+            },
             _ => Err("Expected list or symbol".to_string()),
         }
     }
@@ -97,7 +95,8 @@ Example session:
   * (sqrt 16.0)
   => 4.0
   * (sqrt 2.0)
-  => 1.4142135623730951"#.to_string()
+  => 1.4142135623730951"#
+            .to_string()
     }
 
     fn load_library(&mut self, args: &[Expr]) -> Result<String, String> {
@@ -122,7 +121,9 @@ Example session:
     fn defforeign(&mut self, args: &[Expr]) -> Result<String, String> {
         // (defforeign name "symbol" (param-types...) return-type)
         if args.len() != 4 {
-            return Err("Usage: (defforeign name \"symbol\" (param-types...) return-type)".to_string());
+            return Err(
+                "Usage: (defforeign name \"symbol\" (param-types...) return-type)".to_string(),
+            );
         }
 
         let name = match &args[0] {
@@ -136,14 +137,13 @@ Example session:
         };
 
         let param_types = match &args[2] {
-            Expr::List(types) => {
-                types.iter()
-                    .map(|t| match t {
-                        Expr::Symbol(s) => Self::parse_type(s),
-                        _ => Err("Parameter type must be a symbol".to_string()),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            }
+            Expr::List(types) => types
+                .iter()
+                .map(|t| match t {
+                    Expr::Symbol(s) => Self::parse_type(s),
+                    _ => Err("Parameter type must be a symbol".to_string()),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             _ => return Err("Parameter types must be a list".to_string()),
         };
 
@@ -165,19 +165,23 @@ Example session:
             }
         }
 
-        Err(format!("Symbol '{}' not found in any loaded library", symbol))
+        Err(format!(
+            "Symbol '{}' not found in any loaded library",
+            symbol
+        ))
     }
 
     fn call_function(&mut self, name: &str, args: &[Expr]) -> Result<String, String> {
-        let func = self.functions.get(name)
+        let func = self
+            .functions
+            .get(name)
             .ok_or_else(|| format!("Undefined function: {}", name))?;
 
-        let lisp_args: Result<Vec<_>, _> = args.iter()
-            .map(|e| Self::expr_to_lisp(e))
-            .collect();
+        let lisp_args: Result<Vec<_>, _> = args.iter().map(|e| Self::expr_to_lisp(e)).collect();
         let lisp_args = lisp_args?;
 
-        let result = func.call(&lisp_args)
+        let result = func
+            .call(&lisp_args)
             .map_err(|e| format!("Call failed: {:?}", e))?;
 
         Ok(format!("=> {}", Self::lisp_to_string(result)))
@@ -221,12 +225,10 @@ Example session:
         match expr {
             Expr::Number(n) => {
                 if n.contains('.') {
-                    let f: f64 = n.parse()
-                        .map_err(|_| format!("Invalid float: {}", n))?;
+                    let f: f64 = n.parse().map_err(|_| format!("Invalid float: {}", n))?;
                     Ok(f.to_lisp())
                 } else {
-                    let i: i32 = n.parse()
-                        .map_err(|_| format!("Invalid integer: {}", n))?;
+                    let i: i32 = n.parse().map_err(|_| format!("Invalid integer: {}", n))?;
                     Ok(i.to_lisp())
                 }
             }

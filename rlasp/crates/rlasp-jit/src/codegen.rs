@@ -1,10 +1,10 @@
 //! LLVM IR code generation using inkwell
 
+use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::builder::Builder;
-use inkwell::values::{FunctionValue, AnyValue};
 use inkwell::types::IntType;
+use inkwell::values::{AnyValue, FunctionValue};
 
 /// Code generator for LLVM IR
 pub struct CodeGenerator<'ctx> {
@@ -59,20 +59,25 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // cc_box_fixnum(i64) -> i64
         let box_fixnum_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_box_fixnum", box_fixnum_type, None);
+        self.module
+            .add_function("cc_box_fixnum", box_fixnum_type, None);
 
         // cc_unbox_fixnum(i64) -> i64
         let unbox_fixnum_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_unbox_fixnum", unbox_fixnum_type, None);
+        self.module
+            .add_function("cc_unbox_fixnum", unbox_fixnum_type, None);
 
         // cc_box_float(f64) -> i64
         let box_float_type = i64_type.fn_type(&[f64_type.into()], false);
-        self.module.add_function("cc_box_float", box_float_type, None);
-        self.module.add_function("cc_box_single_float", box_float_type, None);
+        self.module
+            .add_function("cc_box_float", box_float_type, None);
+        self.module
+            .add_function("cc_box_single_float", box_float_type, None);
 
         // cc_unbox_float(i64) -> f64
         let unbox_float_type = f64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_unbox_float", unbox_float_type, None);
+        self.module
+            .add_function("cc_unbox_float", unbox_float_type, None);
 
         // cc_cons(i64, i64) -> i64
         let cons_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
@@ -108,7 +113,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // cc_is_fixnum(i64) -> i32
         let is_fixnum_type = i32_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_is_fixnum", is_fixnum_type, None);
+        self.module
+            .add_function("cc_is_fixnum", is_fixnum_type, None);
 
         // cc_is_cons(i64) -> i32
         let is_cons_type = i32_type.fn_type(&[i64_type.into()], false);
@@ -131,7 +137,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module.add_function("cc_ceiling", floor_type, None);
         self.module.add_function("cc_truncate", floor_type, None);
         let truncate_2_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_truncate_2", truncate_2_type, None);
+        self.module
+            .add_function("cc_truncate_2", truncate_2_type, None);
 
         // List functions: cc_length(i64) -> i64, cc_append(i64, i64) -> i64, etc.
         let length_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -147,15 +154,18 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // String functions: cc_make_string_repeat(i64, i64) -> i64
         let make_string_repeat_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_make_string_repeat", make_string_repeat_type, None);
+        self.module
+            .add_function("cc_make_string_repeat", make_string_repeat_type, None);
 
         // cc_set_char(i64, i64, i64) -> i64
-        let set_char_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        let set_char_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_set_char", set_char_type, None);
 
         // cc_string_equal(i64, i64) -> i64
         let string_equal_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_string_equal", string_equal_type, None);
+        self.module
+            .add_function("cc_string_equal", string_equal_type, None);
 
         // Numeric predicates: cc_evenp(i64) -> i64, cc_oddp(i64) -> i64
         let pred_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -175,41 +185,55 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Time functions
         let time_type = i64_type.fn_type(&[], false);
-        self.module.add_function("cc_get_internal_real_time", time_type, None);
+        self.module
+            .add_function("cc_get_internal_real_time", time_type, None);
 
         // Format: cc_format(i64, i64, i64) -> i64 (dest, control, args)
-        let format_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        let format_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_format", format_type, None);
 
         // Hash tables
         let make_hash_table_type = i64_type.fn_type(&[], false);
-        self.module.add_function("cc_make_hash_table", make_hash_table_type, None);
-        let make_hash_table_full_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_make_hash_table_full", make_hash_table_full_type, None);
-        let gethash_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module
+            .add_function("cc_make_hash_table", make_hash_table_type, None);
+        let make_hash_table_full_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module
+            .add_function("cc_make_hash_table_full", make_hash_table_full_type, None);
+        let gethash_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_gethash", gethash_type, None);
-        let puthash_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        let puthash_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_puthash", puthash_type, None);
         let maphash_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_maphash", maphash_type, None);
 
         // Vectors
         let make_vector_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_make_vector", make_vector_type, None);
-        let svset_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module
+            .add_function("cc_make_vector", make_vector_type, None);
+        let svset_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_svset", svset_type, None);
         let svref_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_svref", svref_type, None);
         let vector_length_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_vector_length", vector_length_type, None);
+        self.module
+            .add_function("cc_vector_length", vector_length_type, None);
 
         // CLOS
         let make_instance_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_make_instance", make_instance_type, None);
+        self.module
+            .add_function("cc_make_instance", make_instance_type, None);
         let slot_value_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_slot_value", slot_value_type, None);
-        let set_slot_value_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_set_slot_value", set_slot_value_type, None);
+        self.module
+            .add_function("cc_slot_value", slot_value_type, None);
+        let set_slot_value_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module
+            .add_function("cc_set_slot_value", set_slot_value_type, None);
 
         // System functions
         let system_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -218,9 +242,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module.add_function("cc_echo", system_type, None);
 
         // Symbol creation
-        let ptr_type = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let ptr_type = self
+            .context
+            .i8_type()
+            .ptr_type(inkwell::AddressSpace::default());
         let make_symbol_type = i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_make_symbol", make_symbol_type, None);
+        self.module
+            .add_function("cc_make_symbol", make_symbol_type, None);
 
         // CLI commands (no arguments)
         let no_arg_type = i64_type.fn_type(&[], false);
@@ -228,12 +256,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module.add_function("cc_pwd", no_arg_type, None);
 
         // String functions
-        let ptr_type = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+        let ptr_type = self
+            .context
+            .i8_type()
+            .ptr_type(inkwell::AddressSpace::default());
         let make_string_type = i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_make_string", make_string_type, None);
+        self.module
+            .add_function("cc_make_string", make_string_type, None);
 
         let shell_type = i64_type.fn_type(&[i64_type.into()], false);
         self.module.add_function("cc_shell", shell_type, None);
+
+        let func_ref_const_type = i64_type.fn_type(&[ptr_type.into()], false);
+        self.module
+            .add_function("cc_make_function_ref_const", func_ref_const_type, None);
+
+        let funcall_0_type = i64_type.fn_type(&[i64_type.into()], false);
+        self.module
+            .add_function("cc_funcall_0", funcall_0_type, None);
+        let funcall_1_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module
+            .add_function("cc_funcall_1", funcall_1_type, None);
+        let funcall_2_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module
+            .add_function("cc_funcall_2", funcall_2_type, None);
+        let funcall_3_type = i64_type.fn_type(
+            &[
+                i64_type.into(),
+                i64_type.into(),
+                i64_type.into(),
+                i64_type.into(),
+            ],
+            false,
+        );
+        self.module
+            .add_function("cc_funcall_3", funcall_3_type, None);
 
         // Command-line arguments
         let argc_type = i64_type.fn_type(&[], false);
@@ -244,25 +302,34 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Function pointers for lambdas
         let box_fn_ptr_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_box_function_ptr", box_fn_ptr_type, None);
+        self.module
+            .add_function("cc_box_function_ptr", box_fn_ptr_type, None);
 
         let unbox_fn_ptr_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_unbox_function_ptr", unbox_fn_ptr_type, None);
+        self.module
+            .add_function("cc_unbox_function_ptr", unbox_fn_ptr_type, None);
 
         let is_fn_type = i32_type.fn_type(&[i64_type.into()], false);
         self.module.add_function("cc_is_function", is_fn_type, None);
 
         // Array functions
         let make_array_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_make_array", make_array_type, None);
+        self.module
+            .add_function("cc_make_array", make_array_type, None);
 
-        let make_array_with_contents_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-        self.module.add_function("cc_make_array_with_contents", make_array_with_contents_type, None);
+        let make_array_with_contents_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function(
+            "cc_make_array_with_contents",
+            make_array_with_contents_type,
+            None,
+        );
 
         let aref_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_aref", aref_type, None);
 
-        let set_aref_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        let set_aref_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
         self.module.add_function("cc_set_aref", set_aref_type, None);
 
         // Math functions
@@ -271,8 +338,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // CLOS accessor functions
         let accessor_type = i64_type.fn_type(&[i64_type.into()], false);
-        self.module.add_function("cc_accessor_x", accessor_type, None);
-        self.module.add_function("cc_accessor_y", accessor_type, None);
+        self.module
+            .add_function("cc_accessor_x", accessor_type, None);
+        self.module
+            .add_function("cc_accessor_y", accessor_type, None);
     }
 
     /// Create a simple function that returns a fixnum
@@ -291,7 +360,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let val = i64_type.const_int(value as u64, true);
         let result = self.builder.call_fn(box_fixnum, &[val.into()], "boxed");
 
-        self.builder.build_return(Some(&result.as_any_value_enum().into_int_value()));
+        self.builder
+            .build_return(Some(&result.as_any_value_enum().into_int_value()));
 
         function
     }
@@ -314,10 +384,16 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         // Unbox both parameters
         let unbox_fixnum = self.module.get_function("cc_unbox_fixnum").unwrap();
-        let a_val = self.builder.call_fn(unbox_fixnum, &[a_param.into()], "a_val")
-            .as_any_value_enum().into_int_value();
-        let b_val = self.builder.call_fn(unbox_fixnum, &[b_param.into()], "b_val")
-            .as_any_value_enum().into_int_value();
+        let a_val = self
+            .builder
+            .call_fn(unbox_fixnum, &[a_param.into()], "a_val")
+            .as_any_value_enum()
+            .into_int_value();
+        let b_val = self
+            .builder
+            .call_fn(unbox_fixnum, &[b_param.into()], "b_val")
+            .as_any_value_enum()
+            .into_int_value();
 
         // Add the values
         let sum = self.builder.build_int_add(a_val, b_val, "sum").unwrap();
@@ -326,7 +402,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let box_fixnum = self.module.get_function("cc_box_fixnum").unwrap();
         let result = self.builder.call_fn(box_fixnum, &[sum.into()], "result");
 
-        self.builder.build_return(Some(&result.as_any_value_enum().into_int_value()));
+        self.builder
+            .build_return(Some(&result.as_any_value_enum().into_int_value()));
 
         function
     }
@@ -338,14 +415,16 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Write WASM output to a file
     pub fn write_wasm_to_file(&self, path: &str) -> Result<(), String> {
-        use inkwell::targets::{Target, InitializationConfig, TargetMachine, RelocMode, CodeModel, FileType};
+        use inkwell::targets::{
+            CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+        };
         use inkwell::OptimizationLevel;
 
         Target::initialize_webassembly(&InitializationConfig::default());
 
         let triple = inkwell::targets::TargetTriple::create("wasm32-unknown-unknown");
-        let target = Target::from_triple(&triple)
-            .map_err(|e| format!("Failed to create target: {}", e))?;
+        let target =
+            Target::from_triple(&triple).map_err(|e| format!("Failed to create target: {}", e))?;
 
         let target_machine = target
             .create_target_machine(
@@ -366,13 +445,21 @@ impl<'ctx> CodeGenerator<'ctx> {
 
 // Helper trait to make calling functions easier
 trait BuilderExt<'ctx> {
-    fn call_fn(&self, function: FunctionValue<'ctx>, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>], name: &str)
-        -> inkwell::values::CallSiteValue<'ctx>;
+    fn call_fn(
+        &self,
+        function: FunctionValue<'ctx>,
+        args: &[inkwell::values::BasicMetadataValueEnum<'ctx>],
+        name: &str,
+    ) -> inkwell::values::CallSiteValue<'ctx>;
 }
 
 impl<'ctx> BuilderExt<'ctx> for Builder<'ctx> {
-    fn call_fn(&self, function: FunctionValue<'ctx>, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>], name: &str)
-        -> inkwell::values::CallSiteValue<'ctx> {
+    fn call_fn(
+        &self,
+        function: FunctionValue<'ctx>,
+        args: &[inkwell::values::BasicMetadataValueEnum<'ctx>],
+        name: &str,
+    ) -> inkwell::values::CallSiteValue<'ctx> {
         self.build_call(function, args, name).unwrap()
     }
 }

@@ -5,58 +5,38 @@ use std::rc::Rc;
 
 pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
-        "open" => {
-            match args.get(0) {
-                Some(EvalResult::String(path)) => Ok(EvalResult::String(path.clone())),
-                _ => Err("open requires a pathname".to_string()),
-            }
-        }
+        "open" => match args.get(0) {
+            Some(EvalResult::String(path)) => Ok(EvalResult::String(path.clone())),
+            _ => Err("open requires a pathname".to_string()),
+        },
 
-        "close" => {
-            Ok(EvalResult::Boolean(true))
-        }
+        "close" => Ok(EvalResult::Boolean(true)),
 
-        "input-stream-p" | "output-stream-p" | "streamp" => {
-            Ok(EvalResult::Boolean(false))
-        }
+        "input-stream-p" | "output-stream-p" | "streamp" => Ok(EvalResult::Boolean(false)),
 
-        "read-byte" | "read-char-no-hang" => {
-            Ok(EvalResult::Nil)
-        }
+        "read-byte" | "read-char-no-hang" => Ok(EvalResult::Nil),
 
-        "write-byte" => {
-            match args.get(0) {
-                Some(byte) => Ok(byte.clone()),
-                None => Err("write-byte requires a byte".to_string()),
-            }
-        }
+        "write-byte" => match args.get(0) {
+            Some(byte) => Ok(byte.clone()),
+            None => Err("write-byte requires a byte".to_string()),
+        },
 
-        "read-sequence" | "write-sequence" => {
-            Ok(EvalResult::Fixnum(0))
-        }
+        "read-sequence" | "write-sequence" => Ok(EvalResult::Fixnum(0)),
 
-        "clear-input" | "clear-output" | "finish-output" | "force-output" => {
-            Ok(EvalResult::Nil)
-        }
+        "clear-input" | "clear-output" | "finish-output" | "force-output" => Ok(EvalResult::Nil),
 
-        "make-string-input-stream" => {
-            match args.get(0) {
-                Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
-                _ => Err("make-string-input-stream requires a string".to_string()),
-            }
-        }
+        "make-string-input-stream" => match args.get(0) {
+            Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
+            _ => Err("make-string-input-stream requires a string".to_string()),
+        },
 
-        "make-string-output-stream" => {
-            Ok(EvalResult::String("".to_string()))
-        }
+        "make-string-output-stream" => Ok(EvalResult::String("".to_string())),
 
         "stream-element-type" | "stream-external-format" => {
             Ok(EvalResult::Symbol("CHARACTER".to_string()))
         }
 
-        "set-stream-element-type" | "set-stream-external-format" => {
-            Ok(EvalResult::Nil)
-        }
+        "set-stream-element-type" | "set-stream-external-format" => Ok(EvalResult::Nil),
 
         "read-from-string" => {
             match args.get(0) {
@@ -79,7 +59,12 @@ pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
             let stream = args.get(0).cloned().unwrap_or(EvalResult::Nil);
             let eof_error_p = args
                 .get(1)
-                .map(|v| !matches!(v, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)))
+                .map(|v| {
+                    !matches!(
+                        v,
+                        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+                    )
+                })
                 .unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
 
@@ -98,9 +83,10 @@ pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
                         let _ = super::eval_io::stream_read_chars(&stream, advance)?;
                     }
                     use crate::repl::lisp_to_ast::{lisp_to_ast, with_read_time_env};
-                    let ast_result = if let Some(result) = super::eval_io::with_current_io_env(|env| {
-                        with_read_time_env(env, || lisp_to_ast(expr))
-                    }) {
+                    let ast_result = if let Some(result) =
+                        super::eval_io::with_current_io_env(|env| {
+                            with_read_time_env(env, || lisp_to_ast(expr))
+                        }) {
                         result
                     } else {
                         lisp_to_ast(expr)
@@ -144,7 +130,11 @@ pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
                 let first = loop {
                     let ch = super::eval_io::call_io_builtin(
                         "read-char",
-                        &[stream.clone(), EvalResult::Boolean(false), eof_marker.clone()],
+                        &[
+                            stream.clone(),
+                            EvalResult::Boolean(false),
+                            eof_marker.clone(),
+                        ],
                     )?;
                     match ch {
                         EvalResult::Symbol(ref s) if s == "__EOF__" => break None,
@@ -162,7 +152,11 @@ pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
                 loop {
                     let ch = super::eval_io::call_io_builtin(
                         "read-char",
-                        &[stream.clone(), EvalResult::Boolean(false), eof_marker.clone()],
+                        &[
+                            stream.clone(),
+                            EvalResult::Boolean(false),
+                            eof_marker.clone(),
+                        ],
                     )?;
                     match ch {
                         EvalResult::Symbol(ref s) if s == "__EOF__" => break,
@@ -178,20 +172,15 @@ pub fn call_io2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, S
 
             let mut list = EvalResult::Nil;
             for value in out.into_iter().rev() {
-                list = EvalResult::Cons(
-                    Rc::new(RefCell::new(value)),
-                    Rc::new(RefCell::new(list)),
-                );
+                list = EvalResult::Cons(Rc::new(RefCell::new(value)), Rc::new(RefCell::new(list)));
             }
             Ok(list)
         }
 
-        "file-string-length" => {
-            match args.get(1) {
-                Some(EvalResult::String(s)) => Ok(EvalResult::Fixnum(s.len() as i64)),
-                _ => Ok(EvalResult::Fixnum(1)),
-            }
-        }
+        "file-string-length" => match args.get(1) {
+            Some(EvalResult::String(s)) => Ok(EvalResult::Fixnum(s.len() as i64)),
+            _ => Ok(EvalResult::Fixnum(1)),
+        },
 
         _ => Err(format!("Unknown io2 builtin: {}", name)),
     }

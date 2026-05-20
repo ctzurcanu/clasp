@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
     let workspace_root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
@@ -63,7 +64,8 @@ fn main() {
         && manifest_dir.join("src/ffi/cxx_bridge.rs").exists()
         && manifest_dir.join("src/ffi/cxx_bridge_impl.cpp").exists()
         && manifest_dir.join("include").exists()
-        && vector_header.exists() {
+        && vector_header.exists()
+    {
         cxx_build::bridge("src/ffi/cxx_bridge.rs")
             .file("src/ffi/cxx_bridge_impl.cpp")
             .flag("-std=c++17")

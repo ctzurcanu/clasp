@@ -26,9 +26,9 @@ pub enum TypeTag {
     Bool = 1,
     Fixnum = 2,
     Float = 3,
-    Pointer = 4,      // General heap pointer (cons, symbol, string, etc.)
+    Pointer = 4, // General heap pointer (cons, symbol, string, etc.)
     Character = 5,
-    Raw = 6,          // Raw bytes (no interpretation)
+    Raw = 6, // Raw bytes (no interpretation)
 }
 
 /// Global evaluation stack
@@ -39,17 +39,77 @@ pub struct EvalStack {
     /// Value stack: array of bytes
     value_stack: Vec<u8>,
 
+    /// Explicit GC root slots for pointer entries.
+    ///
+    /// The value stack is a Rust heap buffer containing tagged words as bytes,
+    /// so conservative stack scanning cannot be relied on to keep Lisp heap
+    /// objects alive while compiled code evaluates later arguments. This slot
+    /// array is registered with Boehm as one stable root range and updated in
+    /// O(1) on push/pop.
+    root_slots: Vec<usize>,
+    root_top: usize,
+
     /// Current position in value stack (byte offset)
     value_sp: usize,
 }
 
 impl EvalStack {
     fn new() -> Self {
-        Self {
-            type_stack: Vec::with_capacity(4096),      // 16KB for 4096 entries
-            value_stack: Vec::with_capacity(1048576),  // 1MB initial
+        let mut stack = Self {
+            type_stack: Vec::with_capacity(4096), // 16KB for 4096 entries
+            value_stack: Vec::with_capacity(1048576), // 1MB initial
+            root_slots: vec![0; 4096],
+            root_top: 0,
             value_sp: 0,
+        };
+        Self::register_slots(&mut stack.root_slots);
+        stack
+    }
+
+    fn register_slots(slots: &mut [usize]) {
+        if slots.is_empty() {
+            return;
         }
+        unsafe {
+            let start = slots.as_mut_ptr();
+            let end = start.add(slots.len());
+            crate::gc::gc_add_root_range(start as *mut u8, end as *mut u8);
+        }
+    }
+
+    fn unregister_slots(slots: &mut [usize]) {
+        if slots.is_empty() {
+            return;
+        }
+        unsafe {
+            let start = slots.as_mut_ptr();
+            let end = start.add(slots.len());
+            crate::gc::gc_remove_root_range(start as *mut u8, end as *mut u8);
+        }
+    }
+
+    #[inline]
+    fn heap_root_word(raw: usize) -> usize {
+        match raw & 0b11 {
+            // Cons and general-object Lisp values are tagged heap pointers.
+            // Boehm root ranges should contain canonical heap addresses, not
+            // tagged Lisp words.
+            0b01 | 0b11 => raw & !0b11,
+            _ => 0,
+        }
+    }
+
+    fn ensure_root_slot(&mut self) {
+        if self.root_top < self.root_slots.len() {
+            return;
+        }
+
+        let new_len = self.root_slots.len().saturating_mul(2).max(1);
+        let mut new_slots = vec![0; new_len];
+        new_slots[..self.root_top].copy_from_slice(&self.root_slots[..self.root_top]);
+        Self::register_slots(&mut new_slots);
+        Self::unregister_slots(&mut self.root_slots);
+        self.root_slots = new_slots;
     }
 
     /// Push a value onto the stack
@@ -59,6 +119,9 @@ impl EvalStack {
             type_tag: type_tag as u16,
             length: data.len() as u16,
         });
+        self.ensure_root_slot();
+        self.root_slots[self.root_top] = 0;
+        self.root_top += 1;
 
         // Add value data at current stack pointer
         // Truncate or extend value_stack to value_sp
@@ -75,6 +138,9 @@ impl EvalStack {
     /// Push a pointer (usize)
     pub fn push_pointer(&mut self, ptr: usize) {
         self.push(TypeTag::Pointer, &ptr.to_le_bytes());
+        if self.root_top > 0 {
+            self.root_slots[self.root_top - 1] = Self::heap_root_word(ptr);
+        }
     }
 
     /// Push nil
@@ -90,6 +156,10 @@ impl EvalStack {
         }
 
         let type_entry = self.type_stack.pop().unwrap();
+        if self.root_top > 0 {
+            self.root_top -= 1;
+            self.root_slots[self.root_top] = 0;
+        }
         let len = type_entry.length as usize;
 
         // Get data from value stack
@@ -162,7 +232,7 @@ impl EvalStack {
 
         Some((
             Self::tag_from_u16(type_entry.type_tag),
-            &self.value_stack[value_pos..value_pos + len]
+            &self.value_stack[value_pos..value_pos + len],
         ))
     }
 
@@ -173,6 +243,10 @@ impl EvalStack {
 
     /// Clear the stack
     pub fn clear(&mut self) {
+        for slot in &mut self.root_slots[..self.root_top] {
+            *slot = 0;
+        }
+        self.root_top = 0;
         self.type_stack.clear();
         self.value_sp = 0;
     }
@@ -197,6 +271,12 @@ impl EvalStack {
             6 => TypeTag::Raw,
             _ => TypeTag::Nil,
         }
+    }
+}
+
+impl Drop for EvalStack {
+    fn drop(&mut self) {
+        Self::unregister_slots(&mut self.root_slots);
     }
 }
 
@@ -261,7 +341,10 @@ pub extern "C" fn stack_pop_pointer() -> usize {
             return crate::LispObject::nil().raw();
         }
         s.pop_pointer().unwrap_or_else(|| {
-            eprintln!("[STACK ERROR] stack_pop_pointer failed to pop (depth was {})", depth);
+            eprintln!(
+                "[STACK ERROR] stack_pop_pointer failed to pop (depth was {})",
+                depth
+            );
             crate::LispObject::nil().raw()
         })
     })

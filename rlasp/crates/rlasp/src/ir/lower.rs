@@ -1,12 +1,11 @@
 /// AST → IR lowering
 ///
 /// Converts AST nodes to BIR (Basic IR) instructions and blocks
-
 use super::ast::ASTNode;
-use super::module::Module;
-use super::datum::{DatumId, ConstantValue};
-use super::instruction::InstructionKind;
+use super::datum::{ConstantValue, DatumId};
 use super::iblock::IBlockId;
+use super::instruction::InstructionKind;
+use super::module::Module;
 use std::collections::HashMap;
 
 /// Context for lowering AST to IR
@@ -47,9 +46,11 @@ impl LowerContext {
                     .ok_or_else(|| format!("Undefined variable: {}", name))
             }
 
-            ASTNode::If { test, then_branch, else_branch } => {
-                self.lower_if(test, then_branch, else_branch)
-            }
+            ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => self.lower_if(test, then_branch, else_branch),
 
             ASTNode::Cond { clauses } => {
                 // Lower cond to nested if expressions
@@ -69,13 +70,9 @@ impl LowerContext {
                 self.lower_ast(&current)
             }
 
-            ASTNode::Call { function, args } => {
-                self.lower_call(function, args)
-            }
+            ASTNode::Call { function, args } => self.lower_call(function, args),
 
-            ASTNode::Lambda { params, body, .. } => {
-                self.lower_lambda(params, body)
-            }
+            ASTNode::Lambda { params, body, .. } => self.lower_lambda(params, body),
 
             ASTNode::Macro { params, body } => {
                 // For now, treat macros like lambdas in the IR
@@ -102,29 +99,17 @@ impl LowerContext {
                 Ok(self.module.make_constant(ConstantValue::Nil))
             }
 
-            ASTNode::Let { bindings, body } => {
-                self.lower_let(bindings, body)
-            }
+            ASTNode::Let { bindings, body } => self.lower_let(bindings, body),
 
-            ASTNode::LetStar { bindings, body } => {
-                self.lower_let(bindings, body)
-            }
+            ASTNode::LetStar { bindings, body } => self.lower_let(bindings, body),
 
-            ASTNode::Setq { var, value } => {
-                self.lower_setq(var, value)
-            }
+            ASTNode::Setq { var, value } => self.lower_setq(var, value),
 
-            ASTNode::Progn { exprs } => {
-                self.lower_progn(exprs)
-            }
+            ASTNode::Progn { exprs } => self.lower_progn(exprs),
 
-            ASTNode::Block { name, body } => {
-                self.lower_block(name, body)
-            }
+            ASTNode::Block { name, body } => self.lower_block(name, body),
 
-            ASTNode::ReturnFrom { block_name, value } => {
-                self.lower_return_from(block_name, value)
-            }
+            ASTNode::ReturnFrom { block_name, value } => self.lower_return_from(block_name, value),
 
             ASTNode::Quote(form) => {
                 // For now, just return the form as a constant
@@ -144,14 +129,21 @@ impl LowerContext {
                 Err("Backquote forms should be expanded before lowering".to_string())
             }
 
-            ASTNode::CCall { function: _, args: _ } => {
+            ASTNode::CCall {
+                function: _,
+                args: _,
+            } => {
                 // Create FFI call instruction
                 let output = self.module.make_output();
                 // TODO: lower args and create CCall instruction
                 Ok(output)
             }
 
-            ASTNode::CppMethodCall { object: _, method: _, args: _ } => {
+            ASTNode::CppMethodCall {
+                object: _,
+                method: _,
+                args: _,
+            } => {
                 // Create C++ method call instruction
                 let output = self.module.make_output();
                 // TODO: lower object, args and create CppMethodCall instruction
@@ -266,10 +258,11 @@ impl LowerContext {
                 } else {
                     // Unknown function - create a runtime symbol lookup
                     // For now, create a constant with the function name
-                    self.module.make_constant(ConstantValue::Symbol(name.clone()))
+                    self.module
+                        .make_constant(ConstantValue::Symbol(name.clone()))
                 }
             }
-            other => self.lower_ast(other)?
+            other => self.lower_ast(other)?,
         };
 
         // Lower arguments
@@ -284,9 +277,7 @@ impl LowerContext {
         inputs.extend(arg_vals);
 
         let _call_inst = self.module.make_instruction(
-            InstructionKind::Call {
-                callee: func_val,
-            },
+            InstructionKind::Call { callee: func_val },
             inputs,
             vec![output],
         );
@@ -294,7 +285,11 @@ impl LowerContext {
         Ok(output)
     }
 
-    fn lower_builtin_call(&mut self, name: &str, args: &[ASTNode]) -> Result<Option<DatumId>, String> {
+    fn lower_builtin_call(
+        &mut self,
+        name: &str,
+        args: &[ASTNode],
+    ) -> Result<Option<DatumId>, String> {
         let kind = match name {
             // Arithmetic
             "+" => Some(InstructionKind::Add),
@@ -328,11 +323,7 @@ impl LowerContext {
             let output = self.module.make_output();
 
             // Create instruction
-            let inst_id = self.module.make_instruction(
-                kind,
-                arg_vals,
-                vec![output],
-            );
+            let inst_id = self.module.make_instruction(kind, arg_vals, vec![output]);
 
             // Link instruction into current block
             if let Some(block_id) = self.current_block {
@@ -380,11 +371,9 @@ impl LowerContext {
         let result = self.lower_progn(body)?;
 
         // Emit return
-        let _ret_inst = self.module.make_instruction(
-            InstructionKind::Return,
-            vec![result],
-            vec![],
-        );
+        let _ret_inst = self
+            .module
+            .make_instruction(InstructionKind::Return, vec![result], vec![]);
 
         // Restore context
         self.env = old_env;
@@ -393,7 +382,9 @@ impl LowerContext {
 
         // Return function as a value
         // In a real implementation, this would create a closure object
-        let func_datum = self.module.make_constant(ConstantValue::Fixnum(func_id as i64));
+        let func_datum = self
+            .module
+            .make_constant(ConstantValue::Fixnum(func_id as i64));
         Ok(func_datum)
     }
 
@@ -465,11 +456,7 @@ impl LowerContext {
         Ok(result.unwrap())
     }
 
-    fn lower_block(
-        &mut self,
-        _name: &Option<String>,
-        body: &[ASTNode],
-    ) -> Result<DatumId, String> {
+    fn lower_block(&mut self, _name: &Option<String>, body: &[ASTNode]) -> Result<DatumId, String> {
         // For now, just lower as progn
         // In a real implementation, this would set up a return-from target
         self.lower_progn(body)
@@ -488,11 +475,9 @@ impl LowerContext {
         };
 
         // Emit return instruction
-        let _ret_inst = self.module.make_instruction(
-            InstructionKind::Return,
-            vec![val_datum],
-            vec![],
-        );
+        let _ret_inst =
+            self.module
+                .make_instruction(InstructionKind::Return, vec![val_datum], vec![]);
 
         Ok(val_datum)
     }
@@ -574,7 +559,9 @@ mod tests {
         ctx.current_block = Some(entry);
 
         // Add "+" to environment
-        let plus_fn = ctx.module.make_constant(ConstantValue::Symbol("+".to_string()));
+        let plus_fn = ctx
+            .module
+            .make_constant(ConstantValue::Symbol("+".to_string()));
         ctx.env.insert("+".to_string(), plus_fn);
 
         // (+ 1 2)

@@ -1,4 +1,3 @@
-#[path = "main.rs"]
-mod main_impl;
+pub mod engine;
 
-pub use main_impl::cc_eval_bridge;
+pub use engine::{NativeArtifactKind, ObjectEmitter};

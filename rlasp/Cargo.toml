@@ -7,7 +7,6 @@ members = [
     "crates/rlasp-mlir",
     "crates/rlasp-reader",
     "crates/rlasp-compiler",
-    "crates/rlasp-evaluator",
     "crates/rlasp-clbind",
     "crates/rlasp",
     "crates/rlasp-macros",

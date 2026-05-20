@@ -4,7 +4,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, FnArg, Pat, ReturnType};
+use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType};
 
 /// Expose a Rust function to Lisp
 ///
@@ -30,17 +30,22 @@ pub fn lisp_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_attrs = &input.attrs;
 
     // Extract parameter names and types
-    let params: Vec<_> = input.sig.inputs.iter().filter_map(|arg| {
-        if let FnArg::Typed(pat_type) = arg {
-            if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                Some((pat_ident.ident.clone(), pat_type.ty.clone()))
+    let params: Vec<_> = input
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| {
+            if let FnArg::Typed(pat_type) = arg {
+                if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                    Some((pat_ident.ident.clone(), pat_type.ty.clone()))
+                } else {
+                    None
+                }
             } else {
                 None
             }
-        } else {
-            None
-        }
-    }).collect();
+        })
+        .collect();
 
     let param_names: Vec<_> = params.iter().map(|(name, _)| name).collect();
     let param_types: Vec<_> = params.iter().map(|(_, ty)| ty).collect();
@@ -61,16 +66,10 @@ pub fn lisp_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Generate wrapper function name
-    let wrapper_name = syn::Ident::new(
-        &format!("{}_lisp_wrapper", fn_name),
-        fn_name.span()
-    );
+    let wrapper_name = syn::Ident::new(&format!("{}_lisp_wrapper", fn_name), fn_name.span());
 
     // Generate registration function name
-    let register_name = syn::Ident::new(
-        &format!("register_{}", fn_name),
-        fn_name.span()
-    );
+    let register_name = syn::Ident::new(&format!("register_{}", fn_name), fn_name.span());
 
     // Convert function name to Lisp naming convention (kebab-case)
     let lisp_name = fn_name.to_string().replace('_', "-");

@@ -1,7 +1,6 @@
-/// Test for stack-based MLIR code generator
-
-use rlasp_mlir::lib_stack::StackMLIRCodegen;
 use rlasp::ir::{ASTNode, ConstantValue};
+/// Test for stack-based MLIR code generator
+use rlasp_mlir::lib_stack::StackMLIRCodegen;
 
 #[test]
 fn test_simple_addition() {

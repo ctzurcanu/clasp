@@ -1,7 +1,6 @@
 /// AST - Abstract Syntax Tree for Lisp expressions
 ///
 /// Simple AST that will be lowered to BIR
-
 use super::datum::ConstantValue;
 use rlasp_runtime::FloatFormat;
 
@@ -32,15 +31,15 @@ pub enum ASTNode {
 
     /// Cond: (cond (test1 result1) (test2 result2) ...)
     Cond {
-        clauses: Vec<(ASTNode, ASTNode)>,  // (test, result) pairs
+        clauses: Vec<(ASTNode, ASTNode)>, // (test, result) pairs
     },
 
     /// Lambda: (lambda (args) body)
     Lambda {
         params: Vec<String>,
-        defaults: std::collections::HashMap<String, ASTNode>,  // Default values for params
-        supplied_p_vars: std::collections::HashMap<String, String>,  // Maps param -> supplied-p var
-        key_params: std::collections::HashMap<String, String>,  // Maps param -> keyword name (no leading :)
+        defaults: std::collections::HashMap<String, ASTNode>, // Default values for params
+        supplied_p_vars: std::collections::HashMap<String, String>, // Maps param -> supplied-p var
+        key_params: std::collections::HashMap<String, String>, // Maps param -> keyword name (no leading :)
         body: Vec<ASTNode>,
     },
 
@@ -76,13 +75,13 @@ pub enum ASTNode {
     /// Supports: (loop for var from start below limit [when condition] sum/collect expr [else sum/collect expr])
     Loop {
         var: String,
-        start: Option<Box<ASTNode>>,      // from value
-        limit: Box<ASTNode>,               // below value
+        start: Option<Box<ASTNode>>,          // from value
+        limit: Box<ASTNode>,                  // below value
         when_condition: Option<Box<ASTNode>>, // when/unless/if condition
-        collect: Option<Box<ASTNode>>,     // collect expression
-        sum: Option<Box<ASTNode>>,         // sum expression
-        else_collect: Option<Box<ASTNode>>, // else collect expression
-        else_sum: Option<Box<ASTNode>>,    // else sum expression
+        collect: Option<Box<ASTNode>>,        // collect expression
+        sum: Option<Box<ASTNode>>,            // sum expression
+        else_collect: Option<Box<ASTNode>>,   // else collect expression
+        else_sum: Option<Box<ASTNode>>,       // else sum expression
     },
 
     /// Let*: (let* ((var val) ...) body)
@@ -166,6 +165,7 @@ pub enum ASTNode {
         name: String,
         superclasses: Vec<String>,
         slots: Vec<SlotSpec>,
+        metaclass: Option<String>,
     },
 
     /// Define a generic function: (defgeneric name lambda-list)
@@ -177,9 +177,9 @@ pub enum ASTNode {
     /// Define a method: (defmethod name [:qualifier] (specialized-lambda-list) body...)
     Defmethod {
         generic_name: String,
-        qualifier: Option<String>,  // :before, :after, :around, or None for primary
-        specializers: Vec<String>,  // Class names or T for unspecialized
-        params: Vec<String>,  // Parameter names
+        qualifier: Option<String>, // :before, :after, :around, or None for primary
+        specializers: Vec<String>, // Class names or T for unspecialized
+        params: Vec<String>,       // Parameter names
         body: Vec<ASTNode>,
     },
 }
@@ -193,6 +193,7 @@ pub struct SlotSpec {
     pub accessor: Option<String>,
     pub reader: Option<String>,
     pub writer: Option<String>,
+    pub allocation_class: bool,
 }
 
 impl ASTNode {
@@ -266,7 +267,11 @@ impl ASTNode {
         }
     }
 
-    pub fn lambda_with_defaults(params: Vec<String>, defaults: std::collections::HashMap<String, ASTNode>, body: Vec<ASTNode>) -> Self {
+    pub fn lambda_with_defaults(
+        params: Vec<String>,
+        defaults: std::collections::HashMap<String, ASTNode>,
+        body: Vec<ASTNode>,
+    ) -> Self {
         ASTNode::Lambda {
             params,
             defaults,
@@ -276,7 +281,13 @@ impl ASTNode {
         }
     }
 
-    pub fn lambda_with_supplied_p(params: Vec<String>, defaults: std::collections::HashMap<String, ASTNode>, supplied_p_vars: std::collections::HashMap<String, String>, key_params: std::collections::HashMap<String, String>, body: Vec<ASTNode>) -> Self {
+    pub fn lambda_with_supplied_p(
+        params: Vec<String>,
+        defaults: std::collections::HashMap<String, ASTNode>,
+        supplied_p_vars: std::collections::HashMap<String, String>,
+        key_params: std::collections::HashMap<String, String>,
+        body: Vec<ASTNode>,
+    ) -> Self {
         ASTNode::Lambda {
             params,
             defaults,
@@ -350,7 +361,11 @@ mod tests {
         let if_node = ASTNode::if_then_else(test, then_branch, else_branch);
 
         match if_node {
-            ASTNode::If { test, then_branch, else_branch } => {
+            ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => {
                 assert!(test.is_variable());
                 assert!(then_branch.is_constant());
                 assert!(else_branch.is_constant());
@@ -366,7 +381,9 @@ mod tests {
         let lambda = ASTNode::lambda(params.clone(), body);
 
         match lambda {
-            ASTNode::Lambda { params: p, body, .. } => {
+            ASTNode::Lambda {
+                params: p, body, ..
+            } => {
                 assert_eq!(p, params);
                 assert_eq!(body.len(), 1);
             }

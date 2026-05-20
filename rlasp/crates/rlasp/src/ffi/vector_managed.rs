@@ -4,8 +4,7 @@
 /// - Handle table for foreign object tracking
 /// - Automatic finalization via Drop
 /// - Safe access to C++ objects
-
-use crate::runtime::{Handle, register_foreign_object, deref_handle};
+use crate::runtime::{deref_handle, register_foreign_object, Handle};
 
 pub struct VectorManaged {
     handle: Handle,
@@ -16,9 +15,12 @@ impl VectorManaged {
         let ptr = unsafe { vector_new(x, y) };
 
         // Register with finalizer
-        let handle = register_foreign_object(ptr, Some(Box::new(|ptr| {
-            unsafe { vector_delete(ptr) };
-        })));
+        let handle = register_foreign_object(
+            ptr,
+            Some(Box::new(|ptr| {
+                unsafe { vector_delete(ptr) };
+            })),
+        );
 
         Self { handle }
     }
@@ -53,9 +55,12 @@ impl VectorManaged {
         let ptr2 = deref_handle(other.handle).expect("Invalid handle");
         let result_ptr = unsafe { vector_add(ptr1, ptr2) };
 
-        let handle = register_foreign_object(result_ptr, Some(Box::new(|ptr| {
-            unsafe { vector_delete(ptr) };
-        })));
+        let handle = register_foreign_object(
+            result_ptr,
+            Some(Box::new(|ptr| {
+                unsafe { vector_delete(ptr) };
+            })),
+        );
 
         VectorManaged { handle }
     }

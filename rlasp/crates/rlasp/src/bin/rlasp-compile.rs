@@ -2,21 +2,20 @@
 ///
 /// Usage: rlasp-compile <input.lisp> <output.ll>
 ///        rlasp-compile --all  (compile all files in clisp/kernel/)
-
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use rlasp::repl::reader::Reader;
-use rlasp::repl::expand_macros;
+use inkwell::context::Context;
+use inkwell::values::{BasicValueEnum, FunctionValue};
+use rlasp::ir::datum::{ConstantValue, DatumId};
+use rlasp::ir::instruction::{InstructionId, InstructionKind};
 use rlasp::ir::lower::LowerContext;
 use rlasp::ir::module::Module as BIRModule;
-use rlasp::ir::instruction::{InstructionKind, InstructionId};
-use rlasp::ir::datum::{DatumId, ConstantValue};
+use rlasp::repl::expand_macros;
+use rlasp::repl::reader::Reader;
 use rlasp_jit::CodeGenerator;
-use inkwell::context::Context;
-use inkwell::values::{FunctionValue, BasicValueEnum};
 use std::collections::HashMap;
 
 fn main() {
@@ -24,7 +23,10 @@ fn main() {
 
     if args.len() < 2 {
         eprintln!("Usage: {} <input.lisp> <output.ll>", args[0]);
-        eprintln!("       {} --all  (compile all files in clisp/kernel/)", args[0]);
+        eprintln!(
+            "       {} --all  (compile all files in clisp/kernel/)",
+            args[0]
+        );
         process::exit(1);
     }
 
@@ -86,7 +88,10 @@ fn compile_all() {
     }
 
     println!();
-    println!("Compilation complete: {} succeeded, {} failed", success_count, error_count);
+    println!(
+        "Compilation complete: {} succeeded, {} failed",
+        success_count, error_count
+    );
 
     if error_count > 0 {
         process::exit(1);
@@ -113,8 +118,8 @@ fn find_lisp_files(dir: &Path) -> Vec<PathBuf> {
 
 fn compile_file(input: &str, output: &str) -> Result<(), String> {
     // Read input file
-    let source = fs::read_to_string(input)
-        .map_err(|e| format!("Failed to read {}: {}", input, e))?;
+    let source =
+        fs::read_to_string(input).map_err(|e| format!("Failed to read {}: {}", input, e))?;
 
     let module_name = Path::new(input)
         .file_stem()
@@ -138,7 +143,7 @@ fn compile_file(input: &str, output: &str) -> Result<(), String> {
                 }
                 // Real parse error - create minimal module
                 let ir_content = format!(
-r#"; ModuleID = '{}'
+                    r#"; ModuleID = '{}'
 ; Parse error: {}
 ; Source: {}
 source_filename = "{}"
@@ -158,9 +163,7 @@ entry:
     }
 
     // 2. Expand macros
-    let expanded_nodes: Vec<_> = ast_nodes.iter()
-        .map(|ast| expand_macros(ast))
-        .collect();
+    let expanded_nodes: Vec<_> = ast_nodes.iter().map(|ast| expand_macros(ast)).collect();
 
     // 3. Lower AST to IR
     let mut lower_ctx = LowerContext::new();
@@ -170,7 +173,7 @@ entry:
         if let Err(e) = lower_ctx.lower_ast(ast) {
             // Create minimal module on lowering error
             let ir_content = format!(
-r#"; ModuleID = '{}'
+                r#"; ModuleID = '{}'
 ; Lowering failed: {}
 ; Source: {}
 source_filename = "{}"
@@ -196,20 +199,21 @@ entry:
     codegen.declare_intrinsics();
 
     // Generate LLVM functions from BIR
-    eprintln!("BIR Module has {} functions, {} instructions",
-              lower_ctx.module.functions.len(),
-              lower_ctx.module.instructions.len());
+    eprintln!(
+        "BIR Module has {} functions, {} instructions",
+        lower_ctx.module.functions.len(),
+        lower_ctx.module.instructions.len()
+    );
 
     generate_llvm_from_bir(&lower_ctx.module, &codegen, &context)?;
 
     // Add initialization function
     let i64_type = context.i64_type();
     let init_fn_type = i64_type.fn_type(&[], false);
-    let init_fn = codegen.module().add_function(
-        &format!("__rlasp_init_{}", module_name),
-        init_fn_type,
-        None
-    );
+    let init_fn =
+        codegen
+            .module()
+            .add_function(&format!("__rlasp_init_{}", module_name), init_fn_type, None);
 
     let entry_block = context.append_basic_block(init_fn, "entry");
     codegen.builder().position_at_end(entry_block);
@@ -219,13 +223,17 @@ entry:
     codegen.builder().build_return(Some(&zero)).unwrap();
 
     // 5. Write LLVM IR to .ll file
-    codegen.module().print_to_file(output)
+    codegen
+        .module()
+        .print_to_file(output)
         .map_err(|e| format!("Failed to write LLVM IR: {}", e.to_string()))?;
 
     // 6. Also generate .bc file if requested
     if output.ends_with(".ll") {
         let bc_output = output.replace(".ll", ".bc");
-        codegen.module().write_bitcode_to_path(Path::new(&bc_output));
+        codegen
+            .module()
+            .write_bitcode_to_path(Path::new(&bc_output));
     }
 
     Ok(())

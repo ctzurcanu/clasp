@@ -1,9 +1,8 @@
+use super::datum::DatumId;
 /// IBlock - Basic blocks in the IR (Cleavir2-style)
 ///
 /// Represents a sequence of instructions with single entry and exit points
-
 use super::instruction::InstructionId;
-use super::datum::DatumId;
 
 /// Unique ID for a basic block
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

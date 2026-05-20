@@ -87,7 +87,7 @@ impl HashTable {
             if a_ty == ObjectType::String && b_ty == ObjectType::String {
                 if let (Some(a_ptr), Some(b_ptr)) = (
                     a.as_general_ptr::<crate::string::RString>(),
-                    b.as_general_ptr::<crate::string::RString>()
+                    b.as_general_ptr::<crate::string::RString>(),
                 ) {
                     let a_str = unsafe { &*a_ptr }.as_str();
                     let b_str = unsafe { &*b_ptr }.as_str();
@@ -97,7 +97,7 @@ impl HashTable {
             if a_ty == ObjectType::Symbol && b_ty == ObjectType::Symbol {
                 if let (Some(a_ptr), Some(b_ptr)) = (
                     a.as_general_ptr::<crate::symbol::Symbol>(),
-                    b.as_general_ptr::<crate::symbol::Symbol>()
+                    b.as_general_ptr::<crate::symbol::Symbol>(),
                 ) {
                     let a_name = unsafe { &*a_ptr }.name();
                     let b_name = unsafe { &*b_ptr }.name();

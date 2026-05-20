@@ -1,0 +1,7 @@
+%FN%foo-test-describe
+%FN%setf-access-fn
+%FN%setf-access-fn-for-long-setf
+%FN%setf-update-fn
+%FN%stupid-function
+%FN%test-documentation-with-args
+%FN%test-documentation-without-args

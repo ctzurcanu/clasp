@@ -67,9 +67,9 @@ pub fn create_vector<T: VectorApi>(x: f64, y: f64) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::VectorWrapper;
     #[cfg(feature = "cxx-bridge")]
     use crate::ffi::VectorCxx;
+    use crate::ffi::VectorWrapper;
 
     #[test]
     fn test_libffi_backend() {

@@ -56,18 +56,20 @@ impl CCall {
         }
 
         // Type checking for fixed parameters
-        for (i, (arg, expected_type)) in self.args.iter()
+        for (i, (arg, expected_type)) in self
+            .args
+            .iter()
             .zip(self.function.param_types.iter())
             .enumerate()
         {
             match (arg, expected_type) {
-                (CCallArg::Int64(_), CType::Int64) => {},
-                (CCallArg::Int64(_), CType::Int32) => {}, // Allow Int64 arg for Int32 param
-                (CCallArg::UInt64(_), CType::UInt64) => {},
-                (CCallArg::UInt64(_), CType::UInt32) => {},
-                (CCallArg::Double(_), CType::Double) => {},
-                (CCallArg::Float(_), CType::Float) => {},
-                (CCallArg::Pointer(_), CType::Pointer(_)) => {},
+                (CCallArg::Int64(_), CType::Int64) => {}
+                (CCallArg::Int64(_), CType::Int32) => {} // Allow Int64 arg for Int32 param
+                (CCallArg::UInt64(_), CType::UInt64) => {}
+                (CCallArg::UInt64(_), CType::UInt32) => {}
+                (CCallArg::Double(_), CType::Double) => {}
+                (CCallArg::Float(_), CType::Float) => {}
+                (CCallArg::Pointer(_), CType::Pointer(_)) => {}
                 _ => {
                     return Err(format!(
                         "Type mismatch for argument {} of {}: expected {:?}",
@@ -95,10 +97,7 @@ mod tests {
             false,
         );
 
-        let call = CCall::new(
-            func.clone(),
-            vec![CCallArg::Int64(1), CCallArg::Int64(2)],
-        );
+        let call = CCall::new(func.clone(), vec![CCallArg::Int64(1), CCallArg::Int64(2)]);
 
         // This should fail because we're passing Int64 when Int32 is expected
         // But our current validation is lenient - we'd need tighter checking
@@ -117,10 +116,7 @@ mod tests {
 
         let call = CCall::new(
             printf.clone(),
-            vec![
-                CCallArg::Pointer(std::ptr::null()),
-                CCallArg::Int64(42),
-            ],
+            vec![CCallArg::Pointer(std::ptr::null()), CCallArg::Int64(42)],
         );
 
         assert!(call.validate().is_ok());

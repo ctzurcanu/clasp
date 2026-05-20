@@ -5,9 +5,9 @@
 // - JIT executing compiled code
 // - Using intrinsics for type boxing/unboxing
 
-use rlasp_jit::CodeGenerator;
-use rlasp_ffi::types::ToLisp;
 use inkwell::context::Context;
+use rlasp_ffi::types::ToLisp;
+use rlasp_jit::CodeGenerator;
 
 fn main() {
     println!("=== rlasp JIT Compilation Demo ===\n");
@@ -30,7 +30,9 @@ fn main() {
 
     // Create JIT engine
     println!("\n=== Creating JIT Engine ===");
-    let jit = codegen.into_jit_engine().expect("Failed to create JIT engine");
+    let jit = codegen
+        .into_jit_engine()
+        .expect("Failed to create JIT engine");
     println!("JIT engine created successfully\n");
 
     // Test 1: Execute constant function

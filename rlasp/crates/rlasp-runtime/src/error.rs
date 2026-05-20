@@ -1,6 +1,6 @@
 //! Lisp Error type for runtime errors
 
-use crate::{LispObject, TypeHeader, ObjectType};
+use crate::{LispObject, ObjectType, TypeHeader};
 
 /// Error types that can occur at runtime
 #[repr(u8)]
@@ -43,7 +43,10 @@ impl LispError {
 
     /// Create a division by zero error
     pub fn division_by_zero() -> LispObject {
-        Self::allocate(ErrorKind::DivisionByZero, Some("Division by zero".to_string()))
+        Self::allocate(
+            ErrorKind::DivisionByZero,
+            Some("Division by zero".to_string()),
+        )
     }
 }
 
@@ -54,9 +57,7 @@ impl LispObject {
             if ptr.is_null() {
                 return false;
             }
-            unsafe {
-                TypeHeader::from_ptr(ptr) == Some(ObjectType::Error)
-            }
+            unsafe { TypeHeader::from_ptr(ptr) == Some(ObjectType::Error) }
         } else {
             false
         }

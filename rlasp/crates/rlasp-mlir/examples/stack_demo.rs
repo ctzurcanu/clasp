@@ -1,10 +1,9 @@
+use rlasp::ir::{ASTNode, ConstantValue};
 /// Demonstration of stack-based MLIR code generation
 ///
 /// This example shows how the new stack-based calling convention works
 /// compared to the old tagged i64 approach.
-
 use rlasp_mlir::lib_stack::StackMLIRCodegen;
-use rlasp::ir::{ASTNode, ConstantValue};
 
 fn main() {
     println!("=== Stack-Based MLIR Code Generation Demo ===\n");

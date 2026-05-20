@@ -1,7 +1,7 @@
 /// eval_list2.rs - Additional Common Lisp list operations
 use super::eval_types::EvalResult;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
@@ -12,16 +12,17 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 Some(EvalResult::Cons(car, cdr)) => {
                     fn copy_list_recursive(lst: &EvalResult) -> EvalResult {
                         match lst {
-                            EvalResult::Cons(car, cdr) => {
-                                EvalResult::Cons(
-                                    Rc::clone(car),
-                                    Rc::new(RefCell::new(copy_list_recursive(&cdr.borrow())))
-                                )
-                            }
-                            other => other.clone()
+                            EvalResult::Cons(car, cdr) => EvalResult::Cons(
+                                Rc::clone(car),
+                                Rc::new(RefCell::new(copy_list_recursive(&cdr.borrow()))),
+                            ),
+                            other => other.clone(),
                         }
                     }
-                    Ok(copy_list_recursive(&EvalResult::Cons(Rc::clone(car), Rc::clone(cdr))))
+                    Ok(copy_list_recursive(&EvalResult::Cons(
+                        Rc::clone(car),
+                        Rc::clone(cdr),
+                    )))
                 }
                 _ => Err("copy-list requires a list".to_string()),
             }
@@ -33,13 +34,11 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 Some(arg) => {
                     fn copy_tree_recursive(tree: &EvalResult) -> EvalResult {
                         match tree {
-                            EvalResult::Cons(car, cdr) => {
-                                EvalResult::Cons(
-                                    Rc::new(RefCell::new(copy_tree_recursive(&car.borrow()))),
-                                    Rc::new(RefCell::new(copy_tree_recursive(&cdr.borrow())))
-                                )
-                            }
-                            other => other.clone()
+                            EvalResult::Cons(car, cdr) => EvalResult::Cons(
+                                Rc::new(RefCell::new(copy_tree_recursive(&car.borrow()))),
+                                Rc::new(RefCell::new(copy_tree_recursive(&cdr.borrow()))),
+                            ),
+                            other => other.clone(),
                         }
                     }
                     Ok(copy_tree_recursive(arg))
@@ -132,11 +131,11 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                     }
                     Ok(result)
                 }
-                (Some(EvalResult::Bignum(_)), Some(_)) => {
+                (Some(EvalResult::Bignum(b)), Some(_)) if *b >= malachite::Integer::from(0) => {
                     // Bignum index is always past the end of any list
                     Ok(EvalResult::Nil)
                 }
-                _ => Err("nthcdr requires a non-negative integer and a list".to_string()),
+                _ => Err("TYPE-ERROR".to_string()),
             }
         }
 
@@ -152,7 +151,7 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                             EvalResult::Cons(car, cdr) => {
                                 reversed = EvalResult::Cons(
                                     Rc::clone(&car),
-                                    Rc::new(RefCell::new(reversed))
+                                    Rc::new(RefCell::new(reversed)),
                                 );
                                 current = cdr.borrow().clone();
                             }
@@ -190,7 +189,10 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
 
         "mapc" | "mapcan" | "mapcon" | "mapl" | "maplist" => {
             // These require function call support - stub for now
-            Err(format!("{} not fully implemented yet - requires function call integration", name))
+            Err(format!(
+                "{} not fully implemented yet - requires function call integration",
+                name
+            ))
         }
 
         "listSTAR" | "list*" => {
@@ -204,10 +206,10 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             }
 
             let mut result = args[args.len() - 1].clone();
-            for arg in args[..args.len()-1].iter().rev() {
+            for arg in args[..args.len() - 1].iter().rev() {
                 result = EvalResult::Cons(
                     Rc::new(RefCell::new(arg.clone())),
-                    Rc::new(RefCell::new(result))
+                    Rc::new(RefCell::new(result)),
                 );
             }
             Ok(result)
@@ -222,12 +224,12 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                     for _ in 0..*n {
                         result = EvalResult::Cons(
                             Rc::new(RefCell::new(elem.clone())),
-                            Rc::new(RefCell::new(result))
+                            Rc::new(RefCell::new(result)),
                         );
                     }
                     Ok(result)
                 }
-                _ => Err("make-list requires a non-negative integer".to_string()),
+                _ => Err("TYPE-ERROR".to_string()),
             }
         }
 
@@ -255,7 +257,7 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
 
                     // Find element at position keep-1 and set its cdr to nil
                     let mut current = list.clone();
-                    for i in 0..keep-1 {
+                    for i in 0..keep - 1 {
                         match current {
                             EvalResult::Cons(_, cdr) => {
                                 current = cdr.borrow().clone();
@@ -272,6 +274,7 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                         _ => Ok(EvalResult::Nil),
                     }
                 }
+                (Some(_), Some(EvalResult::Fixnum(_))) => Err("TYPE-ERROR".to_string()),
                 (Some(list), None) => {
                     // Default is to remove 1 element
                     // Count list length
@@ -293,7 +296,7 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
 
                     // Find element at position len-2 and set its cdr to nil
                     let mut current = list.clone();
-                    for _ in 0..len-2 {
+                    for _ in 0..len - 2 {
                         match current {
                             EvalResult::Cons(_, cdr) => {
                                 current = cdr.borrow().clone();
@@ -310,11 +313,14 @@ pub fn call_list2_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                         _ => Ok(EvalResult::Nil),
                     }
                 }
-                (Some(_), Some(EvalResult::Bignum(_))) => {
-                    // Bignum count is always >= list length, return nil
-                    Ok(EvalResult::Nil)
+                (Some(_), Some(EvalResult::Bignum(b))) => {
+                    if b < &malachite::Integer::from(0) {
+                        Err("TYPE-ERROR".to_string())
+                    } else {
+                        Ok(EvalResult::Nil)
+                    }
                 }
-                _ => Err("nbutlast requires a list and optional count".to_string()),
+                _ => Err("TYPE-ERROR".to_string()),
             }
         }
 

@@ -4,10 +4,9 @@
 /// from Rust code or FFI boundaries.
 ///
 /// Pattern similar to Clasp's gctools::smart_ptr and rooting system.
-
 use super::object::LispObject;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A GC root that prevents an object from being collected
 pub struct Root {

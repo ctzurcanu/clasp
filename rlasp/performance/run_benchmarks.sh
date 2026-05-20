@@ -75,6 +75,24 @@ result_line() {
   awk '/^ALGO=/{line=$0} END{if(line!="") print line}' "$f"
 }
 
+exit_label() {
+  local rc="$1"
+  if [[ "$rc" -eq 0 ]]; then
+    printf "success"
+  else
+    printf "failed"
+  fi
+}
+
+match_label() {
+  local bit="$1"
+  if [[ "$bit" == "1" ]]; then
+    printf "yes"
+  else
+    printf "no"
+  fi
+}
+
 CSV_FILE="${LOG_DIR}/benchmark-results.csv"
 echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,irlasp_aot_build_s,irlasp_aot_exec_s,irlasp_aot_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,irlasp_aot_build_rc,irlasp_aot_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,irlasp_aot_match_cl,result_match" >"$CSV_FILE"
 echo "IRLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB"
@@ -231,8 +249,39 @@ while IFS='|' read -r bench_file bench_args_raw; do
   args_for_csv="${bench_args_raw//,/;}"
   echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${aot_build_s},${aot_exec_s},${aot_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${aot_build_rc},${aot_exec_rc},${cl_baseline},${cl_expected_present},${interp_match_cl},${mlir_match_cl},${aot_match_cl},${result_match}" >>"$CSV_FILE"
 
-  printf '%-22s sbcl=%8ss clasp=%8ss interp=%8ss mlir_compile=%8ss mlir_exec=%8ss mlir_total=%8ss aot_build=%8ss aot_exec=%8ss aot_total=%8ss baseline=%s interp_match=%s mlir_match=%s aot_match=%s match=%s\n' \
-    "$bench_name" "$sbcl_s" "$clasp_s" "$interp_s" "$mlir_compile_s" "$mlir_exec_s" "$mlir_total_s" "$aot_build_s" "$aot_exec_s" "$aot_total_s" "$cl_baseline" "$interp_match_cl" "$mlir_match_cl" "$aot_match_cl" "$result_match"
+  echo ""
+  echo "BENCHMARK $bench_name args=(${bench_args_raw})"
+  echo "  SBCL"
+  echo "    exit: ${sbcl_rc} ($(exit_label "$sbcl_rc"))"
+  echo "    time_s: $sbcl_s"
+  echo "    output: ${sbcl_result:-<no ALGO line>}"
+  echo "  CLASP"
+  echo "    exit: ${clasp_rc} ($(exit_label "$clasp_rc"))"
+  echo "    time_s: $clasp_s"
+  echo "    output: ${clasp_result:-<no ALGO line>}"
+  echo "  rlasp interpret"
+  echo "    exit: ${interp_rc} ($(exit_label "$interp_rc"))"
+  echo "    time_s: $interp_s"
+  echo "    output: ${interp_result:-<no ALGO line>}"
+  echo "    matches CL baseline: $(match_label "$interp_match_cl")"
+  echo "  rlasp mlir"
+  echo "    compile_exit: ${mlir_compile_rc} ($(exit_label "$mlir_compile_rc"))"
+  echo "    compile_time_s: $mlir_compile_s"
+  echo "    exec_exit: ${mlir_exec_rc} ($(exit_label "$mlir_exec_rc"))"
+  echo "    exec_time_s: $mlir_exec_s"
+  echo "    total_time_s: $mlir_total_s"
+  echo "    output: ${mlir_result:-<no ALGO line>}"
+  echo "    matches CL baseline: $(match_label "$mlir_match_cl")"
+  echo "  rlasp aot"
+  echo "    build_exit: ${aot_build_rc} ($(exit_label "$aot_build_rc"))"
+  echo "    build_time_s: $aot_build_s"
+  echo "    exec_exit: ${aot_exec_rc} ($(exit_label "$aot_exec_rc"))"
+  echo "    exec_time_s: $aot_exec_s"
+  echo "    total_time_s: $aot_total_s"
+  echo "    output: ${aot_result:-<no ALGO line>}"
+  echo "    matches CL baseline: $(match_label "$aot_match_cl")"
+  echo "  baseline: $cl_baseline"
+  echo "  all rlasp modes match CL baseline: $(match_label "$result_match")"
 done <<'EOF'
 fibonacci_recursive.lisp|28
 fibonacci_iterative.lisp|900000

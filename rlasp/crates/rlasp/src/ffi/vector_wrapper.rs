@@ -15,20 +15,16 @@ impl VectorWrapper {
             false,
         );
 
-        let call = CCall::new(
-            ctor_func,
-            vec![
-                CCallArg::Double(x),
-                CCallArg::Double(y),
-            ],
-        );
+        let call = CCall::new(ctor_func, vec![CCallArg::Double(x), CCallArg::Double(y)]);
 
         match super::lower_ccall(&call) {
             Ok(super::CCallResult::Pointer(ptr)) => {
                 if ptr.is_null() {
                     Err("Failed to create Vector".to_string())
                 } else {
-                    Ok(Self { ptr: ptr as *mut () })
+                    Ok(Self {
+                        ptr: ptr as *mut (),
+                    })
                 }
             }
             Ok(_) => Err("Unexpected return type".to_string()),
@@ -115,7 +111,9 @@ impl VectorWrapper {
                 if ptr.is_null() {
                     Err("Failed to create result Vector".to_string())
                 } else {
-                    Ok(VectorWrapper { ptr: ptr as *mut () })
+                    Ok(VectorWrapper {
+                        ptr: ptr as *mut (),
+                    })
                 }
             }
             Ok(_) => Err("Unexpected return type".to_string()),

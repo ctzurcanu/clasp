@@ -15,20 +15,33 @@ pub fn generate_shims(class: &CppClass) -> String {
 
     // Constructors
     for (i, ctor) in class.constructors.iter().enumerate() {
-        let suffix = if i == 0 { "".to_string() } else { format!("_{}", i) };
+        let suffix = if i == 0 {
+            "".to_string()
+        } else {
+            format!("_{}", i)
+        };
         let func_name = format!("{}_new{}", class.name.to_lowercase(), suffix);
 
         write!(code, "void* {}(", func_name).unwrap();
         for (j, param) in ctor.params.iter().enumerate() {
-            if j > 0 { write!(code, ", ").unwrap(); }
+            if j > 0 {
+                write!(code, ", ").unwrap();
+            }
             write!(code, "{} {}", map_type(&param.type_name), param.name).unwrap();
         }
         writeln!(code, ") {{").unwrap();
 
         write!(code, "    return new {}(", class.name).unwrap();
         for (j, param) in ctor.params.iter().enumerate() {
-            if j > 0 { write!(code, ", ").unwrap(); }
-            write!(code, "{}", convert_param_call(&param.type_name, &param.name)).unwrap();
+            if j > 0 {
+                write!(code, ", ").unwrap();
+            }
+            write!(
+                code,
+                "{}",
+                convert_param_call(&param.type_name, &param.name)
+            )
+            .unwrap();
         }
         writeln!(code, ");").unwrap();
         writeln!(code, "}}").unwrap();
@@ -37,7 +50,12 @@ pub fn generate_shims(class: &CppClass) -> String {
 
     // Destructor
     if class.destructor {
-        writeln!(code, "void {}_delete(void* ptr) {{", class.name.to_lowercase()).unwrap();
+        writeln!(
+            code,
+            "void {}_delete(void* ptr) {{",
+            class.name.to_lowercase()
+        )
+        .unwrap();
         writeln!(code, "    delete static_cast<{}*>(ptr);", class.name).unwrap();
         writeln!(code, "}}").unwrap();
         writeln!(code, "").unwrap();
@@ -57,7 +75,9 @@ pub fn generate_shims(class: &CppClass) -> String {
         }
 
         for (j, param) in method.params.iter().enumerate() {
-            if j > 0 { write!(code, ", ").unwrap(); }
+            if j > 0 {
+                write!(code, ", ").unwrap();
+            }
             write!(code, "{} {}", map_type(&param.type_name), param.name).unwrap();
         }
         writeln!(code, ") {{").unwrap();
@@ -65,10 +85,11 @@ pub fn generate_shims(class: &CppClass) -> String {
         if method.is_static {
             write!(code, "    ").unwrap();
             // Check if return by value
-            if !method.return_type.contains("*") &&
-               !method.return_type.contains("&") &&
-               method.return_type != "void" &&
-               !is_primitive(&method.return_type) {
+            if !method.return_type.contains("*")
+                && !method.return_type.contains("&")
+                && method.return_type != "void"
+                && !is_primitive(&method.return_type)
+            {
                 write!(code, "{} result = ", method.return_type).unwrap();
             } else if method.return_type != "void" {
                 write!(code, "return ").unwrap();
@@ -77,10 +98,11 @@ pub fn generate_shims(class: &CppClass) -> String {
         } else {
             write!(code, "    ").unwrap();
             // Check if return by value
-            if !method.return_type.contains("*") &&
-               !method.return_type.contains("&") &&
-               method.return_type != "void" &&
-               !is_primitive(&method.return_type) {
+            if !method.return_type.contains("*")
+                && !method.return_type.contains("&")
+                && method.return_type != "void"
+                && !is_primitive(&method.return_type)
+            {
                 write!(code, "{} result = ", method.return_type).unwrap();
             } else if method.return_type != "void" {
                 write!(code, "return ").unwrap();
@@ -89,18 +111,31 @@ pub fn generate_shims(class: &CppClass) -> String {
         }
 
         for (j, param) in method.params.iter().enumerate() {
-            if j > 0 { write!(code, ", ").unwrap(); }
-            write!(code, "{}", convert_param_call(&param.type_name, &param.name)).unwrap();
+            if j > 0 {
+                write!(code, ", ").unwrap();
+            }
+            write!(
+                code,
+                "{}",
+                convert_param_call(&param.type_name, &param.name)
+            )
+            .unwrap();
         }
         write!(code, ")").unwrap();
 
         // For methods that return objects by value, wrap in new
-        if !method.return_type.contains("*") &&
-           !method.return_type.contains("&") &&
-           method.return_type != "void" &&
-           !is_primitive(&method.return_type) {
+        if !method.return_type.contains("*")
+            && !method.return_type.contains("&")
+            && method.return_type != "void"
+            && !is_primitive(&method.return_type)
+        {
             writeln!(code, ");").unwrap();
-            writeln!(code, "    return new {}(result);", extract_type_name(&method.return_type)).unwrap();
+            writeln!(
+                code,
+                "    return new {}(result);",
+                extract_type_name(&method.return_type)
+            )
+            .unwrap();
         } else {
             writeln!(code, ");").unwrap();
         }
@@ -141,7 +176,10 @@ fn convert_param_call(cpp_type: &str, param_name: &str) -> String {
 }
 
 fn is_primitive(type_name: &str) -> bool {
-    matches!(type_name, "int" | "float" | "double" | "bool" | "char" | "long" | "short" | "void")
+    matches!(
+        type_name,
+        "int" | "float" | "double" | "bool" | "char" | "long" | "short" | "void"
+    )
 }
 
 fn extract_type_name(type_str: &str) -> String {
@@ -164,17 +202,15 @@ mod tests {
         class.add_constructor(
             CppConstructor::new()
                 .param("x", "double")
-                .param("y", "double")
+                .param("y", "double"),
         );
 
-        class.add_method(
-            CppMethod::new("length", "double").const_method()
-        );
+        class.add_method(CppMethod::new("length", "double").const_method());
 
         class.add_method(
             CppMethod::new("add", "Vector")
                 .param("other", "const Vector&")
-                .const_method()
+                .const_method(),
         );
 
         let code = generate_shims(&class);
@@ -193,7 +229,7 @@ mod tests {
             CppMethod::new("add", "int")
                 .param("a", "int")
                 .param("b", "int")
-                .static_method()
+                .static_method(),
         );
 
         let code = generate_shims(&class);

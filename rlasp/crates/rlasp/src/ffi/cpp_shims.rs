@@ -16,10 +16,7 @@ impl TestClassWrapper {
             "test_class_new",
             test_class_new as *const (),
             CType::Pointer(Box::new(CType::Void)),
-            vec![
-                CType::Int32,
-                CType::Pointer(Box::new(CType::Int8)),
-            ],
+            vec![CType::Int32, CType::Pointer(Box::new(CType::Int8))],
             false,
         );
 
@@ -36,7 +33,9 @@ impl TestClassWrapper {
                 if ptr.is_null() {
                     Err("Failed to create TestClass".to_string())
                 } else {
-                    Ok(Self { ptr: ptr as *mut () })
+                    Ok(Self {
+                        ptr: ptr as *mut (),
+                    })
                 }
             }
             Ok(_) => Err("Unexpected return type".to_string()),
@@ -54,10 +53,7 @@ impl TestClassWrapper {
             false,
         );
 
-        let call = CCall::new(
-            func,
-            vec![CCallArg::Pointer(self.ptr as *const ())],
-        );
+        let call = CCall::new(func, vec![CCallArg::Pointer(self.ptr as *const ())]);
 
         match super::lower_ccall(&call) {
             Ok(super::CCallResult::Int64(v)) => Ok(v as i32),
@@ -72,10 +68,7 @@ impl TestClassWrapper {
             "test_class_set_value",
             test_class_set_value as *const (),
             CType::Void,
-            vec![
-                CType::Pointer(Box::new(CType::Void)),
-                CType::Int32,
-            ],
+            vec![CType::Pointer(Box::new(CType::Void)), CType::Int32],
             false,
         );
 
@@ -99,10 +92,7 @@ impl TestClassWrapper {
             "test_class_add",
             test_class_add as *const (),
             CType::Int32,
-            vec![
-                CType::Pointer(Box::new(CType::Void)),
-                CType::Int32,
-            ],
+            vec![CType::Pointer(Box::new(CType::Void)), CType::Int32],
             false,
         );
 
@@ -133,10 +123,7 @@ impl TestClassWrapper {
 
         let call = CCall::new(
             func,
-            vec![
-                CCallArg::Int64(a as i64),
-                CCallArg::Int64(b as i64),
-            ],
+            vec![CCallArg::Int64(a as i64), CCallArg::Int64(b as i64)],
         );
 
         match super::lower_ccall(&call) {
@@ -157,10 +144,7 @@ impl Drop for TestClassWrapper {
             false,
         );
 
-        let call = CCall::new(
-            func,
-            vec![CCallArg::Pointer(self.ptr as *const ())],
-        );
+        let call = CCall::new(func, vec![CCallArg::Pointer(self.ptr as *const ())]);
 
         let _ = super::lower_ccall(&call);
     }

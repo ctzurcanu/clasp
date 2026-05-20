@@ -1,10 +1,11 @@
+use super::eval_list::apply_function;
 /// eval_sequence.rs - Common Lisp sequence operations
 /// Sequences include lists, vectors, and strings
+use super::eval_system::get_array_fill_pointer;
 use super::eval_types::EvalResult;
-use super::eval_list::apply_function;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 pub fn call_sequence_builtin(
     name: &str,
@@ -42,16 +43,22 @@ pub fn call_sequence_builtin(
             match (args.get(0), index_opt) {
                 (Some(seq), Some(index)) => {
                     match seq {
-                        EvalResult::String(s) => {
-                            s.chars().nth(index)
-                                .map(EvalResult::Character)
-                                .ok_or_else(|| "Index out of bounds".to_string())
-                        }
+                        EvalResult::String(s) => s
+                            .chars()
+                            .nth(index)
+                            .map(EvalResult::Character)
+                            .ok_or_else(|| "TYPE-ERROR".to_string()),
                         EvalResult::Array(arr) => {
-                            arr.borrow()
-                                .get(index)
-                                .cloned()
-                                .ok_or_else(|| "Index out of bounds".to_string())
+                            let cells = arr.borrow();
+                            let active_len = get_array_fill_pointer(arr).unwrap_or(cells.len());
+                            if index >= active_len {
+                                Err("TYPE-ERROR".to_string())
+                            } else {
+                                cells
+                                    .get(index)
+                                    .cloned()
+                                    .ok_or_else(|| "TYPE-ERROR".to_string())
+                            }
                         }
                         EvalResult::Cons(_, _) => {
                             // Navigate list
@@ -61,12 +68,12 @@ pub fn call_sequence_builtin(
                                     EvalResult::Cons(_, cdr) => {
                                         current = cdr.borrow().clone();
                                     }
-                                    _ => return Err("Index out of bounds".to_string()),
+                                    _ => return Err("TYPE-ERROR".to_string()),
                                 }
                             }
                             match current {
                                 EvalResult::Cons(car, _) => Ok(car.borrow().clone()),
-                                _ => Err("Index out of bounds".to_string()),
+                                _ => Err("TYPE-ERROR".to_string()),
                             }
                         }
                         _ => {
@@ -91,53 +98,68 @@ pub fn call_sequence_builtin(
                                     super::eval_core::debug_call_stack_summary()
                                 );
                             }
-                            Err("elt requires a sequence".to_string())
+                            Err("TYPE-ERROR".to_string())
                         }
                     }
                 }
-                _ => Err("elt requires a sequence and non-negative index".to_string()),
+                _ => Err("TYPE-ERROR".to_string()),
             }
         }
 
-        "copy-seq" => {
-            match args.get(0) {
-                Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
-                Some(EvalResult::Array(arr)) => {
-                    Ok(EvalResult::Array(Rc::new(RefCell::new(arr.borrow().clone()))))
+        "copy-seq" => match args.get(0) {
+            Some(EvalResult::String(s)) => Ok(EvalResult::String(s.clone())),
+            Some(EvalResult::Array(arr)) => {
+                let new_arr = Rc::new(RefCell::new(arr.borrow().clone()));
+                super::eval_system::register_array_dims_for_bridge(
+                    &new_arr,
+                    super::eval_system::array_dims_for_bridge(arr),
+                );
+                super::eval_system::set_array_fill_pointer(&new_arr, get_array_fill_pointer(arr));
+                super::eval_system::set_array_adjustable(
+                    &new_arr,
+                    super::eval_system::is_array_adjustable(arr),
+                );
+                if let Some((displaced_to, displaced_offset)) =
+                    super::eval_system::get_array_displacement(arr)
+                {
+                    super::eval_system::set_array_displacement(
+                        &new_arr,
+                        Some(displaced_to),
+                        displaced_offset,
+                    );
                 }
-                Some(EvalResult::Cons(_, _)) => {
-                    let mut items = Vec::new();
-                    let mut current = args[0].clone();
-                    loop {
-                        match current {
-                            EvalResult::Nil => break,
-                            EvalResult::Cons(car, cdr) => {
-                                items.push(car.borrow().clone());
-                                current = cdr.borrow().clone();
-                            }
-                            _ => return Err("copy-seq requires a proper list".to_string()),
+                Ok(EvalResult::Array(new_arr))
+            }
+            Some(EvalResult::Cons(_, _)) => {
+                let mut items = Vec::new();
+                let mut current = args[0].clone();
+                loop {
+                    match current {
+                        EvalResult::Nil => break,
+                        EvalResult::Cons(car, cdr) => {
+                            items.push(car.borrow().clone());
+                            current = cdr.borrow().clone();
                         }
+                        _ => return Err("TYPE-ERROR".to_string()),
                     }
-
-                    let mut result = EvalResult::Nil;
-                    for item in items.into_iter().rev() {
-                        result = EvalResult::Cons(
-                            Rc::new(RefCell::new(item)),
-                            Rc::new(RefCell::new(result)),
-                        );
-                    }
-                    Ok(result)
                 }
-                Some(EvalResult::Nil) => Ok(EvalResult::Nil),
-                _ => Err("copy-seq requires a sequence".to_string()),
+
+                let mut result = EvalResult::Nil;
+                for item in items.into_iter().rev() {
+                    result = EvalResult::Cons(
+                        Rc::new(RefCell::new(item)),
+                        Rc::new(RefCell::new(result)),
+                    );
+                }
+                Ok(result)
             }
-        }
+            Some(EvalResult::Nil) => Ok(EvalResult::Nil),
+            _ => Err("TYPE-ERROR".to_string()),
+        },
 
         "reverse" => {
             match args.get(0) {
-                Some(EvalResult::String(s)) => {
-                    Ok(EvalResult::String(s.chars().rev().collect()))
-                }
+                Some(EvalResult::String(s)) => Ok(EvalResult::String(s.chars().rev().collect())),
                 Some(seq) => {
                     // Reverse a list
                     let mut result = EvalResult::Nil;
@@ -147,7 +169,7 @@ pub fn call_sequence_builtin(
                             EvalResult::Cons(car, cdr) => {
                                 result = EvalResult::Cons(
                                     Rc::new(RefCell::new(car.borrow().clone())),
-                                    Rc::new(RefCell::new(result))
+                                    Rc::new(RefCell::new(result)),
                                 );
                                 current = cdr.borrow().clone();
                             }
@@ -195,11 +217,11 @@ pub fn call_sequence_builtin(
                     .trim_start_matches(':')
                     .to_ascii_lowercase()
             };
-            let parse_index = |val: &EvalResult, key: &str| -> Result<usize, String> {
+            let parse_index = |val: &EvalResult, _key: &str| -> Result<usize, String> {
                 match val {
                     EvalResult::Fixnum(n) if *n >= 0 => Ok(*n as usize),
                     EvalResult::Float(f) if *f >= 0.0 => Ok(*f as usize),
-                    _ => Err(format!("fill: {} must be a non-negative integer", key)),
+                    _ => Err("TYPE-ERROR".to_string()),
                 }
             };
 
@@ -224,15 +246,17 @@ pub fn call_sequence_builtin(
                     let len = chars.len();
                     let end_idx = end.unwrap_or(len);
                     if start > len || end_idx > len {
-                        return Err("fill: start/end out of bounds".to_string());
+                        return Err("TYPE-ERROR".to_string());
                     }
                     if start > end_idx {
-                        return Err("fill: start must be <= end".to_string());
+                        return Err("PROGRAM-ERROR".to_string());
                     }
                     let fill_char = match item {
                         EvalResult::Character(c) => c,
-                        EvalResult::String(ref one) if one.chars().count() == 1 => one.chars().next().unwrap(),
-                        _ => return Err("fill on string requires a character item".to_string()),
+                        EvalResult::String(ref one) if one.chars().count() == 1 => {
+                            one.chars().next().unwrap()
+                        }
+                        _ => return Err("TYPE-ERROR".to_string()),
                     };
                     for idx in start..end_idx {
                         chars[idx] = fill_char;
@@ -245,19 +269,24 @@ pub fn call_sequence_builtin(
                     let len = cells.len();
                     let end_idx = end.unwrap_or(len);
                     if start > len || end_idx > len {
-                        return Err("fill: start/end out of bounds".to_string());
+                        return Err("TYPE-ERROR".to_string());
                     }
                     if start > end_idx {
-                        return Err("fill: start must be <= end".to_string());
+                        return Err("PROGRAM-ERROR".to_string());
                     }
 
                     let is_bit_vector = !cells.is_empty()
                         && cells.iter().all(|elem| {
-                            matches!(elem,
-                                EvalResult::Fixnum(0) | EvalResult::Fixnum(1) |
-                                EvalResult::Bool(true) | EvalResult::Bool(false) |
-                                EvalResult::Boolean(true) | EvalResult::Boolean(false) |
-                                EvalResult::Nil)
+                            matches!(
+                                elem,
+                                EvalResult::Fixnum(0)
+                                    | EvalResult::Fixnum(1)
+                                    | EvalResult::Bool(true)
+                                    | EvalResult::Bool(false)
+                                    | EvalResult::Boolean(true)
+                                    | EvalResult::Boolean(false)
+                                    | EvalResult::Nil
+                            )
                         });
 
                     let fill_item = if is_bit_vector {
@@ -268,7 +297,7 @@ pub fn call_sequence_builtin(
                                 EvalResult::Fixnum(if b { 1 } else { 0 })
                             }
                             EvalResult::Nil => EvalResult::Fixnum(0),
-                            _ => return Err("fill: bit-vector item must be 0 or 1".to_string()),
+                            _ => return Err("TYPE-ERROR".to_string()),
                         }
                     } else {
                         item
@@ -290,24 +319,24 @@ pub fn call_sequence_builtin(
                                 cells.push(car.clone());
                                 current = cdr.borrow().clone();
                             }
-                            _ => return Err("fill requires a proper list".to_string()),
+                            _ => return Err("TYPE-ERROR".to_string()),
                         }
                     }
 
                     let len = cells.len();
                     let end_idx = end.unwrap_or(len);
                     if start > len || end_idx > len {
-                        return Err("fill: start/end out of bounds".to_string());
+                        return Err("TYPE-ERROR".to_string());
                     }
                     if start > end_idx {
-                        return Err("fill: start must be <= end".to_string());
+                        return Err("TYPE-ERROR".to_string());
                     }
                     for idx in start..end_idx {
                         *cells[idx].borrow_mut() = item.clone();
                     }
                     Ok(sequence)
                 }
-                _ => Err("fill requires a sequence".to_string()),
+                _ => Err("TYPE-ERROR".to_string()),
             }
         }
 
@@ -355,7 +384,7 @@ pub fn call_sequence_builtin(
                 }
                 // For lists, we would need mutable access which is complex
                 // For now, return the target sequence unchanged for list replace
-                _ => Ok(seq1.clone())
+                _ => Ok(seq1.clone()),
             }
         }
 
@@ -393,7 +422,7 @@ pub fn call_sequence_builtin(
                     for item in result.iter().rev() {
                         list_result = EvalResult::Cons(
                             Rc::new(RefCell::new(item.clone())),
-                            Rc::new(RefCell::new(list_result))
+                            Rc::new(RefCell::new(list_result)),
                         );
                     }
                     Ok(list_result)
@@ -416,7 +445,9 @@ pub fn call_sequence_builtin(
                 EvalResult::String(s) => {
                     let needle = match item {
                         EvalResult::Character(c) => Some(*c),
-                        EvalResult::String(text) if text.chars().count() == 1 => text.chars().next(),
+                        EvalResult::String(text) if text.chars().count() == 1 => {
+                            text.chars().next()
+                        }
                         _ => None,
                     };
                     if let Some(needle) = needle {
@@ -441,13 +472,13 @@ pub fn call_sequence_builtin(
                                 current = cdr.borrow().clone();
                             }
                             EvalResult::Nil => break,
-                            _ => break,
+                            _ => return Err("TYPE-ERROR".to_string()),
                         }
                     }
                     Ok(EvalResult::Nil)
                 }
                 EvalResult::Nil => Ok(EvalResult::Nil),
-                _ => Err("find: sequence must be a list or string".to_string()),
+                _ => Err("TYPE-ERROR".to_string()),
             }
         }
 
@@ -464,7 +495,9 @@ pub fn call_sequence_builtin(
                 EvalResult::String(s) => {
                     let needle = match item {
                         EvalResult::Character(c) => Some(*c),
-                        EvalResult::String(text) if text.chars().count() == 1 => text.chars().next(),
+                        EvalResult::String(text) if text.chars().count() == 1 => {
+                            text.chars().next()
+                        }
                         _ => None,
                     };
                     if let Some(needle) = needle {
@@ -502,80 +535,178 @@ pub fn call_sequence_builtin(
         }
 
         "search" => {
-            // (search seq1 seq2 &key from-end test start1 end1 start2 end2)
-            // Returns position of seq1 in seq2, or NIL if not found
+            // (search seq1 seq2 &key from-end test test-not key start1 end1 start2 end2)
             if args.len() < 2 {
                 return Err("search requires two sequences".to_string());
             }
 
-            let seq1 = &args[0];
-            let seq2 = &args[1];
-
-            // Handle string search
-            if let (EvalResult::String(s1), EvalResult::String(s2)) = (seq1, seq2) {
-                if let Some(pos) = s2.find(s1.as_str()) {
-                    return Ok(EvalResult::Fixnum(pos as i64));
+            let normalize_key = |raw: &str| -> String {
+                raw.rsplit(':')
+                    .next()
+                    .unwrap_or(raw)
+                    .trim_start_matches(':')
+                    .to_ascii_lowercase()
+            };
+            let parse_index = |value: &EvalResult, name: &str| -> Result<Option<usize>, String> {
+                match value {
+                    EvalResult::Nil => Ok(None),
+                    EvalResult::Fixnum(n) if *n >= 0 => Ok(Some(*n as usize)),
+                    EvalResult::Float(f) if *f >= 0.0 => Ok(Some(*f as usize)),
+                    _ => Err(format!(
+                        "search: {} must be a non-negative integer or NIL",
+                        name
+                    )),
                 }
+            };
+            let collect_sequence = |seq: &EvalResult| -> Result<Vec<EvalResult>, String> {
+                match seq {
+                    EvalResult::Nil => Ok(Vec::new()),
+                    EvalResult::Cons(_, _) => {
+                        let mut out = Vec::new();
+                        let mut current = seq.clone();
+                        loop {
+                            match current {
+                                EvalResult::Nil => break,
+                                EvalResult::Cons(car, cdr) => {
+                                    out.push(car.borrow().clone());
+                                    current = cdr.borrow().clone();
+                                }
+                                _ => {
+                                    return Err(
+                                        "search: sequence must be a proper list, string, or array"
+                                            .to_string(),
+                                    )
+                                }
+                            }
+                        }
+                        Ok(out)
+                    }
+                    EvalResult::String(s) => Ok(s.chars().map(EvalResult::Character).collect()),
+                    EvalResult::Array(arr) => Ok(arr.borrow().clone()),
+                    _ => {
+                        Err("search: sequence must be a proper list, string, or array".to_string())
+                    }
+                }
+            };
+
+            let mut from_end = false;
+            let mut start1: usize = 0;
+            let mut end1: Option<usize> = None;
+            let mut start2: usize = 0;
+            let mut end2: Option<usize> = None;
+            let mut key_fn: Option<EvalResult> = None;
+            let mut test_fn: Option<EvalResult> = None;
+            let mut negate_test = false;
+
+            let mut i = 2;
+            while i + 1 < args.len() {
+                let Some(key) = (match &args[i] {
+                    EvalResult::Symbol(s) | EvalResult::String(s) => Some(normalize_key(s)),
+                    _ => None,
+                }) else {
+                    i += 1;
+                    continue;
+                };
+                let value = args[i + 1].clone();
+                match key.as_str() {
+                    "from-end" => from_end = is_truthy(&value),
+                    "start1" => start1 = parse_index(&value, "start1")?.unwrap_or(0),
+                    "end1" => end1 = parse_index(&value, "end1")?,
+                    "start2" => start2 = parse_index(&value, "start2")?.unwrap_or(0),
+                    "end2" => end2 = parse_index(&value, "end2")?,
+                    "key" => key_fn = Some(value),
+                    "test" => {
+                        test_fn = Some(value);
+                        negate_test = false;
+                    }
+                    "test-not" => {
+                        test_fn = Some(value);
+                        negate_test = true;
+                    }
+                    _ => {}
+                }
+                i += 2;
+            }
+
+            let needle_all = collect_sequence(&args[0])?;
+            let haystack_all = collect_sequence(&args[1])?;
+
+            let needle_end = end1.unwrap_or(needle_all.len()).min(needle_all.len());
+            let haystack_end = end2.unwrap_or(haystack_all.len()).min(haystack_all.len());
+            if start1 > needle_end || start2 > haystack_end {
                 return Ok(EvalResult::Nil);
             }
 
-            // Handle list search (find seq1 as subsequence of seq2)
-            // Convert seq1 to a vector for matching
-            let mut needle: Vec<EvalResult> = Vec::new();
-            let mut cur1 = seq1.clone();
-            loop {
-                match cur1 {
-                    EvalResult::Cons(car, cdr) => {
-                        needle.push(car.borrow().clone());
-                        cur1 = cdr.borrow().clone();
-                    }
-                    EvalResult::Nil => break,
-                    _ => break,
-                }
-            }
+            let needle = needle_all[start1..needle_end].to_vec();
+            let haystack = haystack_all[start2..haystack_end].to_vec();
 
             if needle.is_empty() {
-                return Ok(EvalResult::Fixnum(0));
+                let pos = if from_end { haystack_end } else { start2 };
+                return Ok(EvalResult::Fixnum(pos as i64));
+            }
+            if needle.len() > haystack.len() {
+                return Ok(EvalResult::Nil);
             }
 
-            // Helper to check if needle matches at position
-            let matches_at = |start: &EvalResult| -> bool {
-                let mut cur = start.clone();
-                for needle_elem in &needle {
-                    match cur {
-                        EvalResult::Cons(mcar, mcdr) => {
-                            if !values_equal(&mcar.borrow(), needle_elem) {
-                                return false;
-                            }
-                            cur = mcdr.borrow().clone();
-                        }
-                        _ => return false,
+            let mut matches_at = |pos: usize| -> Result<bool, String> {
+                for idx in 0..needle.len() {
+                    let needle_elem = if let Some(ref key) = key_fn {
+                        super::eval_types::primary_value(
+                            super::eval_system::call_function_with_values(
+                                key.clone(),
+                                &[needle[idx].clone()],
+                                env,
+                            )?,
+                        )
+                    } else {
+                        needle[idx].clone()
+                    };
+                    let haystack_elem = if let Some(ref key) = key_fn {
+                        super::eval_types::primary_value(
+                            super::eval_system::call_function_with_values(
+                                key.clone(),
+                                &[haystack[pos + idx].clone()],
+                                env,
+                            )?,
+                        )
+                    } else {
+                        haystack[pos + idx].clone()
+                    };
+
+                    let mut matches = if let Some(ref test) = test_fn {
+                        let result = super::eval_system::call_function_with_values(
+                            test.clone(),
+                            &[needle_elem.clone(), haystack_elem.clone()],
+                            env,
+                        )?;
+                        is_truthy(&super::eval_types::primary_value(result))
+                    } else {
+                        values_equal(&needle_elem, &haystack_elem)
+                    };
+                    if negate_test {
+                        matches = !matches;
+                    }
+                    if !matches {
+                        return Ok(false);
                     }
                 }
-                true
+                Ok(true)
             };
 
-            // Search in seq2
-            let mut pos = 0i64;
-            let mut cur2 = seq2.clone();
-            loop {
-                let next = match &cur2 {
-                    EvalResult::Cons(_, cdr) => Some(cdr.borrow().clone()),
-                    _ => None,
-                };
-
-                if matches_at(&cur2) {
-                    return Ok(EvalResult::Fixnum(pos));
-                }
-
-                match next {
-                    Some(n) => {
-                        cur2 = n;
-                        pos += 1;
+            if from_end {
+                for pos in (0..=(haystack.len() - needle.len())).rev() {
+                    if matches_at(pos)? {
+                        return Ok(EvalResult::Fixnum((start2 + pos) as i64));
                     }
-                    None => break,
+                }
+            } else {
+                for pos in 0..=(haystack.len() - needle.len()) {
+                    if matches_at(pos)? {
+                        return Ok(EvalResult::Fixnum((start2 + pos) as i64));
+                    }
                 }
             }
+
             Ok(EvalResult::Nil)
         }
 
@@ -614,13 +745,14 @@ pub fn call_sequence_builtin(
             if args.len() < 2 {
                 return Err("count-if requires predicate and sequence".to_string());
             }
-            let (predicate, seq) = if is_sequence_value(&args[0]) && is_function_designator(&args[1]) {
-                // Some MLIR call paths can supply evaluated args in swapped order.
-                // Normalize to CL order here.
-                (&args[1], &args[0])
-            } else {
-                (&args[0], &args[1])
-            };
+            let (predicate, seq) =
+                if is_sequence_value(&args[0]) && is_function_designator(&args[1]) {
+                    // Some MLIR call paths can supply evaluated args in swapped order.
+                    // Normalize to CL order here.
+                    (&args[1], &args[0])
+                } else {
+                    (&args[0], &args[1])
+                };
 
             let items: Vec<EvalResult> = match seq {
                 EvalResult::Nil => Vec::new(),
@@ -659,13 +791,14 @@ pub fn call_sequence_builtin(
             if args.len() < 2 {
                 return Err("count-if-not requires predicate and sequence".to_string());
             }
-            let (predicate, seq) = if is_sequence_value(&args[0]) && is_function_designator(&args[1]) {
-                // Some MLIR call paths can supply evaluated args in swapped order.
-                // Normalize to CL order here.
-                (&args[1], &args[0])
-            } else {
-                (&args[0], &args[1])
-            };
+            let (predicate, seq) =
+                if is_sequence_value(&args[0]) && is_function_designator(&args[1]) {
+                    // Some MLIR call paths can supply evaluated args in swapped order.
+                    // Normalize to CL order here.
+                    (&args[1], &args[0])
+                } else {
+                    (&args[0], &args[1])
+                };
 
             let items: Vec<EvalResult> = match seq {
                 EvalResult::Nil => Vec::new(),
@@ -743,27 +876,52 @@ pub fn call_sequence_builtin(
                             "+" => {
                                 // Add accumulator and value
                                 match (&acc, val) {
-                                    (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => EvalResult::Fixnum(a + b),
-                                    (EvalResult::Float(a), EvalResult::Float(b)) => EvalResult::Float(a + b),
-                                    (EvalResult::Fixnum(a), EvalResult::Float(b)) => EvalResult::Float(*a as f64 + b),
-                                    (EvalResult::Float(a), EvalResult::Fixnum(b)) => EvalResult::Float(a + *b as f64),
+                                    (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => {
+                                        EvalResult::Fixnum(a + b)
+                                    }
+                                    (EvalResult::Float(a), EvalResult::Float(b)) => {
+                                        EvalResult::Float(a + b)
+                                    }
+                                    (EvalResult::Fixnum(a), EvalResult::Float(b)) => {
+                                        EvalResult::Float(*a as f64 + b)
+                                    }
+                                    (EvalResult::Float(a), EvalResult::Fixnum(b)) => {
+                                        EvalResult::Float(a + *b as f64)
+                                    }
                                     _ => return Err("reduce + requires numeric values".to_string()),
                                 }
                             }
                             "*" => {
                                 // Multiply accumulator and value
                                 match (&acc, val) {
-                                    (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => EvalResult::Fixnum(a * b),
-                                    (EvalResult::Float(a), EvalResult::Float(b)) => EvalResult::Float(a * b),
-                                    (EvalResult::Fixnum(a), EvalResult::Float(b)) => EvalResult::Float(*a as f64 * b),
-                                    (EvalResult::Float(a), EvalResult::Fixnum(b)) => EvalResult::Float(a * *b as f64),
+                                    (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => {
+                                        EvalResult::Fixnum(a * b)
+                                    }
+                                    (EvalResult::Float(a), EvalResult::Float(b)) => {
+                                        EvalResult::Float(a * b)
+                                    }
+                                    (EvalResult::Fixnum(a), EvalResult::Float(b)) => {
+                                        EvalResult::Float(*a as f64 * b)
+                                    }
+                                    (EvalResult::Float(a), EvalResult::Fixnum(b)) => {
+                                        EvalResult::Float(a * *b as f64)
+                                    }
                                     _ => return Err("reduce * requires numeric values".to_string()),
                                 }
                             }
-                            _ => return Err(format!("reduce with function {} not implemented yet", name)),
+                            _ => {
+                                return Err(format!(
+                                    "reduce with function {} not implemented yet",
+                                    name
+                                ))
+                            }
                         }
                     }
-                    _ => return Err("reduce requires a function symbol as first argument".to_string()),
+                    _ => {
+                        return Err(
+                            "reduce requires a function symbol as first argument".to_string()
+                        )
+                    }
                 };
             }
 
@@ -808,11 +966,14 @@ pub fn call_sequence_builtin(
                         v.push(car.borrow().clone());
                         current = cdr.borrow().clone();
                     }
+                    if !matches!(current, EvalResult::Nil) {
+                        return Err("TYPE-ERROR".to_string());
+                    }
                     v
                 }
                 EvalResult::Array(arr) => arr.borrow().clone(),
                 EvalResult::Nil => Vec::new(),
-                _ => return Err("sort: sequence must be a list or vector".to_string()),
+                _ => return Err("TYPE-ERROR".to_string()),
             };
 
             // Sort using the predicate
@@ -838,9 +999,9 @@ pub fn call_sequence_builtin(
                     }
                     Ok(result)
                 }
-                EvalResult::Array(_) => {
-                    Ok(EvalResult::Array(std::rc::Rc::new(std::cell::RefCell::new(items))))
-                }
+                EvalResult::Array(_) => Ok(EvalResult::Array(std::rc::Rc::new(
+                    std::cell::RefCell::new(items),
+                ))),
                 _ => Ok(EvalResult::Nil),
             }
         }
@@ -848,7 +1009,9 @@ pub fn call_sequence_builtin(
         "merge" => {
             // (merge result-type sequence1 sequence2 predicate &key key)
             if args.len() < 4 {
-                return Err("merge requires result-type, sequence1, sequence2, and predicate".to_string());
+                return Err(
+                    "merge requires result-type, sequence1, sequence2, and predicate".to_string(),
+                );
             }
             let _result_type = &args[0]; // We'll just return a list for now
             let seq1 = &args[1];
@@ -916,9 +1079,18 @@ pub fn call_sequence_builtin(
 
         "substitute" => {
             // (substitute newitem olditem sequence &key test test-not)
-            let newitem = args.get(0).cloned().ok_or_else(|| "substitute requires newitem".to_string())?;
-            let olditem = args.get(1).cloned().ok_or_else(|| "substitute requires olditem".to_string())?;
-            let sequence = args.get(2).cloned().ok_or_else(|| "substitute requires sequence".to_string())?;
+            let newitem = args
+                .get(0)
+                .cloned()
+                .ok_or_else(|| "substitute requires newitem".to_string())?;
+            let olditem = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| "substitute requires olditem".to_string())?;
+            let sequence = args
+                .get(2)
+                .cloned()
+                .ok_or_else(|| "substitute requires sequence".to_string())?;
 
             let keyword_args = parse_keyword_args(&args[3..]);
             let test_fn = keyword_args.get("test");
@@ -940,7 +1112,11 @@ pub fn call_sequence_builtin(
                 EvalResult::String(s) => {
                     let new_ch = match newitem {
                         EvalResult::Character(c) => c,
-                        _ => return Err("substitute on strings requires character newitem".to_string()),
+                        _ => {
+                            return Err(
+                                "substitute on strings requires character newitem".to_string()
+                            )
+                        }
                     };
                     let mut result = String::new();
                     for ch in s.chars() {
@@ -962,12 +1138,20 @@ pub fn call_sequence_builtin(
                         match current {
                             EvalResult::Cons(car, cdr) => {
                                 let item = car.borrow().clone();
-                                let replaced = if matches(&item)? { newitem.clone() } else { item };
+                                let replaced = if matches(&item)? {
+                                    newitem.clone()
+                                } else {
+                                    item
+                                };
                                 items.push(replaced);
                                 current = cdr.borrow().clone();
                             }
                             EvalResult::Nil => break,
-                            _ => return Err("substitute requires a proper list or string".to_string()),
+                            _ => {
+                                return Err(
+                                    "substitute requires a proper list or string".to_string()
+                                )
+                            }
                         }
                     }
                     for item in items.iter().rev() {
@@ -984,19 +1168,33 @@ pub fn call_sequence_builtin(
 
         "substitute-if" => {
             // (substitute-if newitem predicate sequence)
-            let newitem = args.get(0).cloned().ok_or_else(|| "substitute-if requires newitem".to_string())?;
-            let predicate = args.get(1).cloned().ok_or_else(|| "substitute-if requires predicate".to_string())?;
-            let sequence = args.get(2).cloned().ok_or_else(|| "substitute-if requires sequence".to_string())?;
+            let newitem = args
+                .get(0)
+                .cloned()
+                .ok_or_else(|| "substitute-if requires newitem".to_string())?;
+            let predicate = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| "substitute-if requires predicate".to_string())?;
+            let sequence = args
+                .get(2)
+                .cloned()
+                .ok_or_else(|| "substitute-if requires sequence".to_string())?;
 
             match sequence {
                 EvalResult::String(s) => {
                     let new_ch = match newitem {
                         EvalResult::Character(c) => c,
-                        _ => return Err("substitute-if on strings requires character newitem".to_string()),
+                        _ => {
+                            return Err(
+                                "substitute-if on strings requires character newitem".to_string()
+                            )
+                        }
                     };
                     let mut result = String::new();
                     for ch in s.chars() {
-                        let pred_val = apply_function(&predicate, &[EvalResult::Character(ch)], env)?;
+                        let pred_val =
+                            apply_function(&predicate, &[EvalResult::Character(ch)], env)?;
                         if is_truthy(&pred_val) {
                             result.push(new_ch);
                         } else {
@@ -1014,12 +1212,20 @@ pub fn call_sequence_builtin(
                             EvalResult::Cons(car, cdr) => {
                                 let item = car.borrow().clone();
                                 let pred_val = apply_function(&predicate, &[item.clone()], env)?;
-                                let replaced = if is_truthy(&pred_val) { newitem.clone() } else { item };
+                                let replaced = if is_truthy(&pred_val) {
+                                    newitem.clone()
+                                } else {
+                                    item
+                                };
                                 items.push(replaced);
                                 current = cdr.borrow().clone();
                             }
                             EvalResult::Nil => break,
-                            _ => return Err("substitute-if requires a proper list or string".to_string()),
+                            _ => {
+                                return Err(
+                                    "substitute-if requires a proper list or string".to_string()
+                                )
+                            }
                         }
                     }
                     for item in items.iter().rev() {
@@ -1078,5 +1284,8 @@ fn parse_keyword_args(args: &[EvalResult]) -> HashMap<String, EvalResult> {
 }
 
 fn is_truthy(val: &EvalResult) -> bool {
-    !matches!(val, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
+    !matches!(
+        val,
+        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+    )
 }

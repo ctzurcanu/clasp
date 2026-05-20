@@ -1,3 +1,4 @@
+use rlasp_runtime::FloatFormat;
 /// Datum - Runtime values in the IR (Cleavir2-style)
 ///
 /// Represents data flow in the IR. Modeled after Cleavir's datum hierarchy:
@@ -5,9 +6,7 @@
 /// - LinearDatum: Single-use constraint
 /// - Variable: Mutable lexical variables
 /// - Phi: SSA merge points
-
 use std::fmt;
-use rlasp_runtime::FloatFormat;
 
 /// Unique ID for a datum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,7 +72,7 @@ pub struct Constant {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstantValue {
     Fixnum(i64),
-    Bignum(String), // String representation of large integer
+    Bignum(String),        // String representation of large integer
     Ratio(String, String), // Signed numerator, positive denominator
     Float(f64, FloatFormat),
     Complex(f64, f64), // Complex literal components

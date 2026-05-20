@@ -1,10 +1,9 @@
 /// IR Module - Container for functions and global data
 ///
 /// Top-level IR structure containing all functions, blocks, instructions, and data
-
 use super::datum::*;
-use super::instruction::*;
 use super::iblock::*;
+use super::instruction::*;
 use std::collections::HashMap;
 
 /// IR Module containing all IR entities
@@ -225,11 +224,7 @@ mod tests {
         let in2 = module.make_constant(ConstantValue::Fixnum(2));
         let out = module.make_output();
 
-        let add_inst = module.make_instruction(
-            InstructionKind::Add,
-            vec![in1, in2],
-            vec![out],
-        );
+        let add_inst = module.make_instruction(InstructionKind::Add, vec![in1, in2], vec![out]);
 
         let inst = module.get_instruction(add_inst).unwrap();
         assert_eq!(inst.inputs.len(), 2);

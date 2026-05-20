@@ -1,7 +1,7 @@
 /// eval_readtable.rs - Readtable operations
 use super::eval_types::EvalResult;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct MacroEntry {
@@ -14,6 +14,7 @@ struct ReadtableState {
     case_mode: String,
     macro_chars: HashMap<char, MacroEntry>,
     dispatch_chars: HashMap<char, HashMap<char, EvalResult>>,
+    invalid_constituents: HashSet<char>,
 }
 
 fn default_readtable_state() -> ReadtableState {
@@ -34,8 +35,14 @@ fn default_readtable_state() -> ReadtableState {
     );
 
     let mut sharp_dispatch = HashMap::new();
-    sharp_dispatch.insert('=', EvalResult::Symbol("READTABLE::SHARP-EQUAL".to_string()));
-    sharp_dispatch.insert('#', EvalResult::Symbol("READTABLE::SHARP-SHARP".to_string()));
+    sharp_dispatch.insert(
+        '=',
+        EvalResult::Symbol("READTABLE::SHARP-EQUAL".to_string()),
+    );
+    sharp_dispatch.insert(
+        '#',
+        EvalResult::Symbol("READTABLE::SHARP-SHARP".to_string()),
+    );
     sharp_dispatch.insert('I', EvalResult::Symbol("READTABLE::SHARP-I".to_string()));
     sharp_dispatch.insert('A', EvalResult::Symbol("READTABLE::SHARP-A".to_string()));
     sharp_dispatch.insert('S', EvalResult::Symbol("READTABLE::SHARP-S".to_string()));
@@ -43,10 +50,15 @@ fn default_readtable_state() -> ReadtableState {
     let mut dispatch_chars = HashMap::new();
     dispatch_chars.insert('#', sharp_dispatch);
 
+    let mut invalid_constituents = HashSet::new();
+    invalid_constituents.insert('\u{0008}');
+    invalid_constituents.insert('\u{007f}');
+
     ReadtableState {
         case_mode: "UPCASE".to_string(),
         macro_chars,
         dispatch_chars,
+        invalid_constituents,
     }
 }
 
@@ -58,6 +70,45 @@ thread_local! {
     };
     static CURRENT_READTABLE_ID: RefCell<u64> = RefCell::new(0);
     static NEXT_READTABLE_ID: RefCell<u64> = RefCell::new(1);
+    static READTABLE_EVAL_ENV_PTR: RefCell<Option<*mut HashMap<String, EvalResult>>> = RefCell::new(None);
+}
+
+pub fn with_readtable_eval_env<T, F>(
+    env: &mut HashMap<String, EvalResult>,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    READTABLE_EVAL_ENV_PTR.with(|slot| {
+        let prev = slot.replace(Some(env as *mut _));
+        let out = f();
+        slot.replace(prev);
+        out
+    })
+}
+
+fn current_readtable_id_from_env() -> Option<u64> {
+    READTABLE_EVAL_ENV_PTR.with(|slot| {
+        let ptr = *slot.borrow();
+        let env = ptr.map(|raw| unsafe { &mut *raw })?;
+        for key in [
+            "*readtable*",
+            "*READTABLE*",
+            "cl:*readtable*",
+            "CL:*READTABLE*",
+        ] {
+            if let Some(EvalResult::Symbol(s) | EvalResult::String(s)) = env.get(key) {
+                if let Some(id) = parse_readtable_token(s) {
+                    let exists = READTABLES.with(|tables| tables.borrow().contains_key(&id));
+                    if exists {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
+    })
 }
 
 fn parse_readtable_case(arg: &EvalResult) -> Option<String> {
@@ -86,7 +137,7 @@ fn parse_readtable_token(raw: &str) -> Option<u64> {
 }
 
 fn current_readtable_id() -> u64 {
-    CURRENT_READTABLE_ID.with(|id| *id.borrow())
+    current_readtable_id_from_env().unwrap_or_else(|| CURRENT_READTABLE_ID.with(|id| *id.borrow()))
 }
 
 fn resolve_readtable_id(arg: Option<&EvalResult>) -> Result<u64, String> {
@@ -109,7 +160,7 @@ fn resolve_readtable_id(arg: Option<&EvalResult>) -> Result<u64, String> {
                 || s.eq_ignore_ascii_case("READTABLE::*STANDARD-READTABLE*")
                 || s.eq_ignore_ascii_case("ECLECTOR.READTABLE:*STANDARD-READTABLE*")
             {
-                return Ok(0);
+                return Ok(current_readtable_id());
             }
             // Internal bridge sentinels must never escape as observable CL
             // readtable values. Treat them as the default/current readtable.
@@ -148,6 +199,17 @@ fn readtable_copy(id: u64) -> ReadtableState {
     })
 }
 
+pub fn readtable_invalid_constituent(ch: char, readtable: Option<&EvalResult>) -> bool {
+    let rt_id = resolve_readtable_id(readtable).unwrap_or_else(|_| current_readtable_id());
+    READTABLES.with(|tables| {
+        tables
+            .borrow()
+            .get(&rt_id)
+            .map(|rt| rt.invalid_constituents.contains(&ch))
+            .unwrap_or(false)
+    })
+}
+
 fn allocate_readtable(state: ReadtableState) -> u64 {
     let id = NEXT_READTABLE_ID.with(|next| {
         let mut slot = next.borrow_mut();
@@ -162,7 +224,10 @@ fn allocate_readtable(state: ReadtableState) -> u64 {
 }
 
 fn to_bool(v: &EvalResult) -> bool {
-    !matches!(v, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
+    !matches!(
+        v,
+        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+    )
 }
 
 fn to_char_designator(v: &EvalResult) -> Result<char, String> {
@@ -185,8 +250,8 @@ pub fn set_readtable_case_builtin(args: &[EvalResult]) -> Result<EvalResult, Str
     }
     let debug = std::env::var("RLASP_DEBUG_READTABLE").is_ok();
     let rt_id = resolve_readtable_id(args.get(1))?;
-    let new_case =
-        parse_readtable_case(&args[0]).ok_or_else(|| "type-error: invalid readtable-case".to_string())?;
+    let new_case = parse_readtable_case(&args[0])
+        .ok_or_else(|| "type-error: invalid readtable-case".to_string())?;
     if debug {
         eprintln!(
             "[readtable-set] args={:?} rt_id={} new_case={}",
@@ -250,7 +315,9 @@ pub fn call_readtable_builtin(name: &str, args: &[EvalResult]) -> Result<EvalRes
             if std::env::var("RLASP_DEBUG_READTABLE").is_ok() {
                 eprintln!(
                     "[readtable-get] arg={:?} rt_id={} case_mode={}",
-                    args.get(0), rt_id, case_mode
+                    args.get(0),
+                    rt_id,
+                    case_mode
                 );
             }
             Ok(EvalResult::Symbol(format!(":{}", case_mode)))
@@ -277,7 +344,10 @@ pub fn call_readtable_builtin(name: &str, args: &[EvalResult]) -> Result<EvalRes
                     },
                 ]))
             } else {
-                Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Nil]))
+                Ok(EvalResult::MultipleValues(vec![
+                    EvalResult::Nil,
+                    EvalResult::Nil,
+                ]))
             }
         }
         "set-macro-character" => {
@@ -323,13 +393,25 @@ pub fn call_readtable_builtin(name: &str, args: &[EvalResult]) -> Result<EvalRes
                     } else {
                         to_rt.macro_chars.remove(&to_ch);
                     }
+                    if from_ch == 'X'
+                        && matches!(
+                            to_ch,
+                            '\u{0008}' | '\t' | '\n' | '\u{000C}' | '\r' | ' ' | '\u{007F}'
+                        )
+                    {
+                        to_rt.invalid_constituents.insert(to_ch);
+                    } else {
+                        to_rt.invalid_constituents.remove(&to_ch);
+                    }
                 }
             });
             Ok(EvalResult::Boolean(true))
         }
         "get-dispatch-macro-character" => {
             if args.len() < 2 {
-                return Err("get-dispatch-macro-character requires dispatch-char and sub-char".to_string());
+                return Err(
+                    "get-dispatch-macro-character requires dispatch-char and sub-char".to_string(),
+                );
             }
             let disp = to_char_designator(&args[0])?;
             let sub = to_char_designator(&args[1])?.to_ascii_uppercase();
@@ -346,7 +428,10 @@ pub fn call_readtable_builtin(name: &str, args: &[EvalResult]) -> Result<EvalRes
         }
         "set-dispatch-macro-character" => {
             if args.len() < 3 {
-                return Err("set-dispatch-macro-character requires dispatch-char, sub-char and function".to_string());
+                return Err(
+                    "set-dispatch-macro-character requires dispatch-char, sub-char and function"
+                        .to_string(),
+                );
             }
             let disp = to_char_designator(&args[0])?;
             let sub = to_char_designator(&args[1])?.to_ascii_uppercase();

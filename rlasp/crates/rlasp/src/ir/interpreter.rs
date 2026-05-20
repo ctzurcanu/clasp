@@ -1,3 +1,6 @@
+use super::datum::{ConstantValue, Datum, DatumId};
+use super::iblock::IBlockId;
+use super::instruction::{InstructionId, InstructionKind};
 /// IR Interpreter - Direct execution of IR without compilation
 ///
 /// Useful for:
@@ -5,13 +8,9 @@
 /// - Debugging without LLVM
 /// - Quick evaluation
 /// - Bootstrapping before JIT is ready
-
 use super::module::Module;
-use super::datum::{Datum, DatumId, ConstantValue};
-use super::instruction::{InstructionKind, InstructionId};
-use super::iblock::IBlockId;
-use std::collections::HashMap;
 use crate::runtime::LispObject;
+use std::collections::HashMap;
 
 /// Runtime value during interpretation
 #[derive(Debug, Clone)]
@@ -71,12 +70,16 @@ impl Interpreter {
 
     /// Execute a function by ID, returns the result value
     pub fn execute_function(&mut self, func_id: usize, args: Vec<Value>) -> Result<Value, String> {
-        let func = self.module.get_function(func_id)
+        let func = self
+            .module
+            .get_function(func_id)
             .ok_or_else(|| format!("Function {} not found", func_id))?;
 
         // Set up arguments
         for (i, arg_val) in args.into_iter().enumerate() {
-            let arg_datum = self.module.get_function(func_id)
+            let arg_datum = self
+                .module
+                .get_function(func_id)
                 .and_then(|f| f.parameters.get(i))
                 .ok_or_else(|| format!("Argument {} not found", i))?;
             self.values.insert(*arg_datum, arg_val);
@@ -92,7 +95,9 @@ impl Interpreter {
     /// Execute a basic block
     fn execute_block(&mut self, block_id: IBlockId) -> Result<Value, String> {
         // Clone phi inputs to avoid borrow issues
-        let phi_inputs = self.module.get_block(block_id)
+        let phi_inputs = self
+            .module
+            .get_block(block_id)
             .ok_or_else(|| format!("Block {:?} not found", block_id))?
             .phi_inputs
             .clone();
@@ -103,13 +108,17 @@ impl Interpreter {
         }
 
         // Get instruction chain
-        let mut current = self.module.get_block(block_id)
+        let mut current = self
+            .module
+            .get_block(block_id)
             .ok_or_else(|| format!("Block {:?} not found", block_id))?
             .start;
 
         while let Some(inst_id) = current {
             // Clone instruction data to avoid borrow issues
-            let inst_clone = self.module.get_instruction(inst_id)
+            let inst_clone = self
+                .module
+                .get_instruction(inst_id)
                 .ok_or_else(|| format!("Instruction {:?} not found", inst_id))?
                 .clone();
 
@@ -136,15 +145,14 @@ impl Interpreter {
     }
 
     /// Execute a single instruction
-    fn execute_instruction(&mut self, inst: &super::instruction::Instruction) -> Result<Value, String> {
+    fn execute_instruction(
+        &mut self,
+        inst: &super::instruction::Instruction,
+    ) -> Result<Value, String> {
         match &inst.kind {
-            InstructionKind::ConstRef { value_id } => {
-                self.evaluate_datum(*value_id)
-            }
+            InstructionKind::ConstRef { value_id } => self.evaluate_datum(*value_id),
 
-            InstructionKind::ReadVar { var_id } => {
-                self.evaluate_datum(*var_id)
-            }
+            InstructionKind::ReadVar { var_id } => self.evaluate_datum(*var_id),
 
             InstructionKind::WriteVar { var_id } => {
                 if let Some(input) = inst.inputs.first() {
@@ -208,9 +216,7 @@ impl Interpreter {
                 Ok(Value::Object(LispObject::nil()))
             }
 
-            InstructionKind::PhiNode { phi_id } => {
-                self.evaluate_datum(*phi_id)
-            }
+            InstructionKind::PhiNode { phi_id } => self.evaluate_datum(*phi_id),
 
             _ => {
                 // Unimplemented instructions return nil
@@ -220,7 +226,10 @@ impl Interpreter {
     }
 
     /// Handle terminator instructions
-    fn handle_terminator(&mut self, inst: &super::instruction::Instruction) -> Result<Value, String> {
+    fn handle_terminator(
+        &mut self,
+        inst: &super::instruction::Instruction,
+    ) -> Result<Value, String> {
         match &inst.kind {
             InstructionKind::Return => {
                 if let Some(input) = inst.inputs.first() {
@@ -230,11 +239,12 @@ impl Interpreter {
                 }
             }
 
-            InstructionKind::Jump { target } => {
-                self.execute_block(IBlockId(*target))
-            }
+            InstructionKind::Jump { target } => self.execute_block(IBlockId(*target)),
 
-            InstructionKind::If { true_target, false_target } => {
+            InstructionKind::If {
+                true_target,
+                false_target,
+            } => {
                 if let Some(test_datum) = inst.inputs.first() {
                     let test_val = self.evaluate_datum(*test_datum)?;
                     if test_val.is_nil() {
@@ -247,13 +257,9 @@ impl Interpreter {
                 }
             }
 
-            InstructionKind::Unreachable => {
-                Err("Hit unreachable code".to_string())
-            }
+            InstructionKind::Unreachable => Err("Hit unreachable code".to_string()),
 
-            _ => {
-                Err(format!("Unhandled terminator: {:?}", inst.kind))
-            }
+            _ => Err(format!("Unhandled terminator: {:?}", inst.kind)),
         }
     }
 
@@ -265,7 +271,9 @@ impl Interpreter {
         }
 
         // Compute value from datum
-        let datum = self.module.get_datum(datum_id)
+        let datum = self
+            .module
+            .get_datum(datum_id)
             .ok_or_else(|| format!("Datum {:?} not found", datum_id))?;
 
         let value = match datum {
@@ -275,8 +283,8 @@ impl Interpreter {
                     ConstantValue::Bignum(s) => {
                         // Parse bignum and convert to LispObject
                         // The IR interpreter doesn't fully support bignums yet, so just try to parse as i64
-                        use malachite::Integer;
                         use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+                        use malachite::Integer;
 
                         if let Ok(bignum) = s.parse::<Integer>() {
                             if i64::convertible_from(&bignum) {
@@ -304,7 +312,7 @@ impl Interpreter {
                     ConstantValue::String(_s) => Value::Object(LispObject::nil()), // TODO: proper string handling
                     ConstantValue::Nil => Value::Object(LispObject::nil()),
                     ConstantValue::T => Value::Object(LispObject::from_fixnum(1)), // T as truthy
-                    ConstantValue::Symbol(_) => Value::Object(LispObject::nil()), // TODO
+                    ConstantValue::Symbol(_) => Value::Object(LispObject::nil()),  // TODO
                 }
             }
 
@@ -339,8 +347,8 @@ impl Interpreter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::LowerContext;
     use crate::ir::ASTNode;
+    use crate::ir::LowerContext;
 
     #[test]
     fn test_interpret_constant() {
@@ -372,18 +380,14 @@ mod tests {
         let c2 = ctx.module.make_constant(ConstantValue::Fixnum(20));
         let out = ctx.module.make_output();
 
-        let add_inst = ctx.module.make_instruction(
-            InstructionKind::Add,
-            vec![c1, c2],
-            vec![out],
-        );
+        let add_inst = ctx
+            .module
+            .make_instruction(InstructionKind::Add, vec![c1, c2], vec![out]);
 
         // Return result
-        let ret_inst = ctx.module.make_instruction(
-            InstructionKind::Return,
-            vec![out],
-            vec![],
-        );
+        let ret_inst = ctx
+            .module
+            .make_instruction(InstructionKind::Return, vec![out], vec![]);
 
         ctx.module.get_block_mut(entry).unwrap().start = Some(add_inst);
         ctx.module.get_block_mut(entry).unwrap().end = Some(ret_inst);
@@ -416,18 +420,14 @@ mod tests {
         let c2 = ctx.module.make_constant(ConstantValue::Fixnum(10));
         let out = ctx.module.make_output();
 
-        let sub_inst = ctx.module.make_instruction(
-            InstructionKind::Sub,
-            vec![c1, c2],
-            vec![out],
-        );
+        let sub_inst = ctx
+            .module
+            .make_instruction(InstructionKind::Sub, vec![c1, c2], vec![out]);
 
         // Return result
-        let ret_inst = ctx.module.make_instruction(
-            InstructionKind::Return,
-            vec![out],
-            vec![],
-        );
+        let ret_inst = ctx
+            .module
+            .make_instruction(InstructionKind::Return, vec![out], vec![]);
 
         ctx.module.get_block_mut(entry).unwrap().start = Some(sub_inst);
         ctx.module.get_block_mut(entry).unwrap().end = Some(ret_inst);

@@ -286,12 +286,15 @@ if wants_kind exe; then
       my $name = "";
       if (/^define\s+\S+\s+\@\"([^\"]+)\"\(/) {
         $name = $1;
-      } elsif (/^define\s+\S+\s+\@([A-Za-z0-9_.]+)\(/) {
+      } elsif (/^define\s+\S+\s+\@([A-Za-z0-9_.-]+)\(/) {
         $name = $1;
       } else {
         next;
       }
-      if ($name =~ /^%FN%/ || $name =~ /^__lambda_\d+$/) {
+      if ($name =~ /^%FN%/
+          || $name =~ /^__lambda_\d+$/
+          || $name =~ /^local_/
+          || $name =~ /_(primary|before|after|around)$/) {
         print "$name\n";
       }
     ' "$LLVM_IR" | sort -u
@@ -308,30 +311,18 @@ extern void __main(void);
 extern void cc_register_builtin_intrinsics(void);
 extern void cc_init_standard_cl_variables(void);
 extern void cc_runtime_ignore_gc_warnings(void);
-extern void cc_set_eval_bridge(uintptr_t callback_ptr);
-extern uintptr_t cc_eval_bridge(uintptr_t form_obj);
 extern void cc_register_function_ptr(const char *name, uintptr_t address, uintptr_t arity);
 extern void cc_register_function_with_args_list(const char *name, uintptr_t address, uintptr_t arity);
+extern uintptr_t cc_errorp(uintptr_t obj);
+extern uintptr_t cc_nil_value(void);
+extern uintptr_t cc_error_kind_code(uintptr_t obj);
+extern const char *cc_error_message_cstr(uintptr_t obj);
+extern uintptr_t cc_prin1_to_string(uintptr_t obj);
+extern uintptr_t cc_print(uintptr_t obj);
 extern void stack_clear(void);
 extern int64_t stack_depth(void);
 extern uintptr_t stack_pop_pointer(void);
 $(cat "$REGISTER_DECLS_C")
-
-/*
- * MLIR-generated code emits debug-stack push/pop hooks for backtrace tracking.
- * The JIT runtime exports richer support, but AOT executables only need these
- * hooks to exist so generated code links and executes correctly.
- */
-static uintptr_t rlasp_aot_debug_stack_depth = 0;
-void cc_runtime_debug_stack_push_name(uintptr_t name_obj_raw) {
-  (void)name_obj_raw;
-  rlasp_aot_debug_stack_depth += 1;
-}
-void cc_runtime_debug_stack_pop_name(void) {
-  if (rlasp_aot_debug_stack_depth > 0) {
-    rlasp_aot_debug_stack_depth -= 1;
-  }
-}
 
 static int should_delegate_to_irlasp(int argc, char **argv) {
   if (argc <= 1) return 0;
@@ -377,10 +368,6 @@ static int maybe_delegate_to_irlasp(int argc, char **argv) {
   return 127;
 }
 
-static void install_irlasp_eval_bridge(void) {
-  cc_set_eval_bridge((uintptr_t)cc_eval_bridge);
-}
-
 static int should_suppress_gc_warnings(void) {
   const char *value = getenv("RLASP_SUPPRESS_GC_WARNINGS");
   if (!value || !*value) return 1;
@@ -406,13 +393,34 @@ int main(int argc, char **argv) {
   }
   cc_register_builtin_intrinsics();
   cc_init_standard_cl_variables();
-  install_irlasp_eval_bridge();
 $(cat "$REGISTER_CALLS_C")
+  setenv("RLASP_AOT_ARTIFACT_EXEC", "1", 1);
   stack_clear();
   __main();
-  while (stack_depth() > 0) {
-    (void)stack_pop_pointer();
+  if (stack_depth() > 0) {
+    uintptr_t result = stack_pop_pointer();
+    if (cc_errorp(result) != cc_nil_value()) {
+      uintptr_t kind = cc_error_kind_code(result);
+      const char *msg = cc_error_message_cstr(result);
+      uintptr_t rendered = cc_prin1_to_string(result);
+      if (msg && *msg) {
+        fprintf(stderr,
+                "[AOT __main returned error kind=%llu raw=0x%llx msg=%s]",
+                (unsigned long long)kind,
+                (unsigned long long)result,
+                msg);
+      } else {
+        fprintf(stderr,
+                "[AOT __main returned error kind=%llu raw=0x%llx]",
+                (unsigned long long)kind,
+                (unsigned long long)result);
+      }
+      cc_print(rendered);
+      fflush(NULL);
+      return 1;
+    }
   }
+  stack_clear();
   fflush(NULL);
   _exit(0);
 }

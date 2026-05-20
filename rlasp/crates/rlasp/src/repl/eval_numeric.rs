@@ -1,108 +1,392 @@
 /// eval_numeric.rs - Common Lisp numeric builtins
 use super::eval_types::EvalResult;
-use std::collections::HashMap;
-use malachite::Integer;
 use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+use malachite::Integer;
+use std::collections::HashMap;
+
+fn numeric_program_error(msg: &str) -> String {
+    format!("PROGRAM-ERROR: {}", msg)
+}
+
+fn numeric_type_error(msg: &str) -> String {
+    format!("TYPE-ERROR: {}", msg)
+}
+
+fn real_to_f64(val: &EvalResult) -> Option<f64> {
+    match val {
+        EvalResult::Fixnum(n) => Some(*n as f64),
+        EvalResult::Float(n) => Some(*n),
+        EvalResult::FloatSingle(n) => Some(*n as f64),
+        EvalResult::Bignum(b) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            Some(f64::rounding_from(b, RoundingMode::Nearest).0)
+        }
+        EvalResult::Ratio(r) => {
+            use malachite::num::conversion::traits::RoundingFrom;
+            use malachite::rounding_modes::RoundingMode;
+            Some(f64::rounding_from(r, RoundingMode::Nearest).0)
+        }
+        _ => None,
+    }
+}
 
 pub fn register_numeric_builtins(env: &mut HashMap<String, EvalResult>) {
     // Numeric predicates
-    env.insert("numberp".to_string(), EvalResult::BuiltinFunction("numberp".to_string()));
-    env.insert("integerp".to_string(), EvalResult::BuiltinFunction("integerp".to_string()));
-    env.insert("floatp".to_string(), EvalResult::BuiltinFunction("floatp".to_string()));
-    env.insert("rationalp".to_string(), EvalResult::BuiltinFunction("rationalp".to_string()));
-    env.insert("realp".to_string(), EvalResult::BuiltinFunction("realp".to_string()));
-    env.insert("complexp".to_string(), EvalResult::BuiltinFunction("complexp".to_string()));
-    env.insert("zerop".to_string(), EvalResult::BuiltinFunction("zerop".to_string()));
-    env.insert("plusp".to_string(), EvalResult::BuiltinFunction("plusp".to_string()));
-    env.insert("minusp".to_string(), EvalResult::BuiltinFunction("minusp".to_string()));
-    env.insert("evenp".to_string(), EvalResult::BuiltinFunction("evenp".to_string()));
-    env.insert("oddp".to_string(), EvalResult::BuiltinFunction("oddp".to_string()));
+    env.insert(
+        "numberp".to_string(),
+        EvalResult::BuiltinFunction("numberp".to_string()),
+    );
+    env.insert(
+        "integerp".to_string(),
+        EvalResult::BuiltinFunction("integerp".to_string()),
+    );
+    env.insert(
+        "floatp".to_string(),
+        EvalResult::BuiltinFunction("floatp".to_string()),
+    );
+    env.insert(
+        "rationalp".to_string(),
+        EvalResult::BuiltinFunction("rationalp".to_string()),
+    );
+    env.insert(
+        "realp".to_string(),
+        EvalResult::BuiltinFunction("realp".to_string()),
+    );
+    env.insert(
+        "complexp".to_string(),
+        EvalResult::BuiltinFunction("complexp".to_string()),
+    );
+    env.insert(
+        "zerop".to_string(),
+        EvalResult::BuiltinFunction("zerop".to_string()),
+    );
+    env.insert(
+        "plusp".to_string(),
+        EvalResult::BuiltinFunction("plusp".to_string()),
+    );
+    env.insert(
+        "minusp".to_string(),
+        EvalResult::BuiltinFunction("minusp".to_string()),
+    );
+    env.insert(
+        "evenp".to_string(),
+        EvalResult::BuiltinFunction("evenp".to_string()),
+    );
+    env.insert(
+        "oddp".to_string(),
+        EvalResult::BuiltinFunction("oddp".to_string()),
+    );
 
     // Numeric comparison
-    env.insert("=".to_string(), EvalResult::BuiltinFunction("=".to_string()));
-    env.insert("/=".to_string(), EvalResult::BuiltinFunction("/=".to_string()));
+    env.insert(
+        "=".to_string(),
+        EvalResult::BuiltinFunction("=".to_string()),
+    );
+    env.insert(
+        "/=".to_string(),
+        EvalResult::BuiltinFunction("/=".to_string()),
+    );
 
     // Math functions
-    env.insert("abs".to_string(), EvalResult::BuiltinFunction("abs".to_string()));
-    env.insert("signum".to_string(), EvalResult::BuiltinFunction("signum".to_string()));
-    env.insert("sqrt".to_string(), EvalResult::BuiltinFunction("sqrt".to_string()));
-    env.insert("exp".to_string(), EvalResult::BuiltinFunction("exp".to_string()));
-    env.insert("expt".to_string(), EvalResult::BuiltinFunction("expt".to_string()));
-    env.insert("log".to_string(), EvalResult::BuiltinFunction("log".to_string()));
-    env.insert("sin".to_string(), EvalResult::BuiltinFunction("sin".to_string()));
-    env.insert("cos".to_string(), EvalResult::BuiltinFunction("cos".to_string()));
-    env.insert("tan".to_string(), EvalResult::BuiltinFunction("tan".to_string()));
-    env.insert("asin".to_string(), EvalResult::BuiltinFunction("asin".to_string()));
-    env.insert("acos".to_string(), EvalResult::BuiltinFunction("acos".to_string()));
-    env.insert("atan".to_string(), EvalResult::BuiltinFunction("atan".to_string()));
-    env.insert("sinh".to_string(), EvalResult::BuiltinFunction("sinh".to_string()));
-    env.insert("cosh".to_string(), EvalResult::BuiltinFunction("cosh".to_string()));
-    env.insert("tanh".to_string(), EvalResult::BuiltinFunction("tanh".to_string()));
+    env.insert(
+        "abs".to_string(),
+        EvalResult::BuiltinFunction("abs".to_string()),
+    );
+    env.insert(
+        "signum".to_string(),
+        EvalResult::BuiltinFunction("signum".to_string()),
+    );
+    env.insert(
+        "sqrt".to_string(),
+        EvalResult::BuiltinFunction("sqrt".to_string()),
+    );
+    env.insert(
+        "exp".to_string(),
+        EvalResult::BuiltinFunction("exp".to_string()),
+    );
+    env.insert(
+        "expt".to_string(),
+        EvalResult::BuiltinFunction("expt".to_string()),
+    );
+    env.insert(
+        "log".to_string(),
+        EvalResult::BuiltinFunction("log".to_string()),
+    );
+    env.insert(
+        "sin".to_string(),
+        EvalResult::BuiltinFunction("sin".to_string()),
+    );
+    env.insert(
+        "cos".to_string(),
+        EvalResult::BuiltinFunction("cos".to_string()),
+    );
+    env.insert(
+        "tan".to_string(),
+        EvalResult::BuiltinFunction("tan".to_string()),
+    );
+    env.insert(
+        "asin".to_string(),
+        EvalResult::BuiltinFunction("asin".to_string()),
+    );
+    env.insert(
+        "acos".to_string(),
+        EvalResult::BuiltinFunction("acos".to_string()),
+    );
+    env.insert(
+        "atan".to_string(),
+        EvalResult::BuiltinFunction("atan".to_string()),
+    );
+    env.insert(
+        "sinh".to_string(),
+        EvalResult::BuiltinFunction("sinh".to_string()),
+    );
+    env.insert(
+        "cosh".to_string(),
+        EvalResult::BuiltinFunction("cosh".to_string()),
+    );
+    env.insert(
+        "tanh".to_string(),
+        EvalResult::BuiltinFunction("tanh".to_string()),
+    );
 
     // Rounding functions
-    env.insert("truncate".to_string(), EvalResult::BuiltinFunction("truncate".to_string()));
-    env.insert("round".to_string(), EvalResult::BuiltinFunction("round".to_string()));
-    env.insert("ffloor".to_string(), EvalResult::BuiltinFunction("ffloor".to_string()));
-    env.insert("fceiling".to_string(), EvalResult::BuiltinFunction("fceiling".to_string()));
-    env.insert("ftruncate".to_string(), EvalResult::BuiltinFunction("ftruncate".to_string()));
-    env.insert("fround".to_string(), EvalResult::BuiltinFunction("fround".to_string()));
+    env.insert(
+        "truncate".to_string(),
+        EvalResult::BuiltinFunction("truncate".to_string()),
+    );
+    env.insert(
+        "round".to_string(),
+        EvalResult::BuiltinFunction("round".to_string()),
+    );
+    env.insert(
+        "ffloor".to_string(),
+        EvalResult::BuiltinFunction("ffloor".to_string()),
+    );
+    env.insert(
+        "fceiling".to_string(),
+        EvalResult::BuiltinFunction("fceiling".to_string()),
+    );
+    env.insert(
+        "ftruncate".to_string(),
+        EvalResult::BuiltinFunction("ftruncate".to_string()),
+    );
+    env.insert(
+        "fround".to_string(),
+        EvalResult::BuiltinFunction("fround".to_string()),
+    );
 
     // Logical operations on integers
-    env.insert("logand".to_string(), EvalResult::BuiltinFunction("logand".to_string()));
-    env.insert("logior".to_string(), EvalResult::BuiltinFunction("logior".to_string()));
-    env.insert("logxor".to_string(), EvalResult::BuiltinFunction("logxor".to_string()));
-    env.insert("lognot".to_string(), EvalResult::BuiltinFunction("lognot".to_string()));
-    env.insert("logeqv".to_string(), EvalResult::BuiltinFunction("logeqv".to_string()));
-    env.insert("lognand".to_string(), EvalResult::BuiltinFunction("lognand".to_string()));
-    env.insert("lognor".to_string(), EvalResult::BuiltinFunction("lognor".to_string()));
-    env.insert("logandc1".to_string(), EvalResult::BuiltinFunction("logandc1".to_string()));
-    env.insert("logandc2".to_string(), EvalResult::BuiltinFunction("logandc2".to_string()));
-    env.insert("logorc1".to_string(), EvalResult::BuiltinFunction("logorc1".to_string()));
-    env.insert("logorc2".to_string(), EvalResult::BuiltinFunction("logorc2".to_string()));
-    env.insert("logbitp".to_string(), EvalResult::BuiltinFunction("logbitp".to_string()));
-    env.insert("logcount".to_string(), EvalResult::BuiltinFunction("logcount".to_string()));
+    env.insert(
+        "logand".to_string(),
+        EvalResult::BuiltinFunction("logand".to_string()),
+    );
+    env.insert(
+        "logior".to_string(),
+        EvalResult::BuiltinFunction("logior".to_string()),
+    );
+    env.insert(
+        "logxor".to_string(),
+        EvalResult::BuiltinFunction("logxor".to_string()),
+    );
+    env.insert(
+        "lognot".to_string(),
+        EvalResult::BuiltinFunction("lognot".to_string()),
+    );
+    env.insert(
+        "logeqv".to_string(),
+        EvalResult::BuiltinFunction("logeqv".to_string()),
+    );
+    env.insert(
+        "lognand".to_string(),
+        EvalResult::BuiltinFunction("lognand".to_string()),
+    );
+    env.insert(
+        "lognor".to_string(),
+        EvalResult::BuiltinFunction("lognor".to_string()),
+    );
+    env.insert(
+        "logandc1".to_string(),
+        EvalResult::BuiltinFunction("logandc1".to_string()),
+    );
+    env.insert(
+        "logandc2".to_string(),
+        EvalResult::BuiltinFunction("logandc2".to_string()),
+    );
+    env.insert(
+        "logorc1".to_string(),
+        EvalResult::BuiltinFunction("logorc1".to_string()),
+    );
+    env.insert(
+        "logorc2".to_string(),
+        EvalResult::BuiltinFunction("logorc2".to_string()),
+    );
+    env.insert(
+        "logbitp".to_string(),
+        EvalResult::BuiltinFunction("logbitp".to_string()),
+    );
+    env.insert(
+        "logcount".to_string(),
+        EvalResult::BuiltinFunction("logcount".to_string()),
+    );
 
     // Integer operations
-    env.insert("mod".to_string(), EvalResult::BuiltinFunction("mod".to_string()));
-    env.insert("rem".to_string(), EvalResult::BuiltinFunction("rem".to_string()));
-    env.insert("gcd".to_string(), EvalResult::BuiltinFunction("gcd".to_string()));
-    env.insert("lcm".to_string(), EvalResult::BuiltinFunction("lcm".to_string()));
-    env.insert("integer-length".to_string(), EvalResult::BuiltinFunction("integer-length".to_string()));
+    env.insert(
+        "mod".to_string(),
+        EvalResult::BuiltinFunction("mod".to_string()),
+    );
+    env.insert(
+        "rem".to_string(),
+        EvalResult::BuiltinFunction("rem".to_string()),
+    );
+    env.insert(
+        "gcd".to_string(),
+        EvalResult::BuiltinFunction("gcd".to_string()),
+    );
+    env.insert(
+        "lcm".to_string(),
+        EvalResult::BuiltinFunction("lcm".to_string()),
+    );
+    env.insert(
+        "integer-length".to_string(),
+        EvalResult::BuiltinFunction("integer-length".to_string()),
+    );
 
     // Type constructors (for reading back typed values)
-    env.insert("fixnum".to_string(), EvalResult::BuiltinFunction("fixnum".to_string()));
-    env.insert("bignum".to_string(), EvalResult::BuiltinFunction("bignum".to_string()));
-    env.insert("float".to_string(), EvalResult::BuiltinFunction("float".to_string()));
-    env.insert("string".to_string(), EvalResult::BuiltinFunction("string".to_string()));
-    env.insert("symbol".to_string(), EvalResult::BuiltinFunction("symbol".to_string()));
-    env.insert("character".to_string(), EvalResult::BuiltinFunction("character".to_string()));
+    env.insert(
+        "fixnum".to_string(),
+        EvalResult::BuiltinFunction("fixnum".to_string()),
+    );
+    env.insert(
+        "bignum".to_string(),
+        EvalResult::BuiltinFunction("bignum".to_string()),
+    );
+    env.insert(
+        "float".to_string(),
+        EvalResult::BuiltinFunction("float".to_string()),
+    );
+    env.insert(
+        "string".to_string(),
+        EvalResult::BuiltinFunction("string".to_string()),
+    );
+    env.insert(
+        "symbol".to_string(),
+        EvalResult::BuiltinFunction("symbol".to_string()),
+    );
+    env.insert(
+        "character".to_string(),
+        EvalResult::BuiltinFunction("character".to_string()),
+    );
 
     // Float operations
-    env.insert("float-radix".to_string(), EvalResult::BuiltinFunction("float-radix".to_string()));
-    env.insert("float-sign".to_string(), EvalResult::BuiltinFunction("float-sign".to_string()));
-    env.insert("float-digits".to_string(), EvalResult::BuiltinFunction("float-digits".to_string()));
-    env.insert("float-precision".to_string(), EvalResult::BuiltinFunction("float-precision".to_string()));
-    env.insert("decode-float".to_string(), EvalResult::BuiltinFunction("decode-float".to_string()));
-    env.insert("scale-float".to_string(), EvalResult::BuiltinFunction("scale-float".to_string()));
-    env.insert("integer-decode-float".to_string(), EvalResult::BuiltinFunction("integer-decode-float".to_string()));
+    env.insert(
+        "float-radix".to_string(),
+        EvalResult::BuiltinFunction("float-radix".to_string()),
+    );
+    env.insert(
+        "float-sign".to_string(),
+        EvalResult::BuiltinFunction("float-sign".to_string()),
+    );
+    env.insert(
+        "float-digits".to_string(),
+        EvalResult::BuiltinFunction("float-digits".to_string()),
+    );
+    env.insert(
+        "float-precision".to_string(),
+        EvalResult::BuiltinFunction("float-precision".to_string()),
+    );
+    env.insert(
+        "decode-float".to_string(),
+        EvalResult::BuiltinFunction("decode-float".to_string()),
+    );
+    env.insert(
+        "scale-float".to_string(),
+        EvalResult::BuiltinFunction("scale-float".to_string()),
+    );
+    env.insert(
+        "integer-decode-float".to_string(),
+        EvalResult::BuiltinFunction("integer-decode-float".to_string()),
+    );
 
     // Rational/complex operations
-    env.insert("ratio".to_string(), EvalResult::BuiltinFunction("ratio".to_string()));
-    env.insert("numerator".to_string(), EvalResult::BuiltinFunction("numerator".to_string()));
-    env.insert("denominator".to_string(), EvalResult::BuiltinFunction("denominator".to_string()));
-    env.insert("rational".to_string(), EvalResult::BuiltinFunction("rational".to_string()));
-    env.insert("rationalize".to_string(), EvalResult::BuiltinFunction("rationalize".to_string()));
-    env.insert("realpart".to_string(), EvalResult::BuiltinFunction("realpart".to_string()));
-    env.insert("imagpart".to_string(), EvalResult::BuiltinFunction("imagpart".to_string()));
-    env.insert("complex".to_string(), EvalResult::BuiltinFunction("complex".to_string()));
-    env.insert("conjugate".to_string(), EvalResult::BuiltinFunction("conjugate".to_string()));
-    env.insert("phase".to_string(), EvalResult::BuiltinFunction("phase".to_string()));
-    env.insert("cis".to_string(), EvalResult::BuiltinFunction("cis".to_string()));
+    env.insert(
+        "ratio".to_string(),
+        EvalResult::BuiltinFunction("ratio".to_string()),
+    );
+    env.insert(
+        "numerator".to_string(),
+        EvalResult::BuiltinFunction("numerator".to_string()),
+    );
+    env.insert(
+        "denominator".to_string(),
+        EvalResult::BuiltinFunction("denominator".to_string()),
+    );
+    env.insert(
+        "rational".to_string(),
+        EvalResult::BuiltinFunction("rational".to_string()),
+    );
+    env.insert(
+        "rationalize".to_string(),
+        EvalResult::BuiltinFunction("rationalize".to_string()),
+    );
+    env.insert(
+        "realpart".to_string(),
+        EvalResult::BuiltinFunction("realpart".to_string()),
+    );
+    env.insert(
+        "imagpart".to_string(),
+        EvalResult::BuiltinFunction("imagpart".to_string()),
+    );
+    env.insert(
+        "complex".to_string(),
+        EvalResult::BuiltinFunction("complex".to_string()),
+    );
+    env.insert(
+        "conjugate".to_string(),
+        EvalResult::BuiltinFunction("conjugate".to_string()),
+    );
+    env.insert(
+        "phase".to_string(),
+        EvalResult::BuiltinFunction("phase".to_string()),
+    );
+    env.insert(
+        "cis".to_string(),
+        EvalResult::BuiltinFunction("cis".to_string()),
+    );
 
     // Random numbers
-    env.insert("random".to_string(), EvalResult::BuiltinFunction("random".to_string()));
-    env.insert("make-random-state".to_string(), EvalResult::BuiltinFunction("make-random-state".to_string()));
-    env.insert("random-state-p".to_string(), EvalResult::BuiltinFunction("random-state-p".to_string()));
+    env.insert(
+        "random".to_string(),
+        EvalResult::BuiltinFunction("random".to_string()),
+    );
+    env.insert(
+        "make-random-state".to_string(),
+        EvalResult::BuiltinFunction("make-random-state".to_string()),
+    );
+    env.insert(
+        "random-state-p".to_string(),
+        EvalResult::BuiltinFunction("random-state-p".to_string()),
+    );
+    for (name, value) in [
+        ("boole-clr", 0),
+        ("boole-set", 1),
+        ("boole-1", 2),
+        ("boole-2", 3),
+        ("boole-c1", 4),
+        ("boole-c2", 5),
+        ("boole-and", 6),
+        ("boole-ior", 7),
+        ("boole-xor", 8),
+        ("boole-eqv", 9),
+        ("boole-nand", 10),
+        ("boole-nor", 11),
+        ("boole-andc1", 12),
+        ("boole-andc2", 13),
+        ("boole-orc1", 14),
+        ("boole-orc2", 15),
+    ] {
+        env.insert(name.to_string(), EvalResult::Fixnum(value));
+    }
 }
 
 pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
@@ -131,20 +415,39 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         },
 
         // Predicates
-        "numberp" => Ok(EvalResult::Boolean(matches!(args.get(0),
-            Some(EvalResult::Float(_)) | Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) |
-            Some(EvalResult::Ratio(_)) | Some(EvalResult::Complex(_, _))))),
+        "numberp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Float(_))
+                | Some(EvalResult::FloatSingle(_))
+                | Some(EvalResult::Fixnum(_))
+                | Some(EvalResult::Bignum(_))
+                | Some(EvalResult::Ratio(_))
+                | Some(EvalResult::Complex(_, _))
+        ))),
         "integerp" => Ok(EvalResult::Boolean(match args.get(0) {
             Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) => true,
             Some(EvalResult::Float(n)) => n.fract() == 0.0,
             _ => false,
         })),
-        "floatp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Float(_))))),
-        "rationalp" => Ok(EvalResult::Boolean(matches!(args.get(0),
-            Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) | Some(EvalResult::Ratio(_))))),
-        "realp" => Ok(EvalResult::Boolean(matches!(args.get(0),
-            Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) | Some(EvalResult::Float(_)) | Some(EvalResult::Ratio(_))))),
-        "complexp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Complex(_, _))))),
+        "floatp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Float(_))
+        ))),
+        "rationalp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Fixnum(_)) | Some(EvalResult::Bignum(_)) | Some(EvalResult::Ratio(_))
+        ))),
+        "realp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Fixnum(_))
+                | Some(EvalResult::Bignum(_))
+                | Some(EvalResult::Float(_))
+                | Some(EvalResult::Ratio(_))
+        ))),
+        "complexp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Complex(_, _))
+        ))),
         "zerop" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n == 0)),
             Some(EvalResult::Float(n)) => Ok(EvalResult::Boolean(*n == 0.0)),
@@ -165,20 +468,28 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         },
         "evenp" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n % 2 == 0)),
-            Some(EvalResult::Float(n)) if n.fract() == 0.0 => Ok(EvalResult::Boolean((*n as i64) % 2 == 0)),
+            Some(EvalResult::Float(n)) if n.fract() == 0.0 => {
+                Ok(EvalResult::Boolean((*n as i64) % 2 == 0))
+            }
             Some(EvalResult::Bignum(n)) => {
                 use malachite::num::arithmetic::traits::DivisibleBy;
-                Ok(EvalResult::Boolean(n.divisible_by(&malachite::Integer::from(2))))
-            },
+                Ok(EvalResult::Boolean(
+                    n.divisible_by(&malachite::Integer::from(2)),
+                ))
+            }
             _ => Err("evenp requires an integer".to_string()),
         },
         "oddp" => match args.get(0) {
             Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Boolean(*n % 2 != 0)),
-            Some(EvalResult::Float(n)) if n.fract() == 0.0 => Ok(EvalResult::Boolean((*n as i64) % 2 != 0)),
+            Some(EvalResult::Float(n)) if n.fract() == 0.0 => {
+                Ok(EvalResult::Boolean((*n as i64) % 2 != 0))
+            }
             Some(EvalResult::Bignum(n)) => {
                 use malachite::num::arithmetic::traits::DivisibleBy;
-                Ok(EvalResult::Boolean(!n.divisible_by(&malachite::Integer::from(2))))
-            },
+                Ok(EvalResult::Boolean(
+                    !n.divisible_by(&malachite::Integer::from(2)),
+                ))
+            }
             _ => Err("oddp requires an integer".to_string()),
         },
 
@@ -188,7 +499,11 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 if *n == i64::MIN {
                     // i64::MIN.abs() overflows - promote to bignum
                     let big = malachite::Integer::from(*n);
-                    let abs_val = if big < malachite::Integer::from(0) { -big } else { big };
+                    let abs_val = if big < malachite::Integer::from(0) {
+                        -big
+                    } else {
+                        big
+                    };
                     Ok(EvalResult::Bignum(abs_val))
                 } else {
                     Ok(EvalResult::Fixnum(n.abs()))
@@ -196,11 +511,19 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             }
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.abs())),
             Some(EvalResult::Bignum(b)) => {
-                let abs_val = if *b < malachite::Integer::from(0) { -b } else { b.clone() };
+                let abs_val = if *b < malachite::Integer::from(0) {
+                    -b
+                } else {
+                    b.clone()
+                };
                 Ok(EvalResult::Bignum(abs_val))
             }
             Some(EvalResult::Ratio(r)) => {
-                let abs_val = if *r < malachite::Rational::from(0) { -r } else { r.clone() };
+                let abs_val = if *r < malachite::Rational::from(0) {
+                    -r
+                } else {
+                    r.clone()
+                };
                 Ok(EvalResult::Ratio(abs_val))
             }
             Some(EvalResult::Complex(re, im)) => Ok(EvalResult::Float((re * re + im * im).sqrt())),
@@ -218,26 +541,42 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             _ => Err("exp requires a number".to_string()),
         },
         "log" => {
-            let val = args.get(0).ok_or_else(|| "log requires a number".to_string())?;
+            let val = args
+                .get(0)
+                .ok_or_else(|| "log requires a number".to_string())?;
             let num = match val {
                 EvalResult::Float(n) => *n,
                 EvalResult::Fixnum(n) => *n as f64,
-                EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(f64::INFINITY) }
-                EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+                EvalResult::Bignum(b) => {
+                    let s = b.to_string();
+                    s.parse::<f64>().unwrap_or(f64::INFINITY)
+                }
+                EvalResult::Ratio(r) => {
+                    let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                    let d = r
+                        .denominator_ref()
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(1.0);
+                    n / d
+                }
                 _ => return Err("log requires a number".to_string()),
             };
             if args.len() == 2 {
                 let base = match &args[1] {
                     EvalResult::Float(n) => *n,
                     EvalResult::Fixnum(n) => *n as f64,
-                    EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(f64::INFINITY) }
+                    EvalResult::Bignum(b) => {
+                        let s = b.to_string();
+                        s.parse::<f64>().unwrap_or(f64::INFINITY)
+                    }
                     _ => return Err("log: base must be a number".to_string()),
                 };
                 Ok(EvalResult::Float(num.ln() / base.ln()))
             } else {
                 Ok(EvalResult::Float(num.ln()))
             }
-        },
+        }
         "sin" => match args.get(0) {
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(n.sin())),
             _ => Err("sin requires a number".to_string()),
@@ -278,48 +617,66 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         // Rounding
         "truncate" => {
             // This path is for BuiltinFunction call with pre-evaluated args
-            if args.is_empty() { return Err("truncate requires at least 1 argument".to_string()); }
+            if args.is_empty() {
+                return Err("truncate requires at least 1 argument".to_string());
+            }
             let num = &args[0];
             let div = args.get(1);
             match (num, div) {
                 (EvalResult::Float(n), None) => {
                     let q = n.trunc();
                     let r = n - q;
-                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q as i64), EvalResult::Float(r)]))
+                    Ok(EvalResult::MultipleValues(vec![
+                        EvalResult::Fixnum(q as i64),
+                        EvalResult::Float(r),
+                    ]))
                 }
-                (EvalResult::Fixnum(n), None) => {
-                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(*n), EvalResult::Fixnum(0)]))
-                }
+                (EvalResult::Fixnum(n), None) => Ok(EvalResult::MultipleValues(vec![
+                    EvalResult::Fixnum(*n),
+                    EvalResult::Fixnum(0),
+                ])),
                 (EvalResult::Fixnum(n), Some(EvalResult::Fixnum(d))) if *d != 0 => {
                     let q = n / d;
                     let r = n - q * d;
-                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q), EvalResult::Fixnum(r)]))
+                    Ok(EvalResult::MultipleValues(vec![
+                        EvalResult::Fixnum(q),
+                        EvalResult::Fixnum(r),
+                    ]))
                 }
                 _ => Err("truncate: unsupported argument types".to_string()),
             }
-        },
+        }
         "round" => {
-            if args.is_empty() { return Err("round requires at least 1 argument".to_string()); }
+            if args.is_empty() {
+                return Err("round requires at least 1 argument".to_string());
+            }
             let num = &args[0];
             let div = args.get(1);
             match (num, div) {
                 (EvalResult::Float(n), None) => {
                     let q = n.round();
                     let r = n - q;
-                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q as i64), EvalResult::Float(r)]))
+                    Ok(EvalResult::MultipleValues(vec![
+                        EvalResult::Fixnum(q as i64),
+                        EvalResult::Float(r),
+                    ]))
                 }
-                (EvalResult::Fixnum(n), None) => {
-                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(*n), EvalResult::Fixnum(0)]))
-                }
+                (EvalResult::Fixnum(n), None) => Ok(EvalResult::MultipleValues(vec![
+                    EvalResult::Fixnum(*n),
+                    EvalResult::Fixnum(0),
+                ])),
                 (EvalResult::Fixnum(n), Some(EvalResult::Fixnum(d))) if *d != 0 => {
                     // Round to nearest, ties to even
                     let q = (*n as f64 / *d as f64).round() as i64;
                     let r = n - q * d;
-                    Ok(EvalResult::MultipleValues(vec![EvalResult::Fixnum(q), EvalResult::Fixnum(r)]))
+                    Ok(EvalResult::MultipleValues(vec![
+                        EvalResult::Fixnum(q),
+                        EvalResult::Fixnum(r),
+                    ]))
                 }
                 _ => Err("round: unsupported argument types".to_string()),
             }
-        },
+        }
 
         // Integer operations
         "mod" => match (args.get(0), args.get(1)) {
@@ -338,22 +695,17 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         // Additional math operations
         "max" => {
             if args.is_empty() {
-                return Err("max requires at least 1 argument".to_string());
+                return Err(numeric_program_error("max requires at least 1 argument"));
             }
             let mut best = args[0].clone();
+            let mut best_val = real_to_f64(&best)
+                .ok_or_else(|| numeric_type_error("max requires real arguments"))?;
             for arg in &args[1..] {
-                let best_val = match &best {
-                    EvalResult::Float(n) => *n,
-                    EvalResult::Fixnum(i) => *i as f64,
-                    _ => return Err("max requires numeric arguments".to_string()),
-                };
-                let arg_val = match arg {
-                    EvalResult::Float(n) => *n,
-                    EvalResult::Fixnum(i) => *i as f64,
-                    _ => return Err("max requires numeric arguments".to_string()),
-                };
+                let arg_val = real_to_f64(arg)
+                    .ok_or_else(|| numeric_type_error("max requires real arguments"))?;
                 if arg_val > best_val {
                     best = arg.clone();
+                    best_val = arg_val;
                 }
             }
             Ok(best)
@@ -361,22 +713,17 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "min" => {
             if args.is_empty() {
-                return Err("min requires at least 1 argument".to_string());
+                return Err(numeric_program_error("min requires at least 1 argument"));
             }
             let mut best = args[0].clone();
+            let mut best_val = real_to_f64(&best)
+                .ok_or_else(|| numeric_type_error("min requires real arguments"))?;
             for arg in &args[1..] {
-                let best_val = match &best {
-                    EvalResult::Float(n) => *n,
-                    EvalResult::Fixnum(i) => *i as f64,
-                    _ => return Err("min requires numeric arguments".to_string()),
-                };
-                let arg_val = match arg {
-                    EvalResult::Float(n) => *n,
-                    EvalResult::Fixnum(i) => *i as f64,
-                    _ => return Err("min requires numeric arguments".to_string()),
-                };
+                let arg_val = real_to_f64(arg)
+                    .ok_or_else(|| numeric_type_error("min requires real arguments"))?;
                 if arg_val < best_val {
                     best = arg.clone();
+                    best_val = arg_val;
                 }
             }
             Ok(best)
@@ -388,8 +735,10 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             }
             let base = &args[0];
             let power = &args[1];
-            let has_complex = matches!(base, EvalResult::Complex(_, _)) || matches!(power, EvalResult::Complex(_, _));
-            let has_float = matches!(base, EvalResult::Float(_)) || matches!(power, EvalResult::Float(_));
+            let has_complex = matches!(base, EvalResult::Complex(_, _))
+                || matches!(power, EvalResult::Complex(_, _));
+            let has_float =
+                matches!(base, EvalResult::Float(_)) || matches!(power, EvalResult::Float(_));
 
             if has_complex {
                 // Complex exponentiation: base^power using e^(power * ln(base))
@@ -469,10 +818,11 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                             }
                         } else {
                             // Negative integer exponent: return ratio
-                            use malachite::Rational;
                             use malachite::num::arithmetic::traits::Pow;
+                            use malachite::Rational;
                             let base_r = Rational::from(*b);
-                            let result = Rational::from(1) / Rational::from(Integer::from(*b).pow((-*p) as u64));
+                            let result = Rational::from(1)
+                                / Rational::from(Integer::from(*b).pow((-*p) as u64));
                             if result.denominator_ref() == &1u32 {
                                 let n = Integer::from(result.numerator_ref().clone());
                                 if i64::convertible_from(&n) {
@@ -492,8 +842,8 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         Ok(EvalResult::Float(b.powf(*p as f64)))
                     }
                     (EvalResult::Ratio(b), EvalResult::Fixnum(p)) => {
-                        use malachite::Rational;
                         use malachite::num::arithmetic::traits::Pow;
+                        use malachite::Rational;
                         if *p >= 0 {
                             let num = Integer::from(b.numerator_ref().clone()).pow(*p as u64);
                             let den = Integer::from(b.denominator_ref().clone()).pow(*p as u64);
@@ -521,15 +871,37 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                         let b = match base {
                             EvalResult::Fixnum(n) => *n as f64,
                             EvalResult::Float(f) => *f,
-                            EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
-                            EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+                            EvalResult::Bignum(b) => {
+                                let s = b.to_string();
+                                s.parse::<f64>().unwrap_or(0.0)
+                            }
+                            EvalResult::Ratio(r) => {
+                                let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                                let d = r
+                                    .denominator_ref()
+                                    .to_string()
+                                    .parse::<f64>()
+                                    .unwrap_or(1.0);
+                                n / d
+                            }
                             _ => return Err("expt: not a number".to_string()),
                         };
                         let p = match power {
                             EvalResult::Fixnum(n) => *n as f64,
                             EvalResult::Float(f) => *f,
-                            EvalResult::Bignum(b) => { let s = b.to_string(); s.parse::<f64>().unwrap_or(0.0) }
-                            EvalResult::Ratio(r) => { let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0); let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0); n / d }
+                            EvalResult::Bignum(b) => {
+                                let s = b.to_string();
+                                s.parse::<f64>().unwrap_or(0.0)
+                            }
+                            EvalResult::Ratio(r) => {
+                                let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                                let d = r
+                                    .denominator_ref()
+                                    .to_string()
+                                    .parse::<f64>()
+                                    .unwrap_or(1.0);
+                                n / d
+                            }
                             _ => return Err("expt: not a number".to_string()),
                         };
                         Ok(EvalResult::Float(b.powf(p)))
@@ -539,8 +911,8 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         }
 
         "gcd" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             if args.is_empty() {
                 return Ok(EvalResult::Fixnum(0));
             }
@@ -575,10 +947,18 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 return Ok(EvalResult::Fixnum(1));
             }
             fn gcd_two(a: i64, b: i64) -> i64 {
-                if b == 0 { a.abs() } else { gcd_two(b, a % b) }
+                if b == 0 {
+                    a.abs()
+                } else {
+                    gcd_two(b, a % b)
+                }
             }
             fn lcm_two(a: i64, b: i64) -> i64 {
-                if a == 0 || b == 0 { 0 } else { (a * b).abs() / gcd_two(a, b) }
+                if a == 0 || b == 0 {
+                    0
+                } else {
+                    (a * b).abs() / gcd_two(a, b)
+                }
             }
             let mut result = match args[0] {
                 EvalResult::Fixnum(i) => i,
@@ -597,53 +977,139 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
         }
 
         "boole" => {
-            // (boole op integer1 integer2) - bitwise operation
-            // For now, stub - would need to implement boole constants
-            Err("boole not fully implemented yet".to_string())
+            if args.len() != 3 {
+                return Err(numeric_program_error("boole requires 3 arguments"));
+            }
+            let op = match &args[0] {
+                EvalResult::Fixnum(n) if (0..=15).contains(n) => *n,
+                _ => return Err(numeric_type_error("boole requires an operation code 0..15")),
+            };
+            let lhs = match &args[1] {
+                EvalResult::Fixnum(n) => Integer::from(*n),
+                EvalResult::Bignum(b) => b.clone(),
+                _ => return Err(numeric_type_error("boole requires integer arguments")),
+            };
+            let rhs = match &args[2] {
+                EvalResult::Fixnum(n) => Integer::from(*n),
+                EvalResult::Bignum(b) => b.clone(),
+                _ => return Err(numeric_type_error("boole requires integer arguments")),
+            };
+            let result = match op {
+                0 => Integer::from(0),
+                1 => !Integer::from(0),
+                2 => lhs.clone(),
+                3 => rhs.clone(),
+                4 => !lhs.clone(),
+                5 => !rhs.clone(),
+                6 => lhs.clone() & rhs.clone(),
+                7 => lhs.clone() | rhs.clone(),
+                8 => lhs.clone() ^ rhs.clone(),
+                9 => !(lhs.clone() ^ rhs.clone()),
+                10 => !(lhs.clone() & rhs.clone()),
+                11 => !(lhs.clone() | rhs.clone()),
+                12 => (!lhs.clone()) & rhs.clone(),
+                13 => lhs.clone() & (!rhs.clone()),
+                14 => (!lhs.clone()) | rhs.clone(),
+                15 => lhs.clone() | (!rhs.clone()),
+                _ => unreachable!(),
+            };
+            if i64::convertible_from(&result) {
+                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
+            } else {
+                Ok(EvalResult::Bignum(result))
+            }
         }
 
         "signum" => match args.get(0) {
-            Some(EvalResult::Float(n)) => {
-                Ok(EvalResult::Float(if *n > 0.0 { 1.0 } else if *n < 0.0 { -1.0 } else { 0.0 }))
-            }
-            Some(EvalResult::Fixnum(n)) => {
-                Ok(EvalResult::Fixnum(if *n > 0 { 1 } else if *n < 0 { -1 } else { 0 }))
-            }
+            Some(EvalResult::Float(n)) => Ok(EvalResult::Float(if *n > 0.0 {
+                1.0
+            } else if *n < 0.0 {
+                -1.0
+            } else {
+                0.0
+            })),
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(if *n > 0 {
+                1
+            } else if *n < 0 {
+                -1
+            } else {
+                0
+            })),
             Some(EvalResult::Bignum(b)) => {
-                Ok(EvalResult::Fixnum(if *b > malachite::Integer::from(0) { 1 } else if *b < malachite::Integer::from(0) { -1 } else { 0 }))
+                Ok(EvalResult::Fixnum(if *b > malachite::Integer::from(0) {
+                    1
+                } else if *b < malachite::Integer::from(0) {
+                    -1
+                } else {
+                    0
+                }))
             }
             Some(EvalResult::Ratio(r)) => {
-                Ok(EvalResult::Fixnum(if *r > malachite::Rational::from(0) { 1 } else if *r < malachite::Rational::from(0) { -1 } else { 0 }))
+                Ok(EvalResult::Fixnum(if *r > malachite::Rational::from(0) {
+                    1
+                } else if *r < malachite::Rational::from(0) {
+                    -1
+                } else {
+                    0
+                }))
             }
             Some(EvalResult::Complex(re, im)) => {
                 let mag = (re * re + im * im).sqrt();
                 if mag == 0.0 {
                     Ok(EvalResult::Complex(0.0, 0.0))
                 } else {
-                    Ok(EvalResult::Complex(re / mag, im / mag))
+                    Ok(EvalResult::Complex(
+                        (re / mag) as f32 as f64,
+                        (im / mag) as f32 as f64,
+                    ))
                 }
             }
             _ => Err("signum requires a number".to_string()),
         },
 
-        "float" => match args.get(0) {
-            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Float(*n as f64)),
-            Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
-            Some(EvalResult::Bignum(b)) => {
-                let s = b.to_string();
-                Ok(EvalResult::Float(s.parse::<f64>().unwrap_or(f64::INFINITY)))
+        "float" => {
+            let wants_single = matches!(args.get(1), Some(EvalResult::FloatSingle(_)));
+            match args.get(0) {
+                Some(EvalResult::Fixnum(n)) if wants_single => {
+                    Ok(EvalResult::FloatSingle(*n as f32 as f64))
+                }
+                Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Float(*n as f64)),
+                Some(EvalResult::FloatSingle(n)) if wants_single => Ok(EvalResult::FloatSingle(*n)),
+                Some(EvalResult::FloatSingle(n)) => Ok(EvalResult::Float(*n)),
+                Some(EvalResult::Float(n)) if wants_single => {
+                    Ok(EvalResult::FloatSingle(*n as f32 as f64))
+                }
+                Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
+                Some(EvalResult::Bignum(b)) => {
+                    let s = b.to_string();
+                    let v = s.parse::<f64>().unwrap_or(f64::INFINITY);
+                    if wants_single {
+                        Ok(EvalResult::FloatSingle(v as f32 as f64))
+                    } else {
+                        Ok(EvalResult::Float(v))
+                    }
+                }
+                Some(EvalResult::Ratio(r)) => {
+                    let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
+                    let d = r
+                        .denominator_ref()
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(1.0);
+                    let v = n / d;
+                    if wants_single {
+                        Ok(EvalResult::FloatSingle(v as f32 as f64))
+                    } else {
+                        Ok(EvalResult::Float(v))
+                    }
+                }
+                _ => Err("float requires a number".to_string()),
             }
-            Some(EvalResult::Ratio(r)) => {
-                let n = r.numerator_ref().to_string().parse::<f64>().unwrap_or(0.0);
-                let d = r.denominator_ref().to_string().parse::<f64>().unwrap_or(1.0);
-                Ok(EvalResult::Float(n / d))
-            }
-            _ => Err("float requires a number".to_string()),
-        },
+        }
 
         "ratio" => {
-            use malachite::Rational;
             use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+            use malachite::Rational;
 
             match (args.get(0), args.get(1)) {
                 (Some(EvalResult::Fixnum(num)), Some(EvalResult::Fixnum(denom))) => {
@@ -662,7 +1128,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 }
                 _ => Err("ratio requires two integer arguments".to_string()),
             }
-        },
+        }
 
         "rational" | "rationalize" => match args.get(0) {
             Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
@@ -714,7 +1180,9 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "complex" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Float(r)), Some(EvalResult::Float(_i))) => Ok(EvalResult::Float(*r)),
-            (Some(EvalResult::Fixnum(r)), Some(EvalResult::Fixnum(_i))) => Ok(EvalResult::Fixnum(*r)),
+            (Some(EvalResult::Fixnum(r)), Some(EvalResult::Fixnum(_i))) => {
+                Ok(EvalResult::Fixnum(*r))
+            }
             (Some(r), None) => Ok(r.clone()),
             _ => Err("complex requires 1 or 2 numbers".to_string()),
         },
@@ -726,9 +1194,15 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         "complexp" => Ok(EvalResult::Boolean(false)),
 
-        "rationalp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Fixnum(_) | EvalResult::Float(_))))),
+        "rationalp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Fixnum(_) | EvalResult::Float(_))
+        ))),
 
-        "realp" => Ok(EvalResult::Boolean(matches!(args.get(0), Some(EvalResult::Fixnum(_) | EvalResult::Float(_))))),
+        "realp" => Ok(EvalResult::Boolean(matches!(
+            args.get(0),
+            Some(EvalResult::Fixnum(_) | EvalResult::Float(_))
+        ))),
 
         "float-sign" => match (args.get(0), args.get(1)) {
             (Some(EvalResult::Float(n)), _) => {
@@ -738,14 +1212,10 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             _ => Err("float-sign requires a float".to_string()),
         },
 
-        "float-digits" | "float-precision" | "float-radix" => {
-            Ok(EvalResult::Fixnum(53))
-        },
+        "float-digits" | "float-precision" | "float-radix" => Ok(EvalResult::Fixnum(53)),
 
         "decode-float" => match args.get(0) {
-            Some(EvalResult::Float(n)) => {
-                Ok(EvalResult::Float(*n))
-            }
+            Some(EvalResult::Float(n)) => Ok(EvalResult::Float(*n)),
             _ => Err("decode-float requires a float".to_string()),
         },
 
@@ -804,20 +1274,37 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 Ok(EvalResult::Fixnum(r))
             }
             Some(EvalResult::Float(n)) if *n > 0.0 => {
+                if *n <= f32::MIN_POSITIVE as f64 {
+                    return Ok(EvalResult::Float(0.0));
+                }
                 use std::collections::hash_map::RandomState;
                 use std::hash::{BuildHasher, Hash, Hasher};
                 let s = RandomState::new();
                 let mut hasher = s.build_hasher();
                 std::time::SystemTime::now().hash(&mut hasher);
-                let r = (hasher.finish() as f64 / u64::MAX as f64) * n;
+                let unit = (hasher.finish() as f64 + 0.5) / (u64::MAX as f64 + 1.0);
+                let r = unit * n;
                 Ok(EvalResult::Float(r))
+            }
+            Some(EvalResult::FloatSingle(n)) if *n > 0.0 => {
+                if *n <= f32::MIN_POSITIVE as f64 {
+                    return Ok(EvalResult::FloatSingle(0.0));
+                }
+                use std::collections::hash_map::RandomState;
+                use std::hash::{BuildHasher, Hash, Hasher};
+                let s = RandomState::new();
+                let mut hasher = s.build_hasher();
+                std::time::SystemTime::now().hash(&mut hasher);
+                let unit = (hasher.finish() as f64 + 0.5) / (u64::MAX as f64 + 1.0);
+                let r = unit * n;
+                Ok(EvalResult::FloatSingle(r))
             }
             Some(EvalResult::Bignum(b)) if *b > malachite::Integer::from(0) => {
                 // For bignum, generate a random number in range [0, b)
+                use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+                use malachite::Integer;
                 use std::collections::hash_map::RandomState;
                 use std::hash::{BuildHasher, Hash, Hasher};
-                use malachite::Integer;
-                use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
                 let s = RandomState::new();
                 let mut hasher = s.build_hasher();
                 std::time::SystemTime::now().hash(&mut hasher);
@@ -830,7 +1317,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     Ok(EvalResult::Bignum(r))
                 }
             }
-            _ => Err("random requires a positive number".to_string()),
+            _ => Err(numeric_type_error("random requires a positive number")),
         },
 
         "make-random-state" => {
@@ -853,8 +1340,8 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
 
         // Bitwise logic operations
         "logand" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             let mut result = Integer::from(-1);
             for arg in args {
                 match arg {
@@ -868,11 +1355,11 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             } else {
                 Ok(EvalResult::Bignum(result))
             }
-        },
+        }
 
         "logior" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             let mut result = Integer::from(0);
             for arg in args {
                 match arg {
@@ -886,11 +1373,11 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             } else {
                 Ok(EvalResult::Bignum(result))
             }
-        },
+        }
 
         "logxor" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             let mut result = Integer::from(0);
             for arg in args {
                 match arg {
@@ -904,97 +1391,167 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             } else {
                 Ok(EvalResult::Bignum(result))
             }
-        },
+        }
 
         "lognot" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             match args.get(0) {
                 Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(!n)),
                 Some(EvalResult::Bignum(b)) => {
                     let r = !b;
-                    if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) }
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
                 }
                 _ => Err("lognot requires an integer".to_string()),
             }
-        },
+        }
 
         "logandc1" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             fn to_int(v: &EvalResult) -> Option<Integer> {
-                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+                match v {
+                    EvalResult::Fixnum(n) => Some(Integer::from(*n)),
+                    EvalResult::Bignum(b) => Some(b.clone()),
+                    _ => None,
+                }
             }
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
-                (Some(a), Some(b)) => { let r = !a & b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                (Some(a), Some(b)) => {
+                    let r = !a & b;
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
+                }
                 _ => Err("logandc1 requires two integers".to_string()),
             }
-        },
+        }
 
         "logandc2" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             fn to_int(v: &EvalResult) -> Option<Integer> {
-                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+                match v {
+                    EvalResult::Fixnum(n) => Some(Integer::from(*n)),
+                    EvalResult::Bignum(b) => Some(b.clone()),
+                    _ => None,
+                }
             }
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
-                (Some(a), Some(b)) => { let r = a & !b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                (Some(a), Some(b)) => {
+                    let r = a & !b;
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
+                }
                 _ => Err("logandc2 requires two integers".to_string()),
             }
-        },
+        }
 
         "logorc1" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             fn to_int(v: &EvalResult) -> Option<Integer> {
-                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+                match v {
+                    EvalResult::Fixnum(n) => Some(Integer::from(*n)),
+                    EvalResult::Bignum(b) => Some(b.clone()),
+                    _ => None,
+                }
             }
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
-                (Some(a), Some(b)) => { let r = !a | b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                (Some(a), Some(b)) => {
+                    let r = !a | b;
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
+                }
                 _ => Err("logorc1 requires two integers".to_string()),
             }
-        },
+        }
 
         "logorc2" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             fn to_int(v: &EvalResult) -> Option<Integer> {
-                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+                match v {
+                    EvalResult::Fixnum(n) => Some(Integer::from(*n)),
+                    EvalResult::Bignum(b) => Some(b.clone()),
+                    _ => None,
+                }
             }
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
-                (Some(a), Some(b)) => { let r = a | !b; if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                (Some(a), Some(b)) => {
+                    let r = a | !b;
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
+                }
                 _ => Err("logorc2 requires two integers".to_string()),
             }
-        },
+        }
 
         "lognand" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             fn to_int(v: &EvalResult) -> Option<Integer> {
-                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+                match v {
+                    EvalResult::Fixnum(n) => Some(Integer::from(*n)),
+                    EvalResult::Bignum(b) => Some(b.clone()),
+                    _ => None,
+                }
             }
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
-                (Some(a), Some(b)) => { let r = !(a & b); if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                (Some(a), Some(b)) => {
+                    let r = !(a & b);
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
+                }
                 _ => Err("lognand requires two integers".to_string()),
             }
-        },
+        }
 
         "lognor" => {
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             fn to_int(v: &EvalResult) -> Option<Integer> {
-                match v { EvalResult::Fixnum(n) => Some(Integer::from(*n)), EvalResult::Bignum(b) => Some(b.clone()), _ => None }
+                match v {
+                    EvalResult::Fixnum(n) => Some(Integer::from(*n)),
+                    EvalResult::Bignum(b) => Some(b.clone()),
+                    _ => None,
+                }
             }
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
-                (Some(a), Some(b)) => { let r = !(a | b); if i64::convertible_from(&r) { Ok(EvalResult::Fixnum(i64::exact_from(&r))) } else { Ok(EvalResult::Bignum(r)) } }
+                (Some(a), Some(b)) => {
+                    let r = !(a | b);
+                    if i64::convertible_from(&r) {
+                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
+                    } else {
+                        Ok(EvalResult::Bignum(r))
+                    }
+                }
                 _ => Err("lognor requires two integers".to_string()),
             }
-        },
+        }
 
         "logeqv" => {
             // (logeqv) = -1, (logeqv x) = x, (logeqv a b ...) = !xor of all
+            use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
             use malachite::Integer;
-            use malachite::num::conversion::traits::{ExactFrom, ConvertibleFrom};
             if args.is_empty() {
                 return Ok(EvalResult::Fixnum(-1));
             }
@@ -1016,12 +1573,10 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             } else {
                 Ok(EvalResult::Bignum(result))
             }
-        },
+        }
 
         "logcount" => match args.get(0) {
-            Some(EvalResult::Fixnum(n)) => {
-                Ok(EvalResult::Fixnum(n.count_ones() as i64))
-            }
+            Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(n.count_ones() as i64)),
             _ => Err("logcount requires an integer".to_string()),
         },
 

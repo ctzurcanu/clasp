@@ -1,9 +1,175 @@
 /// eval_pathname.rs - Basic pathname and file operations
 use super::eval_types::EvalResult;
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Clone, Debug)]
+struct LogicalPathnameTranslation {
+    pattern: String,
+    target: String,
+    literal_prefix: String,
+    target_root: String,
+}
+
+fn logical_pathname_translation_registry(
+) -> &'static Mutex<HashMap<String, Vec<LogicalPathnameTranslation>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Vec<LogicalPathnameTranslation>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn logical_host_key(host: &str) -> String {
+    host.trim_matches('"').to_ascii_uppercase()
+}
+
+fn logical_translation_literal_prefix(pattern: &str) -> String {
+    let mut end = pattern.len();
+    for (idx, ch) in pattern.char_indices() {
+        if ch == '*' || ch == '?' {
+            end = idx;
+            break;
+        }
+    }
+    pattern[..end].to_string()
+}
+
+fn logical_translation_target_root(target: &str) -> String {
+    let target = target.replace(';', "/");
+    let wildcard_idx = target.char_indices().find_map(|(idx, ch)| {
+        if ch == '*' || ch == '?' {
+            Some(idx)
+        } else {
+            None
+        }
+    });
+    let prefix = wildcard_idx
+        .map(|idx| &target[..idx])
+        .unwrap_or(target.as_str());
+    prefix.trim_end_matches('/').to_string()
+}
+
+fn make_list(items: Vec<EvalResult>) -> EvalResult {
+    let mut result = EvalResult::Nil;
+    for item in items.into_iter().rev() {
+        result = EvalResult::Cons(Rc::new(RefCell::new(item)), Rc::new(RefCell::new(result)));
+    }
+    result
+}
+
+fn parse_logical_pathname_translations(
+    value: &EvalResult,
+) -> Result<Vec<LogicalPathnameTranslation>, String> {
+    if matches!(value, EvalResult::Nil) {
+        return Ok(Vec::new());
+    }
+
+    let entries = list_to_vec(value)
+        .ok_or_else(|| "logical-pathname-translations must be a list".to_string())?;
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let parts = list_to_vec(&entry)
+            .ok_or_else(|| "logical-pathname-translation entry must be a list".to_string())?;
+        if parts.len() < 2 {
+            return Err(
+                "logical-pathname-translation entry requires pattern and target".to_string(),
+            );
+        }
+        let pattern = pathname_designator_to_string(&parts[0]).ok_or_else(|| {
+            "logical-pathname-translation pattern must be a pathname designator".to_string()
+        })?;
+        let target = pathname_designator_to_string(&parts[1]).ok_or_else(|| {
+            "logical-pathname-translation target must be a pathname designator".to_string()
+        })?;
+        parsed.push(LogicalPathnameTranslation {
+            literal_prefix: logical_translation_literal_prefix(&pattern),
+            target_root: logical_translation_target_root(&target),
+            pattern,
+            target,
+        });
+    }
+
+    parsed.sort_by(|a, b| b.literal_prefix.len().cmp(&a.literal_prefix.len()));
+    Ok(parsed)
+}
+
+pub(super) fn get_logical_pathname_translations(host: &str) -> EvalResult {
+    let key = logical_host_key(host);
+    let registry = logical_pathname_translation_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(entries) = registry.get(&key) else {
+        return EvalResult::Nil;
+    };
+
+    make_list(
+        entries
+            .iter()
+            .map(|entry| {
+                make_list(vec![
+                    EvalResult::String(entry.pattern.clone()),
+                    make_pathname_object_from_string(&entry.target),
+                ])
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn set_logical_pathname_translations(
+    host: &str,
+    value: &EvalResult,
+) -> Result<EvalResult, String> {
+    let key = logical_host_key(host);
+    let entries = parse_logical_pathname_translations(value)?;
+    let mut registry = logical_pathname_translation_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if entries.is_empty() {
+        registry.remove(&key);
+    } else {
+        registry.insert(key, entries);
+    }
+    Ok(value.clone())
+}
+
+pub(super) fn resolve_logical_pathname(path: &str) -> Option<String> {
+    let (host, rest) = path.split_once(':')?;
+    let key = logical_host_key(host);
+    let registry = logical_pathname_translation_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entries = registry.get(&key)?;
+
+    let rest = rest.trim_start_matches('/');
+    for entry in entries {
+        if !entry.literal_prefix.is_empty()
+            && !rest
+                .to_ascii_lowercase()
+                .starts_with(&entry.literal_prefix.to_ascii_lowercase())
+        {
+            continue;
+        }
+        let suffix = if entry.literal_prefix.is_empty() {
+            rest
+        } else {
+            &rest[entry.literal_prefix.len()..]
+        };
+        let mut resolved = entry.target_root.clone();
+        let suffix = suffix.trim_start_matches(';').trim_start_matches('/');
+        if !suffix.is_empty() {
+            if !resolved.is_empty() {
+                resolved.push('/');
+            }
+            resolved.push_str(&suffix.replace(';', "/"));
+        }
+        return Some(resolved);
+    }
+
+    None
+}
 
 fn symbol_base_name(sym: &str) -> &str {
     sym.rsplit(':').next().unwrap_or(sym)
@@ -51,9 +217,19 @@ fn sys_logical_root() -> PathBuf {
 }
 
 fn normalize_path_designator(path: &str) -> String {
+    if let Some(resolved) = resolve_logical_pathname(path) {
+        return resolved;
+    }
+
     let lower = path.to_ascii_lowercase();
     if lower.starts_with("sys:") {
-        let mut suffix = path[4..].replace(';', "/");
+        let mut suffix = path[4..].to_string();
+        if let Some(stripped) = suffix.strip_prefix("src;lisp;") {
+            suffix = stripped.to_string();
+        } else if let Some(stripped) = suffix.strip_prefix("src/lisp/") {
+            suffix = stripped.to_string();
+        }
+        let mut suffix = suffix.replace(';', "/");
         while suffix.starts_with('/') {
             suffix.remove(0);
         }
@@ -69,13 +245,13 @@ fn normalize_path_designator(path: &str) -> String {
 /// Extract a pathname string from various Common Lisp pathname representations
 fn extract_pathname_string(arg: &EvalResult) -> Option<String> {
     match arg {
-        EvalResult::String(s) => Some(s.clone()),
+        EvalResult::String(s) => Some(normalize_path_designator(s)),
         EvalResult::Symbol(s) => {
             // Handle symbols that might be pathnames (strip quotes if present)
             if s.starts_with("#P\"") && s.ends_with('"') {
-                Some(normalize_path_designator(&s[3..s.len()-1]))
+                Some(normalize_path_designator(&s[3..s.len() - 1]))
             } else if s.starts_with('"') && s.ends_with('"') {
-                Some(normalize_path_designator(&s[1..s.len()-1]))
+                Some(normalize_path_designator(&s[1..s.len() - 1]))
             } else {
                 Some(normalize_path_designator(s))
             }
@@ -93,7 +269,8 @@ fn extract_pathname_string(arg: &EvalResult) -> Option<String> {
                     let cdr_val = cdr.borrow();
                     if let EvalResult::Cons(path_car, _) = &*cdr_val {
                         let path_val = path_car.borrow();
-                        return extract_pathname_string(&path_val).map(|s| normalize_path_designator(&s));
+                        return extract_pathname_string(&path_val)
+                            .map(|s| normalize_path_designator(&s));
                     }
                 }
             }
@@ -230,18 +407,29 @@ fn list_pathname_designator_to_string(arg: &EvalResult) -> Option<String> {
     let mut result: Option<String> = None;
     for item in items {
         let part = match &item {
-            EvalResult::Symbol(s) if s.starts_with(':') => Some(s.trim_start_matches(':').to_string()),
-            _ => extract_pathname_string(&item).or_else(|| list_pathname_designator_to_string(&item)),
+            EvalResult::Symbol(s) if s.starts_with(':') => {
+                Some(s.trim_start_matches(':').to_string())
+            }
+            _ => {
+                extract_pathname_string(&item).or_else(|| list_pathname_designator_to_string(&item))
+            }
         };
 
         let part = part?;
         result = Some(match result {
-            Some(current) => PathBuf::from(current).join(part).to_string_lossy().to_string(),
+            Some(current) => PathBuf::from(current)
+                .join(part)
+                .to_string_lossy()
+                .to_string(),
             None => part,
         });
     }
 
     result
+}
+
+pub(super) fn pathname_designator_to_string(arg: &EvalResult) -> Option<String> {
+    extract_pathname_string(arg).or_else(|| list_pathname_designator_to_string(arg))
 }
 
 fn contains_wildcard_component(path: &str) -> bool {
@@ -423,7 +611,12 @@ fn apply_captures_to_path_pattern(pattern: &str, captures: &[String]) -> String 
         let mut rebuilt = String::new();
         for ch in part.chars() {
             if ch == '*' || ch == '?' {
-                rebuilt.push_str(captures.get(capture_index).map(|s| s.as_str()).unwrap_or(""));
+                rebuilt.push_str(
+                    captures
+                        .get(capture_index)
+                        .map(|s| s.as_str())
+                        .unwrap_or(""),
+                );
                 capture_index += 1;
             } else {
                 rebuilt.push(ch);
@@ -432,7 +625,11 @@ fn apply_captures_to_path_pattern(pattern: &str, captures: &[String]) -> String 
         out_parts.push(rebuilt);
     }
 
-    let mut result = if is_absolute { "/".to_string() } else { String::new() };
+    let mut result = if is_absolute {
+        "/".to_string()
+    } else {
+        String::new()
+    };
     result.push_str(&out_parts.join("/"));
     if is_directory && !result.ends_with('/') {
         result.push('/');
@@ -478,9 +675,10 @@ fn collect_glob_matches(
     entries: &mut Vec<String>,
 ) {
     if patterns.is_empty() {
-        if let Ok(metadata) = fs::metadata(base) {
-            if !directory_only_pattern || metadata.is_dir() {
-                entries.push(pathname_string_for_entry(base, metadata.is_dir()));
+        if let Ok(file_type) = fs::symlink_metadata(base).map(|m| m.file_type()) {
+            let is_dir = file_type.is_dir();
+            if !directory_only_pattern || is_dir {
+                entries.push(pathname_string_for_entry(base, is_dir));
             }
         }
         return;
@@ -493,9 +691,14 @@ fn collect_glob_matches(
         collect_glob_matches(base, &patterns[1..], directory_only_pattern, entries);
         if let Ok(read_dir) = fs::read_dir(base) {
             for entry in read_dir.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_dir() {
-                        collect_glob_matches(&entry.path(), patterns, directory_only_pattern, entries);
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_dir() {
+                        collect_glob_matches(
+                            &entry.path(),
+                            patterns,
+                            directory_only_pattern,
+                            entries,
+                        );
                     }
                 }
             }
@@ -515,16 +718,22 @@ fn collect_glob_matches(
         if !wildcard_match_component(pattern, &name) {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else {
+        let Ok(file_type) = entry.file_type() else {
             continue;
         };
+        let is_dir = file_type.is_dir();
         if patterns.len() == 1 {
-            if directory_only_pattern && !metadata.is_dir() {
+            if directory_only_pattern && !is_dir {
                 continue;
             }
-            entries.push(pathname_string_for_entry(&entry.path(), metadata.is_dir()));
-        } else if metadata.is_dir() {
-            collect_glob_matches(&entry.path(), &patterns[1..], directory_only_pattern, entries);
+            entries.push(pathname_string_for_entry(&entry.path(), is_dir));
+        } else if is_dir {
+            collect_glob_matches(
+                &entry.path(),
+                &patterns[1..],
+                directory_only_pattern,
+                entries,
+            );
         }
     }
 }
@@ -537,8 +746,8 @@ fn directory_entries_for_designator(path: &str) -> Result<Vec<String>, String> {
         match fs::read_dir(path) {
             Ok(read_dir) => {
                 for entry in read_dir.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        entries.push(pathname_string_for_entry(&entry.path(), metadata.is_dir()));
+                    if let Ok(file_type) = entry.file_type() {
+                        entries.push(pathname_string_for_entry(&entry.path(), file_type.is_dir()));
                     }
                 }
                 entries.sort();
@@ -572,28 +781,27 @@ fn directory_entries_for_designator(path: &str) -> Result<Vec<String>, String> {
 
 pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, String> {
     match name {
-        "pathname" => {
-            match args.get(0) {
-                Some(EvalResult::Nil) => Ok(EvalResult::Nil),
-                Some(arg) if is_pathname_object(arg) => Ok(arg.clone()),
-                Some(arg) => {
-                    if let Some(path) = extract_pathname_string(arg) {
-                        Ok(make_pathname_object_from_string(&path))
-                    } else if let Some(path) = list_pathname_designator_to_string(arg) {
-                        Ok(make_pathname_object_from_string(&path))
-                    } else {
-                        Err(format!("pathname requires a pathname designator, got {:?}", arg))
-                    }
+        "pathname" => match args.get(0) {
+            Some(EvalResult::Nil) => Ok(EvalResult::Nil),
+            Some(arg) if is_pathname_object(arg) => Ok(arg.clone()),
+            Some(arg) => {
+                if let Some(path) = extract_pathname_string(arg) {
+                    Ok(make_pathname_object_from_string(&path))
+                } else if let Some(path) = list_pathname_designator_to_string(arg) {
+                    Ok(make_pathname_object_from_string(&path))
+                } else {
+                    Err(format!(
+                        "pathname requires a pathname designator, got {:?}",
+                        arg
+                    ))
                 }
-                None => Err("pathname requires an argument".to_string()),
             }
-        }
+            None => Err("pathname requires an argument".to_string()),
+        },
 
-        "pathnamep" => {
-            Ok(EvalResult::Boolean(
-                args.get(0).map(|a| is_pathname_object(a)).unwrap_or(false)
-            ))
-        }
+        "pathnamep" => Ok(EvalResult::Boolean(
+            args.get(0).map(|a| is_pathname_object(a)).unwrap_or(false),
+        )),
 
         "make-pathname" => {
             // Extract keyword arguments. Keep "not provided" distinct from
@@ -617,53 +825,53 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                         };
                         let mut consumed = true;
                         match key_norm.as_str() {
-                            ":name" => {
-                                match &args[i + 1] {
-                                    EvalResult::Symbol(s) | EvalResult::String(s) if s.starts_with('"') && s.ends_with('"') => {
-                                        name = Some(s[1..s.len()-1].to_string());
-                                    }
-                                    value => {
-                                        if let Some(component) = pathname_component_to_string(value) {
-                                            name = Some(component);
-                                        }
+                            ":name" => match &args[i + 1] {
+                                EvalResult::Symbol(s) | EvalResult::String(s)
+                                    if s.starts_with('"') && s.ends_with('"') =>
+                                {
+                                    name = Some(s[1..s.len() - 1].to_string());
+                                }
+                                value => {
+                                    if let Some(component) = pathname_component_to_string(value) {
+                                        name = Some(component);
                                     }
                                 }
-                            }
-                            ":type" => {
-                                match &args[i + 1] {
-                                    EvalResult::Symbol(s) | EvalResult::String(s) if s.starts_with('"') && s.ends_with('"') => {
-                                        type_ext = Some(s[1..s.len()-1].to_string());
-                                    }
-                                    value => {
-                                        if let Some(component) = pathname_component_to_string(value) {
-                                            type_ext = Some(component);
-                                        }
+                            },
+                            ":type" => match &args[i + 1] {
+                                EvalResult::Symbol(s) | EvalResult::String(s)
+                                    if s.starts_with('"') && s.ends_with('"') =>
+                                {
+                                    type_ext = Some(s[1..s.len() - 1].to_string());
+                                }
+                                value => {
+                                    if let Some(component) = pathname_component_to_string(value) {
+                                        type_ext = Some(component);
                                     }
                                 }
-                            }
-                            ":directory" => {
-                                match &args[i + 1] {
-                                    EvalResult::Symbol(s) | EvalResult::String(s) if s.starts_with('"') && s.ends_with('"') => {
-                                        directory = Some(s[1..s.len()-1].to_string());
-                                    }
-                                    value if !matches!(value, EvalResult::Cons(_, _)) => {
-                                        if let Some(component) = pathname_component_to_string(value) {
-                                            directory = Some(component);
-                                        }
-                                    }
-                                    EvalResult::Cons(_, _) => {
-                                        if let Some((dir_str, _is_relative)) =
-                                            directory_list_to_string_with_mode(&args[i + 1])
-                                        {
-                                            directory = Some(dir_str);
-                                        }
-                                    }
-                                    EvalResult::Nil => {
-                                        directory = Some(String::new());
-                                    }
-                                    _ => {}
+                            },
+                            ":directory" => match &args[i + 1] {
+                                EvalResult::Symbol(s) | EvalResult::String(s)
+                                    if s.starts_with('"') && s.ends_with('"') =>
+                                {
+                                    directory = Some(s[1..s.len() - 1].to_string());
                                 }
-                            }
+                                value if !matches!(value, EvalResult::Cons(_, _)) => {
+                                    if let Some(component) = pathname_component_to_string(value) {
+                                        directory = Some(component);
+                                    }
+                                }
+                                EvalResult::Cons(_, _) => {
+                                    if let Some((dir_str, _is_relative)) =
+                                        directory_list_to_string_with_mode(&args[i + 1])
+                                    {
+                                        directory = Some(dir_str);
+                                    }
+                                }
+                                EvalResult::Nil => {
+                                    directory = Some(String::new());
+                                }
+                                _ => {}
+                            },
                             ":defaults" => {
                                 if let Some(path) = extract_pathname_string(&args[i + 1]) {
                                     defaults_path = Some(path);
@@ -703,7 +911,11 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             // If :directory is explicitly provided, keep it as provided.
             // CL make-pathname does not force merging explicit relative
             // directory components with :defaults at construction time.
-            let directory = if let Some(dir) = directory { dir } else { default_dir };
+            let directory = if let Some(dir) = directory {
+                dir
+            } else {
+                default_dir
+            };
             let name = name.unwrap_or(default_name);
             let type_ext = type_ext.unwrap_or(default_type);
 
@@ -727,23 +939,21 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
         "pathname-name" => {
             match args.get(0) {
                 Some(EvalResult::Nil) => Ok(EvalResult::Nil), // NIL pathname -> NIL name
-                Some(arg) => {
-                    match extract_pathname_string(arg) {
-                        Some(s) => {
-                            if s.ends_with('/') {
-                                return Ok(EvalResult::Nil);
-                            }
-                            let path = Path::new(&s);
-                            Ok(EvalResult::String(
-                                path.file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("")
-                                    .to_string()
-                            ))
+                Some(arg) => match extract_pathname_string(arg) {
+                    Some(s) => {
+                        if s.ends_with('/') {
+                            return Ok(EvalResult::Nil);
                         }
-                        None => Err("pathname-name requires a pathname".to_string()),
+                        let path = Path::new(&s);
+                        Ok(EvalResult::String(
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        ))
                     }
-                }
+                    None => Err("pathname-name requires a pathname".to_string()),
+                },
                 None => Err("pathname-name requires an argument".to_string()),
             }
         }
@@ -763,58 +973,63 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                         path.extension()
                             .and_then(|s| s.to_str())
                             .unwrap_or("")
-                            .to_string()
+                            .to_string(),
                     ))
                 }
                 None => Err("pathname-type requires a pathname".to_string()),
             }
         }
 
-        "pathname-directory" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    let is_absolute = s.starts_with('/');
-                    let dir_path = if s.ends_with('/') {
-                        s.trim_end_matches('/').to_string()
-                    } else {
-                        Path::new(&s)
-                            .parent()
-                            .and_then(|p| p.to_str())
-                            .unwrap_or("")
-                            .to_string()
-                    };
+        "pathname-directory" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => {
+                let is_absolute = s.starts_with('/');
+                let dir_path = if s.ends_with('/') {
+                    s.trim_end_matches('/').to_string()
+                } else {
+                    Path::new(&s)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
 
-                    if dir_path.is_empty() {
-                        return Ok(EvalResult::Nil);
-                    }
-
-                    let mut items = Vec::new();
-                    if is_absolute {
-                        items.push(EvalResult::Symbol(":absolute".to_string()));
-                    } else {
-                        items.push(EvalResult::Symbol(":relative".to_string()));
-                    }
-
-                    for part in dir_path.split('/').filter(|p| !p.is_empty()) {
-                        items.push(EvalResult::String(part.to_string()));
-                    }
-
-                    let mut result = EvalResult::Nil;
-                    for item in items.into_iter().rev() {
-                        result = EvalResult::Cons(
-                            Rc::new(RefCell::new(item)),
-                            Rc::new(RefCell::new(result)),
-                        );
-                    }
-                    Ok(result)
+                if dir_path.is_empty() {
+                    return Ok(EvalResult::Nil);
                 }
-                None => Err("pathname-directory requires a pathname".to_string()),
-            }
-        }
 
-        "pathname-host" | "pathname-device" | "pathname-version" => {
-            Ok(EvalResult::Nil)
-        }
+                let mut items = Vec::new();
+                if is_absolute {
+                    items.push(EvalResult::Symbol(":absolute".to_string()));
+                } else {
+                    items.push(EvalResult::Symbol(":relative".to_string()));
+                }
+
+                for part in dir_path.split('/').filter(|p| !p.is_empty()) {
+                    items.push(EvalResult::String(part.to_string()));
+                }
+
+                let mut result = EvalResult::Nil;
+                for item in items.into_iter().rev() {
+                    result = EvalResult::Cons(
+                        Rc::new(RefCell::new(item)),
+                        Rc::new(RefCell::new(result)),
+                    );
+                }
+                Ok(result)
+            }
+            None => {
+                if std::env::var("RLASP_DEBUG_PATHNAME_DIRECTORY").is_ok() {
+                    eprintln!(
+                        "[pathname-directory] rejected arg={:?} stack=[{}]",
+                        args.get(0).cloned().unwrap_or(EvalResult::Nil),
+                        super::eval_core::debug_call_stack_summary()
+                    );
+                }
+                Err("pathname-directory requires a pathname".to_string())
+            }
+        },
+
+        "pathname-host" | "pathname-device" | "pathname-version" => Ok(EvalResult::Nil),
 
         "namestring" | "host-namestring" | "enough-namestring" => {
             match args.get(0).and_then(extract_pathname_string) {
@@ -823,12 +1038,10 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
         }
 
-        "parse-namestring" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => Ok(make_pathname_object_from_string(&s)),
-                None => Err("parse-namestring requires a string".to_string()),
-            }
-        }
+        "parse-namestring" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => Ok(make_pathname_object_from_string(&s)),
+            None => Err("parse-namestring requires a string".to_string()),
+        },
 
         "merge-pathnames" => {
             let path1 = args.get(0).and_then(extract_pathname_string);
@@ -879,17 +1092,15 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
         }
 
-        "truename" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    match fs::canonicalize(&s) {
-                        Ok(path) => Ok(make_pathname_object_from_string(&path.to_string_lossy().to_string())),
-                        Err(_) => Err(format!("File does not exist: {}", s)),
-                    }
-                }
-                None => Err("truename requires a pathname".to_string()),
-            }
-        }
+        "truename" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => match fs::canonicalize(&s) {
+                Ok(path) => Ok(make_pathname_object_from_string(
+                    &path.to_string_lossy().to_string(),
+                )),
+                Err(_) => Err(format!("File does not exist: {}", s)),
+            },
+            None => Err("truename requires a pathname".to_string()),
+        },
         "resolve-symlinks" | "truenamize" => {
             match args.get(0).and_then(|arg| {
                 extract_pathname_string(arg).or_else(|| list_pathname_designator_to_string(arg))
@@ -897,7 +1108,9 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
                 Some(s) => {
                     let normalized = normalize_path_designator(&s);
                     match fs::canonicalize(&normalized) {
-                        Ok(path) => Ok(make_pathname_object_from_string(&path.to_string_lossy().to_string())),
+                        Ok(path) => Ok(make_pathname_object_from_string(
+                            &path.to_string_lossy().to_string(),
+                        )),
                         Err(_) => Ok(make_pathname_object_from_string(&normalized)),
                     }
                 }
@@ -905,125 +1118,99 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
         }
 
-        "probe-file" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    if Path::new(&s).exists() {
-                        Ok(make_pathname_object_from_string(&s))
-                    } else {
-                        Ok(EvalResult::Nil)
-                    }
+        "probe-file" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => {
+                if Path::new(&s).exists() {
+                    Ok(make_pathname_object_from_string(&s))
+                } else {
+                    Ok(EvalResult::Nil)
                 }
-                None => Ok(EvalResult::Nil),
             }
-        }
+            None => Ok(EvalResult::Nil),
+        },
 
-        "file-length" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    match fs::metadata(&s) {
-                        Ok(meta) => Ok(EvalResult::Fixnum(meta.len() as i64)),
-                        Err(_) => Err(format!("Cannot get file length: {}", s)),
-                    }
-                }
-                None => Err("file-length requires a file stream or pathname".to_string()),
-            }
-        }
+        "file-length" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => match fs::metadata(&s) {
+                Ok(meta) => Ok(EvalResult::Fixnum(meta.len() as i64)),
+                Err(_) => Err(format!("Cannot get file length: {}", s)),
+            },
+            None => Err("file-length requires a file stream or pathname".to_string()),
+        },
 
-        "file-position" => {
-            Ok(EvalResult::Fixnum(0))
-        }
+        "file-position" => Ok(EvalResult::Fixnum(0)),
 
-        "file-write-date" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    match fs::metadata(&s) {
-                        Ok(meta) => {
-                            if let Ok(modified) = meta.modified() {
-                                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                                    Ok(EvalResult::Fixnum(duration.as_secs() as i64))
-                                } else {
-                                    Ok(EvalResult::Fixnum(0))
-                                }
-                            } else {
-                                Ok(EvalResult::Fixnum(0))
-                            }
+        "file-write-date" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => match fs::metadata(&s) {
+                Ok(meta) => {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            Ok(EvalResult::Fixnum(duration.as_secs() as i64))
+                        } else {
+                            Ok(EvalResult::Fixnum(0))
                         }
-                        Err(_) => Ok(EvalResult::Nil),
+                    } else {
+                        Ok(EvalResult::Fixnum(0))
                     }
                 }
-                None => Ok(EvalResult::Nil),
-            }
-        }
+                Err(_) => Ok(EvalResult::Nil),
+            },
+            None => Ok(EvalResult::Nil),
+        },
 
-        "file-author" => {
-            Ok(EvalResult::String("unknown".to_string()))
-        }
+        "file-author" => Ok(EvalResult::String("unknown".to_string())),
 
-        "delete-file" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    match fs::remove_file(&s) {
-                        Ok(_) => Ok(EvalResult::Boolean(true)),
-                        Err(e) => Err(format!("Cannot delete file: {}", e)),
-                    }
-                }
-                None => Err("delete-file requires a pathname".to_string()),
-            }
-        }
+        "delete-file" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => match fs::remove_file(&s) {
+                Ok(_) => Ok(EvalResult::Boolean(true)),
+                Err(e) => Err(format!("Cannot delete file: {}", e)),
+            },
+            None => Err("delete-file requires a pathname".to_string()),
+        },
 
         "rename-file" => {
             let old = args.get(0).and_then(extract_pathname_string);
             let new = args.get(1).and_then(extract_pathname_string);
             match (old, new) {
-                (Some(old), Some(new)) => {
-                    match fs::rename(&old, &new) {
-                        Ok(_) => Ok(make_pathname_object_from_string(&new)),
-                        Err(e) => Err(format!("Cannot rename file: {}", e)),
-                    }
-                }
+                (Some(old), Some(new)) => match fs::rename(&old, &new) {
+                    Ok(_) => Ok(make_pathname_object_from_string(&new)),
+                    Err(e) => Err(format!("Cannot rename file: {}", e)),
+                },
                 _ => Err("rename-file requires two pathnames".to_string()),
             }
         }
 
-        "directory" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    match directory_entries_for_designator(&s) {
-                        Ok(entries) => {
-                            let mut result = EvalResult::Nil;
-                            for entry in entries.into_iter().rev() {
-                                result = EvalResult::Cons(
-                                    Rc::new(RefCell::new(make_pathname_object_from_string(&entry))),
-                                    Rc::new(RefCell::new(result))
-                                );
-                            }
-                            Ok(result)
-                        }
-                        Err(err) => Err(err),
+        "directory" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => match directory_entries_for_designator(&s) {
+                Ok(entries) => {
+                    let mut result = EvalResult::Nil;
+                    for entry in entries.into_iter().rev() {
+                        result = EvalResult::Cons(
+                            Rc::new(RefCell::new(make_pathname_object_from_string(&entry))),
+                            Rc::new(RefCell::new(result)),
+                        );
                     }
+                    Ok(result)
                 }
-                None => Ok(EvalResult::Nil),
-            }
-        }
+                Err(err) => Err(err),
+            },
+            None => Ok(EvalResult::Nil),
+        },
 
-        "ensure-directories-exist" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    let path = Path::new(&s);
-                    let dir = if path.extension().is_some() {
-                        path.parent().unwrap_or(path)
-                    } else {
-                        path
-                    };
-                    match fs::create_dir_all(dir) {
-                        Ok(_) => Ok(make_pathname_object_from_string(&s)),
-                        Err(e) => Err(format!("Cannot create directories: {}", e)),
-                    }
+        "ensure-directories-exist" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => {
+                let path = Path::new(&s);
+                let dir = if path.extension().is_some() {
+                    path.parent().unwrap_or(path)
+                } else {
+                    path
+                };
+                match fs::create_dir_all(dir) {
+                    Ok(_) => Ok(make_pathname_object_from_string(&s)),
+                    Err(e) => Err(format!("Cannot create directories: {}", e)),
                 }
-                None => Err("ensure-directories-exist requires a pathname".to_string()),
             }
-        }
+            None => Err("ensure-directories-exist requires a pathname".to_string()),
+        },
 
         "wild-pathname-p" => {
             let is_wild = args
@@ -1038,7 +1225,9 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             let path = args.get(0).and_then(extract_pathname_string);
             let pattern = args.get(1).and_then(extract_pathname_string);
             let matches = match (path, pattern) {
-                (Some(path), Some(pattern)) => pathname_captures_from_pattern(&path, &pattern).is_some(),
+                (Some(path), Some(pattern)) => {
+                    pathname_captures_from_pattern(&path, &pattern).is_some()
+                }
                 _ => false,
             };
             Ok(EvalResult::Boolean(matches))
@@ -1050,13 +1239,21 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             let to = args.get(2).and_then(extract_pathname_string);
             match (source, from, to) {
                 (Some(source), Some(from), Some(to)) => {
-                    let captures = pathname_captures_from_pattern(&source, &from)
-                        .ok_or_else(|| format!("translate-pathname: source {} does not match {}", source, from))?;
+                    let captures =
+                        pathname_captures_from_pattern(&source, &from).ok_or_else(|| {
+                            format!(
+                                "translate-pathname: source {} does not match {}",
+                                source, from
+                            )
+                        })?;
                     Ok(make_pathname_object_from_string(
                         &apply_captures_to_path_pattern(&to, &captures),
                     ))
                 }
-                _ => Err("translate-pathname requires source, from-wildcard, and to-wildcard pathnames".to_string()),
+                _ => Err(
+                    "translate-pathname requires source, from-wildcard, and to-wildcard pathnames"
+                        .to_string(),
+                ),
             }
         }
 
@@ -1067,72 +1264,88 @@ pub fn call_pathname_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResu
             }
 
             if let Some(path_str) = args.get(0).and_then(extract_pathname_string) {
-                let physical_path = normalize_path_designator(&path_str).replace(';', "/");
+                let physical_path = resolve_logical_pathname(&path_str)
+                    .unwrap_or_else(|| normalize_path_designator(&path_str))
+                    .replace(';', "/");
                 return Ok(make_pathname_object_from_string(&physical_path));
             }
 
             Ok(EvalResult::Nil)
         }
 
-        "logical-pathname" | "logical-pathname-translations" => {
-            Ok(EvalResult::Nil)
-        }
+        "logical-pathname" => match args.get(0).and_then(extract_pathname_string) {
+            Some(path) => Ok(make_pathname_object_from_string(&path)),
+            None => Ok(EvalResult::Nil),
+        },
+
+        "logical-pathname-translations" => match args.get(0) {
+            Some(EvalResult::String(host)) | Some(EvalResult::Symbol(host)) => {
+                Ok(get_logical_pathname_translations(host))
+            }
+            Some(_) => Err("logical-pathname-translations requires a host designator".to_string()),
+            None => Err("logical-pathname-translations requires a host designator".to_string()),
+        },
 
         "setf-logical-pathname-translations" => {
-            // setf form for logical pathname translations
-            Ok(EvalResult::Boolean(true))
-        }
-
-        "pathname-device" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(_) => Ok(EvalResult::Nil),
-                None => Err("pathname-device requires a pathname".to_string()),
-            }
-        }
-
-        "pathname-host" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(_) => Ok(EvalResult::Nil),
-                None => Err("pathname-host requires a pathname".to_string()),
-            }
-        }
-
-        "directory-namestring" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    let path = Path::new(&s);
-                    Ok(EvalResult::String(
-                        path.parent()
-                            .and_then(|p| p.to_str())
-                            .unwrap_or("")
-                            .to_string()
-                    ))
+            let host = match args.first() {
+                Some(EvalResult::String(host)) | Some(EvalResult::Symbol(host)) => host.clone(),
+                Some(_) => {
+                    return Err(
+                        "setf logical-pathname-translations requires a host designator".to_string(),
+                    )
                 }
-                None => Err("directory-namestring requires a pathname".to_string()),
-            }
-        }
-
-        "file-namestring" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(s) => {
-                    let path = Path::new(&s);
-                    Ok(EvalResult::String(
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_string()
-                    ))
+                None => {
+                    return Err(
+                        "setf logical-pathname-translations requires a host designator".to_string(),
+                    )
                 }
-                None => Err("file-namestring requires a pathname".to_string()),
-            }
+            };
+            let value = args.get(1).ok_or_else(|| {
+                "setf logical-pathname-translations requires a translation list".to_string()
+            })?;
+            set_logical_pathname_translations(&host, value)
         }
 
-        "host-namestring" => {
-            match args.get(0).and_then(extract_pathname_string) {
-                Some(_) => Ok(EvalResult::String("".to_string())),
-                None => Err("host-namestring requires a pathname".to_string()),
+        "pathname-device" => match args.get(0).and_then(extract_pathname_string) {
+            Some(_) => Ok(EvalResult::Nil),
+            None => Err("pathname-device requires a pathname".to_string()),
+        },
+
+        "pathname-host" => match args.get(0).and_then(extract_pathname_string) {
+            Some(_) => Ok(EvalResult::Nil),
+            None => Err("pathname-host requires a pathname".to_string()),
+        },
+
+        "directory-namestring" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => {
+                let path = Path::new(&s);
+                Ok(EvalResult::String(
+                    path.parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ))
             }
-        }
+            None => Err("directory-namestring requires a pathname".to_string()),
+        },
+
+        "file-namestring" => match args.get(0).and_then(extract_pathname_string) {
+            Some(s) => {
+                let path = Path::new(&s);
+                Ok(EvalResult::String(
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ))
+            }
+            None => Err("file-namestring requires a pathname".to_string()),
+        },
+
+        "host-namestring" => match args.get(0).and_then(extract_pathname_string) {
+            Some(_) => Ok(EvalResult::String("".to_string())),
+            None => Err("host-namestring requires a pathname".to_string()),
+        },
 
         _ => Err(format!("Unknown pathname builtin: {}", name)),
     }

@@ -1,0 +1,4 @@
+%FN%make-%foo%
+%FN%make-syntax-test-struct-1
+make-%foo%
+make-syntax-test-struct-1

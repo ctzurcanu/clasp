@@ -119,7 +119,9 @@ impl PackageManager {
 
         // Create new package
         let new_pkg = Package::allocate(name);
-        self.packages.write().insert(name_upper, Arc::clone(&new_pkg));
+        self.packages
+            .write()
+            .insert(name_upper, Arc::clone(&new_pkg));
         new_pkg
     }
 

@@ -33,17 +33,17 @@ fn from_eval_result(val: &EvalResult) -> IoSyntaxValue {
 
 /// Get the current value of an IO syntax variable
 pub fn get_io_syntax_var(name: &str) -> Option<EvalResult> {
-    io_syntax::get_io_syntax_var(name).map(to_eval_result)
+    io_syntax::get_io_syntax_var(&name.to_ascii_lowercase()).map(to_eval_result)
 }
 
 /// Set the value of an IO syntax variable
 pub fn set_io_syntax_var(name: &str, value: EvalResult) {
-    io_syntax::set_io_syntax_var(name, from_eval_result(&value));
+    io_syntax::set_io_syntax_var(&name.to_ascii_lowercase(), from_eval_result(&value));
 }
 
 /// Check if a name is an IO syntax variable
 pub fn is_io_syntax_var(name: &str) -> bool {
-    io_syntax::is_io_syntax_var(name)
+    io_syntax::is_io_syntax_var(&name.to_ascii_lowercase())
 }
 
 /// Saved state for restore

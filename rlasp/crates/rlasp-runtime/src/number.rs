@@ -119,7 +119,8 @@ impl Number {
     /// Allocate a single-float (stored as f64 value with single precision rounding).
     pub fn allocate_single_float(f: f64) -> LispObject {
         let rounded = (f as f32) as f64;
-        let ptr = unsafe { Self::allocate_number(NumberValue::Float(rounded), FloatFormat::Single) };
+        let ptr =
+            unsafe { Self::allocate_number(NumberValue::Float(rounded), FloatFormat::Single) };
         LispObject::from_general_ptr(ptr)
     }
 
@@ -131,10 +132,10 @@ impl Number {
         }
     }
 
-    /// Return float format for float values.
+    /// Return stored component float format for float and complex values.
     pub fn float_format(&self) -> Option<FloatFormat> {
         match self.value {
-            NumberValue::Float(_) => Some(self.float_format),
+            NumberValue::Float(_) | NumberValue::Complex(_) => Some(self.float_format),
             _ => None,
         }
     }
@@ -152,6 +153,16 @@ impl Number {
     /// Allocate a complex and return LispObject
     pub fn allocate_complex(c: Complex<f64>) -> LispObject {
         let ptr = unsafe { Self::allocate_number(NumberValue::Complex(c), FloatFormat::Double) };
+        LispObject::from_general_ptr(ptr)
+    }
+
+    /// Allocate a complex with an explicit component float format.
+    pub fn allocate_complex_with_format(c: Complex<f64>, format: FloatFormat) -> LispObject {
+        let value = match format {
+            FloatFormat::Single => Complex::new((c.re as f32) as f64, (c.im as f32) as f64),
+            FloatFormat::Double => c,
+        };
+        let ptr = unsafe { Self::allocate_number(NumberValue::Complex(value), format) };
         LispObject::from_general_ptr(ptr)
     }
 

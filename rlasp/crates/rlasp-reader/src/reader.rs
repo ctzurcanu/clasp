@@ -86,7 +86,9 @@ mod tests {
 
     #[test]
     fn test_read_complex_expr() {
-        let expr = read_from_string("(defun factorial (n) (if (<= n 1) 1 (* n (factorial (- n 1)))))").unwrap();
+        let expr =
+            read_from_string("(defun factorial (n) (if (<= n 1) 1 (* n (factorial (- n 1)))))")
+                .unwrap();
         assert!(expr.is_cons());
     }
 }

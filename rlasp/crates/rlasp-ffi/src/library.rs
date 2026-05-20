@@ -22,8 +22,8 @@ impl Library {
     /// ```
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         unsafe {
-            let lib = DynLib::new(path.as_ref())
-                .map_err(|e| format!("Failed to load library: {}", e))?;
+            let lib =
+                DynLib::new(path.as_ref()).map_err(|e| format!("Failed to load library: {}", e))?;
             Ok(Self { lib })
         }
     }
@@ -35,7 +35,8 @@ impl Library {
         signature: ForeignSignature,
     ) -> Result<ForeignFunction, String> {
         unsafe {
-            let symbol: Symbol<*const c_void> = self.lib
+            let symbol: Symbol<*const c_void> = self
+                .lib
                 .get(name.as_bytes())
                 .map_err(|e| format!("Symbol '{}' not found: {}", name, e))?;
 
@@ -47,7 +48,8 @@ impl Library {
     /// Get a raw symbol pointer
     pub fn get_symbol(&self, name: &str) -> Result<*const c_void, String> {
         unsafe {
-            let symbol: Symbol<*const c_void> = self.lib
+            let symbol: Symbol<*const c_void> = self
+                .lib
                 .get(name.as_bytes())
                 .map_err(|e| format!("Symbol '{}' not found: {}", name, e))?;
 
@@ -77,7 +79,7 @@ impl Library {
         let path = "libm.so.6";
 
         #[cfg(target_os = "macos")]
-        let path = "libSystem.dylib";  // Math is in libSystem on macOS
+        let path = "libSystem.dylib"; // Math is in libSystem on macOS
 
         #[cfg(target_os = "windows")]
         let path = "msvcrt.dll";
@@ -111,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]  // Skip on Windows due to different calling conventions
+    #[cfg(not(target_os = "windows"))] // Skip on Windows due to different calling conventions
     fn test_call_strlen() {
         use crate::types::FromLisp;
         use std::ffi::CString;
@@ -120,8 +122,8 @@ mod tests {
 
         // strlen signature: size_t strlen(const char *s)
         let sig = ForeignSignature {
-            return_type: ForeignType::Int64,  // size_t
-            param_types: vec![ForeignType::Pointer],  // const char*
+            return_type: ForeignType::Int64,         // size_t
+            param_types: vec![ForeignType::Pointer], // const char*
         };
 
         let strlen = libc.get_function("strlen", sig).unwrap();
@@ -138,7 +140,7 @@ mod tests {
 
         // Verify result
         let len = i64::from_lisp(result).unwrap();
-        assert_eq!(len, 13);  // "Hello, World!" is 13 characters
+        assert_eq!(len, 13); // "Hello, World!" is 13 characters
     }
 
     #[test]

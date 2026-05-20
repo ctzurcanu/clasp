@@ -220,3 +220,7 @@ in /private/tmp/ you have scripts for running and analysing /Users/christiantzur
 
 again: you are far from achieving the same result with -mlir as you get using the interpreter for running
   /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/modules/asdf/build/asdf.lisp
+
+make sure interpret, mlir and aot can execute /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/modules/asdf/ *.lisp as CL would. and re-execute regression tests
+
+regression tests at /Users/christiantzurcanu/Documents/dev/clasp/rlasp/clisp/in_work/regression-tests/ should pass for interpreter, MLIR compiler, and AOT compiler with best performance

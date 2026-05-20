@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --example ffi_demo
 
-use rlasp_ffi::{Library, ForeignSignature, ForeignType};
 use rlasp_ffi::types::{FromLisp, ToLisp};
+use rlasp_ffi::{ForeignSignature, ForeignType, Library};
 use rlasp_runtime::LispObject;
 
 fn main() {
@@ -23,7 +23,8 @@ fn main() {
         param_types: vec![ForeignType::Double],
     };
 
-    let sqrt_fn = libm.get_function("sqrt", sqrt_sig)
+    let sqrt_fn = libm
+        .get_function("sqrt", sqrt_sig)
         .expect("Failed to get sqrt function");
 
     // Create Lisp value for 16.0
@@ -64,8 +65,8 @@ fn main() {
     use rlasp_ffi::ForeignFunction;
     use std::ffi::c_void;
 
-    let add_fn = ForeignFunction::new(add as *const c_void, add_sig)
-        .expect("Failed to create add function");
+    let add_fn =
+        ForeignFunction::new(add as *const c_void, add_sig).expect("Failed to create add function");
 
     let a = 5i32.to_lisp();
     let b = 7i32.to_lisp();

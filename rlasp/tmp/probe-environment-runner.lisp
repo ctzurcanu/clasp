@@ -1,0 +1,13 @@
+(in-package :cl-user)
+(load "clisp/in_work/regression-tests/framework.lisp")
+(load "clisp/in_work/regression-tests/set-unexpected-failures.lisp")
+(in-package #:clasp-tests)
+(reset-clasp-tests)
+(message :emph "~%Running environment suite...")
+(let ((suite-file "clisp/in_work/regression-tests/environment.lisp"))
+  (multiple-value-bind (fasl warnings-p failure-p)
+      (compile-file suite-file)
+    (declare (ignore warnings-p failure-p))
+    (when fasl
+      (load fasl))))
+(show-test-summary)

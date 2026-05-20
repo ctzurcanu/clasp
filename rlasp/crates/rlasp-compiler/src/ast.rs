@@ -9,10 +9,10 @@ use rlasp_runtime::LispObject;
 pub enum Ast {
     // Literals
     Constant(LispObject),
-    
+
     // Variables
     Variable(String),
-    
+
     // Special forms
     Quote(Box<Ast>),
     If {
@@ -46,7 +46,7 @@ pub enum Ast {
         value: Box<Ast>,
     },
     Function(Box<Ast>),
-    
+
     // Control flow
     Block {
         name: String,
@@ -60,7 +60,7 @@ pub enum Ast {
         tags: Vec<TagbodyForm>,
     },
     Go(String),
-    
+
     // Exception handling
     Catch {
         tag: Box<Ast>,
@@ -74,7 +74,7 @@ pub enum Ast {
         protected: Box<Ast>,
         cleanup: Vec<Ast>,
     },
-    
+
     // Multiple values
     MultipleValueCall {
         function: Box<Ast>,
@@ -84,13 +84,13 @@ pub enum Ast {
         first: Box<Ast>,
         forms: Vec<Ast>,
     },
-    
+
     // Function application
     Call {
         function: Box<Ast>,
         args: Vec<Ast>,
     },
-    
+
     // Macros (during expansion)
     MacroCall {
         name: String,
@@ -102,9 +102,9 @@ pub enum Ast {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaList {
     pub required: Vec<String>,
-    pub optional: Vec<(String, Option<Ast>)>,  // (name, default-value)
+    pub optional: Vec<(String, Option<Ast>)>, // (name, default-value)
     pub rest: Option<String>,
-    pub key: Vec<(String, Option<Ast>)>,  // (name, default-value)
+    pub key: Vec<(String, Option<Ast>)>, // (name, default-value)
     pub allow_other_keys: bool,
 }
 
@@ -118,7 +118,7 @@ impl LambdaList {
             allow_other_keys: false,
         }
     }
-    
+
     pub fn simple(params: Vec<String>) -> Self {
         LambdaList {
             required: params,
@@ -157,10 +157,18 @@ impl Ast {
         if !obj.is_general() {
             return None;
         }
-
-        // Assume general objects are symbols for now
-        // TODO: Add type checking when we have runtime type info
+        let ptr = obj.as_general_ptr::<u8>()?;
+        if ptr.is_null() {
+            return None;
+        }
+        let obj_type = unsafe { rlasp_runtime::header::TypeHeader::from_ptr(ptr) }?;
+        if !matches!(obj_type, rlasp_runtime::header::ObjectType::Symbol) {
+            return None;
+        }
         let symbol_ptr = obj.as_general_ptr::<rlasp_runtime::Symbol>()?;
+        if symbol_ptr.is_null() {
+            return None;
+        }
         let symbol = unsafe { &*symbol_ptr };
         Some(symbol.name().to_string())
     }
@@ -180,13 +188,13 @@ impl Ast {
             return Ok(Ast::Constant(obj));
         }
 
-        // Symbols are variables
         if obj.is_general() {
-            let name = Self::get_symbol_name(obj)
-                .ok_or_else(|| "Cannot extract symbol name".to_string())?;
-            return Ok(Ast::Variable(name));
+            if let Some(name) = Self::get_symbol_name(obj) {
+                return Ok(Ast::Variable(name));
+            }
+            return Ok(Ast::Constant(obj));
         }
-        
+
         // Lists - could be special forms or function calls
         if obj.is_cons() {
             let cons_ptr = obj.as_cons_ptr().unwrap();
@@ -224,17 +232,15 @@ impl Ast {
                     }
                     "progn" => {
                         let args = Self::list_to_vec(cons.cdr())?;
-                        let forms: Result<Vec<_>, _> = args.iter()
-                            .map(|&a| Self::from_lisp(a))
-                            .collect();
+                        let forms: Result<Vec<_>, _> =
+                            args.iter().map(|&a| Self::from_lisp(a)).collect();
                         return Ok(Ast::Progn(forms?));
                     }
                     _ => {
                         // Function call
                         let args = Self::list_to_vec(cons.cdr())?;
-                        let arg_asts: Result<Vec<_>, _> = args.iter()
-                            .map(|&a| Self::from_lisp(a))
-                            .collect();
+                        let arg_asts: Result<Vec<_>, _> =
+                            args.iter().map(|&a| Self::from_lisp(a)).collect();
                         return Ok(Ast::Call {
                             function: Box::new(Ast::Variable(name)),
                             args: arg_asts?,
@@ -243,23 +249,23 @@ impl Ast {
                 }
             }
         }
-        
+
         Err(format!("Cannot convert to AST: {}", obj))
     }
-    
+
     /// Helper to convert a Lisp list to a Vec of LispObjects
     fn list_to_vec(obj: LispObject) -> Result<Vec<LispObject>, String> {
         if obj.is_nil() {
             return Ok(Vec::new());
         }
-        
+
         if let Some(cons_ptr) = obj.as_cons_ptr() {
             let cons = unsafe { &*cons_ptr };
             if let Some(vec) = cons.to_vec() {
                 return Ok(vec);
             }
         }
-        
+
         Err("Not a proper list".to_string())
     }
 }
@@ -268,35 +274,35 @@ impl Ast {
 mod tests {
     use super::*;
     use rlasp_reader::read_from_string;
-    
+
     #[test]
     fn test_constant() {
         let obj = read_from_string("42").unwrap();
         let ast = Ast::from_lisp(obj).unwrap();
         assert!(matches!(ast, Ast::Constant(_)));
     }
-    
+
     #[test]
     fn test_variable() {
         let obj = read_from_string("x").unwrap();
         let ast = Ast::from_lisp(obj).unwrap();
         assert!(matches!(ast, Ast::Variable(_)));
     }
-    
+
     #[test]
     fn test_quote() {
         let obj = read_from_string("(quote x)").unwrap();
         let ast = Ast::from_lisp(obj).unwrap();
         assert!(matches!(ast, Ast::Quote(_)));
     }
-    
+
     #[test]
     fn test_if() {
         let obj = read_from_string("(if t 1 2)").unwrap();
         let ast = Ast::from_lisp(obj).unwrap();
         assert!(matches!(ast, Ast::If { .. }));
     }
-    
+
     #[test]
     fn test_progn() {
         let obj = read_from_string("(progn 1 2 3)").unwrap();
@@ -307,7 +313,7 @@ mod tests {
             panic!("Expected Progn");
         }
     }
-    
+
     #[test]
     fn test_call() {
         let obj = read_from_string("(+ 1 2)").unwrap();

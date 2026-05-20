@@ -5,7 +5,6 @@
 /// - Safe access to foreign pointers
 /// - Finalizers for cleanup
 /// - Protection from double-free and use-after-free
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -47,11 +46,14 @@ impl HandleTable {
         let handle = Handle(self.next_id);
         self.next_id += 1;
 
-        self.entries.insert(handle, HandleEntry {
-            ptr,
-            finalizer,
-            ref_count: 1,
-        });
+        self.entries.insert(
+            handle,
+            HandleEntry {
+                ptr,
+                finalizer,
+                ref_count: 1,
+            },
+        );
 
         handle
     }
@@ -183,9 +185,12 @@ mod tests {
     fn test_global_table() {
         let test_val = Box::into_raw(Box::new(100i32)) as *mut ();
 
-        let handle = register_foreign_object(test_val, Some(Box::new(|ptr| {
-            unsafe { drop(Box::from_raw(ptr as *mut i32)) };
-        })));
+        let handle = register_foreign_object(
+            test_val,
+            Some(Box::new(|ptr| {
+                unsafe { drop(Box::from_raw(ptr as *mut i32)) };
+            })),
+        );
 
         assert!(is_valid_handle(handle));
         assert_eq!(deref_handle(handle), Some(test_val));

@@ -4,9 +4,9 @@
 //! by `with-standard-io-syntax`. It's in rlasp-runtime so both the
 //! interpreter and JIT can access the same state.
 
+use crate::FloatFormat;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::FloatFormat;
 
 /// IO syntax variable value - a simple enum that can be converted to/from usize for JIT
 #[derive(Clone, Debug, PartialEq)]
@@ -69,12 +69,18 @@ fn create_default_io_syntax() -> HashMap<String, IoSyntaxValue> {
     let mut vars = HashMap::new();
 
     // *package* - bound to COMMON-LISP-USER
-    vars.insert("*package*".to_string(), IoSyntaxValue::Symbol("COMMON-LISP-USER".to_string()));
+    vars.insert(
+        "*package*".to_string(),
+        IoSyntaxValue::Symbol("COMMON-LISP-USER".to_string()),
+    );
 
     // Print control variables
     vars.insert("*print-array*".to_string(), IoSyntaxValue::True);
     vars.insert("*print-base*".to_string(), IoSyntaxValue::Fixnum(10));
-    vars.insert("*print-case*".to_string(), IoSyntaxValue::Symbol(":UPCASE".to_string()));
+    vars.insert(
+        "*print-case*".to_string(),
+        IoSyntaxValue::Symbol(":UPCASE".to_string()),
+    );
     vars.insert("*print-circle*".to_string(), IoSyntaxValue::Nil);
     vars.insert("*print-escape*".to_string(), IoSyntaxValue::True);
     vars.insert("*print-gensym*".to_string(), IoSyntaxValue::True);
@@ -82,7 +88,10 @@ fn create_default_io_syntax() -> HashMap<String, IoSyntaxValue> {
     vars.insert("*print-level*".to_string(), IoSyntaxValue::Nil);
     vars.insert("*print-lines*".to_string(), IoSyntaxValue::Nil);
     vars.insert("*print-miser-width*".to_string(), IoSyntaxValue::Nil);
-    vars.insert("*print-pprint-dispatch*".to_string(), IoSyntaxValue::Symbol("*standard-pprint-dispatch*".to_string()));
+    vars.insert(
+        "*print-pprint-dispatch*".to_string(),
+        IoSyntaxValue::Symbol("*standard-pprint-dispatch*".to_string()),
+    );
     vars.insert("*print-pretty*".to_string(), IoSyntaxValue::Nil);
     vars.insert("*print-radix*".to_string(), IoSyntaxValue::Nil);
     vars.insert("*print-readably*".to_string(), IoSyntaxValue::True);
@@ -90,7 +99,10 @@ fn create_default_io_syntax() -> HashMap<String, IoSyntaxValue> {
 
     // Read control variables
     vars.insert("*read-base*".to_string(), IoSyntaxValue::Fixnum(10));
-    vars.insert("*read-default-float-format*".to_string(), IoSyntaxValue::Symbol("SINGLE-FLOAT".to_string()));
+    vars.insert(
+        "*read-default-float-format*".to_string(),
+        IoSyntaxValue::Symbol("SINGLE-FLOAT".to_string()),
+    );
     vars.insert("*read-eval*".to_string(), IoSyntaxValue::True);
     vars.insert("*read-suppress*".to_string(), IoSyntaxValue::Nil);
     // Use the same bridge-stable token as the evaluator/JIT instead of a
@@ -234,7 +246,11 @@ pub extern "C" fn cc_is_io_syntax_var(name_ptr: *const i8) -> usize {
     }
     unsafe {
         let name = std::ffi::CStr::from_ptr(name_ptr).to_string_lossy();
-        if is_io_syntax_var(&name) { 1 } else { 0 }
+        if is_io_syntax_var(&name) {
+            1
+        } else {
+            0
+        }
     }
 }
 

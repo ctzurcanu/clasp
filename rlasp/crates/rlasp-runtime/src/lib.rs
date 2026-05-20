@@ -3,47 +3,47 @@
 //! This crate implements the foundational object representation using
 //! a two-stack architecture for type-safe operations.
 
-pub mod stack;
-pub mod header;
-pub mod object;
-pub mod cons;
-pub mod symbol;
-pub mod number;
-pub mod gc;
-pub mod package;
-pub mod string;
-pub mod vector;
-pub mod hash_table;
-pub mod clos;
-pub mod eval_stack;
-pub mod closure;
-pub mod error;
-pub mod io_syntax;
-pub mod pathname;
-pub mod stream;
-pub mod cl_builtins;
 pub mod character_names;
+pub mod cl_builtins;
+pub mod clos;
+pub mod closure;
+pub mod cons;
+pub mod error;
+pub mod eval_stack;
+pub mod gc;
+pub mod hash_table;
+pub mod header;
+pub mod io_syntax;
+pub mod number;
+pub mod object;
+pub mod package;
+pub mod pathname;
+pub mod stack;
+pub mod stream;
+pub mod string;
+pub mod symbol;
+pub mod vector;
 
-pub use stack::{TypeTag, ObjectHandle, allocate_object};
-pub use header::{TypeHeader, ObjectType};
-pub use object::{LispObject, Tag};
-pub use cons::Cons;
-pub use symbol::{Symbol, NIL_SYMBOL, T_SYMBOL};
-pub use number::{FloatFormat, Number, NumberValue};
-pub use package::{Package, PackageManager, PACKAGE_MANAGER};
-pub use string::RString;
-pub use vector::RVector;
-pub use hash_table::HashTable;
+pub use character_names::parse_character_name;
+pub use cl_builtins::is_cl_builtin;
 pub use clos::{Class, Instance};
 pub use closure::Closure;
-pub use error::{LispError, ErrorKind};
+pub use cons::Cons;
+pub use error::{ErrorKind, LispError};
+pub use hash_table::HashTable;
+pub use header::{ObjectType, TypeHeader};
+pub use number::{FloatFormat, Number, NumberValue};
+pub use object::{LispObject, Tag};
+pub use package::{Package, PackageManager, PACKAGE_MANAGER};
 pub use pathname::Pathname;
-pub use stream::{Stream, StreamDirection, StreamElementType, StreamData};
-pub use cl_builtins::is_cl_builtin;
-pub use character_names::parse_character_name;
+pub use stack::{allocate_object, ObjectHandle, TypeTag};
+pub use stream::{Stream, StreamData, StreamDirection, StreamElementType};
+pub use string::RString;
+pub use symbol::{Symbol, NIL_SYMBOL, T_SYMBOL};
+pub use vector::RVector;
 
 // Re-export GC functions
-pub use gc::{init_gc, global_gc, is_gc_initialized, GCAllocator};
+pub use gc::{global_gc, init_gc, is_gc_initialized, GCAllocator};
 
 #[cfg(feature = "boehm-gc")]
 pub use gc::BoehmGC;
@@ -57,7 +57,12 @@ pub fn init_runtime() {
         gc::init_gc();
     }
     let suppress_gc_warnings = std::env::var("RLASP_SUPPRESS_GC_WARNINGS")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
         .unwrap_or(true);
     if suppress_gc_warnings {
         gc::gc_ignore_warnings();

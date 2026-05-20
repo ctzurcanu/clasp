@@ -1,0 +1,20 @@
+(in-package #:cl-user)
+
+(defun show-env-doc (symbol doc-type)
+  (let* ((doc (documentation symbol doc-type))
+         (args (ext:function-lambda-list symbol))
+         (text (with-output-to-string (*standard-output*)
+                 (describe symbol))))
+    (format t "~&CASE ~s ~s~%" symbol doc-type)
+    (format t " doc=~s~%" doc)
+    (format t " args=~s~%" args)
+    (format t " args-string=~s~%" (write-to-string args :escape t :readably t))
+    (format t " describe=~s~%" text)
+    (format t " doc-search=~s args-search=~s~%"
+            (and doc (search doc text))
+            (search (write-to-string args :escape t :readably t) text))))
+
+(show-env-doc 'core:function-docstring 'function)
+(show-env-doc 'core:function-docstring 'setf)
+(show-env-doc 'cl:car 'function)
+(show-env-doc 'cl:car 'setf)

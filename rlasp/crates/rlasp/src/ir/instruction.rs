@@ -1,7 +1,6 @@
 /// Instructions - Operations in the IR (Cleavir2-style)
 ///
 /// Modeled after Cleavir's instruction hierarchy with mixins for inputs/outputs
-
 use super::datum::DatumId;
 
 /// Unique ID for an instruction
@@ -30,7 +29,10 @@ pub enum InstructionKind {
     /// Unconditional jump
     Jump { target: usize },
     /// Conditional branch: if input is NIL → false_target, else → true_target
-    If { true_target: usize, false_target: usize },
+    If {
+        true_target: usize,
+        false_target: usize,
+    },
     /// Function return
     Return,
     /// Unreachable code
@@ -167,7 +169,10 @@ impl Instruction {
     pub fn successors(&self) -> Vec<usize> {
         match &self.kind {
             InstructionKind::Jump { target } => vec![*target],
-            InstructionKind::If { true_target, false_target } => {
+            InstructionKind::If {
+                true_target,
+                false_target,
+            } => {
                 vec![*true_target, *false_target]
             }
             InstructionKind::Case { targets, default } => {

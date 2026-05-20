@@ -2,8 +2,7 @@
 ///
 /// Supports calling the correct C++ method when multiple overloads exist.
 /// Simplified version of C++ overload resolution rules.
-
-use super::{CType, CCallArg};
+use super::{CCallArg, CType};
 
 /// Represents a C++ method overload
 #[derive(Debug, Clone)]
@@ -45,9 +44,11 @@ impl OverloadSet {
             if overload.params.len() != args.len() {
                 continue;
             }
-            if args.iter().zip(&overload.params).all(|(arg, param)| {
-                exact_match(arg, param)
-            }) {
+            if args
+                .iter()
+                .zip(&overload.params)
+                .all(|(arg, param)| exact_match(arg, param))
+            {
                 return Some(overload);
             }
         }
@@ -57,9 +58,11 @@ impl OverloadSet {
             if overload.params.len() != args.len() {
                 continue;
             }
-            if args.iter().zip(&overload.params).all(|(arg, param)| {
-                is_convertible(arg, param)
-            }) {
+            if args
+                .iter()
+                .zip(&overload.params)
+                .all(|(arg, param)| is_convertible(arg, param))
+            {
                 return Some(overload);
             }
         }
@@ -149,11 +152,7 @@ mod tests {
         let mut set = OverloadSet::new("test");
 
         // Only overload: test(double)
-        set.add_overload(
-            vec![CType::Double],
-            CType::Double,
-            0x1000 as *const (),
-        );
+        set.add_overload(vec![CType::Double], CType::Double, 0x1000 as *const ());
 
         // Call with int - should convert to double
         let args = vec![CCallArg::Int64(42)];
@@ -191,18 +190,10 @@ mod tests {
         let mut set = OverloadSet::new("test");
 
         // Overload 1: test(int) - exact match for int
-        set.add_overload(
-            vec![CType::Int64],
-            CType::Int64,
-            0x1000 as *const (),
-        );
+        set.add_overload(vec![CType::Int64], CType::Int64, 0x1000 as *const ());
 
         // Overload 2: test(double) - conversion from int
-        set.add_overload(
-            vec![CType::Double],
-            CType::Double,
-            0x2000 as *const (),
-        );
+        set.add_overload(vec![CType::Double], CType::Double, 0x2000 as *const ());
 
         // Call with int - should prefer exact match (overload 1)
         let args = vec![CCallArg::Int64(42)];

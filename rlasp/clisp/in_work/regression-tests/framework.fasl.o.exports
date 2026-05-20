@@ -1,0 +1,11 @@
+%FN%%fail-test
+%FN%%fail-test-with-error
+%FN%%succeed-test
+%FN%%test
+%FN%load-if-compiled-correctly
+%FN%message
+%FN%no-handler-case-load-if-compiled-correctly
+%FN%note-compile-error
+%FN%note-test
+%FN%reset-clasp-tests
+%FN%show-test-summary

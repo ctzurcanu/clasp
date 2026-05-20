@@ -50,7 +50,11 @@ impl fmt::Display for ReaderError {
                 write!(f, "Invalid number '{}' at position {}", text, pos)
             }
             ReaderError::InvalidCharacter { text, pos } => {
-                write!(f, "Invalid character literal '{}' at position {}", text, pos)
+                write!(
+                    f,
+                    "Invalid character literal '{}' at position {}",
+                    text, pos
+                )
             }
             ReaderError::UnterminatedString { pos } => {
                 write!(f, "Unterminated string at position {}", pos)
@@ -59,7 +63,11 @@ impl fmt::Display for ReaderError {
                 write!(f, "Unterminated comment at position {}", pos)
             }
             ReaderError::UnmatchedClosing { ch, pos } => {
-                write!(f, "Unmatched closing delimiter '{}' at position {}", ch, pos)
+                write!(
+                    f,
+                    "Unmatched closing delimiter '{}' at position {}",
+                    ch, pos
+                )
             }
             ReaderError::ExpectedClosing { expected, pos } => {
                 write!(f, "Expected closing '{}' at position {}", expected, pos)

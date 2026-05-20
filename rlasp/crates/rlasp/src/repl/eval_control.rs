@@ -1,17 +1,20 @@
-/// Control flow operations: do, dolist, dotimes, return
-
-use super::eval_types::{
-    EvalResult, RETURN_VALUE, ACTIVE_BLOCK_STACK, NEXT_BLOCK_ID, primary_value,
-};
 use super::eval_core::eval_with_env;
+/// Control flow operations: do, dolist, dotimes, return
+use super::eval_types::{
+    primary_value, EvalResult, ACTIVE_BLOCK_STACK, NEXT_BLOCK_ID, RETURN_VALUE,
+};
 use crate::ir::{ASTNode, ConstantValue};
-use std::collections::HashMap;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::LazyLock;
 
 fn condition_true(value: &EvalResult) -> bool {
     let primary = primary_value(value.clone());
-    !matches!(primary, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
+    !matches!(
+        primary,
+        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+    )
 }
 
 fn canonical_block_name(name: &str) -> String {
@@ -24,7 +27,9 @@ struct BlockFrameGuard {
 
 impl BlockFrameGuard {
     fn push(block_name: &str) -> Self {
-        Self { id: push_block_frame(block_name) }
+        Self {
+            id: push_block_frame(block_name),
+        }
     }
 
     fn id(&self) -> u64 {
@@ -40,6 +45,22 @@ impl Drop for BlockFrameGuard {
 
 pub(super) const BLOCK_CAPTURE_DEPTH_KEY: &str = "%__RLASP_BLOCK_CAPTURE_DEPTH__%";
 pub(super) const BLOCK_CALL_ENTRY_DEPTH_KEY: &str = "%__RLASP_BLOCK_CALL_ENTRY_DEPTH__%";
+static TRACE_BLOCK_BODY_FOR: LazyLock<Option<HashSet<String>>> = LazyLock::new(|| {
+    std::env::var("RLASP_TRACE_BLOCK_BODY_FOR")
+        .ok()
+        .and_then(|raw| {
+            let names: HashSet<String> = raw
+                .split(',')
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| !name.is_empty())
+                .collect();
+            if names.is_empty() {
+                None
+            } else {
+                Some(names)
+            }
+        })
+});
 
 fn depth_from_env(env: &HashMap<String, EvalResult>, key: &str) -> Option<usize> {
     match env.get(key) {
@@ -76,7 +97,10 @@ pub(super) fn pop_block_frame(block_id: u64) {
     });
 }
 
-pub(super) fn find_visible_block_id(block_name: &str, env: &HashMap<String, EvalResult>) -> Option<u64> {
+pub(super) fn find_visible_block_id(
+    block_name: &str,
+    env: &HashMap<String, EvalResult>,
+) -> Option<u64> {
     let capture_depth = depth_from_env(env, BLOCK_CAPTURE_DEPTH_KEY)?;
     let call_entry_depth = depth_from_env(env, BLOCK_CALL_ENTRY_DEPTH_KEY).unwrap_or(usize::MAX);
     let canonical = canonical_block_name(block_name);
@@ -94,12 +118,11 @@ pub(super) fn find_visible_block_id(block_name: &str, env: &HashMap<String, Eval
     })
 }
 
-pub(super) fn extract_return_from_payload<'a>(err: &'a str, expected_block: &str) -> Option<&'a str> {
-    let trimmed = err
-        .split(" (callee ast:")
-        .next()
-        .unwrap_or(err)
-        .trim();
+pub(super) fn extract_return_from_payload<'a>(
+    err: &'a str,
+    expected_block: &str,
+) -> Option<&'a str> {
+    let trimmed = err.split(" (callee ast:").next().unwrap_or(err).trim();
     if trimmed.starts_with("RETURN-FROM-ID:") {
         return None;
     }
@@ -117,11 +140,7 @@ pub(super) fn extract_return_from_payload_for_block<'a>(
     expected_block: &str,
     expected_block_id: u64,
 ) -> Option<&'a str> {
-    let trimmed = err
-        .split(" (callee ast:")
-        .next()
-        .unwrap_or(err)
-        .trim();
+    let trimmed = err.split(" (callee ast:").next().unwrap_or(err).trim();
     if let Some(rest) = trimmed.strip_prefix("RETURN-FROM-ID:") {
         let mut parts = rest.splitn(3, ':');
         let id = parts.next()?.parse::<u64>().ok()?;
@@ -157,6 +176,9 @@ thread_local! {
 /// Register a setf expander for an accessor
 pub fn register_setf_expander(accessor: &str, expander: SetfExpander) {
     SETF_EXPANDERS.with(|table| {
+        if std::env::var_os("RLASP_DEBUG_SETF_EXPANDERS").is_some() {
+            eprintln!("[setf-expander] register {}", accessor);
+        }
         table.borrow_mut().insert(accessor.to_uppercase(), expander);
     });
 }
@@ -164,14 +186,411 @@ pub fn register_setf_expander(accessor: &str, expander: SetfExpander) {
 /// Get a setf expander for an accessor
 pub fn get_setf_expander(accessor: &str) -> Option<SetfExpander> {
     SETF_EXPANDERS.with(|table| {
-        table.borrow().get(&accessor.to_uppercase()).cloned()
+        let table = table.borrow();
+        if std::env::var_os("RLASP_DEBUG_SETF_EXPANDERS").is_some() {
+            let keys: Vec<String> = table.keys().cloned().collect();
+            eprintln!("[setf-expander] lookup {} keys={:?}", accessor, keys);
+        }
+        if let Some(expander) = table.get(&accessor.to_uppercase()).cloned() {
+            return Some(expander);
+        }
+        let base = accessor.rsplit(':').next().unwrap_or(accessor);
+        table.get(&base.to_uppercase()).cloned().or_else(|| {
+            table.iter().find_map(|(key, expander)| {
+                let key_base = key.rsplit(':').next().unwrap_or(key.as_str());
+                if key_base.eq_ignore_ascii_case(base) {
+                    Some(expander.clone())
+                } else {
+                    None
+                }
+            })
+        })
     })
+}
+
+fn eval_result_list_to_vec(value: &EvalResult) -> Result<Vec<EvalResult>, String> {
+    let mut out = Vec::new();
+    let mut current = value.clone();
+    loop {
+        match current {
+            EvalResult::Nil => return Ok(out),
+            EvalResult::Cons(car, cdr) => {
+                out.push(car.borrow().clone());
+                current = cdr.borrow().clone();
+            }
+            _ => return Err("expected a proper list".to_string()),
+        }
+    }
+}
+
+fn eval_result_list_to_symbol_names(value: &EvalResult) -> Result<Vec<String>, String> {
+    eval_result_list_to_vec(value)?
+        .into_iter()
+        .map(|item| match item {
+            EvalResult::Symbol(name) => Ok(name),
+            EvalResult::Nil => Ok("nil".to_string()),
+            _ => Err("expected a list of symbols".to_string()),
+        })
+        .collect()
+}
+
+fn make_proper_list(items: impl IntoIterator<Item = EvalResult>) -> EvalResult {
+    let mut out = EvalResult::Nil;
+    let collected: Vec<EvalResult> = items.into_iter().collect();
+    for item in collected.into_iter().rev() {
+        out = EvalResult::Cons(Rc::new(RefCell::new(item)), Rc::new(RefCell::new(out)));
+    }
+    out
+}
+
+fn next_setf_temp_symbol(prefix: &str) -> String {
+    super::eval_types::GENSYM_COUNTER.with(|counter| {
+        let id = *counter.borrow();
+        *counter.borrow_mut() = id + 1;
+        format!("{}{}", prefix, id)
+    })
+}
+
+fn compute_setf_expansion_for_ast(place_ast: &ASTNode) -> Result<[EvalResult; 5], String> {
+    match place_ast {
+        ASTNode::Variable(name) => {
+            let store = next_setf_temp_symbol("%SETF-STORE-");
+            let writer = ASTNode::Call {
+                function: Box::new(ASTNode::Variable("setq".to_string())),
+                args: vec![
+                    ASTNode::Variable(name.clone()),
+                    ASTNode::Variable(store.clone()),
+                ],
+            };
+            Ok([
+                EvalResult::Nil,
+                EvalResult::Nil,
+                make_proper_list([EvalResult::Symbol(store.clone())]),
+                super::eval_core::ast_to_result(&writer)?,
+                super::eval_core::ast_to_result(place_ast)?,
+            ])
+        }
+        ASTNode::Call { function, args } => {
+            let ASTNode::Variable(func_name) = function.as_ref() else {
+                return Err("get-setf-expansion: unsupported place".to_string());
+            };
+            let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+            if super::eval_list::is_car_cdr_accessor_name(base_name) && args.len() == 1 {
+                let temp = next_setf_temp_symbol("%SETF-TEMP-");
+                let store = next_setf_temp_symbol("%SETF-STORE-");
+                let reader = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable(func_name.clone())),
+                    args: vec![ASTNode::Variable(temp.clone())],
+                };
+                let writer = ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("setf".to_string())),
+                    args: vec![
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable(func_name.clone())),
+                            args: vec![ASTNode::Variable(temp.clone())],
+                        },
+                        ASTNode::Variable(store.clone()),
+                    ],
+                };
+                Ok([
+                    make_proper_list([EvalResult::Symbol(temp.clone())]),
+                    make_proper_list([super::eval_core::ast_to_result(&args[0])?]),
+                    make_proper_list([EvalResult::Symbol(store.clone())]),
+                    super::eval_core::ast_to_result(&writer)?,
+                    super::eval_core::ast_to_result(&reader)?,
+                ])
+            } else {
+                Err("get-setf-expansion: unsupported place".to_string())
+            }
+        }
+        _ => Err("get-setf-expansion: unsupported place".to_string()),
+    }
+}
+
+fn original_setf_pair_ast(place: &ASTNode, value: &ASTNode) -> ASTNode {
+    ASTNode::Call {
+        function: Box::new(ASTNode::Variable("setf".to_string())),
+        args: vec![place.clone(), value.clone()],
+    }
+}
+
+fn expand_complex_setf_expander_to_ast(
+    lambda_list: &[String],
+    body: &[ASTNode],
+    place_args: &[ASTNode],
+    value_ast: &ASTNode,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<ASTNode, String> {
+    let mut expansion_env = env.clone();
+
+    let mut place_arg_index = 0usize;
+    let mut lambda_index = 0usize;
+    while lambda_index < lambda_list.len() {
+        let param = &lambda_list[lambda_index];
+        if param.eq_ignore_ascii_case("&environment") {
+            if let Some(env_param) = lambda_list.get(lambda_index + 1) {
+                expansion_env.insert(env_param.clone(), EvalResult::Nil);
+            }
+            lambda_index += 2;
+            continue;
+        }
+        if param.starts_with('&') {
+            lambda_index += 1;
+            continue;
+        }
+        if let Some(arg) = place_args.get(place_arg_index) {
+            let arg_val = super::eval_core::ast_to_result(arg)?;
+            expansion_env.insert(param.clone(), arg_val);
+            place_arg_index += 1;
+        }
+        lambda_index += 1;
+    }
+
+    let mut expansion = EvalResult::Nil;
+    for expr in body {
+        expansion = eval_with_env(expr, &mut expansion_env)?;
+    }
+
+    if let EvalResult::MultipleValues(vals) = &expansion {
+        if vals.len() == 5 {
+            let temp_names = eval_result_list_to_symbol_names(&vals[0])?;
+            let value_forms = eval_result_list_to_vec(&vals[1])?;
+            let store_names = eval_result_list_to_symbol_names(&vals[2])?;
+            if temp_names.len() != value_forms.len() {
+                return Err("get-setf-expansion produced mismatched temp/value forms".to_string());
+            }
+            let writer_ast = super::eval_system::result_to_ast(&vals[3])?;
+
+            let temp_bindings: Result<Vec<(String, ASTNode)>, String> = temp_names
+                .into_iter()
+                .zip(value_forms.iter())
+                .map(|(name, value_form)| {
+                    Ok((name, super::eval_system::result_to_ast(value_form)?))
+                })
+                .collect();
+
+            let mut store_bindings = Vec::new();
+            for (idx, store_name) in store_names.into_iter().enumerate() {
+                let store_value = if idx == 0 {
+                    value_ast.clone()
+                } else {
+                    ASTNode::Constant(ConstantValue::Nil)
+                };
+                store_bindings.push((store_name, store_value));
+            }
+
+            let with_stores = if store_bindings.is_empty() {
+                writer_ast
+            } else {
+                ASTNode::LetStar {
+                    bindings: store_bindings,
+                    body: vec![writer_ast],
+                }
+            };
+
+            let temp_bindings = temp_bindings?;
+            return if temp_bindings.is_empty() {
+                Ok(with_stores)
+            } else {
+                Ok(ASTNode::LetStar {
+                    bindings: temp_bindings,
+                    body: vec![with_stores],
+                })
+            };
+        }
+    }
+
+    super::eval_system::result_to_ast(&expansion)
+}
+
+pub fn expand_setf_form_to_ast(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<Option<ASTNode>, String> {
+    if args.len() < 2 || args.len() % 2 != 0 {
+        return Ok(None);
+    }
+
+    let mut handled_any = false;
+    let mut expanded_pairs = Vec::with_capacity(args.len() / 2);
+
+    for chunk in args.chunks(2) {
+        let place = &chunk[0];
+        let value = &chunk[1];
+
+        let expanded_pair = match place {
+            ASTNode::Call {
+                function,
+                args: place_args,
+            } => match function.as_ref() {
+                ASTNode::Variable(func_name) => {
+                    if local_macro_shadows_place(func_name, env) {
+                        if let Some(local_macro_place) =
+                            macroexpand_local_place_once(func_name, place_args, env)?
+                        {
+                            let nested_args = vec![local_macro_place, value.clone()];
+                            if let Some(expanded) = expand_setf_form_to_ast(&nested_args, env)? {
+                                handled_any = true;
+                                expanded
+                            } else {
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("setf".to_string())),
+                                    args: nested_args,
+                                }
+                            }
+                        } else {
+                            original_setf_pair_ast(place, value)
+                        }
+                    } else if lexical_setf_function_visible(func_name, env) {
+                        original_setf_pair_ast(place, value)
+                    } else {
+                        match get_setf_expander(func_name) {
+                            Some(SetfExpander::Simple(updater)) => {
+                                handled_any = true;
+                                let mut call_args = place_args.clone();
+                                call_args.push(value.clone());
+                                ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable(updater)),
+                                    args: call_args,
+                                }
+                            }
+                            Some(SetfExpander::Complex {
+                                lambda_list, body, ..
+                            }) => {
+                                handled_any = true;
+                                expand_complex_setf_expander_to_ast(
+                                    &lambda_list,
+                                    &body,
+                                    place_args,
+                                    value,
+                                    env,
+                                )?
+                            }
+                            None => {
+                                if let Some(local_macro_place) =
+                                    macroexpand_local_place_once(func_name, place_args, env)?
+                                {
+                                    let nested_args = vec![local_macro_place, value.clone()];
+                                    if let Some(expanded) =
+                                        expand_setf_form_to_ast(&nested_args, env)?
+                                    {
+                                        handled_any = true;
+                                        expanded
+                                    } else {
+                                        ASTNode::Call {
+                                            function: Box::new(ASTNode::Variable(
+                                                "setf".to_string(),
+                                            )),
+                                            args: nested_args,
+                                        }
+                                    }
+                                } else {
+                                    original_setf_pair_ast(place, value)
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => original_setf_pair_ast(place, value),
+            },
+            _ => original_setf_pair_ast(place, value),
+        };
+
+        expanded_pairs.push(expanded_pair);
+    }
+
+    if !handled_any {
+        return Ok(None);
+    }
+
+    Ok(Some(if expanded_pairs.len() == 1 {
+        expanded_pairs.remove(0)
+    } else {
+        ASTNode::Progn {
+            exprs: expanded_pairs,
+        }
+    }))
+}
+
+fn local_macro_shadows_place(func_name: &str, env: &HashMap<String, EvalResult>) -> bool {
+    let func_base = func_name.rsplit(':').next().unwrap_or(func_name);
+    super::eval_core::local_macro_names_from_env(env)
+        .iter()
+        .any(|name| {
+            let name_base = name.rsplit(':').next().unwrap_or(name.as_str());
+            name.eq_ignore_ascii_case(func_name) || name_base.eq_ignore_ascii_case(func_base)
+        })
+}
+
+fn function_env_binding_visible(
+    name: &str,
+    env: &HashMap<String, EvalResult>,
+) -> Option<EvalResult> {
+    let requested = name
+        .strip_prefix(super::eval_core::FUNCTION_NS_PREFIX)
+        .unwrap_or(name);
+    let requested_base = requested.rsplit(':').next().unwrap_or(requested);
+    env.iter().find_map(|(key, value)| {
+        let key_symbol = key
+            .strip_prefix(super::eval_core::FUNCTION_NS_PREFIX)
+            .or_else(|| {
+                key.rsplit_once(super::eval_core::FUNCTION_NS_PREFIX)
+                    .map(|(_, tail)| tail)
+            })?;
+        let key_base = key_symbol.rsplit(':').next().unwrap_or(key_symbol);
+        if requested.eq_ignore_ascii_case(key_symbol)
+            || requested_base.eq_ignore_ascii_case(key_base)
+        {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn lexical_setf_function_visible(func_name: &str, env: &HashMap<String, EvalResult>) -> bool {
+    let setf_name = format!(
+        "{}(setf {})",
+        super::eval_core::FUNCTION_NS_PREFIX,
+        func_name
+    );
+    function_env_binding_visible(&setf_name, env).is_some()
+}
+
+fn macroexpand_local_place_once(
+    func_name: &str,
+    place_args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<Option<ASTNode>, String> {
+    let fn_name = format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, func_name);
+    let Some(EvalResult::Macro { params, body }) = function_env_binding_visible(&fn_name, env)
+    else {
+        return Ok(None);
+    };
+    super::eval_core::macroexpand_1_call_to_ast(&params, &body, Some(func_name), place_args, env)
+        .map(Some)
+}
+
+pub fn eval_get_setf_expansion(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
+    if args.is_empty() {
+        return Err("get-setf-expansion requires a place".to_string());
+    }
+    let place_form = eval_with_env(&args[0], env)?;
+    let place_ast = super::eval_system::result_to_ast(&place_form)?;
+    let expansion = compute_setf_expansion_for_ast(&place_ast)?;
+    Ok(EvalResult::MultipleValues(expansion.into_iter().collect()))
 }
 
 /// Evaluate defsetf
 /// Simple form: (defsetf accessor updater)
 /// Complex form: (defsetf accessor lambda-list (store-var) body...)
-pub fn eval_defsetf(args: &[ASTNode], _env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub fn eval_defsetf(
+    args: &[ASTNode],
+    _env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     if args.len() < 2 {
         return Err("defsetf requires at least 2 arguments".to_string());
     }
@@ -217,18 +636,21 @@ pub fn eval_defsetf(args: &[ASTNode], _env: &mut HashMap<String, EvalResult>) ->
 
         let body = args[body_start..].to_vec();
 
-        register_setf_expander(&accessor, SetfExpander::Complex {
-            lambda_list,
-            store_vars,
-            body,
-        });
+        register_setf_expander(
+            &accessor,
+            SetfExpander::Complex {
+                lambda_list,
+                store_vars,
+                body,
+            },
+        );
     }
 
     Ok(EvalResult::Symbol(accessor))
 }
 
 /// Extract parameter names from a lambda list AST node
-fn extract_lambda_list(ast: &ASTNode) -> Result<Vec<String>, String> {
+pub(crate) fn extract_lambda_list(ast: &ASTNode) -> Result<Vec<String>, String> {
     match ast {
         ASTNode::Call { function, args } => {
             let mut params = Vec::new();
@@ -250,17 +672,42 @@ fn extract_lambda_list(ast: &ASTNode) -> Result<Vec<String>, String> {
 
 // Helper to check if a name is a car/cdr accessor
 fn is_car_cdr_accessor(name: &str) -> bool {
-    name == "car" || name == "cdr" ||
-    name == "caar" || name == "cadr" || name == "cdar" || name == "cddr" ||
-    name == "caaar" || name == "caadr" || name == "cadar" || name == "caddr" ||
-    name == "cdaar" || name == "cdadr" || name == "cddar" || name == "cdddr" ||
-    name == "caaaar" || name == "caaadr" || name == "caadar" || name == "caaddr" ||
-    name == "cadaar" || name == "cadadr" || name == "caddar" || name == "cadddr" ||
-    name == "cdaaar" || name == "cdaadr" || name == "cdadar" || name == "cdaddr" ||
-    name == "cddaar" || name == "cddadr" || name == "cdddar" || name == "cddddr"
+    name == "car"
+        || name == "cdr"
+        || name == "caar"
+        || name == "cadr"
+        || name == "cdar"
+        || name == "cddr"
+        || name == "caaar"
+        || name == "caadr"
+        || name == "cadar"
+        || name == "caddr"
+        || name == "cdaar"
+        || name == "cdadr"
+        || name == "cddar"
+        || name == "cdddr"
+        || name == "caaaar"
+        || name == "caaadr"
+        || name == "caadar"
+        || name == "caaddr"
+        || name == "cadaar"
+        || name == "cadadr"
+        || name == "caddar"
+        || name == "cadddr"
+        || name == "cdaaar"
+        || name == "cdaadr"
+        || name == "cdadar"
+        || name == "cdaddr"
+        || name == "cddaar"
+        || name == "cddadr"
+        || name == "cdddar"
+        || name == "cddddr"
 }
 
-pub(super) fn eval_return(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_return(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // return exits from the nearest enclosing NIL block (implicitly created by do, loop, etc.)
     // This is equivalent to (return-from nil value)
     let return_val = if args.is_empty() {
@@ -274,19 +721,28 @@ pub(super) fn eval_return(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         if let Some(target_id) = find_visible_block_id("nil", env) {
             if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
                 let stack_snapshot = ACTIVE_BLOCK_STACK.with(|s| s.borrow().clone());
-                eprintln!("[return-raise] block=nil target={} value={:?}", target_id, return_val);
+                eprintln!(
+                    "[return-raise] block=nil target={} value={:?}",
+                    target_id, return_val
+                );
                 eprintln!("[return-raise] active-stack={:?}", stack_snapshot);
             }
             return Err(format!("RETURN-FROM-ID:{}:nil:{}", target_id, encoded));
         }
     }
     if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
-        eprintln!("[return-raise] block=nil target=<name-only> value={:?}", return_val);
+        eprintln!(
+            "[return-raise] block=nil target=<name-only> value={:?}",
+            return_val
+        );
     }
     Err(format!("RETURN-FROM:nil:{}", encoded))
 }
 
-pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_block(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (block name body-forms...)
     if args.is_empty() {
         return Err("block requires at least a name argument".to_string());
@@ -300,13 +756,37 @@ pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
 
     let body_forms = &args[1..];
     let block_id = push_block_frame(&block_name);
+    let trace_block_body = TRACE_BLOCK_BODY_FOR
+        .as_ref()
+        .map(|selected| selected.contains(&block_name))
+        .unwrap_or(false);
 
     let result = (|| -> Result<EvalResult, String> {
         let mut result = EvalResult::Nil;
-        for form in body_forms {
+        for (form_index, form) in body_forms.iter().enumerate() {
+            if trace_block_body {
+                eprintln!(
+                    "[trace-block-body before] block={} form#={} form={:?}",
+                    block_name, form_index, form
+                );
+            }
             match eval_with_env(form, env) {
-                Ok(val) => result = val,
+                Ok(val) => {
+                    if trace_block_body {
+                        eprintln!(
+                            "[trace-block-body after] block={} form#={} result={:?}",
+                            block_name, form_index, val
+                        );
+                    }
+                    result = val
+                }
                 Err(e) => {
+                    if trace_block_body {
+                        eprintln!(
+                            "[trace-block-body err] block={} form#={} err={}",
+                            block_name, form_index, e
+                        );
+                    }
                     if let Some(value_part) =
                         extract_return_from_payload_for_block(&e, &block_name, block_id)
                     {
@@ -323,7 +803,10 @@ pub(super) fn eval_block(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     result
 }
 
-pub(super) fn eval_return_from(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_return_from(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (return-from name [value])
     if args.is_empty() {
         return Err("return-from requires at least a name argument".to_string());
@@ -352,7 +835,10 @@ pub(super) fn eval_return_from(args: &[ASTNode], env: &mut HashMap<String, EvalR
                 );
                 eprintln!("[return-raise] active-stack={:?}", stack_snapshot);
             }
-            return Err(format!("RETURN-FROM-ID:{}:{}:{}", target_id, block_name, encoded));
+            return Err(format!(
+                "RETURN-FROM-ID:{}:{}:{}",
+                target_id, block_name, encoded
+            ));
         }
     }
     if std::env::var("RLASP_DEBUG_RETURN").is_ok() {
@@ -378,21 +864,19 @@ fn encode_return_value(val: &EvalResult) -> String {
 
 // Decode the "RETURN:TYPE:value" format from eval_return
 fn decode_return_from_format(e: &str) -> Result<EvalResult, String> {
-    let e = e
-        .split(" (callee ast:")
-        .next()
-        .unwrap_or(e)
-        .trim();
+    let e = e.split(" (callee ast:").next().unwrap_or(e).trim();
     if e == "RETURN:NIL" {
         Ok(EvalResult::Nil)
     } else if e.starts_with("RETURN:FIXNUM:") {
         let num_str = &e[14..];
-        num_str.parse::<i64>()
+        num_str
+            .parse::<i64>()
             .map(EvalResult::Fixnum)
             .map_err(|_| "Failed to parse fixnum".to_string())
     } else if e.starts_with("RETURN:FLOAT:") {
         let num_str = &e[13..];
-        num_str.parse::<f64>()
+        num_str
+            .parse::<f64>()
             .map(EvalResult::Float)
             .map_err(|_| "Failed to parse float".to_string())
     } else if e.starts_with("RETURN:BOOL:") {
@@ -422,12 +906,14 @@ pub(super) fn decode_return_value(encoded: String) -> Result<EvalResult, String>
         Ok(EvalResult::Nil)
     } else if encoded.starts_with("FIXNUM:") {
         let num_str = &encoded[7..];
-        num_str.parse::<i64>()
+        num_str
+            .parse::<i64>()
             .map(EvalResult::Fixnum)
             .map_err(|_| "Failed to parse fixnum".to_string())
     } else if encoded.starts_with("FLOAT:") {
         let num_str = &encoded[6..];
-        num_str.parse::<f64>()
+        num_str
+            .parse::<f64>()
             .map(EvalResult::Float)
             .map_err(|_| "Failed to parse float".to_string())
     } else if encoded.starts_with("BOOL:") {
@@ -445,7 +931,11 @@ pub(super) fn decode_return_value(encoded: String) -> Result<EvalResult, String>
     }
 }
 
-pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, sequential: bool) -> Result<EvalResult, String> {
+pub(super) fn eval_do(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+    sequential: bool,
+) -> Result<EvalResult, String> {
     // (do ((var init step)...) (end-test result...) body...)
     if args.len() < 2 {
         return Err("do requires at least 2 arguments".to_string());
@@ -461,9 +951,16 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
         ASTNode::Constant(ConstantValue::Nil) => {
             // No variable bindings
         }
-        ASTNode::Call { function, args: spec_args } => {
+        ASTNode::Call {
+            function,
+            args: spec_args,
+        } => {
             // Process first binding
-            if let ASTNode::Call { function: var_func, args: var_args } = &**function {
+            if let ASTNode::Call {
+                function: var_func,
+                args: var_args,
+            } = &**function
+            {
                 if let ASTNode::Variable(var_name) = &**var_func {
                     let init_val = if !var_args.is_empty() {
                         eval_with_env(&var_args[0], env)?
@@ -480,7 +977,11 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
             }
             // Process remaining bindings
             for spec in spec_args {
-                if let ASTNode::Call { function: var_func, args: var_args } = spec {
+                if let ASTNode::Call {
+                    function: var_func,
+                    args: var_args,
+                } = spec
+                {
                     if let ASTNode::Variable(var_name) = &**var_func {
                         let init_val = if !var_args.is_empty() {
                             if sequential {
@@ -513,9 +1014,10 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
     // Parse end test and result forms
     let end_clause = &args[1];
     let (end_test, result_forms) = match end_clause {
-        ASTNode::Call { function, args: result_args } => {
-            (function.as_ref().clone(), result_args.clone())
-        }
+        ASTNode::Call {
+            function,
+            args: result_args,
+        } => (function.as_ref().clone(), result_args.clone()),
         _ => return Err("do: invalid end clause".to_string()),
     };
 
@@ -544,10 +1046,14 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
         // Execute body forms
         for form in body_forms {
             match eval_with_env(form, &mut loop_env) {
-                Ok(_) => {},
-                Err(e) if extract_return_from_payload_for_block(&e, "nil", block_guard.id()).is_some() => {
+                Ok(_) => {}
+                Err(e)
+                    if extract_return_from_payload_for_block(&e, "nil", block_guard.id())
+                        .is_some() =>
+                {
                     let payload =
-                        extract_return_from_payload_for_block(&e, "nil", block_guard.id()).unwrap_or("NIL");
+                        extract_return_from_payload_for_block(&e, "nil", block_guard.id())
+                            .unwrap_or("NIL");
                     return decode_return_value(payload.to_string());
                 }
                 Err(e) if e.starts_with("RETURN:") => {
@@ -577,7 +1083,10 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
                     } else if e.starts_with("RETURN:SYMBOL:") {
                         let s = &e[14..];
                         return Ok(EvalResult::Symbol(s.to_string()));
-                    } else if e == "RETURN:CONS" || e == "RETURN:LAMBDA" || e.starts_with("RETURN:COMPLEX") {
+                    } else if e == "RETURN:CONS"
+                        || e == "RETURN:LAMBDA"
+                        || e.starts_with("RETURN:COMPLEX")
+                    {
                         let encoded = e.strip_prefix("RETURN:").unwrap_or(e.as_str());
                         return super::eval_types::take_nonlocal_return_value(encoded)
                             .ok_or_else(|| "return value not found".to_string());
@@ -616,7 +1125,10 @@ pub(super) fn eval_do(args: &[ASTNode], env: &mut HashMap<String, EvalResult>, s
     }
 }
 
-pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_dolist(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (dolist (var list-form result-form) body...)
     if args.is_empty() {
         return Err("dolist requires at least 1 argument".to_string());
@@ -629,7 +1141,9 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         .map_err(|_| "dolist spec must be a list".to_string())?;
 
     if spec_parts.len() < 2 || spec_parts.len() > 3 {
-        return Err("dolist spec must have 2 or 3 elements: (var list-form [result-form])".to_string());
+        return Err(
+            "dolist spec must have 2 or 3 elements: (var list-form [result-form])".to_string(),
+        );
     }
 
     let var_name = match &spec_parts[0] {
@@ -653,20 +1167,25 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
         // Extract current element and next before match
         let (elem, next) = match &current {
             EvalResult::Nil => break,
-            EvalResult::Cons(car, cdr) => {
-                (car.borrow().clone(), cdr.borrow().clone())
-            }
+            EvalResult::Cons(car, cdr) => (car.borrow().clone(), cdr.borrow().clone()),
             _ => return Err("dolist list must be a proper list".to_string()),
         };
 
-        // Bind var to current element
-        env.insert(var_name.clone(), elem);
+        // Bind var to current element without allocating a fresh key each iteration.
+        if let Some(slot) = env.get_mut(&var_name) {
+            *slot = elem;
+        } else {
+            env.insert(var_name.clone(), elem);
+        }
 
         // Execute body forms
         for form in body_forms {
             match eval_with_env(form, env) {
-                Ok(_) => {},
-                Err(e) if extract_return_from_payload_for_block(&e, "nil", block_guard.id()).is_some() => {
+                Ok(_) => {}
+                Err(e)
+                    if extract_return_from_payload_for_block(&e, "nil", block_guard.id())
+                        .is_some() =>
+                {
                     // Restore old value and return
                     if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
@@ -674,7 +1193,8 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
                         env.remove(&var_name);
                     }
                     let payload =
-                        extract_return_from_payload_for_block(&e, "nil", block_guard.id()).unwrap_or("NIL");
+                        extract_return_from_payload_for_block(&e, "nil", block_guard.id())
+                            .unwrap_or("NIL");
                     return decode_return_value(payload.to_string());
                 }
                 Err(e) if e.starts_with("RETURN:") => {
@@ -722,7 +1242,10 @@ pub(super) fn eval_dolist(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     Ok(result)
 }
 
-pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_dotimes(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (dotimes (var count-form result-form) body...)
     if args.is_empty() {
         return Err("dotimes requires at least 1 argument".to_string());
@@ -732,7 +1255,10 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     // Parse the iteration spec: (var count-form result-form?)
     let spec = &args[0];
     let spec_parts = match spec {
-        ASTNode::Call { function, args: spec_args } => {
+        ASTNode::Call {
+            function,
+            args: spec_args,
+        } => {
             let mut parts = vec![*function.clone()];
             parts.extend(spec_args.clone());
             parts
@@ -741,7 +1267,9 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     };
 
     if spec_parts.len() < 2 || spec_parts.len() > 3 {
-        return Err("dotimes spec must have 2 or 3 elements: (var count-form [result-form])".to_string());
+        return Err(
+            "dotimes spec must have 2 or 3 elements: (var count-form [result-form])".to_string(),
+        );
     }
 
     let var_name = match &spec_parts[0] {
@@ -757,7 +1285,9 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     let count_val = eval_with_env(count_form, env)?;
     let count = match count_val {
         EvalResult::Fixnum(n) if n >= 0 => n as usize,
-        EvalResult::Fixnum(n) => return Err(format!("dotimes count must be non-negative, got {}", n)),
+        EvalResult::Fixnum(n) => {
+            return Err(format!("dotimes count must be non-negative, got {}", n))
+        }
         _ => return Err("dotimes count must be a fixnum".to_string()),
     };
 
@@ -766,15 +1296,22 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
 
     // Iterate from 0 to count-1
     for i in 0..count {
-        // Bind var to current index
-        env.insert(var_name.clone(), EvalResult::Fixnum(i as i64));
+        // Bind var to current index without allocating a fresh key each iteration.
+        if let Some(slot) = env.get_mut(&var_name) {
+            *slot = EvalResult::Fixnum(i as i64);
+        } else {
+            env.insert(var_name.clone(), EvalResult::Fixnum(i as i64));
+        }
 
         // Execute body forms
         for form in body_forms {
             match eval_with_env(form, env) {
-                Ok(_) => {},
+                Ok(_) => {}
                 // Check RETURN-FROM NIL FIRST (more specific pattern)
-                Err(e) if extract_return_from_payload_for_block(&e, "nil", block_guard.id()).is_some() => {
+                Err(e)
+                    if extract_return_from_payload_for_block(&e, "nil", block_guard.id())
+                        .is_some() =>
+                {
                     // Handle return-from nil format (from (return ...) which converts to (return-from nil ...))
                     if let Some(val) = old_val.clone() {
                         env.insert(var_name.clone(), val);
@@ -782,7 +1319,8 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
                         env.remove(&var_name);
                     }
                     let value_part =
-                        extract_return_from_payload_for_block(&e, "nil", block_guard.id()).unwrap_or("NIL");
+                        extract_return_from_payload_for_block(&e, "nil", block_guard.id())
+                            .unwrap_or("NIL");
                     return decode_return_value(value_part.to_string());
                 }
                 // Then check RETURN: (less specific pattern)
@@ -829,7 +1367,10 @@ pub(super) fn eval_dotimes(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     Ok(result)
 }
 
-pub(super) fn eval_prog1(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_prog1(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (prog1 first-form other-forms...)
     // Evaluates all forms in sequence, returns the value of the first form
     if args.is_empty() {
@@ -846,7 +1387,10 @@ pub(super) fn eval_prog1(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     Ok(first_result)
 }
 
-pub(super) fn eval_prog2(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_prog2(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (prog2 first-form second-form other-forms...)
     // Evaluates all forms in sequence, returns the value of the second form
     if args.len() < 2 {
@@ -867,7 +1411,10 @@ pub(super) fn eval_prog2(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     Ok(second_result)
 }
 
-pub(super) fn eval_while(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_while(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (while test body...)
     // Evaluates body forms repeatedly while test is non-nil
     if args.is_empty() {
@@ -897,7 +1444,10 @@ pub(super) fn eval_while(args: &[ASTNode], env: &mut HashMap<String, EvalResult>
     Ok(EvalResult::Nil)
 }
 
-pub(super) fn eval_assert(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_assert(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (assert test-form)
     if args.is_empty() {
         return Err("assert requires at least 1 argument".to_string());
@@ -914,7 +1464,10 @@ pub(super) fn eval_assert(args: &[ASTNode], env: &mut HashMap<String, EvalResult
     Ok(EvalResult::Nil)
 }
 
-pub(super) fn eval_check_type(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_check_type(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (check-type place typespec &optional string)
     // Signals an error if the value of place is not of type typespec
     if args.len() < 2 {
@@ -931,7 +1484,10 @@ pub(super) fn eval_check_type(args: &[ASTNode], env: &mut HashMap<String, EvalRe
     if !matches {
         let type_desc = format_typespec(typespec);
         let place_desc = format!("{:?}", place);
-        eprintln!("DEBUG check-type failed: place={} value={:?} type={}", place_desc, value, type_desc);
+        eprintln!(
+            "DEBUG check-type failed: place={} value={:?} type={}",
+            place_desc, value, type_desc
+        );
         let string_desc = if args.len() > 2 {
             match eval_with_env(&args[2], env)? {
                 EvalResult::String(s) => format!(": {}", s),
@@ -940,7 +1496,10 @@ pub(super) fn eval_check_type(args: &[ASTNode], env: &mut HashMap<String, EvalRe
         } else {
             String::new()
         };
-        return Err(format!("The value {:?} is not of type {}{}", value, type_desc, string_desc));
+        return Err(format!(
+            "The value {:?} is not of type {}{}",
+            value, type_desc, string_desc
+        ));
     }
 
     Ok(EvalResult::Nil)
@@ -963,7 +1522,11 @@ fn format_typespec(typespec: &ASTNode) -> String {
     }
 }
 
-fn check_typespec_matches(value: &EvalResult, typespec: &ASTNode, env: &mut HashMap<String, EvalResult>) -> Result<bool, String> {
+fn check_typespec_matches(
+    value: &EvalResult,
+    typespec: &ASTNode,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<bool, String> {
     match typespec {
         ASTNode::Variable(name) => Ok(type_matches(value, &name.to_uppercase())),
         ASTNode::Quote(inner) => check_typespec_matches(value, inner, env),
@@ -1002,14 +1565,18 @@ fn check_typespec_matches(value: &EvalResult, typespec: &ASTNode, env: &mut Hash
                     "NOT" => {
                         // (not type) - check if value does NOT match type
                         if args.len() != 1 {
-                            return Err("NOT type specifier requires exactly one argument".to_string());
+                            return Err(
+                                "NOT type specifier requires exactly one argument".to_string()
+                            );
                         }
                         Ok(!check_typespec_matches(value, &args[0], env)?)
                     }
                     "EQL" => {
                         // (eql object) - check if value is eql to object
                         if args.len() != 1 {
-                            return Err("EQL type specifier requires exactly one argument".to_string());
+                            return Err(
+                                "EQL type specifier requires exactly one argument".to_string()
+                            );
                         }
                         let item = eval_with_env(&args[0], env)?;
                         Ok(eql_values(value, &item))
@@ -1071,28 +1638,43 @@ fn type_matches(value: &EvalResult, type_name: &str) -> bool {
             } else {
                 false
             }
-        },
+        }
         "STRING" => matches!(value, EvalResult::String(_)),
         "INTEGER" => matches!(value, EvalResult::Fixnum(_) | EvalResult::Bignum(_)),
         "FIXNUM" => matches!(value, EvalResult::Fixnum(_)),
         "BIGNUM" => matches!(value, EvalResult::Bignum(_)),
         "FLOAT" => matches!(value, EvalResult::Float(_)),
-        "NUMBER" | "REAL" => matches!(value, EvalResult::Fixnum(_) | EvalResult::Float(_) | EvalResult::Bignum(_) | EvalResult::Ratio(_)),
+        "NUMBER" | "REAL" => matches!(
+            value,
+            EvalResult::Fixnum(_)
+                | EvalResult::Float(_)
+                | EvalResult::Bignum(_)
+                | EvalResult::Ratio(_)
+        ),
         "RATIO" => matches!(value, EvalResult::Ratio(_)),
         "COMPLEX" => matches!(value, EvalResult::Complex(_, _)),
         "CONS" => matches!(value, EvalResult::Cons(_, _)),
         "LIST" => matches!(value, EvalResult::Cons(_, _) | EvalResult::Nil),
         "ATOM" => !matches!(value, EvalResult::Cons(_, _)),
-        "SEQUENCE" => matches!(value, EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_) | EvalResult::Nil),
+        "SEQUENCE" => matches!(
+            value,
+            EvalResult::Cons(_, _) | EvalResult::Array(_) | EvalResult::String(_) | EvalResult::Nil
+        ),
         "ARRAY" | "VECTOR" | "SIMPLE-VECTOR" => matches!(value, EvalResult::Array(_)),
         "HASH-TABLE" => matches!(value, EvalResult::HashTable(_)),
-        "FUNCTION" => matches!(value, EvalResult::Lambda { .. } | EvalResult::Macro { .. } | EvalResult::ModifyMacro { .. } | EvalResult::BuiltinFunction(_) | EvalResult::GenericFunction(_) | EvalResult::ForeignFunction(_)),
-        "BOOLEAN" => {
-            match value {
-                EvalResult::Nil | EvalResult::Bool(_) | EvalResult::Boolean(_) => true,
-                EvalResult::Symbol(s) if s.to_uppercase() == "T" => true,
-                _ => false,
-            }
+        "FUNCTION" => matches!(
+            value,
+            EvalResult::Lambda { .. }
+                | EvalResult::Macro { .. }
+                | EvalResult::ModifyMacro { .. }
+                | EvalResult::BuiltinFunction(_)
+                | EvalResult::GenericFunction(_)
+                | EvalResult::ForeignFunction(_)
+        ),
+        "BOOLEAN" => match value {
+            EvalResult::Nil | EvalResult::Bool(_) | EvalResult::Boolean(_) => true,
+            EvalResult::Symbol(s) if s.to_uppercase() == "T" => true,
+            _ => false,
         },
         "CHARACTER" => matches!(value, EvalResult::Character(_)),
         "INSTANCE" => matches!(value, EvalResult::Instance(_)),
@@ -1101,12 +1683,9 @@ fn type_matches(value: &EvalResult, type_name: &str) -> bool {
             // Check if the value is a Package object or a symbol naming a valid package
             match value {
                 EvalResult::Package(_) => true,
-                EvalResult::Symbol(name) => {
-                    super::eval_package::PACKAGES.with(|p| {
-                        p.borrow().contains_key(&name.to_uppercase())
-                    })
-                }
-                _ => false
+                EvalResult::Symbol(name) => super::eval_package::PACKAGES
+                    .with(|p| p.borrow().contains_key(&name.to_uppercase())),
+                _ => false,
             }
         }
         "PACKAGE-DESIGNATOR" => {
@@ -1125,10 +1704,16 @@ fn type_matches(value: &EvalResult, type_name: &str) -> bool {
 /// This macro-defining macro creates a read-modify-write macro.
 /// Example: (define-modify-macro incf (&optional (delta 1)) +)
 /// creates (defmacro incf (place &optional (delta 1)) `(setf ,place (+ ,place ,delta)))
-pub(super) fn eval_define_modify_macro(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_define_modify_macro(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (define-modify-macro name lambda-list function [documentation])
     if args.len() < 3 {
-        return Err("define-modify-macro requires at least 3 arguments (name lambda-list function)".to_string());
+        return Err(
+            "define-modify-macro requires at least 3 arguments (name lambda-list function)"
+                .to_string(),
+        );
     }
 
     // Get name - could be Variable or quoted symbol
@@ -1147,20 +1732,21 @@ pub(super) fn eval_define_modify_macro(args: &[ASTNode], env: &mut HashMap<Strin
 
     // Extract lambda-list parameters
     let lambda_list_nodes = match &args[1] {
-        ASTNode::Call { function, args: inner_args } => {
+        ASTNode::Call {
+            function,
+            args: inner_args,
+        } => {
             let mut nodes = vec![function.as_ref().clone()];
             nodes.extend(inner_args.clone());
             nodes
         }
-        _ => vec![],  // Empty lambda list
+        _ => vec![], // Empty lambda list
     };
 
     // Check for &rest
-    let has_rest = lambda_list_nodes.iter().any(|n| {
-        match n {
-            ASTNode::Variable(s) | ASTNode::Constant(ConstantValue::Symbol(s)) => s == "&rest",
-            _ => false,
-        }
+    let has_rest = lambda_list_nodes.iter().any(|n| match n {
+        ASTNode::Variable(s) | ASTNode::Constant(ConstantValue::Symbol(s)) => s == "&rest",
+        _ => false,
     });
 
     // Get parameter names from AST nodes
@@ -1220,7 +1806,11 @@ fn navigate_and_get(accessor: &str, cons: EvalResult) -> Result<EvalResult, Stri
 }
 
 // Helper to navigate and set value for car/cdr accessors
-fn navigate_and_incf(accessor: &str, cons: EvalResult, delta: EvalResult) -> Result<EvalResult, String> {
+fn navigate_and_incf(
+    accessor: &str,
+    cons: EvalResult,
+    delta: EvalResult,
+) -> Result<EvalResult, String> {
     // Parse accessor: "cadr" means (car (cdr x)), so we modify (car (cdr x))
     let ops: Vec<char> = accessor.chars().skip(1).take(accessor.len() - 2).collect();
     let mut current = cons;
@@ -1229,8 +1819,11 @@ fn navigate_and_incf(accessor: &str, cons: EvalResult, delta: EvalResult) -> Res
     for &op in ops.iter().skip(1) {
         current = match current {
             EvalResult::Cons(car, cdr) => {
-                if op == 'a' { car.borrow().clone() }
-                else { cdr.borrow().clone() }
+                if op == 'a' {
+                    car.borrow().clone()
+                } else {
+                    cdr.borrow().clone()
+                }
             }
             _ => return Err(format!("Not a cons cell while navigating {}", accessor)),
         };
@@ -1254,11 +1847,17 @@ fn navigate_and_incf(accessor: &str, cons: EvalResult, delta: EvalResult) -> Res
             *cell_to_modify.borrow_mut() = new_val.clone();
             Ok(new_val)
         }
-        other => Err(format!("Not a cons cell for final {} operation: {:?}", accessor, other)),
+        other => Err(format!(
+            "Not a cons cell for final {} operation: {:?}",
+            accessor, other
+        )),
     }
 }
 
-pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_incf(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (incf place [delta])
     if args.is_empty() {
         return Err("incf requires at least 1 argument".to_string());
@@ -1275,7 +1874,10 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     // behave as if initialized to 0 for INCF.
     let current_val = super::eval_types::primary_value(match place {
         ASTNode::Variable(name) => env.get(name).cloned().unwrap_or(EvalResult::Fixnum(0)),
-        ASTNode::Call { function, args: place_args } => {
+        ASTNode::Call {
+            function,
+            args: place_args,
+        } => {
             if let ASTNode::Variable(func_name) = &**function {
                 match func_name.as_str() {
                     "gethash" if place_args.len() >= 2 => {
@@ -1283,9 +1885,11 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         let ht = eval_with_env(&place_args[1], env)?;
                         let key_str = super::eval_system::key_to_typed_string(&key)?;
                         match ht {
-                            EvalResult::HashTable(ref table) => {
-                                table.borrow().get(&key_str).cloned().unwrap_or(EvalResult::Fixnum(0))
-                            }
+                            EvalResult::HashTable(ref table) => table
+                                .borrow()
+                                .get(&key_str)
+                                .cloned()
+                                .unwrap_or(EvalResult::Fixnum(0)),
                             _ => return Err("incf gethash: not a hash table".to_string()),
                         }
                     }
@@ -1315,7 +1919,10 @@ pub(super) fn eval_incf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     Ok(new_val)
 }
 
-pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_decf(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (decf place [delta])
     if args.is_empty() {
         return Err("decf requires at least 1 argument".to_string());
@@ -1331,7 +1938,10 @@ pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     // Keep parity with INCF behavior for historical tests.
     let current_val = super::eval_types::primary_value(match place {
         ASTNode::Variable(name) => env.get(name).cloned().unwrap_or(EvalResult::Fixnum(0)),
-        ASTNode::Call { function, args: place_args } => {
+        ASTNode::Call {
+            function,
+            args: place_args,
+        } => {
             if let ASTNode::Variable(func_name) = &**function {
                 match func_name.as_str() {
                     "gethash" if place_args.len() >= 2 => {
@@ -1339,9 +1949,11 @@ pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         let ht = eval_with_env(&place_args[1], env)?;
                         let key_str = super::eval_system::key_to_typed_string(&key)?;
                         match ht {
-                            EvalResult::HashTable(ref table) => {
-                                table.borrow().get(&key_str).cloned().unwrap_or(EvalResult::Fixnum(0))
-                            }
+                            EvalResult::HashTable(ref table) => table
+                                .borrow()
+                                .get(&key_str)
+                                .cloned()
+                                .unwrap_or(EvalResult::Fixnum(0)),
                             _ => return Err("decf gethash: not a hash table".to_string()),
                         }
                     }
@@ -1371,7 +1983,10 @@ pub(super) fn eval_decf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     Ok(new_val)
 }
 
-pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_eval_when(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (eval-when (situation*) form*)
     // Situations: :compile-toplevel, :load-toplevel, :execute
     // In interpreter mode:
@@ -1387,7 +2002,10 @@ pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalRes
 
     if let Some(situations) = args.get(0) {
         let situation_list = match situations {
-            ASTNode::Call { function: _, args: situations_args } => {
+            ASTNode::Call {
+                function: _,
+                args: situations_args,
+            } => {
                 // (situation1 situation2 ...)
                 let mut slist = vec![];
                 match &**&situations {
@@ -1398,7 +2016,9 @@ pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalRes
                 for arg in situations_args {
                     match arg {
                         ASTNode::Variable(s) => slist.push(s.clone()),
-                        ASTNode::Constant(crate::ir::ConstantValue::Symbol(s)) => slist.push(s.clone()),
+                        ASTNode::Constant(crate::ir::ConstantValue::Symbol(s)) => {
+                            slist.push(s.clone())
+                        }
                         _ => {}
                     }
                 }
@@ -1449,7 +2069,10 @@ pub(super) fn eval_eval_when(args: &[ASTNode], env: &mut HashMap<String, EvalRes
     Ok(result)
 }
 
-pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_setf(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (setf place value [place value]...)
     if args.is_empty() || args.len() % 2 != 0 {
         return Err("setf requires an even number of arguments (place value pairs)".to_string());
@@ -1468,17 +2091,22 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                 if var_name == "*features*" {
                     super::eval_symbol::set_features(value.clone());
                     last_value = value.clone();
+                } else if super::eval_core::assign_existing_lexical_if_unambiguous(
+                    var_name,
+                    value.clone(),
+                    env,
+                ) {
+                    last_value = value.clone();
                 } else {
-                    env.insert(var_name.clone(), value.clone());
-                    // Also update global dynamic store for special variables
-                    if super::eval_types::is_special_variable(var_name) {
-                        super::eval_types::set_dynamic_var(var_name, value.clone());
-                    }
+                    super::eval_core::assign_setq_like(var_name, value.clone(), env);
                     last_value = value.clone();
                 }
             }
             // (gethash key ht) or (aref array index)
-            ASTNode::Call { function, args: place_args } => {
+            ASTNode::Call {
+                function,
+                args: place_args,
+            } => {
                 if let ASTNode::Variable(func_name) = &**function {
                     let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
                     if base_name.eq_ignore_ascii_case("atomic") && !place_args.is_empty() {
@@ -1491,39 +2119,69 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             ],
                         };
                         last_value = eval_with_env(&nested_setf, env)?;
-                    } else if base_name.eq_ignore_ascii_case("readtable-case") && !place_args.is_empty() {
+                    } else if base_name.eq_ignore_ascii_case("readtable-case")
+                        && !place_args.is_empty()
+                    {
                         let mut eval_args: Vec<EvalResult> = Vec::with_capacity(2);
                         eval_args.push(super::eval_types::primary_value(value.clone()));
-                        eval_args.push(super::eval_types::primary_value(eval_with_env(&place_args[0], env)?));
-                        last_value = super::eval_readtable::set_readtable_case_builtin(&eval_args)?;
-                    } else if func_name == "stream-element-type" && !place_args.is_empty() {
+                        eval_args.push(super::eval_types::primary_value(eval_with_env(
+                            &place_args[0],
+                            env,
+                        )?));
+                        last_value = super::eval_readtable::with_readtable_eval_env(env, || {
+                            super::eval_readtable::set_readtable_case_builtin(&eval_args)
+                        })?;
+                    } else if base_name.eq_ignore_ascii_case("stream-element-type")
+                        && !place_args.is_empty()
+                    {
                         let stream = eval_with_env(&place_args[0], env)?;
                         let _ = super::eval_io::call_io_builtin(
                             "set-stream-element-type",
                             &[stream, value.clone()],
                         )?;
                         last_value = value.clone();
-                    } else if func_name == "stream-external-format" && !place_args.is_empty() {
+                    } else if base_name.eq_ignore_ascii_case("stream-external-format")
+                        && !place_args.is_empty()
+                    {
                         let stream = eval_with_env(&place_args[0], env)?;
                         let _ = super::eval_io::call_io_builtin(
                             "set-stream-external-format",
                             &[stream, value.clone()],
                         )?;
                         last_value = value.clone();
-                    } else if func_name == "documentation" && place_args.len() >= 2 {
+                    } else if base_name.eq_ignore_ascii_case("logical-pathname-translations")
+                        && place_args.len() == 1
+                    {
+                        let host = eval_with_env(&place_args[0], env)?;
+                        let host =
+                            match host {
+                                EvalResult::String(host) | EvalResult::Symbol(host) => host,
+                                _ => return Err(
+                                    "setf logical-pathname-translations requires a host designator"
+                                        .to_string(),
+                                ),
+                            };
+                        last_value =
+                            super::eval_pathname::set_logical_pathname_translations(&host, &value)?;
+                    } else if base_name.eq_ignore_ascii_case("documentation")
+                        && place_args.len() >= 2
+                    {
                         let target = eval_with_env(&place_args[0], env)?;
                         let doc_type = eval_with_env(&place_args[1], env)?;
                         match target {
                             EvalResult::Symbol(sym) => {
-                                super::eval_symbol::set_symbol_property(&sym, doc_type, value.clone());
+                                super::eval_symbol::set_symbol_property(
+                                    &sym,
+                                    doc_type,
+                                    value.clone(),
+                                );
                                 last_value = value.clone();
                             }
                             _ => {
                                 last_value = value.clone();
                             }
                         }
-                    } else
-                    if func_name == "gethash" && place_args.len() >= 2 {
+                    } else if base_name.eq_ignore_ascii_case("gethash") && place_args.len() >= 2 {
                         let key = eval_with_env(&place_args[0], env)?;
                         let ht = eval_with_env(&place_args[1], env)?;
 
@@ -1534,9 +2192,14 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                 table.borrow_mut().insert(key_str, value.clone());
                                 last_value = value.clone();
                             }
-                            _ => return Err("setf gethash: second argument must be a hash table".to_string()),
+                            _ => {
+                                return Err("setf gethash: second argument must be a hash table"
+                                    .to_string())
+                            }
                         }
-                    } else if func_name == "symbol-value" && place_args.len() == 1 {
+                    } else if base_name.eq_ignore_ascii_case("symbol-value")
+                        && place_args.len() == 1
+                    {
                         let sym_val = eval_with_env(&place_args[0], env)?;
                         let sym_val = match sym_val {
                             EvalResult::MultipleValues(vals) if !vals.is_empty() => vals[0].clone(),
@@ -1545,49 +2208,412 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 
                         let sym_name = match sym_val {
                             EvalResult::Symbol(name) => name,
-                            EvalResult::Nil => return Err("setf symbol-value: nil is not a symbol".to_string()),
+                            EvalResult::Nil => {
+                                return Err("setf symbol-value: nil is not a symbol".to_string())
+                            }
                             _ => return Err("setf symbol-value requires a symbol".to_string()),
                         };
 
                         if sym_name == "*features*" {
                             super::eval_symbol::set_features(value.clone());
                         } else {
-                            env.insert(sym_name, value.clone());
+                            super::eval_core::assign_setq_like(&sym_name, value.clone(), env);
                         }
                         last_value = value.clone();
-                    } else if (func_name == "aref" || func_name == "svref") && place_args.len() >= 2 {
-                        // For (setf (aref array-var index) value), get the array from environment
+                    } else if base_name.eq_ignore_ascii_case("symbol-plist")
+                        && place_args.len() == 1
+                    {
+                        let sym_val = eval_with_env(&place_args[0], env)?;
+                        let sym_name = match sym_val {
+                            EvalResult::Symbol(name) => name,
+                            EvalResult::Nil => "NIL".to_string(),
+                            _ => return Err("setf symbol-plist requires a symbol".to_string()),
+                        };
+                        super::eval_symbol::set_symbol_plist(&sym_name, value.clone())?;
+                        last_value = value.clone();
+                    } else if base_name.eq_ignore_ascii_case("get") && place_args.len() >= 2 {
+                        let sym_val = eval_with_env(&place_args[0], env)?;
+                        let sym_name = match sym_val {
+                            EvalResult::Symbol(name) => name,
+                            EvalResult::Nil => "NIL".to_string(),
+                            _ => return Err("setf get requires a symbol".to_string()),
+                        };
+                        let indicator = eval_with_env(&place_args[1], env)?;
+                        super::eval_symbol::set_symbol_property(
+                            &sym_name,
+                            indicator,
+                            value.clone(),
+                        );
+                        last_value = value.clone();
+                    } else if base_name.eq_ignore_ascii_case("find-class") && !place_args.is_empty()
+                    {
+                        let class_name = match eval_with_env(&place_args[0], env)? {
+                            EvalResult::Symbol(name) => name,
+                            EvalResult::String(name) => name,
+                            _ => return Err("setf find-class requires a symbol".to_string()),
+                        };
+                        let base = class_name.rsplit(':').next().unwrap_or(class_name.as_str());
+                        if matches!(
+                            value,
+                            EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+                        ) {
+                            for name in [class_name.as_str(), base] {
+                                super::eval_core::remove_setq_like(
+                                    &super::eval_clos::class_slots_key(name),
+                                    env,
+                                );
+                                super::eval_core::remove_setq_like(
+                                    &super::eval_clos::class_initargs_key(name),
+                                    env,
+                                );
+                                super::eval_core::remove_setq_like(
+                                    &super::eval_clos::class_supers_key(name),
+                                    env,
+                                );
+                                super::eval_core::remove_setq_like(
+                                    &format!("*class-{}*", name.to_uppercase()),
+                                    env,
+                                );
+                            }
+                            super::eval_types::unregister_class_hierarchy(&class_name);
+                        } else {
+                            super::eval_core::assign_setq_like(
+                                &format!("*class-{}*", class_name.to_uppercase()),
+                                value.clone(),
+                                env,
+                            );
+                            if !base.eq_ignore_ascii_case(&class_name) {
+                                super::eval_core::assign_setq_like(
+                                    &format!("*class-{}*", base.to_uppercase()),
+                                    value.clone(),
+                                    env,
+                                );
+                            }
+                        }
+                        last_value = value.clone();
+                    } else if base_name.eq_ignore_ascii_case("fdefinition") && place_args.len() == 1
+                    {
+                        let target = eval_with_env(&place_args[0], env)?;
+                        let parsed = super::eval_system::parse_function_name_designator(&target)
+                            .map_err(|_| {
+                                "TYPE-ERROR: setf fdefinition requires a valid function-name"
+                                    .to_string()
+                            })?;
+                        let symbol_name = match &parsed {
+                            super::eval_system::ParsedFunctionName::Ordinary(s)
+                            | super::eval_system::ParsedFunctionName::Setf(s) => s.clone(),
+                        };
+                        let target_pkg = if let Some((pkg, _)) = symbol_name.split_once("::") {
+                            pkg.to_string()
+                        } else if let Some((pkg, _)) = symbol_name.split_once(':') {
+                            pkg.to_string()
+                        } else {
+                            super::eval_package::get_current_package()
+                        };
+                        if super::eval_package::is_package_locked(&target_pkg) {
+                            return super::eval_package::signal_package_lock_violation(
+                                "Package is locked",
+                                env,
+                            );
+                        }
+                        match parsed {
+                            super::eval_system::ParsedFunctionName::Ordinary(s) => {
+                                for name in super::eval_system::ordinary_function_name_variants(&s)
+                                {
+                                    super::eval_core::assign_setq_like(
+                                        &format!(
+                                            "{}{}",
+                                            super::eval_core::FUNCTION_NS_PREFIX,
+                                            name
+                                        ),
+                                        value.clone(),
+                                        env,
+                                    );
+                                }
+                            }
+                            super::eval_system::ParsedFunctionName::Setf(s) => {
+                                for name in super::eval_system::ordinary_function_name_variants(&s)
+                                {
+                                    super::eval_core::assign_setq_like(
+                                        &format!(
+                                            "{}(setf {})",
+                                            super::eval_core::FUNCTION_NS_PREFIX,
+                                            name
+                                        ),
+                                        value.clone(),
+                                        env,
+                                    );
+                                    super::eval_core::assign_setq_like(
+                                        &format!(
+                                            "{}setf-{}",
+                                            super::eval_core::FUNCTION_NS_PREFIX,
+                                            name
+                                        ),
+                                        value.clone(),
+                                        env,
+                                    );
+                                    super::eval_core::assign_setq_like(
+                                        &format!("(setf {})", name),
+                                        value.clone(),
+                                        env,
+                                    );
+                                }
+                            }
+                        }
+                        last_value = value.clone();
+                    } else if base_name.eq_ignore_ascii_case("macro-function")
+                        && place_args.len() == 1
+                    {
+                        let target = eval_with_env(&place_args[0], env)?;
+                        let symbol_name = match &target {
+                            EvalResult::Symbol(s) | EvalResult::String(s) => s.clone(),
+                            _ => return Err("setf macro-function requires a symbol".to_string()),
+                        };
+                        let target_pkg = if let Some((pkg, _)) = symbol_name.split_once("::") {
+                            pkg.to_string()
+                        } else if let Some((pkg, _)) = symbol_name.split_once(':') {
+                            pkg.to_string()
+                        } else {
+                            super::eval_package::get_current_package()
+                        };
+                        if super::eval_package::is_package_locked(&target_pkg) {
+                            return super::eval_package::signal_package_lock_violation(
+                                "Package is locked",
+                                env,
+                            );
+                        }
+                        let macro_value = match value.clone() {
+                            EvalResult::Lambda { params, body, .. } => {
+                                let params_ast = if params.is_empty() {
+                                    ASTNode::nil()
+                                } else {
+                                    let mut nodes: Vec<ASTNode> =
+                                        params.into_iter().map(ASTNode::Variable).collect();
+                                    let first = nodes.remove(0);
+                                    ASTNode::Call {
+                                        function: Box::new(first),
+                                        args: nodes,
+                                    }
+                                };
+                                EvalResult::Macro {
+                                    params: Box::new(params_ast),
+                                    body,
+                                }
+                            }
+                            other => other,
+                        };
+                        let mut names = vec![
+                            symbol_name.clone(),
+                            symbol_name.to_ascii_uppercase(),
+                            symbol_name.to_ascii_lowercase(),
+                        ];
+                        if let Some(base) = symbol_name.rsplit(':').next() {
+                            if base != symbol_name {
+                                names.push(base.to_string());
+                                names.push(base.to_ascii_uppercase());
+                                names.push(base.to_ascii_lowercase());
+                            }
+                        }
+                        names.sort();
+                        names.dedup();
+                        for name in names {
+                            super::eval_core::assign_setq_like(
+                                &format!("{}{}", super::eval_core::FUNCTION_NS_PREFIX, name),
+                                macro_value.clone(),
+                                env,
+                            );
+                        }
+                        last_value = macro_value;
+                    } else if base_name.eq_ignore_ascii_case("compiler-macro-function")
+                        && place_args.len() == 1
+                    {
+                        let target = eval_with_env(&place_args[0], env)?;
+                        let symbol_name = match &target {
+                            EvalResult::Symbol(s) | EvalResult::String(s) => s.clone(),
+                            _ => {
+                                return Err(
+                                    "setf compiler-macro-function requires a symbol".to_string()
+                                )
+                            }
+                        };
+                        let target_pkg = if let Some((pkg, _)) = symbol_name.split_once("::") {
+                            pkg.to_string()
+                        } else if let Some((pkg, _)) = symbol_name.split_once(':') {
+                            pkg.to_string()
+                        } else {
+                            super::eval_package::get_current_package()
+                        };
+                        if super::eval_package::is_package_locked(&target_pkg) {
+                            return super::eval_package::signal_package_lock_violation(
+                                "Package is locked",
+                                env,
+                            );
+                        }
+                        let mut names = vec![symbol_name.clone(), symbol_name.to_ascii_uppercase()];
+                        if let Some(base) = symbol_name.rsplit(':').next() {
+                            names.push(base.to_string());
+                            names.push(base.to_ascii_uppercase());
+                        }
+                        names.sort();
+                        names.dedup();
+                        for name in names {
+                            super::eval_core::assign_setq_like(
+                                &format!("compiler-macro:{}", name),
+                                value.clone(),
+                                env,
+                            );
+                        }
+                        last_value = value.clone();
+                    } else if (base_name.eq_ignore_ascii_case("sbit")
+                        || base_name.eq_ignore_ascii_case("bit"))
+                        && place_args.len() >= 2
+                    {
                         let array_result = eval_with_env(&place_args[0], env)?;
                         let index = eval_with_env(&place_args[1], env)?;
-
                         let idx = match index {
                             EvalResult::Fixnum(n) if n >= 0 => n as usize,
-                            _ => return Err("aref index must be a non-negative integer".to_string()),
+                            _ => {
+                                return Err(format!(
+                                    "{} index must be a non-negative integer",
+                                    func_name
+                                ))
+                            }
                         };
+                        let bit_value = match value {
+                            EvalResult::Fixnum(0) | EvalResult::Nil => EvalResult::Fixnum(0),
+                            EvalResult::Fixnum(1)
+                            | EvalResult::Bool(true)
+                            | EvalResult::Boolean(true) => EvalResult::Fixnum(1),
+                            _ => {
+                                return Err(format!(
+                                    "setf {} requires a bit value of 0 or 1",
+                                    func_name
+                                ))
+                            }
+                        };
+                        match array_result {
+                            EvalResult::Array(ref arr) => {
+                                let mut array_mut = arr.borrow_mut();
+                                if idx < array_mut.len() {
+                                    array_mut[idx] = bit_value.clone();
+                                    last_value = bit_value;
+                                } else {
+                                    return Err(format!(
+                                        "{} index {} out of bounds (array length {})",
+                                        func_name,
+                                        idx,
+                                        array_mut.len()
+                                    ));
+                                }
+                            }
+                            EvalResult::String(ref s) => {
+                                let mut chars: Vec<char> = s.chars().collect();
+                                if idx >= chars.len() {
+                                    return Err(format!(
+                                        "{} index {} out of bounds (string length {})",
+                                        func_name,
+                                        idx,
+                                        chars.len()
+                                    ));
+                                }
+                                chars[idx] = if matches!(bit_value, EvalResult::Fixnum(0)) {
+                                    '0'
+                                } else {
+                                    '1'
+                                };
+                                let new_string = chars.into_iter().collect::<String>();
+                                if let ASTNode::Variable(var_name) = &place_args[0] {
+                                    env.insert(var_name.clone(), EvalResult::String(new_string));
+                                    last_value = bit_value;
+                                } else {
+                                    return Err(format!(
+                                        "setf {}: string place must be a simple variable",
+                                        func_name
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "setf {}: first argument must be a bit array",
+                                    func_name
+                                ))
+                            }
+                        }
+                    } else if (base_name.eq_ignore_ascii_case("aref")
+                        || base_name.eq_ignore_ascii_case("svref"))
+                        && !place_args.is_empty()
+                    {
+                        // For (setf (aref array-var index) value), get the array from environment
+                        let array_result = eval_with_env(&place_args[0], env)?;
 
                         match array_result {
                             EvalResult::Array(ref arr) => {
+                                let idx = if place_args.len() == 1 {
+                                    if super::eval_system::get_array_dims(arr).is_empty() {
+                                        0
+                                    } else {
+                                        return Err(
+                                            "setf aref requires an index for non-rank-0 arrays"
+                                                .to_string(),
+                                        );
+                                    }
+                                } else {
+                                    match eval_with_env(&place_args[1], env)? {
+                                        EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                                        _ => {
+                                            return Err("aref index must be a non-negative integer"
+                                                .to_string())
+                                        }
+                                    }
+                                };
                                 let mut array_mut = arr.borrow_mut();
                                 if idx < array_mut.len() {
                                     array_mut[idx] = value.clone();
                                     last_value = value.clone();
                                 } else {
-                                    return Err(format!("aref index {} out of bounds (array length {})", idx, array_mut.len()));
+                                    return Err(format!(
+                                        "aref index {} out of bounds (array length {})",
+                                        idx,
+                                        array_mut.len()
+                                    ));
                                 }
                             }
                             EvalResult::String(ref s) => {
+                                if place_args.len() < 2 {
+                                    return Err("setf aref on string requires exactly one index"
+                                        .to_string());
+                                }
                                 // Special case: strings are mutable in Common Lisp
                                 // Convert to Vec<char>, modify, convert back
+                                let idx = match eval_with_env(&place_args[1], env)? {
+                                    EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                                    _ => {
+                                        return Err(
+                                            "aref index must be a non-negative integer".to_string()
+                                        )
+                                    }
+                                };
                                 let mut chars: Vec<char> = s.chars().collect();
                                 if idx >= chars.len() {
-                                    return Err(format!("aref index {} out of bounds (string length {})", idx, chars.len()));
+                                    return Err(format!(
+                                        "aref index {} out of bounds (string length {})",
+                                        idx,
+                                        chars.len()
+                                    ));
                                 }
 
                                 // Get the character to set
                                 let new_char = match value {
                                     EvalResult::Character(c) => c,
-                                    EvalResult::String(ref s) if s.len() == 1 => s.chars().next().unwrap(),
-                                    _ => return Err("setf aref on string requires a character value".to_string()),
+                                    EvalResult::String(ref s) if s.len() == 1 => {
+                                        s.chars().next().unwrap()
+                                    }
+                                    _ => {
+                                        return Err(
+                                            "setf aref on string requires a character value"
+                                                .to_string(),
+                                        )
+                                    }
                                 };
 
                                 chars[idx] = new_char;
@@ -1599,12 +2625,21 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                     env.insert(var_name.clone(), EvalResult::String(new_string));
                                     last_value = EvalResult::Character(new_char);
                                 } else {
-                                    return Err("setf aref: string place must be a simple variable".to_string());
+                                    return Err(
+                                        "setf aref: string place must be a simple variable"
+                                            .to_string(),
+                                    );
                                 }
                             }
-                            _ => return Err(format!("setf aref: first argument must be an array or string, got {:?}", array_result)),
+                            _ => {
+                                return Err(format!(
+                                "setf aref: first argument must be an array or string, got {:?}",
+                                array_result
+                            ))
+                            }
                         }
-                    } else if (base_name.eq_ignore_ascii_case("mem-ref") || base_name.eq_ignore_ascii_case("mem-aref"))
+                    } else if (base_name.eq_ignore_ascii_case("mem-ref")
+                        || base_name.eq_ignore_ascii_case("mem-aref"))
                         && place_args.len() >= 2
                     {
                         let ptr = eval_with_env(&place_args[0], env)?;
@@ -1613,20 +2648,28 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             let off_val = eval_with_env(&place_args[2], env)?;
                             match off_val {
                                 EvalResult::Fixnum(n) if n >= 0 => n as usize,
-                                _ => return Err("setf mem-ref offset must be a non-negative integer".to_string()),
+                                _ => {
+                                    return Err(
+                                        "setf mem-ref offset must be a non-negative integer"
+                                            .to_string(),
+                                    )
+                                }
                             }
                         } else {
                             0usize
                         };
                         if base_name.eq_ignore_ascii_case("mem-aref") {
                             let size_call = ASTNode::Call {
-                                function: Box::new(ASTNode::Variable("clasp-ffi:%foreign-type-size".to_string())),
+                                function: Box::new(ASTNode::Variable(
+                                    "clasp-ffi:%foreign-type-size".to_string(),
+                                )),
                                 args: vec![super::eval_system::result_to_ast_quoted(&type_val)?],
                             };
                             let elem_size = match eval_with_env(&size_call, env)? {
                                 EvalResult::Fixnum(n) if n >= 0 => n as usize,
                                 _ => {
-                                    return Err("setf mem-aref unsupported foreign element type".to_string())
+                                    return Err("setf mem-aref unsupported foreign element type"
+                                        .to_string())
                                 }
                             };
                             byte_offset = byte_offset
@@ -1636,11 +2679,10 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                 let extra_off = eval_with_env(&place_args[3], env)?;
                                 let extra = match extra_off {
                                     EvalResult::Fixnum(n) if n >= 0 => n as usize,
-                                    _ => {
-                                        return Err(
-                                            "setf mem-aref extra offset must be a non-negative integer".to_string()
-                                        )
-                                    }
+                                    _ => return Err(
+                                        "setf mem-aref extra offset must be a non-negative integer"
+                                            .to_string(),
+                                    ),
                                 };
                                 byte_offset = byte_offset
                                     .checked_add(extra)
@@ -1660,28 +2702,40 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         };
                         last_value = eval_with_env(&set_call, env)?;
                         env.remove(&ptr_tmp);
-                    } else if func_name == "char" && place_args.len() >= 2 {
+                    } else if base_name.eq_ignore_ascii_case("char") && place_args.len() >= 2 {
                         // (setf (char string index) value) - same as aref for strings
                         let string_result = eval_with_env(&place_args[0], env)?;
                         let index = eval_with_env(&place_args[1], env)?;
 
                         let idx = match index {
                             EvalResult::Fixnum(n) if n >= 0 => n as usize,
-                            _ => return Err("char index must be a non-negative integer".to_string()),
+                            _ => {
+                                return Err("char index must be a non-negative integer".to_string())
+                            }
                         };
 
                         match string_result {
                             EvalResult::String(ref s) => {
                                 let mut chars: Vec<char> = s.chars().collect();
                                 if idx >= chars.len() {
-                                    return Err(format!("char index {} out of bounds (string length {})", idx, chars.len()));
+                                    return Err(format!(
+                                        "char index {} out of bounds (string length {})",
+                                        idx,
+                                        chars.len()
+                                    ));
                                 }
 
                                 // Get the character to set
                                 let new_char = match value {
                                     EvalResult::Character(c) => c,
-                                    EvalResult::String(ref s) if s.len() == 1 => s.chars().next().unwrap(),
-                                    _ => return Err("setf char requires a character value".to_string()),
+                                    EvalResult::String(ref s) if s.len() == 1 => {
+                                        s.chars().next().unwrap()
+                                    }
+                                    _ => {
+                                        return Err(
+                                            "setf char requires a character value".to_string()
+                                        )
+                                    }
                                 };
 
                                 chars[idx] = new_char;
@@ -1692,22 +2746,122 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                     env.insert(var_name.clone(), EvalResult::String(new_string));
                                     last_value = EvalResult::Character(new_char);
                                 } else {
-                                    return Err("setf char: string place must be a simple variable".to_string());
+                                    return Err(
+                                        "setf char: string place must be a simple variable"
+                                            .to_string(),
+                                    );
                                 }
                             }
-                            _ => return Err("setf char: first argument must be a string".to_string()),
+                            _ => {
+                                return Err("setf char: first argument must be a string".to_string())
+                            }
                         }
-                    } else if base_name.eq_ignore_ascii_case("slot-value") && place_args.len() >= 2 {
+                    } else if base_name.eq_ignore_ascii_case("fill-pointer")
+                        && place_args.len() == 1
+                    {
+                        let array_result = eval_with_env(&place_args[0], env)?;
+                        let new_fp = match &value {
+                            EvalResult::Fixnum(n) if *n >= 0 => *n as usize,
+                            _ => return Err("TYPE-ERROR".to_string()),
+                        };
+
+                        match array_result {
+                            EvalResult::Array(arr) => {
+                                let dims = super::eval_system::get_array_dims(&arr);
+                                if dims.len() != 1 {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                                if super::eval_system::get_array_fill_pointer(&arr).is_none() {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                                if new_fp > arr.borrow().len() {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                                super::eval_system::set_array_fill_pointer(&arr, Some(new_fp));
+                                last_value = value.clone();
+                            }
+                            _ => return Err("TYPE-ERROR".to_string()),
+                        }
+                    } else if base_name.eq_ignore_ascii_case("elt") && place_args.len() >= 2 {
+                        let sequence_result = eval_with_env(&place_args[0], env)?;
+                        let index_result = eval_with_env(&place_args[1], env)?;
+
+                        let idx = match index_result {
+                            EvalResult::Fixnum(n) if n >= 0 => n as usize,
+                            _ => return Err("TYPE-ERROR".to_string()),
+                        };
+
+                        match sequence_result {
+                            EvalResult::Array(arr) => {
+                                let active_len = super::eval_system::get_array_fill_pointer(&arr)
+                                    .unwrap_or_else(|| arr.borrow().len());
+                                if idx >= active_len {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                                let mut cells = arr.borrow_mut();
+                                if idx >= cells.len() {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                                cells[idx] = value.clone();
+                                last_value = value.clone();
+                            }
+                            EvalResult::String(s) => {
+                                let mut chars: Vec<char> = s.chars().collect();
+                                if idx >= chars.len() {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                                let new_char = match value {
+                                    EvalResult::Character(c) => c,
+                                    EvalResult::String(ref s) if s.chars().count() == 1 => {
+                                        s.chars().next().unwrap()
+                                    }
+                                    _ => return Err("TYPE-ERROR".to_string()),
+                                };
+                                chars[idx] = new_char;
+                                let new_string = chars.into_iter().collect::<String>();
+                                if let ASTNode::Variable(var_name) = &place_args[0] {
+                                    env.insert(var_name.clone(), EvalResult::String(new_string));
+                                    last_value = EvalResult::Character(new_char);
+                                } else {
+                                    return Err("TYPE-ERROR".to_string());
+                                }
+                            }
+                            EvalResult::Cons(_, _) | EvalResult::Nil => {
+                                let mut current = sequence_result;
+                                for _ in 0..idx {
+                                    match current {
+                                        EvalResult::Cons(_, cdr) => {
+                                            current = cdr.borrow().clone();
+                                        }
+                                        _ => return Err("TYPE-ERROR".to_string()),
+                                    }
+                                }
+                                match current {
+                                    EvalResult::Cons(car, _) => {
+                                        *car.borrow_mut() = value.clone();
+                                        last_value = value.clone();
+                                    }
+                                    _ => return Err("TYPE-ERROR".to_string()),
+                                }
+                            }
+                            _ => return Err("TYPE-ERROR".to_string()),
+                        }
+                    } else if base_name.eq_ignore_ascii_case("slot-value") && place_args.len() >= 2
+                    {
                         let object = eval_with_env(&place_args[0], env)?;
                         let slot_name = eval_with_env(&place_args[1], env)?;
                         let clos_args = vec![object, slot_name, value.clone()];
-                        last_value = super::eval_clos::call_clos_builtin("set-slot-value", &clos_args, env)?;
-                    } else if super::eval_list::is_car_cdr_accessor_name(base_name) && place_args.len() >= 1 {
+                        last_value =
+                            super::eval_clos::call_clos_builtin("set-slot-value", &clos_args, env)?;
+                    } else if super::eval_list::is_car_cdr_accessor_name(base_name)
+                        && place_args.len() >= 1
+                    {
                         // (setf (car list) value) or (setf (cadr list) value), etc.
                         // Evaluate the list expression
                         let list_result = eval_with_env(&place_args[0], env)?;
                         let canonical_accessor = match base_name.to_ascii_lowercase().as_str() {
                             "first" => "car".to_string(),
+                            "rest" => "cdr".to_string(),
                             "second" => "cadr".to_string(),
                             "third" => "caddr".to_string(),
                             "fourth" => "cadddr".to_string(),
@@ -1721,9 +2875,13 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                         };
 
                         // Navigate to the correct cons cell based on the accessor
-                        fn navigate_and_set(accessor: &str, cons: EvalResult, value: EvalResult) -> Result<EvalResult, String> {
-                            use std::rc::Rc;
+                        fn navigate_and_set(
+                            accessor: &str,
+                            cons: EvalResult,
+                            value: EvalResult,
+                        ) -> Result<EvalResult, String> {
                             use std::cell::RefCell;
+                            use std::rc::Rc;
 
                             if accessor.is_empty() {
                                 return Err("Invalid accessor".to_string());
@@ -1731,7 +2889,8 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
 
                             // Parse accessor: "cadr" means (car (cdr x))
                             // Extract 'a' and 'd' characters between 'c' and 'r'
-                            let ops: Vec<char> = accessor.chars().skip(1).take(accessor.len() - 2).collect();
+                            let ops: Vec<char> =
+                                accessor.chars().skip(1).take(accessor.len() - 2).collect();
 
                             if ops.is_empty() {
                                 return Err("Invalid accessor - no operations".to_string());
@@ -1753,7 +2912,12 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                             cdr.borrow().clone()
                                         }
                                     }
-                                    _ => return Err(format!("Not a cons cell while navigating {}", accessor)),
+                                    _ => {
+                                        return Err(format!(
+                                            "Not a cons cell while navigating {}",
+                                            accessor
+                                        ))
+                                    }
                                 };
                             }
 
@@ -1770,33 +2934,135 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                 }
                                 _ => {
                                     #[cfg(debug_assertions)]
-                                    eprintln!("DEBUG setf: non-cons for final {} operation", accessor);
+                                    eprintln!(
+                                        "DEBUG setf: non-cons for final {} operation",
+                                        accessor
+                                    );
                                     Err(format!("Not a cons cell for final {} operation", accessor))
-                                },
+                                }
                             }
                         }
 
-                        last_value = navigate_and_set(&canonical_accessor, list_result, value.clone())?;
+                        last_value =
+                            navigate_and_set(&canonical_accessor, list_result, value.clone())?;
                     } else if let Some(expander) = get_setf_expander(func_name) {
                         // User-defined setf expander from defsetf
+                        let setf_fn_name = format!(
+                            "{}(setf {})",
+                            super::eval_core::FUNCTION_NS_PREFIX,
+                            func_name
+                        );
+                        let setf_fn = super::eval_core::lookup_env_binding(&setf_fn_name, env)
+                            .or_else(|| {
+                                super::eval_core::lookup_global_function_binding(&setf_fn_name)
+                            })
+                            .or_else(|| {
+                                let base_name =
+                                    func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                                if base_name.eq_ignore_ascii_case(func_name) {
+                                    None
+                                } else {
+                                    let base_setf = format!(
+                                        "{}(setf {})",
+                                        super::eval_core::FUNCTION_NS_PREFIX,
+                                        base_name
+                                    );
+                                    super::eval_core::lookup_env_binding(&base_setf, env).or_else(
+                                        || {
+                                            super::eval_core::lookup_global_function_binding(
+                                                &base_setf,
+                                            )
+                                        },
+                                    )
+                                }
+                            });
+                        if let Some(func_val) = setf_fn {
+                            let mut eval_args: Vec<EvalResult> =
+                                Vec::with_capacity(place_args.len() + 1);
+                            eval_args.push(value.clone());
+                            for arg_ast in place_args {
+                                eval_args.push(eval_with_env(arg_ast, env)?);
+                            }
+                            last_value = super::eval_system::call_function_with_values(
+                                func_val, &eval_args, env,
+                            )?;
+                            continue;
+                        }
+
+                        let local_macro_names = super::eval_core::local_macro_names_from_env(env);
+                        let has_local_macro_shadow = local_macro_names.iter().any(|name| {
+                            name.eq_ignore_ascii_case(func_name)
+                                || name
+                                    .rsplit(':')
+                                    .next()
+                                    .unwrap_or(name.as_str())
+                                    .eq_ignore_ascii_case(
+                                        func_name.rsplit(':').next().unwrap_or(func_name.as_str()),
+                                    )
+                        });
+                        if has_local_macro_shadow {
+                            let macroexpand_1_form = ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("macroexpand-1".to_string())),
+                                args: vec![ASTNode::Quote(Box::new(place.clone()))],
+                            };
+                            let expanded_place = super::eval_system::result_to_ast(
+                                &eval_with_env(&macroexpand_1_form, env)?,
+                            )?;
+                            let nested_setf = ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("setf".to_string())),
+                                args: vec![
+                                    expanded_place,
+                                    super::eval_system::result_to_ast_quoted(&value)?,
+                                ],
+                            };
+                            last_value = eval_with_env(&nested_setf, env)?;
+                            continue;
+                        }
+
                         match expander {
                             SetfExpander::Simple(updater) => {
                                 // (defsetf accessor updater) -> (updater args... new-value)
                                 let mut call_args = place_args.clone();
                                 call_args.push(super::eval_system::result_to_ast_quoted(&value)?);
-                                last_value = eval_with_env(&ASTNode::Call {
-                                    function: Box::new(ASTNode::Variable(updater)),
-                                    args: call_args,
-                                }, env)?;
+                                last_value = eval_with_env(
+                                    &ASTNode::Call {
+                                        function: Box::new(ASTNode::Variable(updater)),
+                                        args: call_args,
+                                    },
+                                    env,
+                                )?;
                             }
-                            SetfExpander::Complex { lambda_list, store_vars, body } => {
-                                // Complex form - bind lambda-list params to place args, store-vars to value
+                            SetfExpander::Complex {
+                                lambda_list,
+                                store_vars,
+                                body,
+                            } => {
+                                // Complex form - bind lambda-list params to place args, store-vars to value.
+                                // Also accepts DEFINE-SETF-EXPANDER style lambda-lists with &environment.
                                 let mut expansion_env = env.clone();
 
-                                // Bind lambda-list params to evaluated place args
-                                for (param, arg) in lambda_list.iter().zip(place_args.iter()) {
-                                    let arg_val = eval_with_env(arg, env)?;
-                                    expansion_env.insert(param.clone(), arg_val);
+                                let mut place_arg_index = 0usize;
+                                let mut lambda_index = 0usize;
+                                while lambda_index < lambda_list.len() {
+                                    let param = &lambda_list[lambda_index];
+                                    if param.eq_ignore_ascii_case("&environment") {
+                                        if let Some(env_param) = lambda_list.get(lambda_index + 1) {
+                                            expansion_env
+                                                .insert(env_param.clone(), EvalResult::Nil);
+                                        }
+                                        lambda_index += 2;
+                                        continue;
+                                    }
+                                    if param.starts_with('&') {
+                                        lambda_index += 1;
+                                        continue;
+                                    }
+                                    if let Some(arg) = place_args.get(place_arg_index) {
+                                        let arg_val = super::eval_core::ast_to_result(arg)?;
+                                        expansion_env.insert(param.clone(), arg_val);
+                                        place_arg_index += 1;
+                                    }
+                                    lambda_index += 1;
                                 }
 
                                 // Bind store vars to the new value
@@ -1810,7 +3076,76 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                     expansion = eval_with_env(expr, &mut expansion_env)?;
                                 }
 
-                                // The expansion should be code to evaluate
+                                if let EvalResult::MultipleValues(vals) = &expansion {
+                                    if vals.len() == 5 {
+                                        let temp_names =
+                                            eval_result_list_to_symbol_names(&vals[0])?;
+                                        let value_forms = eval_result_list_to_vec(&vals[1])?;
+                                        let store_names =
+                                            eval_result_list_to_symbol_names(&vals[2])?;
+                                        if temp_names.len() != value_forms.len() {
+                                            return Err(
+                                                "get-setf-expansion produced mismatched temp/value forms"
+                                                    .to_string(),
+                                            );
+                                        }
+                                        let writer_ast =
+                                            super::eval_system::result_to_ast(&vals[3])?;
+                                        let mut saved_bindings: HashMap<
+                                            String,
+                                            Option<EvalResult>,
+                                        > = HashMap::new();
+
+                                        for (temp_name, value_form) in
+                                            temp_names.iter().zip(value_forms.iter())
+                                        {
+                                            saved_bindings
+                                                .entry(temp_name.clone())
+                                                .or_insert_with(|| env.get(temp_name).cloned());
+                                            let value_ast =
+                                                super::eval_system::result_to_ast(value_form)?;
+                                            let evaluated = eval_with_env(&value_ast, env)?;
+                                            env.insert(
+                                                temp_name.clone(),
+                                                super::eval_types::primary_value(evaluated),
+                                            );
+                                        }
+                                        if store_names.is_empty() {
+                                            return Err(
+                                                "get-setf-expansion produced no store variables"
+                                                    .to_string(),
+                                            );
+                                        }
+                                        for (idx, store_name) in store_names.iter().enumerate() {
+                                            saved_bindings
+                                                .entry(store_name.clone())
+                                                .or_insert_with(|| env.get(store_name).cloned());
+                                            env.insert(
+                                                store_name.clone(),
+                                                if idx == 0 {
+                                                    value.clone()
+                                                } else {
+                                                    EvalResult::Nil
+                                                },
+                                            );
+                                        }
+                                        let writer_result = eval_with_env(&writer_ast, env);
+                                        for (name, old_value) in saved_bindings {
+                                            match old_value {
+                                                Some(old) => {
+                                                    env.insert(name, old);
+                                                }
+                                                None => {
+                                                    env.remove(&name);
+                                                }
+                                            }
+                                        }
+                                        last_value = writer_result?;
+                                        continue;
+                                    }
+                                }
+
+                                // Otherwise the expansion should be code to evaluate directly.
                                 let expansion_ast = super::eval_system::result_to_ast(&expansion)?;
                                 last_value = eval_with_env(&expansion_ast, env)?;
                             }
@@ -1818,11 +3153,18 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                     } else {
                         // Try to find a setf function defined via (defun (setf name) ...)
                         // These are stored as %FN%(setf name) in the environment
-                        let setf_fn_name = format!("{}(setf {})", super::eval_core::FUNCTION_NS_PREFIX, func_name);
+                        let setf_fn_name = format!(
+                            "{}(setf {})",
+                            super::eval_core::FUNCTION_NS_PREFIX,
+                            func_name
+                        );
                         let setf_fn = super::eval_core::lookup_env_binding(&setf_fn_name, env)
-                            .or_else(|| super::eval_core::lookup_global_function_binding(&setf_fn_name))
                             .or_else(|| {
-                                let base_name = func_name.rsplit(':').next().unwrap_or(func_name.as_str());
+                                super::eval_core::lookup_global_function_binding(&setf_fn_name)
+                            })
+                            .or_else(|| {
+                                let base_name =
+                                    func_name.rsplit(':').next().unwrap_or(func_name.as_str());
                                 if base_name.eq_ignore_ascii_case(func_name) {
                                     None
                                 } else {
@@ -1831,8 +3173,13 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                                         super::eval_core::FUNCTION_NS_PREFIX,
                                         base_name
                                     );
-                                    super::eval_core::lookup_env_binding(&base_setf, env)
-                                        .or_else(|| super::eval_core::lookup_global_function_binding(&base_setf))
+                                    super::eval_core::lookup_env_binding(&base_setf, env).or_else(
+                                        || {
+                                            super::eval_core::lookup_global_function_binding(
+                                                &base_setf,
+                                            )
+                                        },
+                                    )
                                 }
                             });
                         if let Some(func_val) = setf_fn {
@@ -1840,26 +3187,43 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
                             // (new-value ...place-arguments)
                             // This preserves non-printable runtime objects (instances, hash tables, etc.)
                             // that would otherwise be degraded by AST round-tripping.
-                            let mut eval_args: Vec<EvalResult> = Vec::with_capacity(place_args.len() + 1);
+                            let mut eval_args: Vec<EvalResult> =
+                                Vec::with_capacity(place_args.len() + 1);
                             eval_args.push(value.clone());
                             for arg_ast in place_args {
                                 eval_args.push(eval_with_env(arg_ast, env)?);
                             }
-                            last_value = super::eval_system::call_function_with_values(func_val, &eval_args, env)?;
+                            last_value = super::eval_system::call_function_with_values(
+                                func_val, &eval_args, env,
+                            )?;
                         } else {
-                            // Unknown accessor - just return the value without erroring
-                            // This allows files to parse even if we don't support the accessor
-                            last_value = value.clone();
+                            let macroexpand_1_form = ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("macroexpand-1".to_string())),
+                                args: vec![ASTNode::Quote(Box::new(place.clone()))],
+                            };
+                            let expanded_place = super::eval_system::result_to_ast(
+                                &eval_with_env(&macroexpand_1_form, env)?,
+                            )?;
+                            if format!("{:?}", expanded_place) != format!("{:?}", place) {
+                                let nested_setf = ASTNode::Call {
+                                    function: Box::new(ASTNode::Variable("setf".to_string())),
+                                    args: vec![
+                                        expanded_place,
+                                        super::eval_system::result_to_ast_quoted(&value)?,
+                                    ],
+                                };
+                                last_value = eval_with_env(&nested_setf, env)?;
+                            } else {
+                                return Err(format!("SETF undefined for place {}", func_name));
+                            }
                         }
                     }
                 } else {
-                    // Complex place forms not yet supported - return value without erroring
-                    last_value = value.clone();
+                    return Err("SETF unsupported complex place form".to_string());
                 }
             }
             _ => {
-                // Unsupported place form - return value without erroring
-                last_value = value.clone();
+                return Err("SETF unsupported place form".to_string());
             }
         }
     }
@@ -1867,7 +3231,10 @@ pub(super) fn eval_setf(args: &[ASTNode], env: &mut HashMap<String, EvalResult>)
     Ok(last_value)
 }
 
-pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_multiple_value_bind(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (multiple-value-bind (var1 var2 ...) values-form body-forms...)
     if args.len() < 2 {
         return Err("multiple-value-bind requires at least 2 arguments".to_string());
@@ -1903,15 +3270,19 @@ pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<Strin
     // Extract multiple values
     let values = match result {
         EvalResult::MultipleValues(vals) => vals,
-        other => vec![other],  // Single value treated as (values single-val)
+        other => vec![other], // Single value treated as (values single-val)
     };
 
     if std::env::var("RLASP_DEBUG_MVB").is_ok() {
-        eprintln!("[mv-bind] vars={:?} values={:?} form={:?}", var_names, values, values_form);
+        eprintln!(
+            "[mv-bind] vars={:?} values={:?} form={:?}",
+            var_names, values, values_form
+        );
     }
 
     // Save old variable values
-    let old_values: Vec<Option<EvalResult>> = var_names.iter()
+    let old_values: Vec<Option<EvalResult>> = var_names
+        .iter()
         .map(|name| env.get(name).cloned())
         .collect();
 
@@ -1938,7 +3309,10 @@ pub(super) fn eval_multiple_value_bind(args: &[ASTNode], env: &mut HashMap<Strin
     Ok(body_result)
 }
 
-pub(super) fn eval_destructuring_bind(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_destructuring_bind(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (destructuring-bind lambda-list expression body-forms...)
     // Binds variables in lambda-list to parts of the evaluated expression
     if args.len() < 2 {
@@ -2042,7 +3416,11 @@ fn result_to_list(result: &EvalResult) -> Vec<EvalResult> {
     list
 }
 
-fn bind_pattern_value(pattern: &ASTNode, value: EvalResult, env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
+fn bind_pattern_value(
+    pattern: &ASTNode,
+    value: EvalResult,
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<(), String> {
     match pattern {
         ASTNode::Variable(name) => {
             env.insert(name.clone(), value);
@@ -2082,7 +3460,11 @@ fn ensure_destructuring_key_map(
     }
 }
 
-fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<String, EvalResult>) -> Result<(), String> {
+fn destructure_bind(
+    pattern: &ASTNode,
+    data: &[EvalResult],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<(), String> {
     match pattern {
         ASTNode::Variable(name) => {
             // Single variable - bind to entire data as list
@@ -2101,7 +3483,10 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
             // Empty pattern - nothing to bind
             Ok(())
         }
-        ASTNode::Call { function, args: pattern_args } => {
+        ASTNode::Call {
+            function,
+            args: pattern_args,
+        } => {
             // Pattern is a list like (var1 var2 &optional var3 ...)
             let mut data_idx = 0;
             let mut pattern_idx = 0;
@@ -2138,7 +3523,9 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
                         pattern_idx += 1;
                         continue;
                     }
-                    ASTNode::Variable(name) if name == "&key" || name == "&allow-other-keys" || name == "&aux" => {
+                    ASTNode::Variable(name)
+                        if name == "&key" || name == "&allow-other-keys" || name == "&aux" =>
+                    {
                         if name == "&key" {
                             mode = "key";
                         }
@@ -2166,42 +3553,65 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
                         } else if mode == "optional" {
                             env.insert(name.clone(), EvalResult::Nil);
                         } else {
-                            return Err(format!("destructuring-bind: not enough values for {}", name));
+                            return Err(format!(
+                                "destructuring-bind: not enough values for {}",
+                                name
+                            ));
                         }
                         pattern_idx += 1;
                     }
-                    ASTNode::Call { function: inner_fn, args: inner_args } => {
+                    ASTNode::Call {
+                        function: inner_fn,
+                        args: inner_args,
+                    } => {
                         // Could be (var default) for &optional, or nested destructuring
                         if mode == "key" {
                             ensure_destructuring_key_map(&mut key_map, data, data_idx);
 
-                            let (key_name, var_name, default_ast, supplied_p) = if let ASTNode::Variable(var) = inner_fn.as_ref() {
-                                if var.starts_with(':') {
-                                    (
-                                        var.trim_start_matches(':').to_ascii_lowercase(),
-                                        inner_args
-                                            .get(0)
-                                            .and_then(|a| if let ASTNode::Variable(v) = a { Some(v.clone()) } else { None })
-                                            .unwrap_or_else(|| var.trim_start_matches(':').to_string()),
-                                        inner_args.get(1).cloned(),
-                                        inner_args
-                                            .get(2)
-                                            .and_then(|a| if let ASTNode::Variable(v) = a { Some(v.clone()) } else { None }),
-                                    )
+                            let (key_name, var_name, default_ast, supplied_p) =
+                                if let ASTNode::Variable(var) = inner_fn.as_ref() {
+                                    if var.starts_with(':') {
+                                        (
+                                            var.trim_start_matches(':').to_ascii_lowercase(),
+                                            inner_args
+                                                .get(0)
+                                                .and_then(|a| {
+                                                    if let ASTNode::Variable(v) = a {
+                                                        Some(v.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    var.trim_start_matches(':').to_string()
+                                                }),
+                                            inner_args.get(1).cloned(),
+                                            inner_args.get(2).and_then(|a| {
+                                                if let ASTNode::Variable(v) = a {
+                                                    Some(v.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            }),
+                                        )
+                                    } else {
+                                        (
+                                            var.to_ascii_lowercase(),
+                                            var.clone(),
+                                            inner_args.get(0).cloned(),
+                                            inner_args.get(1).and_then(|a| {
+                                                if let ASTNode::Variable(v) = a {
+                                                    Some(v.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            }),
+                                        )
+                                    }
                                 } else {
-                                    (
-                                        var.to_ascii_lowercase(),
-                                        var.clone(),
-                                        inner_args.get(0).cloned(),
-                                        inner_args
-                                            .get(1)
-                                            .and_then(|a| if let ASTNode::Variable(v) = a { Some(v.clone()) } else { None }),
-                                    )
-                                }
-                            } else {
-                                pattern_idx += 1;
-                                continue;
-                            };
+                                    pattern_idx += 1;
+                                    continue;
+                                };
 
                             let (value, present) = if let Some(map) = key_map.as_ref() {
                                 if let Some(v) = map.get(&key_name) {
@@ -2219,7 +3629,11 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
                             if let Some(supplied_p_var) = supplied_p {
                                 env.insert(
                                     supplied_p_var,
-                                    if present { EvalResult::Bool(true) } else { EvalResult::Nil },
+                                    if present {
+                                        EvalResult::Bool(true)
+                                    } else {
+                                        EvalResult::Nil
+                                    },
                                 );
                             }
                         } else if mode == "optional" {
@@ -2272,20 +3686,23 @@ fn destructure_bind(pattern: &ASTNode, data: &[EvalResult], env: &mut HashMap<St
 }
 
 fn vec_to_cons(items: &[EvalResult]) -> EvalResult {
-    use std::rc::Rc;
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     let mut result = EvalResult::Nil;
     for item in items.iter().rev() {
         result = EvalResult::Cons(
             Rc::new(RefCell::new(item.clone())),
-            Rc::new(RefCell::new(result))
+            Rc::new(RefCell::new(result)),
         );
     }
     result
 }
 
-pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_handler_case(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (handler-case protected-form (condition-type (var) handler-body)...)
     if args.is_empty() {
         return Err("handler-case requires at least 1 argument".to_string());
@@ -2299,7 +3716,8 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
                         pending_condition: Option<EvalResult>,
                         env: &mut HashMap<String, EvalResult>|
      -> Result<EvalResult, String> {
-        let mut pending_condition = pending_condition;
+        let mut pending_condition = pending_condition
+            .or_else(|| Some(super::eval_conditions::make_error_condition_from_message(&error_msg)));
         if trace_pkg {
             eprintln!(
                 "[aot-handler-case] run_handlers err={} handlers={} pending={:?}",
@@ -2309,7 +3727,11 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
             );
         }
         for handler in handlers {
-            if let ASTNode::Call { function: _condition_type, args: handler_args } = handler {
+            if let ASTNode::Call {
+                function: _condition_type,
+                args: handler_args,
+            } = handler
+            {
                 if trace_pkg {
                     eprintln!("[aot-handler-case] handler_args={:?}", handler_args);
                 }
@@ -2324,7 +3746,10 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
                                 if let Some(cond) = &pending_condition {
                                     handler_env.insert(var_name.clone(), cond.clone());
                                 } else {
-                                    handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                    handler_env.insert(
+                                        var_name.clone(),
+                                        EvalResult::String(error_msg.clone()),
+                                    );
                                 }
                             }
                         }
@@ -2333,7 +3758,10 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
                             if let Some(cond) = &pending_condition {
                                 handler_env.insert(var_name.clone(), cond.clone());
                             } else {
-                                handler_env.insert(var_name.clone(), EvalResult::String(error_msg.clone()));
+                                handler_env.insert(
+                                    var_name.clone(),
+                                    EvalResult::String(error_msg.clone()),
+                                );
                             }
                         }
                         ASTNode::Constant(ConstantValue::Nil) => {}
@@ -2411,7 +3839,10 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
                 None
             };
             if trace_pkg {
-                eprintln!("[aot-handler-case] pending_condition={:?}", pending_condition);
+                eprintln!(
+                    "[aot-handler-case] pending_condition={:?}",
+                    pending_condition
+                );
             }
             let handled = run_handlers(error_msg, pending_condition, env);
             if let Ok(_) = handled {
@@ -2424,7 +3855,10 @@ pub(super) fn eval_handler_case(args: &[ASTNode], env: &mut HashMap<String, Eval
     }
 }
 
-pub(super) fn eval_tagbody(args: &[ASTNode], env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_tagbody(
+    args: &[ASTNode],
+    env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (tagbody tag1 form1 form2 tag2 form3 ...)
     // Tags are symbols or integers, forms are expressions to evaluate
     // Returns Nil
@@ -2478,7 +3912,10 @@ pub(super) fn eval_tagbody(args: &[ASTNode], env: &mut HashMap<String, EvalResul
     Ok(EvalResult::Nil)
 }
 
-pub(super) fn eval_go(args: &[ASTNode], _env: &mut HashMap<String, EvalResult>) -> Result<EvalResult, String> {
+pub(super) fn eval_go(
+    args: &[ASTNode],
+    _env: &mut HashMap<String, EvalResult>,
+) -> Result<EvalResult, String> {
     // (go tag)
     if args.len() != 1 {
         return Err("go requires exactly 1 argument".to_string());

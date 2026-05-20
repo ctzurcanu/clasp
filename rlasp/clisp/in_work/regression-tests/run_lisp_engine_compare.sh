@@ -24,6 +24,7 @@ IRLASP_MLIR_TIMEOUT_S="${IRLASP_MLIR_TIMEOUT_S:-$RUN_TIMEOUT_S}"
 IRLASP_GC_FREE_SPACE_DIVISOR="${IRLASP_GC_FREE_SPACE_DIVISOR:-}"
 IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
+OUTPUT_PREVIEW_LINES="${OUTPUT_PREVIEW_LINES:-80}"
 typeset -a IRLASP_ENV=()
 mkdir -p "$LOG_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -33,6 +34,7 @@ if [[ $# -lt 1 ]]; then
   echo "Optional env: SBCL_BIN, CLASP_BIN, IRLASP_BIN, LOG_DIR, REQUIRE_BASELINE_PASS, BASELINE_POLICY, HARNESS_MODE"
   echo "Optional env timeouts (seconds): RUN_TIMEOUT_S, SBCL_TIMEOUT_S, CLASP_TIMEOUT_S, IRLASP_INTERP_TIMEOUT_S, IRLASP_MLIR_TIMEOUT_S"
   echo "Optional env memory guard: IRLASP_MEMORY_CEILING_MB (default 1024), IRLASP_MEMORY_CEILING_CHECK_MS (default 100)"
+  echo "Optional env output: OUTPUT_PREVIEW_LINES (default 80, use all for full output)"
   echo "BASELINE_POLICY: auto|clasp|sbcl|sbcl_and_clasp (default: auto)"
   echo "HARNESS_MODE: auto|direct|regression (default: auto)"
   exit 2
@@ -212,6 +214,86 @@ normalize_output() {
     -e '/^\[JIT execution:/d' \
     -e '/^=> /d' \
     "$in_file" > "$out_file"
+}
+
+status_label() {
+  local exit_status="$1"
+  if [[ "$exit_status" -eq 0 ]]; then
+    echo "ok"
+  elif [[ "$exit_status" -eq 124 ]]; then
+    echo "timeout(exit=124)"
+  elif [[ "$exit_status" -eq 125 ]]; then
+    echo "skipped(exit=125)"
+  elif [[ "$exit_status" -eq 127 ]]; then
+    echo "not-found(exit=127)"
+  elif [[ "$exit_status" -ge 128 && "$exit_status" -le 255 ]]; then
+    echo "failed(signal=$(( exit_status - 128 )) exit=$exit_status)"
+  else
+    echo "failed(exit=$exit_status)"
+  fi
+}
+
+match_label() {
+  local match="$1"
+  local baseline="$2"
+  case "$match" in
+    MATCH)
+      echo "matched baseline=$baseline"
+      ;;
+    DIFF)
+      echo "different from baseline=$baseline"
+      ;;
+    SKIP)
+      echo "not compared (skipped)"
+      ;;
+    NA)
+      if [[ "$baseline" == "none" ]]; then
+        echo "not compared (no baseline output)"
+      else
+        echo "not compared"
+      fi
+      ;;
+    *)
+      echo "$match"
+      ;;
+  esac
+}
+
+append_output_block() {
+  local output_file="$1"
+  echo "    output:"
+  if [[ ! -s "$output_file" ]]; then
+    echo "      <empty>"
+    return 0
+  fi
+  if [[ "$OUTPUT_PREVIEW_LINES" == "all" ]]; then
+    sed 's/^/      /' "$output_file"
+    return 0
+  fi
+  local line_limit="$OUTPUT_PREVIEW_LINES"
+  if [[ ! "$line_limit" =~ '^[0-9]+$' || "$line_limit" -le 0 ]]; then
+    line_limit=80
+  fi
+  local line_count
+  line_count="$(wc -l < "$output_file" | tr -d ' ')"
+  sed -n "1,${line_limit}p" "$output_file" | sed 's/^/      /'
+  if [[ "$line_count" -gt "$line_limit" ]]; then
+    echo "      ... truncated after $line_limit lines; full output: $output_file"
+  fi
+}
+
+append_engine_report() {
+  local engine="$1"
+  local exit_status="$2"
+  local match="$3"
+  local time_label="$4"
+  local time_value="$5"
+  local output_file="$6"
+  echo "  $engine:"
+  echo "    result=$(status_label "$exit_status")"
+  echo "    output_match=$(match_label "$match" "$baseline_engine")"
+  echo "    $time_label=$time_value"
+  append_output_block "$output_file"
 }
 
 RUN_STATUS=127
@@ -409,6 +491,7 @@ CSV_FILE="$LOG_DIR/lisp-engine-compare-$STAMP.csv"
   echo "TIMEOUT_BIN: ${TIMEOUT_BIN:-<none>}"
   echo "RLASP_MLIR_SELECTIVE_EVAL: ${RLASP_MLIR_SELECTIVE_EVAL:-1}"
   echo "TIMEOUTS_S: SBCL=$SBCL_TIMEOUT_S CLASP=$CLASP_TIMEOUT_S IRLASP_INTERP=$IRLASP_INTERP_TIMEOUT_S IRLASP_MLIR=$IRLASP_MLIR_TIMEOUT_S"
+  echo "OUTPUT_PREVIEW_LINES: $OUTPUT_PREVIEW_LINES"
   echo "IRLASP_GC_FREE_SPACE_DIVISOR: $IRLASP_GC_FREE_SPACE_DIVISOR"
   echo "IRLASP_MEMORY_CEILING_MB: $IRLASP_MEMORY_CEILING_MB"
   echo "IRLASP_MEMORY_CEILING_CHECK_MS: $IRLASP_MEMORY_CEILING_CHECK_MS"
@@ -481,6 +564,10 @@ for file_path in "${FILES[@]}"; do
   clasp_raw="$file_prefix.clasp.log"
   interp_raw="$file_prefix.irlasp-interpreter.log"
   mlir_raw="$file_prefix.irlasp-mlir.log"
+  sbcl_norm="$sbcl_raw.norm"
+  clasp_norm="$clasp_raw.norm"
+  interp_norm="$interp_raw.norm"
+  mlir_norm="$mlir_raw.norm"
 
   if [[ -n "${SBCL_BIN:-}" && -x "$SBCL_BIN" ]]; then
     run_engine_generic "$sbcl_raw" "$SBCL_TIMEOUT_S" "$SBCL_BIN" --noinform --disable-debugger --non-interactive --load "$engine_input"
@@ -495,7 +582,7 @@ for file_path in "${FILES[@]}"; do
   record_engine_result "sbcl" "$sbcl_status" "$sbcl_time"
 
   if [[ -n "${CLASP_BIN:-}" && -x "$CLASP_BIN" ]]; then
-    run_engine_generic "$clasp_raw" "$CLASP_TIMEOUT_S" "$CLASP_BIN" --non-interactive --load "$engine_input"
+    run_engine_generic "$clasp_raw" "$CLASP_TIMEOUT_S" "$CLASP_BIN" --non-interactive --disable-debugger --load "$engine_input"
     clasp_status="$RUN_STATUS"
     clasp_time="$RUN_ELAPSED"
   else
@@ -617,10 +704,6 @@ for file_path in "${FILES[@]}"; do
   if [[ "$eligible" == "yes" ]]; then
     interp_match="NA"
     mlir_match="NA"
-    sbcl_norm="$sbcl_raw.norm"
-    clasp_norm="$clasp_raw.norm"
-    interp_norm="$interp_raw.norm"
-    mlir_norm="$mlir_raw.norm"
     normalize_output "$sbcl_raw" "$sbcl_norm"
     normalize_output "$clasp_raw" "$clasp_norm"
     normalize_output "$interp_raw" "$interp_norm"
@@ -687,17 +770,34 @@ for file_path in "${FILES[@]}"; do
     mlir_match="SKIP"
   fi
 
+  sbcl_output_file="$sbcl_raw"
+  clasp_output_file="$clasp_raw"
+  interp_output_file="$interp_raw"
+  mlir_output_file="$mlir_raw"
+  [[ -f "$sbcl_norm" ]] && sbcl_output_file="$sbcl_norm"
+  [[ -f "$clasp_norm" ]] && clasp_output_file="$clasp_norm"
+  [[ -f "$interp_norm" ]] && interp_output_file="$interp_norm"
+  [[ -f "$mlir_norm" ]] && mlir_output_file="$mlir_norm"
+
   {
-    echo "FILE $rel_path"
-    echo "  eligible=$eligible skip_reason=$skip_reason"
+    echo "COMPARISON $file_index/$total_selected"
+    echo "  file=$rel_path"
+    echo "  eligible=$eligible"
+    echo "  skip_reason=$skip_reason"
     echo "  baseline_gate_failed_engines=$failed_baseline_engines"
     echo "  baseline=$baseline_engine"
-    echo "  sbcl: status=$sbcl_status time_s=$sbcl_time match=$sbcl_match"
-    echo "  clasp: status=$clasp_status time_s=$clasp_time match=$clasp_match"
-    echo "  irlasp-interpreter: status=$interp_status time_s=$interp_time match=$interp_match"
-    echo "  irlasp-mlir: status=$mlir_status total_s=$mlir_total_time compile_s=$mlir_compile_time exec_s=$mlir_exec_time match=$mlir_match"
+    append_engine_report "sbcl" "$sbcl_status" "$sbcl_match" "time_s" "$sbcl_time" "$sbcl_output_file"
+    append_engine_report "clasp" "$clasp_status" "$clasp_match" "time_s" "$clasp_time" "$clasp_output_file"
+    append_engine_report "irlasp-interpreter" "$interp_status" "$interp_match" "time_s" "$interp_time" "$interp_output_file"
+    echo "  irlasp-mlir:"
+    echo "    result=$(status_label "$mlir_status")"
+    echo "    output_match=$(match_label "$mlir_match" "$baseline_engine")"
+    echo "    total_s=$mlir_total_time"
+    echo "    compile_s=$mlir_compile_time"
+    echo "    exec_s=$mlir_exec_time"
+    append_output_block "$mlir_output_file"
     echo
-  } >> "$SUMMARY_FILE"
+  } | tee -a "$SUMMARY_FILE"
 
   echo "\"$rel_path\",$eligible,\"$skip_reason\",$baseline_engine,$sbcl_status,$sbcl_match,$sbcl_time,$clasp_status,$clasp_match,$clasp_time,$interp_status,$interp_match,$interp_time,$mlir_status,$mlir_match,$mlir_total_time,$mlir_compile_time,$mlir_exec_time" >> "$CSV_FILE"
 

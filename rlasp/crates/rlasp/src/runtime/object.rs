@@ -7,10 +7,10 @@ pub struct LispObject {
 /// Tag bits (2 low bits)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tag {
-    Fixnum = 0b00,      // Immediate 62-bit integer
-    Cons = 0b01,        // Cons cell pointer
-    Character = 0b10,   // Immediate Unicode char
-    General = 0b11,     // Heap object pointer
+    Fixnum = 0b00,    // Immediate 62-bit integer
+    Cons = 0b01,      // Cons cell pointer
+    Character = 0b10, // Immediate Unicode char
+    General = 0b11,   // Heap object pointer
 }
 
 const TAG_MASK: usize = 0b11;
@@ -70,7 +70,9 @@ impl LispObject {
     }
 
     /// NIL constant
-    pub const NIL: LispObject = LispObject { ptr: Tag::General as usize };
+    pub const NIL: LispObject = LispObject {
+        ptr: Tag::General as usize,
+    };
 
     /// Create NIL (for non-const contexts)
     pub fn nil() -> Self {

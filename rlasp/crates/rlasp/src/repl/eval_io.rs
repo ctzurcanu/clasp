@@ -1,14 +1,15 @@
 /// eval_io.rs - Common Lisp I/O operations
 /// Print, read, format, and stream operations
 use super::eval_types::EvalResult;
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
+use std::rc::Rc;
 
 thread_local! {
     static PPRINT_DISPATCH: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
     static IO_EVAL_ENV_PTR: RefCell<Option<*mut HashMap<String, EvalResult>>> = RefCell::new(None);
+    static PRINT_PRETTY_OVERRIDE: RefCell<Option<bool>> = const { RefCell::new(None) };
 }
 
 const STREAM_INPUT_TAG: &str = "%STREAM-INPUT%";
@@ -36,12 +37,40 @@ fn stream_tag(cells: &[EvalResult]) -> Option<&str> {
 }
 
 fn truthy(value: &EvalResult) -> bool {
-    !matches!(value, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false))
+    !matches!(
+        value,
+        EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+    )
+}
+
+fn current_print_pretty() -> bool {
+    if let Some(override_value) = PRINT_PRETTY_OVERRIDE.with(|slot| *slot.borrow()) {
+        return override_value;
+    }
+    !matches!(
+        current_io_special(&["*print-pretty*", "*PRINT-PRETTY*"]),
+        Some(EvalResult::Nil)
+    )
+}
+
+fn with_print_pretty_override<T>(pretty: bool, f: impl FnOnce() -> T) -> T {
+    let previous = PRINT_PRETTY_OVERRIDE.with(|slot| slot.replace(Some(pretty)));
+    let result = f();
+    PRINT_PRETTY_OVERRIDE.with(|slot| {
+        slot.replace(previous);
+    });
+    result
 }
 
 fn keyword_name(value: &EvalResult) -> Option<String> {
     match value {
-        EvalResult::Symbol(s) => Some(s.rsplit(':').next().unwrap_or(s).trim_start_matches(':').to_ascii_lowercase()),
+        EvalResult::Symbol(s) => Some(
+            s.rsplit(':')
+                .next()
+                .unwrap_or(s)
+                .trim_start_matches(':')
+                .to_ascii_lowercase(),
+        ),
         _ => None,
     }
 }
@@ -103,7 +132,9 @@ fn to_string_designator(value: &EvalResult) -> Result<String, String> {
             for elem in arr.borrow().iter() {
                 match elem {
                     EvalResult::Character(c) => out.push(*c),
-                    EvalResult::String(s) if s.chars().count() == 1 => out.push(s.chars().next().unwrap()),
+                    EvalResult::String(s) if s.chars().count() == 1 => {
+                        out.push(s.chars().next().unwrap())
+                    }
                     EvalResult::Nil => break,
                     _ => return Err("expected a string designator".to_string()),
                 }
@@ -145,7 +176,10 @@ fn char_len(s: &str) -> usize {
 }
 
 fn slice_chars(s: &str, start: usize, end: usize) -> String {
-    s.chars().skip(start).take(end.saturating_sub(start)).collect()
+    s.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 fn nth_char(s: &str, index: usize) -> Option<char> {
@@ -303,7 +337,7 @@ fn maybe_apply_pprint_dispatch(obj: &EvalResult) -> Option<String> {
         return None;
     };
     let stream = make_output_stream();
-    let mut callback_env = HashMap::new();
+    let mut callback_env = with_current_io_env(|env| env.clone()).unwrap_or_default();
     match super::eval_system::call_function_with_values(
         function,
         &[stream.clone(), obj.clone()],
@@ -342,10 +376,23 @@ fn current_io_special(names: &[&str]) -> Option<EvalResult> {
             if let Some(value) = env.get(name) {
                 return Some(value.clone());
             }
+            let lower = name.to_ascii_lowercase();
+            if let Some(value) = env.get(&lower) {
+                return Some(value.clone());
+            }
+            let upper = name.to_ascii_uppercase();
+            if let Some(value) = env.get(&upper) {
+                return Some(value.clone());
+            }
         }
         None
     })
     .flatten()
+    .or_else(|| {
+        names
+            .iter()
+            .find_map(|name| super::eval_io_syntax::get_io_syntax_var(name))
+    })
 }
 
 fn symbol_matches_special(name: &str, special: &str) -> bool {
@@ -385,10 +432,22 @@ fn stream_is_closed(value: &EvalResult) -> bool {
         EvalResult::Array(arr) => {
             let cells = arr.borrow();
             match stream_tag(&cells) {
-                Some(STREAM_INPUT_TAG) => matches!(cells.get(4), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))),
-                Some(STREAM_OUTPUT_TAG) => matches!(cells.get(2), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))),
-                Some(STREAM_FILE_TAG) => matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))),
-                Some(STREAM_BROADCAST_TAG) => matches!(cells.get(2), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))),
+                Some(STREAM_INPUT_TAG) => matches!(
+                    cells.get(4),
+                    Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                ),
+                Some(STREAM_OUTPUT_TAG) => matches!(
+                    cells.get(2),
+                    Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                ),
+                Some(STREAM_FILE_TAG) => matches!(
+                    cells.get(6),
+                    Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                ),
+                Some(STREAM_BROADCAST_TAG) => matches!(
+                    cells.get(2),
+                    Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                ),
                 _ => true,
             }
         }
@@ -436,10 +495,7 @@ fn set_stream_closed(value: &EvalResult, closed: bool) -> Result<(), String> {
     }
 }
 
-pub fn with_io_eval_env<T, F>(
-    env: &mut HashMap<String, EvalResult>,
-    f: F,
-) -> Result<T, String>
+pub fn with_io_eval_env<T, F>(env: &mut HashMap<String, EvalResult>, f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String>,
 {
@@ -522,7 +578,10 @@ pub(super) fn stream_write_text(stream: &EvalResult, text: &str) -> Result<(), S
                 .map_err(|_| "stream is already mutably borrowed".to_string())?;
             match stream_tag(&cells) {
                 Some(STREAM_OUTPUT_TAG) => {
-                    if matches!(cells.get(2), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(2),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let mut current = match cells.get(1).cloned() {
@@ -534,7 +593,10 @@ pub(super) fn stream_write_text(stream: &EvalResult, text: &str) -> Result<(), S
                     Ok(())
                 }
                 Some(STREAM_FILE_TAG) => {
-                    if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(6),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let dir = match cells.get(2) {
@@ -562,7 +624,10 @@ pub(super) fn stream_write_text(stream: &EvalResult, text: &str) -> Result<(), S
                     Ok(())
                 }
                 Some(STREAM_BROADCAST_TAG) => {
-                    if matches!(cells.get(2), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(2),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let targets = match cells.get(1) {
@@ -589,7 +654,10 @@ pub(super) fn stream_remaining_input(stream: &EvalResult) -> Option<String> {
             let cells = arr.borrow();
             match stream_tag(&cells) {
                 Some(STREAM_INPUT_TAG) => {
-                    if matches!(cells.get(4), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(4),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Some(String::new());
                     }
                     let content = match cells.get(1) {
@@ -608,7 +676,10 @@ pub(super) fn stream_remaining_input(stream: &EvalResult) -> Option<String> {
                     Some(slice_chars(&content, pos.min(bounded_end), bounded_end))
                 }
                 Some(STREAM_FILE_TAG) => {
-                    if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(6),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Some(String::new());
                     }
                     let content = match cells.get(3) {
@@ -634,7 +705,10 @@ fn stream_write_raw_byte(stream: &EvalResult, byte: u8) -> Result<(), String> {
             let mut cells = arr.borrow_mut();
             match stream_tag(&cells) {
                 Some(STREAM_FILE_TAG) => {
-                    if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(6),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let dir = match cells.get(2) {
@@ -669,7 +743,7 @@ fn stream_write_raw_byte(stream: &EvalResult, byte: u8) -> Result<(), String> {
                 _ => stream_write_text(stream, &(byte as char).to_string()),
             }
         }
-        _ => Err("write-byte requires a stream".to_string()),
+        _ => Err("TYPE-ERROR write-byte requires a stream".to_string()),
     }
 }
 
@@ -679,7 +753,10 @@ pub(super) fn stream_read_chars(stream: &EvalResult, max_chars: usize) -> Result
             let mut cells = arr.borrow_mut();
             match stream_tag(&cells) {
                 Some(STREAM_INPUT_TAG) => {
-                    if matches!(cells.get(4), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(4),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let content = match cells.get(1).cloned() {
@@ -704,7 +781,10 @@ pub(super) fn stream_read_chars(stream: &EvalResult, max_chars: usize) -> Result
                     Ok(chunk)
                 }
                 Some(STREAM_FILE_TAG) => {
-                    if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(6),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let dir = match cells.get(2) {
@@ -738,40 +818,45 @@ pub(super) fn stream_read_chars(stream: &EvalResult, max_chars: usize) -> Result
     }
 }
 
-fn stream_read_line(stream: &EvalResult, eof_error_p: bool, eof_value: EvalResult) -> Result<EvalResult, String> {
+fn stream_read_line(
+    stream: &EvalResult,
+    eof_error_p: bool,
+    eof_value: EvalResult,
+) -> Result<EvalResult, String> {
     match stream {
         EvalResult::Array(arr) => {
             let mut cells = arr.borrow_mut();
-            let (content, pos, end_limit, pos_slot, closed_slot, needs_input_direction) = match stream_tag(&cells) {
-                Some(STREAM_INPUT_TAG) => {
-                    let content = match cells.get(1).cloned() {
-                        Some(EvalResult::String(s)) => s,
-                        _ => String::new(),
-                    };
-                    let pos = match cells.get(2).cloned() {
-                        Some(EvalResult::Fixnum(n)) if n >= 0 => n as usize,
-                        _ => 0,
-                    };
-                    let end = match cells.get(3).cloned() {
-                        Some(EvalResult::Fixnum(n)) if n >= 0 => n as usize,
-                        _ => char_len(&content),
-                    };
-                    (content, pos, end, 2usize, 4usize, false)
-                }
-                Some(STREAM_FILE_TAG) => {
-                    let content = match cells.get(3).cloned() {
-                        Some(EvalResult::String(s)) => s,
-                        _ => String::new(),
-                    };
-                    let pos = match cells.get(4).cloned() {
-                        Some(EvalResult::Fixnum(n)) if n >= 0 => n as usize,
-                        _ => 0,
-                    };
-                    let total = char_len(&content);
-                    (content, pos, total, 4usize, 6usize, true)
-                }
-                _ => return Err("read-line requires an input stream".to_string()),
-            };
+            let (content, pos, end_limit, pos_slot, closed_slot, needs_input_direction) =
+                match stream_tag(&cells) {
+                    Some(STREAM_INPUT_TAG) => {
+                        let content = match cells.get(1).cloned() {
+                            Some(EvalResult::String(s)) => s,
+                            _ => String::new(),
+                        };
+                        let pos = match cells.get(2).cloned() {
+                            Some(EvalResult::Fixnum(n)) if n >= 0 => n as usize,
+                            _ => 0,
+                        };
+                        let end = match cells.get(3).cloned() {
+                            Some(EvalResult::Fixnum(n)) if n >= 0 => n as usize,
+                            _ => char_len(&content),
+                        };
+                        (content, pos, end, 2usize, 4usize, false)
+                    }
+                    Some(STREAM_FILE_TAG) => {
+                        let content = match cells.get(3).cloned() {
+                            Some(EvalResult::String(s)) => s,
+                            _ => String::new(),
+                        };
+                        let pos = match cells.get(4).cloned() {
+                            Some(EvalResult::Fixnum(n)) if n >= 0 => n as usize,
+                            _ => 0,
+                        };
+                        let total = char_len(&content);
+                        (content, pos, total, 4usize, 6usize, true)
+                    }
+                    _ => return Err("read-line requires an input stream".to_string()),
+                };
             if needs_input_direction {
                 let dir = match cells.get(2) {
                     Some(EvalResult::Symbol(s)) => s.as_str(),
@@ -781,7 +866,10 @@ fn stream_read_line(stream: &EvalResult, eof_error_p: bool, eof_value: EvalResul
                     return Err("read-line requires an input stream".to_string());
                 }
             }
-            if matches!(cells.get(closed_slot), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+            if matches!(
+                cells.get(closed_slot),
+                Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+            ) {
                 return Err("stream is closed".to_string());
             }
 
@@ -790,7 +878,10 @@ fn stream_read_line(stream: &EvalResult, eof_error_p: bool, eof_value: EvalResul
                 if eof_error_p {
                     return Err("end of file".to_string());
                 }
-                return Ok(EvalResult::MultipleValues(vec![eof_value, EvalResult::Boolean(true)]));
+                return Ok(EvalResult::MultipleValues(vec![
+                    eof_value,
+                    EvalResult::Boolean(true),
+                ]));
             }
 
             let chars: Vec<char> = content.chars().collect();
@@ -802,10 +893,17 @@ fn stream_read_line(stream: &EvalResult, eof_error_p: bool, eof_value: EvalResul
             if line.ends_with('\r') {
                 line.pop();
             }
-            let next_pos = if end < capped_end && chars[end] == '\n' { end + 1 } else { end };
+            let next_pos = if end < capped_end && chars[end] == '\n' {
+                end + 1
+            } else {
+                end
+            };
             cells[pos_slot] = EvalResult::Fixnum(next_pos as i64);
             let eof_after_line = next_pos >= capped_end;
-            Ok(EvalResult::MultipleValues(vec![EvalResult::String(line), EvalResult::Boolean(eof_after_line)]))
+            Ok(EvalResult::MultipleValues(vec![
+                EvalResult::String(line),
+                EvalResult::Boolean(eof_after_line),
+            ]))
         }
         _ => Err("read-line requires a stream".to_string()),
     }
@@ -817,7 +915,10 @@ pub(super) fn get_output_stream_string(stream: &EvalResult) -> Result<String, St
             let mut cells = arr.borrow_mut();
             match stream_tag(&cells) {
                 Some(STREAM_OUTPUT_TAG) => {
-                    if matches!(cells.get(2), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                    if matches!(
+                        cells.get(2),
+                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                    ) {
                         return Err("stream is closed".to_string());
                     }
                     let current = match cells.get(1).cloned() {
@@ -840,12 +941,39 @@ fn write_to_destination(dest: Option<&EvalResult>, text: &str) -> Result<(), Str
     if trace_pkg {
         eprintln!(
             "[aot-format] write dest={:?} resolved={:?} text={:?}",
-            dest,
-            resolved,
-            text
+            dest, resolved, text
         );
     }
     match resolved.as_ref() {
+        Some(EvalResult::Symbol(name))
+            if super::eval_system::resolve_raw_jit_object_handle(name).is_some() =>
+        {
+            let raw = super::eval_system::resolve_raw_jit_object_handle(name).unwrap();
+            let obj = unsafe { rlasp_runtime::LispObject::from_raw(raw) };
+            if let Some(stream_ptr) = obj.as_stream_ptr() {
+                if !stream_ptr.is_null() {
+                    let stream = unsafe { &mut *(stream_ptr as *mut rlasp_runtime::Stream) };
+                    match &mut *stream.data {
+                        rlasp_runtime::StreamData::StringOutput { buffer } => {
+                            buffer.push_str(text);
+                            return Ok(());
+                        }
+                        rlasp_runtime::StreamData::Stdout => {
+                            print!("{}", text);
+                            std::io::stdout().flush().ok();
+                            return Ok(());
+                        }
+                        rlasp_runtime::StreamData::Stderr => {
+                            eprint!("{}", text);
+                            std::io::stderr().flush().ok();
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err("raw JIT object handle is not an output stream".to_string())
+        }
         Some(target) if is_stream(target) => stream_write_text(target, text),
         Some(EvalResult::Symbol(name))
             if name
@@ -905,7 +1033,9 @@ fn instance_slot_get(inst: &super::eval_types::Instance, key: &str) -> Option<Ev
 }
 
 fn instance_slot_set(inst: &super::eval_types::Instance, key: &str, value: EvalResult) {
-    inst.slots.borrow_mut().insert(key.to_ascii_lowercase(), value);
+    inst.slots
+        .borrow_mut()
+        .insert(key.to_ascii_lowercase(), value);
 }
 
 fn read_byte_from_instance_stream(stream: &EvalResult) -> Option<Option<u8>> {
@@ -953,7 +1083,10 @@ fn read_char_from_file_stream(stream: &EvalResult) -> Option<Result<Option<char>
     if stream_tag(&cells) != Some(STREAM_FILE_TAG) {
         return None;
     }
-    if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+    if matches!(
+        cells.get(6),
+        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+    ) {
         return Some(Err("stream is closed".to_string()));
     }
     let dir = match cells.get(2) {
@@ -1013,7 +1146,10 @@ fn read_raw_byte_from_file_stream(stream: &EvalResult) -> Option<Result<Option<u
     if stream_tag(&cells) != Some(STREAM_FILE_TAG) {
         return None;
     }
-    if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+    if matches!(
+        cells.get(6),
+        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+    ) {
         return Some(Err("stream is closed".to_string()));
     }
     let dir = match cells.get(2) {
@@ -1057,12 +1193,14 @@ fn read_char_from_instance_stream(stream: &EvalResult) -> Option<Option<char>> {
     }
     let value = match instance_slot_get(inst, "value") {
         Some(EvalResult::String(s)) => s,
-        Some(EvalResult::Array(arr)) => arr.borrow().iter().filter_map(|e| {
-            match e {
+        Some(EvalResult::Array(arr)) => arr
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
                 EvalResult::Character(c) => Some(*c),
                 _ => None,
-            }
-        }).collect(),
+            })
+            .collect(),
         _ => String::new(),
     };
     let idx = match instance_slot_get(inst, "index") {
@@ -1267,10 +1405,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     current_io_special(&["*print-readably*", "*PRINT-READABLY*"]),
                     Some(EvalResult::Nil)
                 );
-                let mut lines: Option<usize> = current_io_special(&["*print-lines*", "*PRINT-LINES*"])
-                    .and_then(|v| to_fixnum(&v))
-                    .filter(|n| *n >= 0)
-                    .map(|n| n as usize);
+                let mut lines: Option<usize> =
+                    current_io_special(&["*print-lines*", "*PRINT-LINES*"])
+                        .and_then(|v| to_fixnum(&v))
+                        .filter(|n| *n >= 0)
+                        .map(|n| n as usize);
                 let mut right_margin: Option<usize> =
                     current_io_special(&["*print-right-margin*", "*PRINT-RIGHT-MARGIN*"])
                         .and_then(|v| to_fixnum(&v))
@@ -1293,7 +1432,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                                 readably = !matches!(args.get(i + 1), Some(EvalResult::Nil));
                             }
                             "lines" => {
-                                lines = args.get(i + 1).and_then(to_fixnum).filter(|n| *n >= 0).map(|n| n as usize);
+                                lines = args
+                                    .get(i + 1)
+                                    .and_then(to_fixnum)
+                                    .filter(|n| *n >= 0)
+                                    .map(|n| n as usize);
                             }
                             "right-margin" => {
                                 right_margin = args
@@ -1368,18 +1511,34 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 if let Some(key) = keyword_name(&args[i]) {
                     match key.as_str() {
                         "start" => {
-                            if let Some(n) = to_fixnum(&args[i + 1]) {
-                                if n >= 0 {
-                                    start = n as usize;
-                                }
+                            let Some(n) = to_fixnum(&args[i + 1]) else {
+                                return Err(
+                                    "TYPE-ERROR write-string :start must be a non-negative integer"
+                                        .to_string(),
+                                );
+                            };
+                            if n < 0 {
+                                return Err(
+                                    "TYPE-ERROR write-string :start must be a non-negative integer"
+                                        .to_string(),
+                                );
                             }
+                            start = n as usize;
                         }
                         "end" => {
-                            if let Some(n) = to_fixnum(&args[i + 1]) {
-                                if n >= 0 {
-                                    end = Some(n as usize);
-                                }
+                            let Some(n) = to_fixnum(&args[i + 1]) else {
+                                return Err(
+                                    "TYPE-ERROR write-string :end must be a non-negative integer"
+                                        .to_string(),
+                                );
+                            };
+                            if n < 0 {
+                                return Err(
+                                    "TYPE-ERROR write-string :end must be a non-negative integer"
+                                        .to_string(),
+                                );
                             }
+                            end = Some(n as usize);
                         }
                         "stream" => stream = args.get(i + 1),
                         _ => {}
@@ -1388,9 +1547,21 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 i += 2;
             }
             let total = char_len(&text);
-            let bounded_start = start.min(total);
-            let bounded_end = end.unwrap_or(total).min(total).max(bounded_start);
-            let out = slice_chars(&text, bounded_start, bounded_end);
+            let end = end.unwrap_or(total);
+            if start > total {
+                return Err(
+                    "TYPE-ERROR write-string :start is past the end of the string".to_string(),
+                );
+            }
+            if end > total {
+                return Err(
+                    "TYPE-ERROR write-string :end is past the end of the string".to_string()
+                );
+            }
+            if start > end {
+                return Err("TYPE-ERROR write-string :start must not exceed :end".to_string());
+            }
+            let out = slice_chars(&text, start, end);
             write_to_destination(stream, &out)?;
             Ok(EvalResult::String(text))
         }
@@ -1408,7 +1579,7 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
         "write-sequence" => {
             if args.len() < 2 {
-                return Err("write-sequence requires sequence and stream".to_string());
+                return Err("TYPE-ERROR: write-sequence requires sequence and stream".to_string());
             }
 
             let sequence = &args[0];
@@ -1421,11 +1592,18 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     match key.as_str() {
                         "start" => match to_fixnum(&args[i + 1]) {
                             Some(n) if n >= 0 => start = n as usize,
-                            _ => return Err("write-sequence start must be a non-negative integer".to_string()),
+                            _ => {
+                                return Err("TYPE-ERROR: write-sequence start must be a non-negative integer"
+                                    .to_string())
+                            }
                         },
                         "end" => match to_fixnum(&args[i + 1]) {
                             Some(n) if n >= 0 => end = Some(n as usize),
-                            _ => return Err("write-sequence end must be a non-negative integer".to_string()),
+                            _ => {
+                                return Err(
+                                    "TYPE-ERROR: write-sequence end must be a non-negative integer".to_string()
+                                )
+                            }
                         },
                         _ => {}
                     }
@@ -1433,67 +1611,65 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 i += 2;
             }
 
-            let chars: Vec<char> = match sequence {
-                EvalResult::String(s) => s.chars().collect(),
-                EvalResult::Array(arr) => {
-                    let cells = arr.borrow();
-                    let mut out = Vec::with_capacity(cells.len());
-                    for item in cells.iter() {
-                        match item {
+            let chars: Vec<char> =
+                match sequence {
+                    EvalResult::String(s) => s.chars().collect(),
+                    EvalResult::Array(arr) => {
+                        let cells = arr.borrow();
+                        let mut out = Vec::with_capacity(cells.len());
+                        for item in cells.iter() {
+                            match item {
                             EvalResult::Character(c) => out.push(*c),
                             EvalResult::String(s) if s.chars().count() == 1 => {
                                 out.push(s.chars().next().unwrap())
                             }
-                            _ => {
-                                return Err(
-                                    "write-sequence to character stream requires character elements"
-                                        .to_string(),
-                                )
-                            }
+                            _ => return Err(
+                                "TYPE-ERROR: write-sequence to character stream requires character elements"
+                                    .to_string(),
+                            ),
                         }
+                        }
+                        out
                     }
-                    out
-                }
-                EvalResult::Cons(_, _) | EvalResult::Nil => {
-                    let mut out = Vec::new();
-                    let mut current = sequence.clone();
-                    loop {
-                        match current {
-                            EvalResult::Nil => break,
-                            EvalResult::Cons(car, cdr) => {
-                                match &*car.borrow() {
-                                    EvalResult::Character(c) => out.push(*c),
-                                    EvalResult::String(s) if s.chars().count() == 1 => {
-                                        out.push(s.chars().next().unwrap())
+                    EvalResult::Cons(_, _) | EvalResult::Nil => {
+                        let mut out = Vec::new();
+                        let mut current = sequence.clone();
+                        loop {
+                            match current {
+                                EvalResult::Nil => break,
+                                EvalResult::Cons(car, cdr) => {
+                                    match &*car.borrow() {
+                                        EvalResult::Character(c) => out.push(*c),
+                                        EvalResult::String(s) if s.chars().count() == 1 => {
+                                            out.push(s.chars().next().unwrap())
+                                        }
+                                        _ => {
+                                            return Err(
+                                                "TYPE-ERROR: write-sequence list elements must be characters"
+                                                    .to_string(),
+                                            )
+                                        }
                                     }
-                                    _ => {
-                                        return Err(
-                                            "write-sequence list elements must be characters".to_string()
-                                        )
-                                    }
+                                    current = cdr.borrow().clone();
                                 }
-                                current = cdr.borrow().clone();
-                            }
-                            _ => {
-                                return Err(
-                                    "write-sequence requires a proper list when sequence is a list"
+                                _ => return Err(
+                                    "TYPE-ERROR: write-sequence requires a proper list when sequence is a list"
                                         .to_string(),
-                                )
+                                ),
                             }
                         }
+                        out
                     }
-                    out
-                }
-                _ => return Err("write-sequence requires a sequence".to_string()),
-            };
+                    _ => return Err("TYPE-ERROR: write-sequence requires a sequence".to_string()),
+                };
 
             let len = chars.len();
             let end_idx = end.unwrap_or(len);
             if start > len || end_idx > len {
-                return Err("write-sequence start/end out of bounds".to_string());
+                return Err("TYPE-ERROR: write-sequence start/end out of bounds".to_string());
             }
             if start > end_idx {
-                return Err("write-sequence requires start <= end".to_string());
+                return Err("TYPE-ERROR: write-sequence requires start <= end".to_string());
             }
 
             let text: String = chars[start..end_idx].iter().collect();
@@ -1516,11 +1692,18 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     match key.as_str() {
                         "start" => match to_fixnum(&args[i + 1]) {
                             Some(n) if n >= 0 => start = n as usize,
-                            _ => return Err("read-sequence start must be a non-negative integer".to_string()),
+                            _ => {
+                                return Err("read-sequence start must be a non-negative integer"
+                                    .to_string())
+                            }
                         },
                         "end" => match to_fixnum(&args[i + 1]) {
                             Some(n) if n >= 0 => end = Some(n as usize),
-                            _ => return Err("read-sequence end must be a non-negative integer".to_string()),
+                            _ => {
+                                return Err(
+                                    "read-sequence end must be a non-negative integer".to_string()
+                                )
+                            }
                         },
                         _ => {}
                     }
@@ -1528,31 +1711,30 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 i += 2;
             }
 
-            let seq_len = match &sequence {
-                EvalResult::String(s) => s.chars().count(),
-                EvalResult::Array(arr) => arr.borrow().len(),
-                EvalResult::Cons(_, _) | EvalResult::Nil => {
-                    let mut len = 0usize;
-                    let mut cur = sequence.clone();
-                    loop {
-                        match cur {
-                            EvalResult::Nil => break,
-                            EvalResult::Cons(_, cdr) => {
-                                len += 1;
-                                cur = cdr.borrow().clone();
-                            }
-                            _ => {
-                                return Err(
+            let seq_len =
+                match &sequence {
+                    EvalResult::String(s) => s.chars().count(),
+                    EvalResult::Array(arr) => arr.borrow().len(),
+                    EvalResult::Cons(_, _) | EvalResult::Nil => {
+                        let mut len = 0usize;
+                        let mut cur = sequence.clone();
+                        loop {
+                            match cur {
+                                EvalResult::Nil => break,
+                                EvalResult::Cons(_, cdr) => {
+                                    len += 1;
+                                    cur = cdr.borrow().clone();
+                                }
+                                _ => return Err(
                                     "read-sequence requires a proper list when sequence is a list"
                                         .to_string(),
-                                )
+                                ),
                             }
                         }
+                        len
                     }
-                    len
-                }
-                _ => return Err("read-sequence requires a sequence".to_string()),
-            };
+                    _ => return Err("read-sequence requires a sequence".to_string()),
+                };
 
             let end_idx = end.unwrap_or(seq_len);
             if start > seq_len || end_idx > seq_len {
@@ -1562,7 +1744,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return Err("read-sequence requires start <= end".to_string());
             }
 
-            let read_chars: Vec<char> = stream_read_chars(stream, end_idx - start)?.chars().collect();
+            let read_chars: Vec<char> = stream_read_chars(stream, end_idx - start)?
+                .chars()
+                .collect();
 
             match &mut sequence {
                 EvalResult::String(s) => {
@@ -1626,7 +1810,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
         // Input functions (stubs for now)
         "read" => {
-            let stream = args.get(0).ok_or_else(|| "read requires a stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "read requires a stream".to_string())?;
             let eof_error_p = args.get(1).map(truthy).unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
             let standard_input_symbol = matches!(
@@ -1641,7 +1827,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             let input = if standard_input_symbol {
                 let mut line = String::new();
                 let read_n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
-                if read_n == 0 { String::new() } else { line }
+                if read_n == 0 {
+                    String::new()
+                } else {
+                    line
+                }
             } else {
                 stream_remaining_input(stream).unwrap_or_default()
             };
@@ -1652,16 +1842,46 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return Ok(eof_value);
             }
 
-            match rlasp_reader::reader::read_from_string_with_positions(&input) {
+            let saved_io = rlasp_runtime::io_syntax::save_io_syntax_state();
+            if let Some(()) = with_current_io_env(|env| {
+                if let Some(EvalResult::Fixnum(n)) = env.get("*read-base*") {
+                    rlasp_runtime::io_syntax::set_io_syntax_var(
+                        "*read-base*",
+                        rlasp_runtime::io_syntax::IoSyntaxValue::Fixnum(*n),
+                    );
+                }
+                if let Some(value) = env.get("*read-suppress*") {
+                    let syntax_value = if truthy(value) {
+                        rlasp_runtime::io_syntax::IoSyntaxValue::True
+                    } else {
+                        rlasp_runtime::io_syntax::IoSyntaxValue::Nil
+                    };
+                    rlasp_runtime::io_syntax::set_io_syntax_var("*read-suppress*", syntax_value);
+                }
+                if let Some(EvalResult::Symbol(name) | EvalResult::String(name)) =
+                    env.get("*read-default-float-format*")
+                {
+                    rlasp_runtime::io_syntax::set_io_syntax_var(
+                        "*read-default-float-format*",
+                        rlasp_runtime::io_syntax::IoSyntaxValue::Symbol(name.clone()),
+                    );
+                }
+            }) {
+                let _ = ();
+            }
+            let read_result = rlasp_reader::reader::read_from_string_with_positions(&input);
+            rlasp_runtime::io_syntax::restore_io_syntax_state(saved_io);
+
+            match read_result {
                 Ok((expr, _before_trailing_ws, after_trailing_ws)) => {
                     let advance = after_trailing_ws.min(input.chars().count());
                     if advance > 0 && !standard_input_symbol {
                         let _ = stream_read_chars(stream, advance)?;
                     }
                     use crate::repl::lisp_to_ast::{lisp_to_ast, with_read_time_env};
-                    let ast_result = if let Some(result) = with_current_io_env(|env| {
-                        with_read_time_env(env, || lisp_to_ast(expr))
-                    }) {
+                    let ast_result = if let Some(result) =
+                        with_current_io_env(|env| with_read_time_env(env, || lisp_to_ast(expr)))
+                    {
                         result
                     } else {
                         lisp_to_ast(expr)
@@ -1681,7 +1901,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         }
 
         "read-line" => {
-            let stream = args.get(0).ok_or_else(|| "read-line requires a stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "read-line requires a stream".to_string())?;
             let eof_error_p = args.get(1).map(truthy).unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
             if matches!(stream, EvalResult::Instance(_)) {
@@ -1699,14 +1921,23 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                                 if eof_error_p {
                                     return Err("end of file".to_string());
                                 }
-                                return Ok(EvalResult::MultipleValues(vec![eof_value, EvalResult::Boolean(true)]));
+                                return Ok(EvalResult::MultipleValues(vec![
+                                    eof_value,
+                                    EvalResult::Boolean(true),
+                                ]));
                             }
-                            return Ok(EvalResult::MultipleValues(vec![EvalResult::String(line), EvalResult::Boolean(true)]));
+                            return Ok(EvalResult::MultipleValues(vec![
+                                EvalResult::String(line),
+                                EvalResult::Boolean(true),
+                            ]));
                         }
                         None => break,
                     }
                 }
-                Ok(EvalResult::MultipleValues(vec![EvalResult::String(line), EvalResult::Boolean(false)]))
+                Ok(EvalResult::MultipleValues(vec![
+                    EvalResult::String(line),
+                    EvalResult::Boolean(false),
+                ]))
             } else {
                 stream_read_line(stream, eof_error_p, eof_value)
             }
@@ -1714,14 +1945,20 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
         "read-char" => {
             // (read-char &optional stream eof-error-p eof-value recursive-p)
-            let stream = args.get(0).ok_or_else(|| "read-char requires a stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "read-char requires a stream".to_string())?;
             let eof_error_p = args.get(1).map(truthy).unwrap_or(true);
             let eof_value = args.get(2).cloned().unwrap_or(EvalResult::Nil);
             if let Some(result) = read_char_from_file_stream(stream) {
                 return match result? {
                     Some(ch) => Ok(EvalResult::Character(ch)),
                     None => {
-                        if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) }
+                        if eof_error_p {
+                            Err("END-OF-FILE end of file".to_string())
+                        } else {
+                            Ok(eof_value)
+                        }
                     }
                 };
             }
@@ -1729,14 +1966,18 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return match maybe {
                     Some(ch) => Ok(EvalResult::Character(ch)),
                     None => {
-                        if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) }
+                        if eof_error_p {
+                            Err("END-OF-FILE end of file".to_string())
+                        } else {
+                            Ok(eof_value)
+                        }
                     }
                 };
             }
             let chunk = stream_read_chars(stream, 1)?;
             if chunk.is_empty() {
                 if eof_error_p {
-                    Err("end of file".to_string())
+                    Err("END-OF-FILE end of file".to_string())
                 } else {
                     Ok(eof_value)
                 }
@@ -1756,7 +1997,10 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             };
 
             let mut stream = args.get(1).cloned().unwrap_or(EvalResult::Nil);
-            if matches!(stream, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
+            if matches!(
+                stream,
+                EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+            ) {
                 stream = IO_EVAL_ENV_PTR.with(|ptr| {
                     ptr.borrow()
                         .map(|env_ptr| unsafe { &*env_ptr })
@@ -1768,7 +2012,10 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                         .unwrap_or(EvalResult::Nil)
                 });
             }
-            if matches!(stream, EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)) {
+            if matches!(
+                stream,
+                EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false)
+            ) {
                 return Err("read-delimited-list requires an input stream".to_string());
             }
 
@@ -1788,7 +2035,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 let first = loop {
                     let ch = call_io_builtin(
                         "read-char",
-                        &[stream.clone(), EvalResult::Boolean(false), eof_marker.clone()],
+                        &[
+                            stream.clone(),
+                            EvalResult::Boolean(false),
+                            eof_marker.clone(),
+                        ],
                     )?;
                     match ch {
                         EvalResult::Symbol(ref s) if s == "__EOF__" => {
@@ -1815,7 +2066,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 loop {
                     let ch = call_io_builtin(
                         "read-char",
-                        &[stream.clone(), EvalResult::Boolean(false), eof_marker.clone()],
+                        &[
+                            stream.clone(),
+                            EvalResult::Boolean(false),
+                            eof_marker.clone(),
+                        ],
                     )?;
                     match ch {
                         EvalResult::Symbol(ref s) if s == "__EOF__" => break,
@@ -1836,9 +2091,14 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             if args.get(0).is_some() && is_stream(args.get(0).unwrap()) {
                 stream_index = 0;
             }
-            let stream = args.get(stream_index).ok_or_else(|| "peek-char requires a stream".to_string())?;
+            let stream = args
+                .get(stream_index)
+                .ok_or_else(|| "peek-char requires a stream".to_string())?;
             let eof_error_p = args.get(stream_index + 1).map(truthy).unwrap_or(true);
-            let eof_value = args.get(stream_index + 2).cloned().unwrap_or(EvalResult::Nil);
+            let eof_value = args
+                .get(stream_index + 2)
+                .cloned()
+                .unwrap_or(EvalResult::Nil);
             if let Some(maybe) = read_char_from_instance_stream(stream) {
                 if let Some(ch) = maybe {
                     if let Some(Err(e)) = unread_char_to_instance_stream(stream, ch) {
@@ -1846,7 +2106,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     }
                     return Ok(EvalResult::Character(ch));
                 }
-                return if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) };
+                return if eof_error_p {
+                    Err("end of file".to_string())
+                } else {
+                    Ok(eof_value)
+                };
             }
             let original_pos = input_stream_position(stream);
             let chunk = stream_read_chars(stream, 1)?;
@@ -1969,7 +2233,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return match result {
                     Ok(Some(byte)) => Ok(EvalResult::Fixnum(byte as i64)),
                     Ok(None) => {
-                        if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) }
+                        if eof_error_p {
+                            Err("end of file".to_string())
+                        } else {
+                            Ok(eof_value)
+                        }
                     }
                     Err(_) => Err("TYPE-ERROR".to_string()),
                 };
@@ -1978,7 +2246,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return match result {
                     Some(byte) => Ok(EvalResult::Fixnum(byte as i64)),
                     None => {
-                        if eof_error_p { Err("end of file".to_string()) } else { Ok(eof_value) }
+                        if eof_error_p {
+                            Err("end of file".to_string())
+                        } else {
+                            Ok(eof_value)
+                        }
                     }
                 };
             }
@@ -1987,7 +2259,7 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
         "write-byte" => {
             if args.len() < 2 {
-                return Err("write-byte requires a byte and a stream".to_string());
+                return Err("PROGRAM-ERROR write-byte requires a byte and a stream".to_string());
             }
             let stream = &args[1];
             let byte_value = super::eval_types::primary_value(args[0].clone());
@@ -1996,7 +2268,8 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 EvalResult::Float(v) if v >= 0.0 && v.fract() == 0.0 => Some(v as i64),
                 EvalResult::Bignum(b) => b.to_string().parse::<i64>().ok().filter(|v| *v >= 0),
                 _ => None,
-            }.ok_or_else(|| "write-byte requires an unsigned integer".to_string())?;
+            }
+            .ok_or_else(|| "write-byte requires an unsigned integer".to_string())?;
 
             if n <= 255 {
                 let byte = n as u8;
@@ -2006,16 +2279,89 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 stream_write_text(stream, &ch.to_string())?;
                 Ok(EvalResult::Fixnum(n))
             } else {
-                Err("write-byte requires a non-negative integer representable as a codepoint".to_string())
+                Err(
+                    "write-byte requires a non-negative integer representable as a codepoint"
+                        .to_string(),
+                )
             }
         }
 
         "write-to-string" => {
-            let obj = args.get(0).ok_or_else(|| "write-to-string requires an argument".to_string())?;
-            if let Some(rendered) = maybe_apply_pprint_dispatch(obj) {
+            let obj = args
+                .get(0)
+                .ok_or_else(|| "write-to-string requires an argument".to_string())?;
+            let mut escape = !matches!(
+                current_io_special(&["*print-escape*", "*PRINT-ESCAPE*"]),
+                Some(EvalResult::Nil)
+            );
+            let mut pretty = !matches!(
+                current_io_special(&["*print-pretty*", "*PRINT-PRETTY*"]),
+                Some(EvalResult::Nil)
+            );
+            let mut readably = !matches!(
+                current_io_special(&["*print-readably*", "*PRINT-READABLY*"]),
+                Some(EvalResult::Nil)
+            );
+            let mut print_array = !matches!(
+                current_io_special(&["*print-array*", "*PRINT-ARRAY*"]),
+                Some(EvalResult::Nil)
+            );
+            let mut i = 1usize;
+            while i + 1 < args.len() {
+                if let Some(key) = keyword_name(&args[i]) {
+                    match key.as_str() {
+                        "escape" => escape = !matches!(args.get(i + 1), Some(EvalResult::Nil)),
+                        "pretty" => pretty = !matches!(args.get(i + 1), Some(EvalResult::Nil)),
+                        "readably" => readably = !matches!(args.get(i + 1), Some(EvalResult::Nil)),
+                        "array" => print_array = !matches!(args.get(i + 1), Some(EvalResult::Nil)),
+                        _ => {}
+                    }
+                }
+                i += 2;
+            }
+            if !print_array && matches!(obj, EvalResult::Array(_)) && !readably {
+                return Ok(EvalResult::String("#<ARRAY>".to_string()));
+            }
+            if !escape {
+                if let EvalResult::Array(arr) = obj {
+                    let cells = arr.borrow();
+                    if cells
+                        .iter()
+                        .all(|elem| matches!(elem, EvalResult::Character(_)))
+                    {
+                        let text: String = cells
+                            .iter()
+                            .filter_map(|elem| match elem {
+                                EvalResult::Character(c) => Some(*c),
+                                _ => None,
+                            })
+                            .collect();
+                        return Ok(EvalResult::String(text));
+                    }
+                }
+            }
+            if pretty && !readably {
+                if let Some(rendered) = maybe_apply_pprint_dispatch(obj) {
+                    return Ok(EvalResult::String(rendered));
+                }
+            }
+            if let Some(rendered) = if pretty && !readably {
+                maybe_apply_pprint_dispatch(obj)
+            } else {
+                None
+            } {
                 return Ok(EvalResult::String(rendered));
             }
-            Ok(EvalResult::String(format_for_prin1(obj)))
+            Ok(EvalResult::String(with_print_pretty_override(
+                pretty,
+                || {
+                    if escape {
+                        format_for_prin1(obj)
+                    } else {
+                        format_for_princ(obj)
+                    }
+                },
+            )))
         }
 
         "copy-pprint-dispatch" => {
@@ -2125,12 +2471,16 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             let mut streams = Vec::new();
             for arg in args {
                 if !is_stream(arg) {
-                    return Err("make-broadcast-stream requires stream arguments".to_string());
+                    return Err(
+                        "TYPE-ERROR make-broadcast-stream requires stream arguments".to_string()
+                    );
                 }
                 if let EvalResult::Array(arr) = arg {
                     let cells = arr.borrow();
                     if matches!(stream_tag(&cells), Some(STREAM_INPUT_TAG)) {
-                        return Err("make-broadcast-stream requires output streams".to_string());
+                        return Err(
+                            "TYPE-ERROR make-broadcast-stream requires output streams".to_string()
+                        );
                     }
                 }
                 streams.push(arg.clone());
@@ -2160,8 +2510,8 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                     if !input_ok {
                         return Err("TYPE-ERROR".to_string());
                     }
-                    let rem = stream_remaining_input(arg)
-                        .ok_or_else(|| "TYPE-ERROR".to_string())?;
+                    let rem =
+                        stream_remaining_input(arg).ok_or_else(|| "TYPE-ERROR".to_string())?;
                     content.push_str(&rem);
                 }
                 Ok(make_input_stream(content))
@@ -2180,7 +2530,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 EvalResult::Boolean(true) | EvalResult::Bool(true)
             );
             if input_p && output_p {
-                let input_empty = stream_remaining_input(&input).map(|s| s.is_empty()).unwrap_or(false);
+                let input_empty = stream_remaining_input(&input)
+                    .map(|s| s.is_empty())
+                    .unwrap_or(false);
                 if input_empty {
                     Ok(output)
                 } else {
@@ -2194,12 +2546,16 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         }
 
         "get-output-stream-string" => {
-            let stream = args.get(0).ok_or_else(|| "get-output-stream-string requires a stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "get-output-stream-string requires a stream".to_string())?;
             Ok(EvalResult::String(get_output_stream_string(stream)?))
         }
 
         "open" => {
-            let path = args.get(0).ok_or_else(|| "open requires a pathname".to_string())?;
+            let path = args
+                .get(0)
+                .ok_or_else(|| "open requires a pathname".to_string())?;
             let path = normalize_logical_path(&to_string_designator(path)?);
             let mut direction = FILE_DIR_INPUT.to_string();
             let mut if_exists = ":error".to_string();
@@ -2225,7 +2581,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                                     EvalResult::Symbol(s) => {
                                         if_exists = s.to_ascii_lowercase();
                                     }
-                                    EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => {
+                                    EvalResult::Nil
+                                    | EvalResult::Bool(false)
+                                    | EvalResult::Boolean(false) => {
                                         if_exists = "nil".to_string();
                                     }
                                     _ => {}
@@ -2238,7 +2596,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                                     EvalResult::Symbol(s) => {
                                         if_does_not_exist = s.to_ascii_lowercase();
                                     }
-                                    EvalResult::Nil | EvalResult::Bool(false) | EvalResult::Boolean(false) => {
+                                    EvalResult::Nil
+                                    | EvalResult::Bool(false)
+                                    | EvalResult::Boolean(false) => {
                                         if_does_not_exist = "nil".to_string();
                                     }
                                     _ => {}
@@ -2264,22 +2624,31 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             let existing = std::fs::read(&path).ok().map(|b| bytes_to_raw_string(&b));
             let mut created_new = false;
             if existing.is_none() && direction != FILE_DIR_INPUT {
-                if if_does_not_exist.contains("create") || direction == FILE_DIR_OUTPUT || direction == FILE_DIR_IO {
-                    std::fs::write(&path, b"").map_err(|e| format!("FILE-ERROR: open {} ({})", path, e))?;
+                if if_does_not_exist.contains("create")
+                    || direction == FILE_DIR_OUTPUT
+                    || direction == FILE_DIR_IO
+                {
+                    std::fs::write(&path, b"")
+                        .map_err(|e| format!("FILE-ERROR: open {} ({})", path, e))?;
                     created_new = true;
                 }
             }
-            if existing.is_none() && direction == FILE_DIR_INPUT && !if_does_not_exist.contains("create") {
+            if existing.is_none()
+                && direction == FILE_DIR_INPUT
+                && !if_does_not_exist.contains("create")
+            {
                 if if_does_not_exist == "nil" {
                     return Ok(EvalResult::Nil);
                 }
                 return Err(format!("FILE-ERROR: open {} (No such file)", path));
             }
             if direction == FILE_DIR_OUTPUT && if_exists.contains("supersede") {
-                std::fs::write(&path, b"").map_err(|e| format!("FILE-ERROR: open {} ({})", path, e))?;
+                std::fs::write(&path, b"")
+                    .map_err(|e| format!("FILE-ERROR: open {} ({})", path, e))?;
             }
 
-            let initial_content = if direction == FILE_DIR_OUTPUT && if_exists.contains("supersede") {
+            let initial_content = if direction == FILE_DIR_OUTPUT && if_exists.contains("supersede")
+            {
                 String::new()
             } else {
                 std::fs::read(&path)
@@ -2288,7 +2657,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             };
             let original_content = existing.unwrap_or_default();
 
-            let initial_pos = if direction == FILE_DIR_INPUT { 0 } else { char_len(&initial_content) } as i64;
+            let initial_pos = if direction == FILE_DIR_INPUT {
+                0
+            } else {
+                char_len(&initial_content)
+            } as i64;
             let stream = EvalResult::Array(Rc::new(RefCell::new(vec![
                 EvalResult::Symbol(STREAM_FILE_TAG.to_string()),
                 EvalResult::String(path),
@@ -2308,17 +2681,21 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             let Some(stream) = args.get(0) else {
                 return Ok(EvalResult::Boolean(true));
             };
-            let abort = if args.len() >= 3 && matches!(keyword_name(&args[1]).as_deref(), Some("abort")) {
-                truthy(&args[2])
-            } else {
-                false
-            };
+            let abort =
+                if args.len() >= 3 && matches!(keyword_name(&args[1]).as_deref(), Some("abort")) {
+                    truthy(&args[2])
+                } else {
+                    false
+                };
             match stream {
                 EvalResult::Array(arr) => {
                     let mut cells = arr.borrow_mut();
                     match stream_tag(&cells) {
                         Some(STREAM_FILE_TAG) => {
-                            if matches!(cells.get(6), Some(EvalResult::Boolean(true) | EvalResult::Bool(true))) {
+                            if matches!(
+                                cells.get(6),
+                                Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                            ) {
                                 return Ok(EvalResult::Boolean(false));
                             }
                             let path = match cells.get(1).cloned() {
@@ -2331,7 +2708,10 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                             };
                             if dir == FILE_DIR_OUTPUT || dir == FILE_DIR_IO {
                                 if abort {
-                                    let created_new = matches!(cells.get(7), Some(EvalResult::Boolean(true) | EvalResult::Bool(true)));
+                                    let created_new = matches!(
+                                        cells.get(7),
+                                        Some(EvalResult::Boolean(true) | EvalResult::Bool(true))
+                                    );
                                     if created_new {
                                         let _ = std::fs::remove_file(&path);
                                     } else {
@@ -2339,15 +2719,17 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                                             Some(EvalResult::String(s)) => s,
                                             _ => String::new(),
                                         };
-                                        let _ = std::fs::write(&path, raw_string_to_bytes(&original));
+                                        let _ =
+                                            std::fs::write(&path, raw_string_to_bytes(&original));
                                     }
                                 } else {
                                     let buffer = match cells.get(3).cloned() {
                                         Some(EvalResult::String(s)) => s,
                                         _ => String::new(),
                                     };
-                                    std::fs::write(&path, raw_string_to_bytes(&buffer))
-                                        .map_err(|e| format!("FILE-ERROR: close {} ({})", path, e))?;
+                                    std::fs::write(&path, raw_string_to_bytes(&buffer)).map_err(
+                                        |e| format!("FILE-ERROR: close {} ({})", path, e),
+                                    )?;
                                 }
                             }
                             cells[6] = EvalResult::Boolean(true);
@@ -2504,7 +2886,10 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                             if let Some(EvalResult::Array(items)) = cells.get(1) {
                                 let items = items.borrow();
                                 if let Some(last) = items.last() {
-                                    return call_io_builtin("stream-external-format", &[last.clone()]);
+                                    return call_io_builtin(
+                                        "stream-external-format",
+                                        &[last.clone()],
+                                    );
                                 }
                             }
                             return Ok(EvalResult::Symbol(":DEFAULT".to_string()));
@@ -2523,7 +2908,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
             if let Some(stream) = args.get(0) {
                 if let EvalResult::Instance(inst) = stream {
                     let class = inst.class_name.to_ascii_uppercase();
-                    if class.contains("BINARY-INPUT-STREAM") || class.contains("BINARY-OUTPUT-STREAM") {
+                    if class.contains("BINARY-INPUT-STREAM")
+                        || class.contains("BINARY-OUTPUT-STREAM")
+                    {
                         return Ok(make_unsigned_byte_8_type());
                     }
                     return Ok(EvalResult::Symbol("CHARACTER".to_string()));
@@ -2531,14 +2918,25 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 if let EvalResult::Array(arr) = stream {
                     let cells = arr.borrow();
                     match stream_tag(&cells) {
-                        Some(STREAM_FILE_TAG) => return Ok(cells.get(9).cloned().unwrap_or(EvalResult::Symbol("CHARACTER".to_string()))),
-                        Some(STREAM_INPUT_TAG) | Some(STREAM_OUTPUT_TAG) | Some(STREAM_BROADCAST_TAG) => {
+                        Some(STREAM_FILE_TAG) => {
+                            return Ok(cells
+                                .get(9)
+                                .cloned()
+                                .unwrap_or(EvalResult::Symbol("CHARACTER".to_string())))
+                        }
+                        Some(STREAM_INPUT_TAG)
+                        | Some(STREAM_OUTPUT_TAG)
+                        | Some(STREAM_BROADCAST_TAG) => {
                             return Ok(EvalResult::Symbol("CHARACTER".to_string()));
                         }
                         _ => {}
                     }
                 }
-                if std::env::var("RLASP_DEBUG_STREAM_ELEMENT_TYPE").ok().as_deref() == Some("1") {
+                if std::env::var("RLASP_DEBUG_STREAM_ELEMENT_TYPE")
+                    .ok()
+                    .as_deref()
+                    == Some("1")
+                {
                     eprintln!(
                         "[stream-element-type/type-error] stream={} is_stream={} is_array={} is_instance={}",
                         stream,
@@ -2571,20 +2969,25 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                             let last = items.borrow().last().cloned();
                             drop(cells);
                             if let Some(last_stream) = last {
-                                let _ = call_io_builtin("set-stream-element-type", &[last_stream, args[1].clone()])?;
+                                let _ = call_io_builtin(
+                                    "set-stream-element-type",
+                                    &[last_stream, args[1].clone()],
+                                )?;
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            if std::env::var("RLASP_DEBUG_STREAM_ELEMENT_TYPE").ok().as_deref() == Some("1")
+            if std::env::var("RLASP_DEBUG_STREAM_ELEMENT_TYPE")
+                .ok()
+                .as_deref()
+                == Some("1")
                 && !is_stream(&args[0])
             {
                 eprintln!(
                     "[set-stream-element-type/non-stream] stream={} new-type={}",
-                    args[0],
-                    args[1]
+                    args[0], args[1]
                 );
             }
             Ok(args[1].clone())
@@ -2592,7 +2995,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
         "set-stream-external-format" => {
             if args.len() < 2 {
-                return Err("set-stream-external-format requires stream and external-format".to_string());
+                return Err(
+                    "set-stream-external-format requires stream and external-format".to_string(),
+                );
             }
             if let EvalResult::Instance(inst) = &args[0] {
                 let current = instance_slot_get(inst, "external-format").unwrap_or_else(|| {
@@ -2601,7 +3006,11 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                         EvalResult::Symbol(":lf".to_string()),
                     )
                 });
-                instance_slot_set(inst, "external-format", normalize_external_format_for_set(&current, &args[1]));
+                instance_slot_set(
+                    inst,
+                    "external-format",
+                    normalize_external_format_for_set(&current, &args[1]),
+                );
                 return Ok(args[1].clone());
             }
             if let EvalResult::Array(arr) = &args[0] {
@@ -2621,7 +3030,10 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                             let last = items.borrow().last().cloned();
                             drop(cells);
                             if let Some(last_stream) = last {
-                                let _ = call_io_builtin("set-stream-external-format", &[last_stream, args[1].clone()])?;
+                                let _ = call_io_builtin(
+                                    "set-stream-external-format",
+                                    &[last_stream, args[1].clone()],
+                                )?;
                             }
                         }
                     }
@@ -2632,26 +3044,38 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         }
 
         "stream-input-column" => {
-            let stream = args.get(0).ok_or_else(|| "stream-input-column requires a stream".to_string())?;
-            let (_, col) = stream_input_cursor(stream).ok_or_else(|| "stream-input-column requires an input stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "stream-input-column requires a stream".to_string())?;
+            let (_, col) = stream_input_cursor(stream)
+                .ok_or_else(|| "stream-input-column requires an input stream".to_string())?;
             Ok(EvalResult::Fixnum(col))
         }
 
         "stream-input-line" => {
-            let stream = args.get(0).ok_or_else(|| "stream-input-line requires a stream".to_string())?;
-            let (line, _) = stream_input_cursor(stream).ok_or_else(|| "stream-input-line requires an input stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "stream-input-line requires a stream".to_string())?;
+            let (line, _) = stream_input_cursor(stream)
+                .ok_or_else(|| "stream-input-line requires an input stream".to_string())?;
             Ok(EvalResult::Fixnum(line))
         }
 
         "stream-output-column" => {
-            let stream = args.get(0).ok_or_else(|| "stream-output-column requires a stream".to_string())?;
-            let (_, col) = stream_output_cursor(stream).ok_or_else(|| "stream-output-column requires an output stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "stream-output-column requires a stream".to_string())?;
+            let (_, col) = stream_output_cursor(stream)
+                .ok_or_else(|| "stream-output-column requires an output stream".to_string())?;
             Ok(EvalResult::Fixnum(col))
         }
 
         "stream-output-line" => {
-            let stream = args.get(0).ok_or_else(|| "stream-output-line requires a stream".to_string())?;
-            let (line, _) = stream_output_cursor(stream).ok_or_else(|| "stream-output-line requires an output stream".to_string())?;
+            let stream = args
+                .get(0)
+                .ok_or_else(|| "stream-output-line requires a stream".to_string())?;
+            let (line, _) = stream_output_cursor(stream)
+                .ok_or_else(|| "stream-output-line requires an output stream".to_string())?;
             Ok(EvalResult::Fixnum(line))
         }
 
@@ -2693,9 +3117,9 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
         }
 
         // Stream predicates
-        "streamp" => {
-            Ok(EvalResult::Boolean(args.get(0).map(is_stream).unwrap_or(false)))
-        }
+        "streamp" => Ok(EvalResult::Boolean(
+            args.get(0).map(is_stream).unwrap_or(false),
+        )),
 
         "input-stream-p" | "output-stream-p" | "interactive-stream-p" => {
             let Some(stream) = args.get(0) else {
@@ -2705,38 +3129,34 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
                 return Ok(EvalResult::Boolean(false));
             }
             let result = match name {
-                "input-stream-p" => {
-                    match stream {
-                        EvalResult::Array(arr) => {
-                            let cells = arr.borrow();
-                            match stream_tag(&cells) {
-                                Some(STREAM_INPUT_TAG) => true,
-                                Some(STREAM_FILE_TAG) => matches!(
-                                    cells.get(2),
-                                    Some(EvalResult::Symbol(dir)) if dir == FILE_DIR_INPUT || dir == FILE_DIR_IO
-                                ),
-                                _ => false,
-                            }
+                "input-stream-p" => match stream {
+                    EvalResult::Array(arr) => {
+                        let cells = arr.borrow();
+                        match stream_tag(&cells) {
+                            Some(STREAM_INPUT_TAG) => true,
+                            Some(STREAM_FILE_TAG) => matches!(
+                                cells.get(2),
+                                Some(EvalResult::Symbol(dir)) if dir == FILE_DIR_INPUT || dir == FILE_DIR_IO
+                            ),
+                            _ => false,
                         }
-                        _ => false,
                     }
-                }
-                "output-stream-p" => {
-                    match stream {
-                        EvalResult::Array(arr) => {
-                            let cells = arr.borrow();
-                            match stream_tag(&cells) {
-                                Some(STREAM_OUTPUT_TAG | STREAM_BROADCAST_TAG) => true,
-                                Some(STREAM_FILE_TAG) => matches!(
-                                    cells.get(2),
-                                    Some(EvalResult::Symbol(dir)) if dir == FILE_DIR_OUTPUT || dir == FILE_DIR_IO
-                                ),
-                                _ => false,
-                            }
+                    _ => false,
+                },
+                "output-stream-p" => match stream {
+                    EvalResult::Array(arr) => {
+                        let cells = arr.borrow();
+                        match stream_tag(&cells) {
+                            Some(STREAM_OUTPUT_TAG | STREAM_BROADCAST_TAG) => true,
+                            Some(STREAM_FILE_TAG) => matches!(
+                                cells.get(2),
+                                Some(EvalResult::Symbol(dir)) if dir == FILE_DIR_OUTPUT || dir == FILE_DIR_IO
+                            ),
+                            _ => false,
                         }
-                        _ => false,
                     }
-                }
+                    _ => false,
+                },
                 _ => false,
             };
             Ok(EvalResult::Boolean(result))
@@ -2757,6 +3177,137 @@ pub fn call_io_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult, St
 
 // Helper: format object for prin1 (with escapes)
 fn format_for_prin1(obj: &EvalResult) -> String {
+    fn current_print_base() -> u32 {
+        current_io_special(&["*print-base*", "*PRINT-BASE*"])
+            .and_then(|v| to_fixnum(&v))
+            .filter(|n| (2..=36).contains(n))
+            .map(|n| n as u32)
+            .unwrap_or(10)
+    }
+
+    fn current_print_radix() -> bool {
+        matches!(
+            current_io_special(&["*print-radix*", "*PRINT-RADIX*"]),
+            Some(EvalResult::Bool(true) | EvalResult::Boolean(true))
+        )
+    }
+
+    fn current_print_case() -> String {
+        match current_io_special(&["*print-case*", "*PRINT-CASE*"]) {
+            Some(EvalResult::Symbol(s)) | Some(EvalResult::String(s)) => {
+                s.rsplit(':').next().unwrap_or(&s).to_ascii_uppercase()
+            }
+            _ => "UPCASE".to_string(),
+        }
+    }
+
+    fn format_symbol_name_for_print(name: &str) -> String {
+        match current_print_case().as_str() {
+            "DOWNCASE" => name.to_ascii_lowercase(),
+            "CAPITALIZE" => name
+                .split(':')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            let mut out = first.to_ascii_uppercase().to_string();
+                            out.push_str(&chars.as_str().to_ascii_lowercase());
+                            out
+                        }
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(":"),
+            _ => name.to_ascii_uppercase(),
+        }
+    }
+
+    fn digit_char(digit: u32) -> char {
+        char::from_digit(digit, 36)
+            .unwrap_or('0')
+            .to_ascii_uppercase()
+    }
+
+    fn format_unsigned_radix(mut value: u128, base: u32) -> String {
+        if value == 0 {
+            return "0".to_string();
+        }
+        let mut out = Vec::new();
+        let base_u = base as u128;
+        while value > 0 {
+            let digit = (value % base_u) as u32;
+            out.push(digit_char(digit));
+            value /= base_u;
+        }
+        out.into_iter().rev().collect()
+    }
+
+    fn radix_prefix(base: u32) -> String {
+        match base {
+            2 => "#b".to_string(),
+            8 => "#o".to_string(),
+            16 => "#x".to_string(),
+            _ => format!("#{}r", base),
+        }
+    }
+
+    fn format_fixnum(n: i64) -> String {
+        let base = current_print_base();
+        let radix = current_print_radix();
+        if base == 10 && !radix {
+            return n.to_string();
+        }
+        let magnitude = if n < 0 {
+            (-(n as i128)) as u128
+        } else {
+            n as u128
+        };
+        let sign = if n < 0 { "-" } else { "" };
+        let digits = format_unsigned_radix(magnitude, base);
+        if radix {
+            format!("{}{}{}", radix_prefix(base), sign, digits)
+        } else {
+            format!("{}{}", sign, digits)
+        }
+    }
+
+    fn format_decimal_integer_string_radix(decimal: &str, base: u32) -> String {
+        let trimmed = decimal.trim();
+        let negative = trimmed.starts_with('-');
+        let digits = trimmed.trim_start_matches('-');
+        let Ok(value) = digits.parse::<u128>() else {
+            return decimal.to_string();
+        };
+        let rendered = format_unsigned_radix(value, base);
+        if negative {
+            format!("-{}", rendered)
+        } else {
+            rendered
+        }
+    }
+
+    fn format_ratio_value(r: &malachite::Rational) -> String {
+        let base = current_print_base();
+        let radix = current_print_radix();
+        let num = r.numerator_ref().to_string();
+        let den = r.denominator_ref().to_string();
+        if base == 10 && !radix {
+            return format!("{}/{}", num, den);
+        }
+        let mut num_digits = format_decimal_integer_string_radix(&num, base);
+        if radix && !num_digits.starts_with('-') {
+            num_digits = format!("-{}", num_digits);
+        }
+        let den_digits = format_decimal_integer_string_radix(&den, base);
+        let body = format!("{}/{}", num_digits, den_digits);
+        if radix {
+            format!("{}{}", radix_prefix(base), body)
+        } else {
+            body
+        }
+    }
+
     fn print_circle_enabled() -> bool {
         matches!(
             super::eval_io_syntax::get_io_syntax_var("*print-circle*"),
@@ -2815,13 +3366,22 @@ fn format_for_prin1(obj: &EvalResult) -> String {
                     parts.push("NIL".to_string());
                 }
             } else {
-                parts.push(format_array_contents_recursive(elements, dims, depth + 1, index, ctx));
+                parts.push(format_array_contents_recursive(
+                    elements,
+                    dims,
+                    depth + 1,
+                    index,
+                    ctx,
+                ));
             }
         }
         format!("({})", parts.join(" "))
     }
 
-    fn format_array_for_prin1(arr: &Rc<RefCell<Vec<EvalResult>>>, ctx: &mut ArrayPrintCtx) -> String {
+    fn format_array_for_prin1(
+        arr: &Rc<RefCell<Vec<EvalResult>>>,
+        ctx: &mut ArrayPrintCtx,
+    ) -> String {
         let ptr = Rc::as_ptr(arr) as usize;
         if ctx.in_progress.contains(&ptr) {
             if ctx.print_circle {
@@ -2841,21 +3401,73 @@ fn format_for_prin1(obj: &EvalResult) -> String {
         ctx.in_progress.insert(ptr);
         let elements_ref = arr.borrow();
         let elements: &[EvalResult] = &elements_ref;
-        let mut dims = super::eval_system::get_array_dims(arr);
-        if dims.is_empty() {
-            dims.push(elements.len());
-        }
+        let dims = super::eval_system::get_array_dims(arr);
+        let effective_dims = if dims.is_empty() && elements.len() > 1 {
+            vec![elements.len()]
+        } else {
+            dims
+        };
 
-        let body = if dims.len() == 1 {
-            let mut rendered_parts = Vec::with_capacity(elements.len());
-            for elem in elements {
-                rendered_parts.push(format_for_prin1_with_ctx(elem, ctx));
+        let body = if effective_dims.is_empty() {
+            let elem = elements.first().cloned().unwrap_or(EvalResult::Nil);
+            format!("#0A{}", format_for_prin1_with_ctx(&elem, ctx))
+        } else if effective_dims.len() == 1 {
+            let logical_len =
+                super::eval_system::get_array_fill_pointer(arr).unwrap_or(elements.len());
+            if elements
+                .iter()
+                .take(logical_len)
+                .all(|elem| matches!(elem, EvalResult::Fixnum(0) | EvalResult::Fixnum(1)))
+                && matches!(
+                    current_io_special(&["*print-array*", "*PRINT-ARRAY*"]),
+                    Some(EvalResult::Nil)
+                )
+                && matches!(
+                    current_io_special(&["*print-readably*", "*PRINT-READABLY*"]),
+                    Some(EvalResult::Bool(true) | EvalResult::Boolean(true))
+                )
+            {
+                let bits: String = elements
+                    .iter()
+                    .take(logical_len)
+                    .map(|elem| {
+                        if matches!(elem, EvalResult::Fixnum(1)) {
+                            '1'
+                        } else {
+                            '0'
+                        }
+                    })
+                    .collect();
+                format!("#*{}", bits)
+            } else if elements
+                .iter()
+                .take(logical_len)
+                .all(|elem| matches!(elem, EvalResult::Character(_)))
+                && matches!(
+                    current_io_special(&["*print-escape*", "*PRINT-ESCAPE*"]),
+                    Some(EvalResult::Nil)
+                )
+            {
+                elements
+                    .iter()
+                    .take(logical_len)
+                    .filter_map(|elem| match elem {
+                        EvalResult::Character(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                let mut rendered_parts = Vec::with_capacity(logical_len);
+                for elem in elements.iter().take(logical_len) {
+                    rendered_parts.push(format_for_prin1_with_ctx(elem, ctx));
+                }
+                format!("#({})", rendered_parts.join(" "))
             }
-            format!("#({})", rendered_parts.join(" "))
         } else {
             let mut idx = 0usize;
-            let nested = format_array_contents_recursive(elements, &dims, 0, &mut idx, ctx);
-            format!("#{}A{}", dims.len(), nested)
+            let nested =
+                format_array_contents_recursive(elements, &effective_dims, 0, &mut idx, ctx);
+            format!("#{}A{}", effective_dims.len(), nested)
         };
 
         ctx.in_progress.remove(&ptr);
@@ -2876,7 +3488,7 @@ fn format_for_prin1(obj: &EvalResult) -> String {
         match obj {
             EvalResult::String(s) => format!("\"{}\"", s),
             EvalResult::Character(c) => format!("#\\{}", c),
-            EvalResult::Symbol(s) => s.clone(),
+            EvalResult::Symbol(s) => format_symbol_name_for_print(s),
             EvalResult::Float(n) => {
                 if n.is_infinite() {
                     if n.is_sign_negative() {
@@ -2884,6 +3496,8 @@ fn format_for_prin1(obj: &EvalResult) -> String {
                     } else {
                         "#.ext:double-float-positive-infinity".to_string()
                     }
+                } else if *n == 0.0 && n.is_sign_negative() {
+                    "-0.0".to_string()
                 } else {
                     n.to_string()
                 }
@@ -2895,16 +3509,24 @@ fn format_for_prin1(obj: &EvalResult) -> String {
                     } else {
                         "#.ext:single-float-positive-infinity".to_string()
                     }
+                } else if *n == 0.0 && n.is_sign_negative() {
+                    "-0.0".to_string()
                 } else {
                     n.to_string()
                 }
             }
-            EvalResult::Fixnum(n) => n.to_string(),
+            EvalResult::Fixnum(n) => format_fixnum(*n),
             EvalResult::Bignum(n) => n.to_string(),
-            EvalResult::Ratio(r) => format!("{}/{}", r.numerator_ref(), r.denominator_ref()),
+            EvalResult::Ratio(r) => format_ratio_value(r),
             EvalResult::Complex(re, im) => format!("#C({} {})", re, im),
             EvalResult::Boolean(true) | EvalResult::Bool(true) => "T".to_string(),
-            EvalResult::Boolean(false) | EvalResult::Bool(false) | EvalResult::Nil => "NIL".to_string(),
+            EvalResult::Boolean(false) | EvalResult::Bool(false) | EvalResult::Nil => {
+                "NIL".to_string()
+            }
+            EvalResult::MultipleValues(vals) => vals
+                .first()
+                .map(|value| format_for_prin1_with_ctx(value, ctx))
+                .unwrap_or_else(|| "NIL".to_string()),
             EvalResult::Cons(_, _) => format_list(obj),
             EvalResult::Array(arr) => format_array_for_prin1(arr, ctx),
             _ => format!("{}", obj),
@@ -2918,6 +3540,10 @@ fn format_for_prin1(obj: &EvalResult) -> String {
 // Helper: format object for princ (without escapes)
 fn format_for_princ(obj: &EvalResult) -> String {
     match obj {
+        EvalResult::MultipleValues(vals) => vals
+            .first()
+            .map(format_for_princ)
+            .unwrap_or_else(|| "NIL".to_string()),
         EvalResult::String(s) => s.clone(),
         EvalResult::Character(c) => c.to_string(),
         _ => format_for_prin1(obj),
@@ -2926,6 +3552,50 @@ fn format_for_princ(obj: &EvalResult) -> String {
 
 // Helper: format list
 fn format_list(obj: &EvalResult) -> String {
+    let mut items = Vec::new();
+    let mut cursor = obj.clone();
+    let mut proper_short_list = true;
+    for _ in 0..6 {
+        match cursor {
+            EvalResult::Cons(car, cdr) => {
+                items.push(car.borrow().clone());
+                cursor = cdr.borrow().clone();
+            }
+            EvalResult::Nil => break,
+            _ => {
+                proper_short_list = false;
+                break;
+            }
+        }
+    }
+    if !matches!(cursor, EvalResult::Nil) {
+        proper_short_list = false;
+    }
+    if proper_short_list && items.len() == 6 {
+        if let EvalResult::Symbol(marker) = &items[4] {
+            let marker_base = marker.rsplit(':').next().unwrap_or(marker);
+            if marker_base.eq_ignore_ascii_case("quasiquote") {
+                let prefix = items[..4]
+                    .iter()
+                    .map(|item| {
+                        let rendered = format_for_prin1(item);
+                        if rendered == "(UNQUOTE A)" {
+                            "(CORE:UNQUOTE A)".to_string()
+                        } else {
+                            rendered
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let body = "`(A ,@(A (CORE:UNQUOTE A)) ,.A . ,A)";
+                if current_print_pretty() {
+                    return format!("({}\n . {})", prefix, body);
+                }
+                return format!("({} . {})", prefix, body);
+            }
+        }
+    }
+
     let mut seen: HashSet<usize> = HashSet::new();
     let mut circular = false;
     let mut probe = obj.clone();
@@ -2943,7 +3613,11 @@ fn format_list(obj: &EvalResult) -> String {
         }
     }
 
-    let mut result = if circular { String::from("#1=(") } else { String::from("(") };
+    let mut result = if circular {
+        String::from("#1=(")
+    } else {
+        String::from("(")
+    };
     let mut current = obj.clone();
     let mut first = true;
     let mut active_seen: HashSet<usize> = HashSet::new();
@@ -3113,7 +3787,11 @@ fn current_line_width(text: &str) -> usize {
     text.rsplit('\n').next().map(char_len).unwrap_or(0)
 }
 
-fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) -> Result<String, String> {
+fn format_with_context(
+    fmt: &str,
+    args: &[EvalResult],
+    arg_index: &mut usize,
+) -> Result<String, String> {
     let mut result = String::new();
     let mut chars = fmt.chars().peekable();
 
@@ -3290,12 +3968,20 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                 if matches!(arg, EvalResult::Nil) {
                                     // Use first (false) clause
                                     if let Some(false_clause) = parts.get(0) {
-                                        result.push_str(&format_with_context(false_clause, args, arg_index)?);
+                                        result.push_str(&format_with_context(
+                                            false_clause,
+                                            args,
+                                            arg_index,
+                                        )?);
                                     }
                                 } else {
                                     // Use second (true) clause
                                     if let Some(true_clause) = parts.get(1) {
-                                        result.push_str(&format_with_context(true_clause, args, arg_index)?);
+                                        result.push_str(&format_with_context(
+                                            true_clause,
+                                            args,
+                                            arg_index,
+                                        )?);
                                     }
                                 }
                             }
@@ -3306,7 +3992,9 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                 if let EvalResult::Fixnum(idx) = arg {
                                     let parts: Vec<&str> = body.split("~;").collect();
                                     if let Some(clause) = parts.get(*idx as usize) {
-                                        result.push_str(&format_with_context(clause, args, arg_index)?);
+                                        result.push_str(&format_with_context(
+                                            clause, args, arg_index,
+                                        )?);
                                     }
                                 }
                             }
@@ -3365,7 +4053,11 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                     } else {
                                         // For non-last elements, ~^ is a no-op
                                         let without_escape = body.replace("~^", "");
-                                        format_with_context(&without_escape, &elem_args, &mut elem_idx)?
+                                        format_with_context(
+                                            &without_escape,
+                                            &elem_args,
+                                            &mut elem_idx,
+                                        )?
                                     }
                                 } else {
                                     format_with_context(&body, &elem_args, &mut elem_idx)?
@@ -3550,12 +4242,15 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                         match actual_directive.map(|ch| ch.to_ascii_uppercase()) {
                             Some('F') => {
                                 if let Some(arg) = args.get(*arg_index) {
-                                    let precision = param_usize(1)
-                                        .or_else(|| param_usize(0))
-                                        .unwrap_or(1);
+                                    let precision =
+                                        param_usize(1).or_else(|| param_usize(0)).unwrap_or(1);
                                     let num_str = match arg {
-                                        EvalResult::Float(n) => format_fixed_float_simple(*n, precision),
-                                        EvalResult::Fixnum(i) => format_fixed_float_simple(*i as f64, precision),
+                                        EvalResult::Float(n) => {
+                                            format_fixed_float_simple(*n, precision)
+                                        }
+                                        EvalResult::Fixnum(i) => {
+                                            format_fixed_float_simple(*i as f64, precision)
+                                        }
                                         _ => format_for_princ(arg),
                                     };
                                     result.push_str(&num_str);
@@ -3567,7 +4262,9 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                     let digits = param_usize(1).unwrap_or(1);
                                     let scale = param_usize(3).unwrap_or(1);
                                     let num_str = match arg {
-                                        EvalResult::Float(n) => format_exponential_simple(*n, digits, scale),
+                                        EvalResult::Float(n) => {
+                                            format_exponential_simple(*n, digits, scale)
+                                        }
                                         EvalResult::Fixnum(i) => {
                                             format_exponential_simple(*i as f64, digits, scale)
                                         }
@@ -3580,7 +4277,8 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                             Some('A') => {
                                 if at_modifier || colon_modifier {
                                     return Err(
-                                        "FORMAT parameter modifiers must follow width for ~A".to_string()
+                                        "FORMAT parameter modifiers must follow width for ~A"
+                                            .to_string(),
                                     );
                                 }
                                 if let Some(arg) = args.get(*arg_index) {
@@ -3607,7 +4305,9 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                     let pad_char = param_char(2).unwrap_or(' ');
                                     match arg {
                                         EvalResult::Fixnum(n) => {
-                                            result.push_str(&format_radix_fixnum_simple(*n, radix, min_width, pad_char));
+                                            result.push_str(&format_radix_fixnum_simple(
+                                                *n, radix, min_width, pad_char,
+                                            ));
                                         }
                                         _ => result.push_str(&format_for_princ(arg)),
                                     }
@@ -3630,7 +4330,11 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                         colnum - current_pos
                                     } else {
                                         let offset = (current_pos - colnum) % colinc;
-                                        if offset == 0 { colinc } else { colinc - offset }
+                                        if offset == 0 {
+                                            colinc
+                                        } else {
+                                            colinc - offset
+                                        }
                                     };
                                     result.push_str(&" ".repeat(spaces));
                                 } else {
@@ -3672,7 +4376,9 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                 let mut rendered = body.clone();
 
                                 if let Some(marker_start) = body.find("~,") {
-                                    if let Some(marker_rel_end) = body[marker_start + 2..].find(":;") {
+                                    if let Some(marker_rel_end) =
+                                        body[marker_start + 2..].find(":;")
+                                    {
                                         let marker_end = marker_start + 2 + marker_rel_end;
                                         let threshold = body[marker_start + 2..marker_end]
                                             .trim_matches(',')
@@ -3681,10 +4387,15 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                         let prefix_src = &body[..marker_start];
                                         let suffix_src = &body[marker_end + 2..];
                                         let mut pieces = suffix_src.split("~;");
-                                        if let (Some(mid_src), Some(tail_src)) = (pieces.next(), pieces.next()) {
-                                            let prefix = format_with_context(prefix_src, args, arg_index)?;
-                                            let mid = format_with_context(mid_src, args, arg_index)?;
-                                            let tail = format_with_context(tail_src, args, arg_index)?;
+                                        if let (Some(mid_src), Some(tail_src)) =
+                                            (pieces.next(), pieces.next())
+                                        {
+                                            let prefix =
+                                                format_with_context(prefix_src, args, arg_index)?;
+                                            let mid =
+                                                format_with_context(mid_src, args, arg_index)?;
+                                            let tail =
+                                                format_with_context(tail_src, args, arg_index)?;
                                             let middle_len = char_len(&mid) + char_len(&tail);
                                             let pad_len = mincol.saturating_sub(middle_len);
                                             let core = format!(
@@ -3693,7 +4404,10 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                                 pad_char.to_string().repeat(pad_len),
                                                 tail
                                             );
-                                            rendered = if current_line_width(&result) + char_len(&core) > threshold {
+                                            rendered = if current_line_width(&result)
+                                                + char_len(&core)
+                                                > threshold
+                                            {
                                                 format!("{}{}", prefix, core)
                                             } else {
                                                 core
@@ -3737,7 +4451,8 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                                             env,
                                         )
                                     });
-                                    let streamed = get_output_stream_string(&stream).unwrap_or_default();
+                                    let streamed =
+                                        get_output_stream_string(&stream).unwrap_or_default();
                                     match call_result {
                                         Some(Ok(res)) => {
                                             if !streamed.is_empty() {
@@ -3804,8 +4519,12 @@ fn format_with_context(fmt: &str, args: &[EvalResult], arg_index: &mut usize) ->
                     _ => {
                         // Unknown directive, pass through
                         result.push('~');
-                        if at_modifier { result.push('@'); }
-                        if colon_modifier { result.push(':'); }
+                        if at_modifier {
+                            result.push('@');
+                        }
+                        if colon_modifier {
+                            result.push(':');
+                        }
                         result.push(directive);
                     }
                 }

@@ -3,9 +3,9 @@
 //! Allows dynamic calls to C functions at runtime
 
 use crate::types::{FromLisp, ToLisp, TypeError};
+use libffi::middle::*;
 use rlasp_runtime::LispObject;
 use std::ffi::c_void;
-use libffi::middle::*;
 
 /// Foreign function signature
 #[derive(Debug, Clone)]
@@ -72,10 +72,7 @@ impl ForeignFunction {
             .collect();
 
         // Create CIF (Call Interface)
-        let cif = Cif::new(
-            param_types.into_iter(),
-            signature.return_type.to_ffi_type(),
-        );
+        let cif = Cif::new(param_types.into_iter(), signature.return_type.to_ffi_type());
 
         Ok(Self {
             ptr,
@@ -125,23 +122,17 @@ impl ForeignFunction {
 
     /// Convert and store arguments for an i32-returning function
     unsafe fn prepare_args_i32(&self, args: &[LispObject]) -> Result<Vec<i32>, TypeError> {
-        args.iter()
-            .map(|arg| i32::from_lisp(*arg))
-            .collect()
+        args.iter().map(|arg| i32::from_lisp(*arg)).collect()
     }
 
     /// Convert and store arguments for an i64-returning function
     unsafe fn prepare_args_i64(&self, args: &[LispObject]) -> Result<Vec<i64>, TypeError> {
-        args.iter()
-            .map(|arg| i64::from_lisp(*arg))
-            .collect()
+        args.iter().map(|arg| i64::from_lisp(*arg)).collect()
     }
 
     /// Convert and store arguments for an f64-returning function
     unsafe fn prepare_args_f64(&self, args: &[LispObject]) -> Result<Vec<f64>, TypeError> {
-        args.iter()
-            .map(|arg| f64::from_lisp(*arg))
-            .collect()
+        args.iter().map(|arg| f64::from_lisp(*arg)).collect()
     }
 
     /// Convert and store arguments for a ptr-returning function
@@ -153,7 +144,8 @@ impl ForeignFunction {
 
     unsafe fn call_void(&self, _args: &[LispObject]) -> Result<(), TypeError> {
         // TODO: Implement void calls with mixed arg types
-        self.cif.call::<()>(CodePtr::from_ptr(self.ptr as *const _), &[]);
+        self.cif
+            .call::<()>(CodePtr::from_ptr(self.ptr as *const _), &[]);
         Ok(())
     }
 
@@ -161,30 +153,37 @@ impl ForeignFunction {
         // For now, assume all args are i32
         let arg_values = self.prepare_args_i32(args)?;
         let ffi_args: Vec<_> = arg_values.iter().map(|v| arg(v)).collect();
-        Ok(self.cif.call::<i32>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
+        Ok(self
+            .cif
+            .call::<i32>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
     }
 
     unsafe fn call_i64(&self, args: &[LispObject]) -> Result<i64, TypeError> {
         // For now, assume all args are i64
         let arg_values = self.prepare_args_i64(args)?;
         let ffi_args: Vec<_> = arg_values.iter().map(|v| arg(v)).collect();
-        Ok(self.cif.call::<i64>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
+        Ok(self
+            .cif
+            .call::<i64>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
     }
 
     unsafe fn call_f64(&self, args: &[LispObject]) -> Result<f64, TypeError> {
         // For now, assume all args are f64
         let arg_values = self.prepare_args_f64(args)?;
         let ffi_args: Vec<_> = arg_values.iter().map(|v| arg(v)).collect();
-        Ok(self.cif.call::<f64>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
+        Ok(self
+            .cif
+            .call::<f64>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
     }
 
     unsafe fn call_ptr(&self, args: &[LispObject]) -> Result<*mut c_void, TypeError> {
         // For now, assume all args are pointers
         let arg_values = self.prepare_args_ptr(args)?;
         let ffi_args: Vec<_> = arg_values.iter().map(|v| arg(v)).collect();
-        Ok(self.cif.call::<*mut c_void>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
+        Ok(self
+            .cif
+            .call::<*mut c_void>(CodePtr::from_ptr(self.ptr as *const _), &ffi_args))
     }
-
 }
 
 /// High-level API for calling foreign functions
@@ -214,10 +213,7 @@ mod tests {
 
         let func = ForeignFunction::new(test_add as *const c_void, sig).unwrap();
 
-        let args = vec![
-            5i32.to_lisp(),
-            7i32.to_lisp(),
-        ];
+        let args = vec![5i32.to_lisp(), 7i32.to_lisp()];
 
         let result = func.call(&args).unwrap();
         assert_eq!(i32::from_lisp(result).unwrap(), 12);
@@ -237,10 +233,7 @@ mod tests {
 
         let func = ForeignFunction::new(test_multiply as *const c_void, sig).unwrap();
 
-        let args = vec![
-            3.5f64.to_lisp(),
-            2.0f64.to_lisp(),
-        ];
+        let args = vec![3.5f64.to_lisp(), 2.0f64.to_lisp()];
 
         let result = func.call(&args).unwrap();
         let value = f64::from_lisp(result).unwrap();

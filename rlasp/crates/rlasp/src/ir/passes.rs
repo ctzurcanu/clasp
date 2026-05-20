@@ -1,11 +1,10 @@
+use super::datum::DatumId;
+use super::instruction::{Instruction, InstructionId};
 /// Optimization passes for IR
 ///
 /// Based on Cleavir's BIR transformations
-
 use super::module::Module;
-use super::instruction::{Instruction, InstructionId};
-use super::datum::DatumId;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 /// Dead code elimination pass
 pub struct DeadCodeElimination;
@@ -206,19 +205,11 @@ mod tests {
         let out1 = module.make_output();
 
         // Dead instruction (output not used)
-        let _dead_inst = module.make_instruction(
-            InstructionKind::Add,
-            vec![c1, c1],
-            vec![out1],
-        );
+        let _dead_inst = module.make_instruction(InstructionKind::Add, vec![c1, c1], vec![out1]);
 
         // Live instruction (return)
         let c2 = module.make_constant(ConstantValue::Fixnum(100));
-        let ret_inst = module.make_instruction(
-            InstructionKind::Return,
-            vec![c2],
-            vec![],
-        );
+        let ret_inst = module.make_instruction(InstructionKind::Return, vec![c2], vec![]);
 
         module.get_block_mut(entry).unwrap().end = Some(ret_inst);
 
@@ -242,11 +233,7 @@ mod tests {
 
         // Create instruction using the phi
         let out = module.make_output();
-        module.make_instruction(
-            InstructionKind::Add,
-            vec![phi, c1],
-            vec![out],
-        );
+        module.make_instruction(InstructionKind::Add, vec![phi, c1], vec![out]);
 
         CopyPropagation::run(&mut module);
 

@@ -5,10 +5,10 @@
 use crate::error::{ReaderError, ReaderResult};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind};
+use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
+use malachite::Integer;
 use rlasp_runtime::{LispObject, RVector, Symbol};
 use std::collections::HashMap;
-use malachite::Integer;
-use malachite::num::conversion::traits::{ConvertibleFrom, ExactFrom};
 
 /// Sentinel symbol for skipped feature conditionals
 /// read_list and read_all filter this out
@@ -43,13 +43,19 @@ fn feature_present_in_env(feature_upper: &str) -> bool {
     };
     raw.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .any(|entry| entry.trim_start_matches(':').eq_ignore_ascii_case(feature_upper))
+        .any(|entry| {
+            entry
+                .trim_start_matches(':')
+                .eq_ignore_ascii_case(feature_upper)
+        })
 }
 
 /// Check if a feature is present
 fn feature_present(feature: &str) -> bool {
     let feature_upper = feature.to_uppercase();
-    DEFAULT_FEATURES.iter().any(|f| f.eq_ignore_ascii_case(&feature_upper))
+    DEFAULT_FEATURES
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(&feature_upper))
         || feature_present_in_env(&feature_upper)
 }
 
@@ -223,14 +229,20 @@ impl Parser {
                 let numerator_str = numerator.clone();
                 let denominator_str = denominator.clone();
                 self.advance()?;
-                let num = numerator_str.parse::<Integer>().map_err(|_| ReaderError::InvalidSyntax {
-                    msg: format!("Invalid ratio numerator: {}", numerator_str),
-                    pos: self.current_token.pos,
-                })?;
-                let denom = denominator_str.parse::<Integer>().map_err(|_| ReaderError::InvalidSyntax {
-                    msg: format!("Invalid ratio denominator: {}", denominator_str),
-                    pos: self.current_token.pos,
-                })?;
+                let num =
+                    numerator_str
+                        .parse::<Integer>()
+                        .map_err(|_| ReaderError::InvalidSyntax {
+                            msg: format!("Invalid ratio numerator: {}", numerator_str),
+                            pos: self.current_token.pos,
+                        })?;
+                let denom =
+                    denominator_str
+                        .parse::<Integer>()
+                        .map_err(|_| ReaderError::InvalidSyntax {
+                            msg: format!("Invalid ratio denominator: {}", denominator_str),
+                            pos: self.current_token.pos,
+                        })?;
                 if denom == Integer::from(0) {
                     return Err(ReaderError::InvalidSyntax {
                         msg: "Ratio denominator cannot be zero".to_string(),
@@ -330,17 +342,18 @@ impl Parser {
                 Ok(list)
             }
 
-            TokenKind::HashLeftParen => {
-                self.read_vector()
-            }
+            TokenKind::HashLeftParen => self.read_vector(),
 
             TokenKind::HashC => {
                 // Complex number: #C(real imaginary)
                 self.advance()?; // skip #C
-                // Expect a list (real imaginary)
+                                 // Expect a list (real imaginary)
                 if !matches!(self.current_token.kind, TokenKind::LeftParen) {
                     return Err(ReaderError::InvalidSyntax {
-                        msg: format!("#C must be followed by (real imaginary), found {}", self.current_token.kind),
+                        msg: format!(
+                            "#C must be followed by (real imaginary), found {}",
+                            self.current_token.kind
+                        ),
                         pos: self.current_token.pos,
                     });
                 }
@@ -393,7 +406,11 @@ impl Parser {
                             }
                         }
                         rlasp_runtime::NumberValue::Complex(c) => {
-                            if c.im == 0.0 { Some(c.re) } else { None }
+                            if c.im == 0.0 {
+                                Some(c.re)
+                            } else {
+                                None
+                            }
                         }
                     }
                 };
@@ -406,7 +423,9 @@ impl Parser {
                     msg: "#C imaginary part must be a real number".to_string(),
                     pos: self.current_token.pos,
                 })?;
-                Ok(rlasp_runtime::Number::allocate_complex(num_complex::Complex::new(real_f, imag_f)))
+                Ok(rlasp_runtime::Number::allocate_complex(
+                    num_complex::Complex::new(real_f, imag_f),
+                ))
             }
 
             TokenKind::HashPlus => {
@@ -465,6 +484,12 @@ impl Parser {
                 // Next token should be a symbol
                 if let TokenKind::Symbol(name) = &self.current_token.kind {
                     let name = name.clone();
+                    if name.contains(':') {
+                        return Err(ReaderError::InvalidSyntax {
+                            msg: "#: symbol name must not contain package markers".to_string(),
+                            pos: self.current_token.pos,
+                        });
+                    }
                     self.advance()?;
                     Ok(Symbol::allocate_uninterned(name.as_str()))
                 } else {
@@ -512,10 +537,12 @@ impl Parser {
                     match ch {
                         '0' => elements.push(LispObject::fixnum(0)),
                         '1' => elements.push(LispObject::fixnum(1)),
-                        _ => return Err(ReaderError::InvalidSyntax {
-                            msg: format!("Invalid bit vector: contains '{}'", ch),
-                            pos: self.current_token.pos,
-                        }),
+                        _ => {
+                            return Err(ReaderError::InvalidSyntax {
+                                msg: format!("Invalid bit vector: contains '{}'", ch),
+                                pos: self.current_token.pos,
+                            })
+                        }
                     }
                 }
                 Ok(RVector::allocate_bit_vector(elements))
@@ -525,40 +552,44 @@ impl Parser {
                 // Array notation: #2A(...) or #3A(...)
                 // Convert nested list payload into nested vectors.
                 let array_rank = *dim as usize;
+                let make_rank0_array = |payload: LispObject| {
+                    let array = rlasp_runtime::RVector::allocate(vec![payload]);
+                    if let Some(ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
+                        unsafe { (*(ptr as *mut rlasp_runtime::RVector)).set_dims(vec![]) };
+                    }
+                    array
+                };
+                let parse_rank0_inline_payload = |text: &str| -> LispObject {
+                    if text.eq_ignore_ascii_case("nil") {
+                        return LispObject::nil();
+                    }
+                    if text.eq_ignore_ascii_case("t") {
+                        return LispObject::t();
+                    }
+                    if let Ok(n) = text.parse::<i64>() {
+                        return LispObject::fixnum(n);
+                    }
+                    rlasp_runtime::Symbol::allocate(text)
+                };
                 self.advance()?; // skip #<digit>
+                let mut inline_rank0_payload: Option<LispObject> = None;
                 // Check for 'A' or 'a'
                 if let TokenKind::Symbol(s) = &self.current_token.kind {
                     if s.eq_ignore_ascii_case("a") {
                         self.advance()?; // skip 'A'
-                    } else if array_rank == 0
-                        && (s.eq_ignore_ascii_case("a0") || s.eq_ignore_ascii_case("a1"))
-                    {
-                        let bit = if s.ends_with('1') { 1 } else { 0 };
+                    } else if array_rank == 0 && (s.starts_with('a') || s.starts_with('A')) {
+                        inline_rank0_payload = Some(parse_rank0_inline_payload(&s[1..]));
                         self.advance()?;
-                        let array = rlasp_runtime::RVector::allocate_bit_vector(vec![
-                            rlasp_runtime::LispObject::fixnum(bit),
-                        ]);
-                        if let Some(ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
-                            unsafe { (*(ptr as *mut rlasp_runtime::RVector)).set_dims(vec![]) };
-                        }
-                        return Ok(array);
                     }
                 }
-                // Read the array contents (expect a list)
-                let payload = self.read_expr()?;
+                // Read the array contents (expect a list for rank>0, any object for rank 0)
+                let payload = if let Some(payload) = inline_rank0_payload {
+                    payload
+                } else {
+                    self.read_expr()?
+                };
                 if array_rank == 0 {
-                    if let Some(bit) = payload.as_fixnum() {
-                        if bit == 0 || bit == 1 {
-                            let array = rlasp_runtime::RVector::allocate_bit_vector(vec![
-                                rlasp_runtime::LispObject::fixnum(bit),
-                            ]);
-                            if let Some(ptr) = array.as_general_ptr::<rlasp_runtime::RVector>() {
-                                unsafe { (*(ptr as *mut rlasp_runtime::RVector)).set_dims(vec![]) };
-                            }
-                            return Ok(array);
-                        }
-                    }
-                    Ok(payload)
+                    Ok(make_rank0_array(payload))
                 } else {
                     self.array_literal_to_vector(payload, array_rank)
                 }
@@ -580,7 +611,7 @@ impl Parser {
                 // References a previously defined label
                 let label_num = *label;
                 self.advance()?; // skip #n#
-                // Look up in label map
+                                 // Look up in label map
                 if let Some(&expr) = self.label_map.get(&label_num) {
                     Ok(expr)
                 } else {
@@ -634,7 +665,10 @@ impl Parser {
         let mut dot_seen = false;
         let mut dotted_tail = None;
 
-        while !matches!(self.current_token.kind, TokenKind::RightParen | TokenKind::Eof) {
+        while !matches!(
+            self.current_token.kind,
+            TokenKind::RightParen | TokenKind::Eof
+        ) {
             if matches!(self.current_token.kind, TokenKind::Dot) {
                 if elements.is_empty() {
                     return Err(ReaderError::InvalidSyntax {
@@ -651,7 +685,32 @@ impl Parser {
                 dot_seen = true;
                 self.advance()?;
 
-                dotted_tail = Some(self.read_expr()?);
+                loop {
+                    let tail_candidate = self.read_expr()?;
+                    if is_skip_marker(&tail_candidate) {
+                        if matches!(
+                            self.current_token.kind,
+                            TokenKind::RightParen | TokenKind::Eof
+                        ) {
+                            continue;
+                        }
+                        continue;
+                    }
+                    dotted_tail = Some(tail_candidate);
+                    while !matches!(
+                        self.current_token.kind,
+                        TokenKind::RightParen | TokenKind::Eof
+                    ) {
+                        let trailing = self.read_expr()?;
+                        if !is_skip_marker(&trailing) {
+                            return Err(ReaderError::InvalidSyntax {
+                                msg: "Dotted list tail must be followed only by skipped reader-conditional forms".to_string(),
+                                pos: self.current_token.pos,
+                            });
+                        }
+                    }
+                    break;
+                }
                 break;
             }
 
@@ -699,7 +758,10 @@ impl Parser {
         let mut dot_seen = false;
         let mut dotted_tail = None;
 
-        while !matches!(self.current_token.kind, TokenKind::RightBracket | TokenKind::Eof) {
+        while !matches!(
+            self.current_token.kind,
+            TokenKind::RightBracket | TokenKind::Eof
+        ) {
             if matches!(self.current_token.kind, TokenKind::Dot) {
                 if elements.is_empty() {
                     return Err(ReaderError::InvalidSyntax {
@@ -716,7 +778,32 @@ impl Parser {
                 dot_seen = true;
                 self.advance()?;
 
-                dotted_tail = Some(self.read_expr()?);
+                loop {
+                    let tail_candidate = self.read_expr()?;
+                    if is_skip_marker(&tail_candidate) {
+                        if matches!(
+                            self.current_token.kind,
+                            TokenKind::RightBracket | TokenKind::Eof
+                        ) {
+                            continue;
+                        }
+                        continue;
+                    }
+                    dotted_tail = Some(tail_candidate);
+                    while !matches!(
+                        self.current_token.kind,
+                        TokenKind::RightBracket | TokenKind::Eof
+                    ) {
+                        let trailing = self.read_expr()?;
+                        if !is_skip_marker(&trailing) {
+                            return Err(ReaderError::InvalidSyntax {
+                                msg: "Dotted list tail must be followed only by skipped reader-conditional forms".to_string(),
+                                pos: self.current_token.pos,
+                            });
+                        }
+                    }
+                    break;
+                }
                 break;
             }
 
@@ -760,7 +847,10 @@ impl Parser {
         let mut dot_seen = false;
         let mut dotted_tail = None;
 
-        while !matches!(self.current_token.kind, TokenKind::RightBrace | TokenKind::Eof) {
+        while !matches!(
+            self.current_token.kind,
+            TokenKind::RightBrace | TokenKind::Eof
+        ) {
             if matches!(self.current_token.kind, TokenKind::Dot) {
                 if elements.is_empty() {
                     return Err(ReaderError::InvalidSyntax {
@@ -777,7 +867,32 @@ impl Parser {
                 dot_seen = true;
                 self.advance()?;
 
-                dotted_tail = Some(self.read_expr()?);
+                loop {
+                    let tail_candidate = self.read_expr()?;
+                    if is_skip_marker(&tail_candidate) {
+                        if matches!(
+                            self.current_token.kind,
+                            TokenKind::RightBrace | TokenKind::Eof
+                        ) {
+                            continue;
+                        }
+                        continue;
+                    }
+                    dotted_tail = Some(tail_candidate);
+                    while !matches!(
+                        self.current_token.kind,
+                        TokenKind::RightBrace | TokenKind::Eof
+                    ) {
+                        let trailing = self.read_expr()?;
+                        if !is_skip_marker(&trailing) {
+                            return Err(ReaderError::InvalidSyntax {
+                                msg: "Dotted list tail must be followed only by skipped reader-conditional forms".to_string(),
+                                pos: self.current_token.pos,
+                            });
+                        }
+                    }
+                    break;
+                }
                 break;
             }
 
@@ -819,7 +934,10 @@ impl Parser {
 
         let mut elements = Vec::new();
 
-        while !matches!(self.current_token.kind, TokenKind::RightParen | TokenKind::Eof) {
+        while !matches!(
+            self.current_token.kind,
+            TokenKind::RightParen | TokenKind::Eof
+        ) {
             let elem = self.read_expr()?;
             // Filter out feature conditional skip markers
             if !is_skip_marker(&elem) {
@@ -872,7 +990,8 @@ impl Parser {
                 if depth == 1 {
                     flat_elements.push(raw_elem);
                 } else {
-                    let (mut child_flat, dims) = flatten_array_literal(parser, raw_elem, depth - 1)?;
+                    let (mut child_flat, dims) =
+                        flatten_array_literal(parser, raw_elem, depth - 1)?;
                     if let Some(expected) = &child_dims {
                         if *expected != dims {
                             return Err(ReaderError::InvalidSyntax {
@@ -910,7 +1029,9 @@ impl Parser {
         if let Some(vec_ptr) = out.as_general_ptr::<RVector>() {
             if !vec_ptr.is_null() {
                 let vec_ptr = vec_ptr as *mut RVector;
-                unsafe { (*vec_ptr).set_dims(dims); }
+                unsafe {
+                    (*vec_ptr).set_dims(dims);
+                }
             }
         }
         Ok(out)
@@ -985,5 +1106,16 @@ mod tests {
         let mut parser = Parser::new("(a . b)").unwrap();
         let expr = parser.read().unwrap();
         assert!(expr.is_cons());
+    }
+
+    #[test]
+    fn test_parse_dotted_tail_with_reader_conditionals() {
+        std::env::set_var("RLASP_READER_FEATURES", "asdf3");
+        let mut parser = Parser::new("(x . #-asdf3 () #+asdf3 (:encoding :utf-8))").unwrap();
+        let expr = parser.read().unwrap();
+        assert!(expr.is_cons());
+        let list = expr.as_cons_ptr().unwrap();
+        let cdr = unsafe { (*list).cdr() };
+        assert!(cdr.is_cons());
     }
 }

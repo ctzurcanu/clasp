@@ -7,9 +7,13 @@ license.workspace = true
 
 [dependencies]
 rlasp = { path = "../rlasp" }
+rlasp-compiler = { path = "../rlasp-compiler" }
 rlasp-jit = { path = "../rlasp-jit" }
 inkwell.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+rlasp-runtime = { path = "../rlasp-runtime" }
 
 [build-dependencies]

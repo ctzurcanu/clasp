@@ -111,48 +111,44 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             Ok(EvalResult::Boolean(rank == 1))
         }
 
-        "simple-vector-p" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => {
-                    let dims = get_array_dims(arr);
-                    let fp = get_array_fill_pointer(arr);
-                    let adjustable = is_array_adjustable(arr);
-                    let displaced = get_array_displacement(arr).is_some();
-                    Ok(EvalResult::Boolean(dims.len() == 1 && fp.is_none() && !adjustable && !displaced))
-                }
-                Some(EvalResult::String(_)) => Ok(EvalResult::Boolean(false)),
-                _ => Ok(EvalResult::Boolean(false)),
+        "simple-vector-p" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                let dims = get_array_dims(arr);
+                let fp = get_array_fill_pointer(arr);
+                let adjustable = is_array_adjustable(arr);
+                let displaced = get_array_displacement(arr).is_some();
+                Ok(EvalResult::Boolean(
+                    dims.len() == 1 && fp.is_none() && !adjustable && !displaced,
+                ))
             }
-        }
+            Some(EvalResult::String(_)) => Ok(EvalResult::Boolean(false)),
+            _ => Ok(EvalResult::Boolean(false)),
+        },
 
-        "bit-vector-p" | "simple-bit-vector-p" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => {
-                    let dims = get_array_dims(arr);
-                    if dims.len() != 1 {
+        "bit-vector-p" | "simple-bit-vector-p" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                let dims = get_array_dims(arr);
+                if dims.len() != 1 {
+                    return Ok(EvalResult::Boolean(false));
+                }
+                if name == "simple-bit-vector-p" {
+                    let fp = get_array_fill_pointer(arr).is_some();
+                    let displaced = get_array_displacement(arr).is_some();
+                    let adjustable = is_array_adjustable(arr);
+                    if fp || displaced || adjustable {
                         return Ok(EvalResult::Boolean(false));
                     }
-                    if name == "simple-bit-vector-p" {
-                        let fp = get_array_fill_pointer(arr).is_some();
-                        let displaced = get_array_displacement(arr).is_some();
-                        let adjustable = is_array_adjustable(arr);
-                        if fp || displaced || adjustable {
-                            return Ok(EvalResult::Boolean(false));
-                        }
-                    }
-                    let values = arr.borrow();
-                    Ok(EvalResult::Boolean(values.iter().all(bit_like)))
                 }
-                _ => Ok(EvalResult::Boolean(false)),
+                let values = arr.borrow();
+                Ok(EvalResult::Boolean(values.iter().all(bit_like)))
             }
-        }
+            _ => Ok(EvalResult::Boolean(false)),
+        },
 
-        "adjustable-array-p" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => Ok(EvalResult::Boolean(is_array_adjustable(arr))),
-                _ => Ok(EvalResult::Boolean(false)),
-            }
-        }
+        "adjustable-array-p" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => Ok(EvalResult::Boolean(is_array_adjustable(arr))),
+            _ => Ok(EvalResult::Boolean(false)),
+        },
 
         // Array creation
         "make-array" => {
@@ -178,7 +174,12 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             let mut i = 1usize;
             while i + 1 < args.len() {
                 let key = match &args[i] {
-                    EvalResult::Symbol(s) => s.rsplit(':').next().unwrap_or(s).trim_start_matches(':').to_ascii_lowercase(),
+                    EvalResult::Symbol(s) => s
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(s)
+                        .trim_start_matches(':')
+                        .to_ascii_lowercase(),
                     _ => return Err("make-array expects keyword names".to_string()),
                 };
                 let value = args[i + 1].clone();
@@ -197,8 +198,7 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                             EvalResult::Nil
                             | EvalResult::Bool(false)
                             | EvalResult::Boolean(false) => None,
-                            EvalResult::Bool(true)
-                            | EvalResult::Boolean(true) => Some(size),
+                            EvalResult::Bool(true) | EvalResult::Boolean(true) => Some(size),
                             EvalResult::Symbol(s) if s.eq_ignore_ascii_case("t") => Some(size),
                             _ => Some(as_usize(&value, "fill-pointer")?),
                         };
@@ -226,11 +226,21 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                         flatten_contents(displaced, &mut flat);
                         flat
                     }
-                    _ => return Err("make-array :displaced-to requires an array, string, or list".to_string()),
+                    _ => {
+                        return Err(
+                            "make-array :displaced-to requires an array, string, or list"
+                                .to_string(),
+                        )
+                    }
                 };
                 let mut out = Vec::with_capacity(size);
                 for idx in 0..size {
-                    out.push(source.get(displaced_offset + idx).cloned().unwrap_or(EvalResult::Nil));
+                    out.push(
+                        source
+                            .get(displaced_offset + idx)
+                            .cloned()
+                            .unwrap_or(EvalResult::Nil),
+                    );
                 }
                 out
             } else if let Some(contents) = initial_contents {
@@ -264,77 +274,73 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
         }
 
         // Array access
-        "aref" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => {
-                    let dims = get_array_dims(arr);
-                    let values = arr.borrow();
-                    if dims.is_empty() {
-                        if args.len() != 1 {
-                            return Err("aref on scalar array takes no subscripts".to_string());
-                        }
-                        return values
-                            .get(0)
-                            .cloned()
-                            .ok_or_else(|| "aref out of bounds".to_string());
+        "aref" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                let dims = get_array_dims(arr);
+                let values = arr.borrow();
+                if dims.is_empty() {
+                    if args.len() != 1 {
+                        return Err("aref on scalar array takes no subscripts".to_string());
                     }
-                    if args.len() != dims.len() + 1 {
-                        return Err("aref wrong number of subscripts".to_string());
-                    }
-                    let mut linear = 0usize;
-                    for (axis, dim) in dims.iter().enumerate() {
-                        let index = as_usize(
-                            args.get(axis + 1)
-                                .ok_or("aref requires subscript for each dimension")?,
-                            "index",
-                        )?;
-                        if index >= *dim {
-                            return Err("aref index out of bounds".to_string());
-                        }
-                        linear = linear.saturating_mul(*dim).saturating_add(index);
-                    }
-                    values
-                        .get(linear)
+                    return values
+                        .get(0)
                         .cloned()
-                        .ok_or_else(|| "aref index out of bounds".to_string())
+                        .ok_or_else(|| "aref out of bounds".to_string());
                 }
-                Some(EvalResult::String(s)) => {
-                    if args.len() != 2 {
-                        return Err("aref on string requires one index".to_string());
+                if args.len() != dims.len() + 1 {
+                    return Err("aref wrong number of subscripts".to_string());
+                }
+                let mut linear = 0usize;
+                for (axis, dim) in dims.iter().enumerate() {
+                    let index = as_usize(
+                        args.get(axis + 1)
+                            .ok_or("aref requires subscript for each dimension")?,
+                        "index",
+                    )?;
+                    if index >= *dim {
+                        return Err("aref index out of bounds".to_string());
                     }
-                    let idx = as_usize(args.get(1).ok_or("aref requires index")?, "index")?;
-                    s.chars()
-                        .nth(idx)
-                        .map(EvalResult::Character)
-                        .ok_or_else(|| "aref index out of bounds".to_string())
+                    linear = linear.saturating_mul(*dim).saturating_add(index);
                 }
-                _ => Err("aref requires an array".to_string()),
+                values
+                    .get(linear)
+                    .cloned()
+                    .ok_or_else(|| "aref index out of bounds".to_string())
             }
-        }
+            Some(EvalResult::String(s)) => {
+                if args.len() != 2 {
+                    return Err("aref on string requires one index".to_string());
+                }
+                let idx = as_usize(args.get(1).ok_or("aref requires index")?, "index")?;
+                s.chars()
+                    .nth(idx)
+                    .map(EvalResult::Character)
+                    .ok_or_else(|| "aref index out of bounds".to_string())
+            }
+            _ => Err("aref requires an array".to_string()),
+        },
 
-        "svref" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => {
-                    let dims = get_array_dims(arr);
-                    if dims.len() != 1 {
-                        return Err("svref requires a vector".to_string());
-                    }
-                    let index = as_usize(args.get(1).ok_or("svref requires index")?, "index")?;
-                    arr.borrow()
-                        .get(index)
-                        .cloned()
-                        .ok_or_else(|| "svref index out of bounds".to_string())
+        "svref" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                let dims = get_array_dims(arr);
+                if dims.len() != 1 {
+                    return Err("svref requires a vector".to_string());
                 }
-                Some(EvalResult::String(s)) => {
-                    let index = as_usize(args.get(1).ok_or("svref requires index")?, "index")?;
-                    s.chars()
-                        .nth(index)
-                        .map(EvalResult::Character)
-                        .ok_or_else(|| "svref index out of bounds".to_string())
-                }
-                _ => Err("svref requires a vector".to_string()),
+                let index = as_usize(args.get(1).ok_or("svref requires index")?, "index")?;
+                arr.borrow()
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "svref index out of bounds".to_string())
             }
-        }
+            Some(EvalResult::String(s)) => {
+                let index = as_usize(args.get(1).ok_or("svref requires index")?, "index")?;
+                s.chars()
+                    .nth(index)
+                    .map(EvalResult::Character)
+                    .ok_or_else(|| "svref index out of bounds".to_string())
+            }
+            _ => Err("svref requires a vector".to_string()),
+        },
 
         "row-major-aref" => {
             if args.len() != 2 {
@@ -342,8 +348,16 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             }
             let idx = as_usize(args.get(1).ok_or("row-major-aref requires index")?, "index")?;
             match args.get(0) {
-                Some(EvalResult::Array(arr)) => arr.borrow().get(idx).cloned().ok_or_else(|| "row-major-aref out of bounds".to_string()),
-                Some(EvalResult::String(s)) => s.chars().nth(idx).map(EvalResult::Character).ok_or_else(|| "row-major-aref out of bounds".to_string()),
+                Some(EvalResult::Array(arr)) => arr
+                    .borrow()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| "row-major-aref out of bounds".to_string()),
+                Some(EvalResult::String(s)) => s
+                    .chars()
+                    .nth(idx)
+                    .map(EvalResult::Character)
+                    .ok_or_else(|| "row-major-aref out of bounds".to_string()),
                 _ => Err("row-major-aref requires an array".to_string()),
             }
         }
@@ -353,7 +367,10 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             if args.len() != 2 {
                 return Err("array-dimension requires 2 args".to_string());
             }
-            let axis = as_usize(args.get(1).ok_or("array-dimension requires axis")?, "axis-number")?;
+            let axis = as_usize(
+                args.get(1).ok_or("array-dimension requires axis")?,
+                "axis-number",
+            )?;
             match args.get(0) {
                 Some(EvalResult::Array(arr)) => get_array_dims(arr)
                     .get(axis)
@@ -370,29 +387,25 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             }
         }
 
-        "array-dimensions" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => Ok(build_int_list(&get_array_dims(arr))),
-                Some(EvalResult::String(s)) => Ok(build_int_list(&[s.chars().count()])),
-                _ => Err("array-dimensions requires an array".to_string()),
-            }
-        }
+        "array-dimensions" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => Ok(build_int_list(&get_array_dims(arr))),
+            Some(EvalResult::String(s)) => Ok(build_int_list(&[s.chars().count()])),
+            _ => Err("array-dimensions requires an array".to_string()),
+        },
 
-        "array-rank" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => Ok(EvalResult::Fixnum(get_array_dims(arr).len() as i64)),
-                Some(EvalResult::String(_)) => Ok(EvalResult::Fixnum(1)),
-                _ => Err("array-rank requires an array".to_string()),
+        "array-rank" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                Ok(EvalResult::Fixnum(get_array_dims(arr).len() as i64))
             }
-        }
+            Some(EvalResult::String(_)) => Ok(EvalResult::Fixnum(1)),
+            _ => Err("array-rank requires an array".to_string()),
+        },
 
-        "array-total-size" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => Ok(EvalResult::Fixnum(arr.borrow().len() as i64)),
-                Some(EvalResult::String(s)) => Ok(EvalResult::Fixnum(s.chars().count() as i64)),
-                _ => Err("array-total-size requires an array".to_string()),
-            }
-        }
+        "array-total-size" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => Ok(EvalResult::Fixnum(arr.borrow().len() as i64)),
+            Some(EvalResult::String(s)) => Ok(EvalResult::Fixnum(s.chars().count() as i64)),
+            _ => Err("array-total-size requires an array".to_string()),
+        },
 
         "array-in-bounds-p" => {
             if args.is_empty() {
@@ -415,7 +428,8 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             }
             for (i, dim) in dims.iter().enumerate() {
                 let index = as_usize(
-                    args.get(i + 1).ok_or("array-in-bounds-p requires subscript")?,
+                    args.get(i + 1)
+                        .ok_or("array-in-bounds-p requires subscript")?,
                     "subscript",
                 )?;
                 if index >= *dim {
@@ -438,7 +452,9 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 if args.len() == 1 {
                     return Ok(EvalResult::Fixnum(0));
                 }
-                return Err("array-row-major-index requires no subscripts for rank-0 arrays".to_string());
+                return Err(
+                    "array-row-major-index requires no subscripts for rank-0 arrays".to_string(),
+                );
             }
             if args.len() != dims.len() + 1 {
                 return Err("array-row-major-index requires one index per dimension".to_string());
@@ -446,7 +462,8 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             let mut index = 0usize;
             for (i, dim) in dims.iter().enumerate() {
                 let sub = as_usize(
-                    args.get(i + 1).ok_or("array-row-major-index requires subscript")?,
+                    args.get(i + 1)
+                        .ok_or("array-row-major-index requires subscript")?,
                     "subscript",
                 )?;
                 if sub >= *dim {
@@ -458,49 +475,57 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
         }
 
         // Array properties
-        "array-element-type" => {
-            match args.get(0) {
-                Some(EvalResult::String(_)) => Ok(EvalResult::Symbol("CHARACTER".to_string())),
-                Some(EvalResult::Array(_)) => Ok(EvalResult::Symbol("T".to_string())),
-                _ => Err("array-element-type requires an array".to_string()),
-            }
-        }
+        "array-element-type" => match args.get(0) {
+            Some(EvalResult::String(_)) => Ok(EvalResult::Symbol("CHARACTER".to_string())),
+            Some(EvalResult::Array(_)) => Ok(EvalResult::Symbol("T".to_string())),
+            _ => Err("array-element-type requires an array".to_string()),
+        },
 
-        "array-has-fill-pointer-p" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => Ok(EvalResult::Boolean(get_array_fill_pointer(arr).is_some())),
-                _ => Ok(EvalResult::Boolean(false)),
+        "array-has-fill-pointer-p" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                Ok(EvalResult::Boolean(get_array_fill_pointer(arr).is_some()))
             }
-        }
+            _ => Ok(EvalResult::Boolean(false)),
+        },
 
-        "fill-pointer" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => get_array_fill_pointer(arr)
-                    .map(|fp| EvalResult::Fixnum(fp as i64))
-                    .ok_or_else(|| "fill-pointer only for vector with fill pointer".to_string()),
-                _ => Err("fill-pointer requires a vector".to_string()),
-            }
-        }
-
-        "array-displacement" => {
-            match args.get(0) {
-                Some(EvalResult::Array(arr)) => {
-                    if let Some((displaced, offset)) = get_array_displacement(arr) {
-                        Ok(EvalResult::MultipleValues(vec![
-                            displaced,
-                            EvalResult::Fixnum(offset as i64),
-                        ]))
-                    } else {
-                        Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Fixnum(0)]))
-                    }
+        "fill-pointer" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                let dims = get_array_dims(arr);
+                if dims.len() != 1 {
+                    return Err("TYPE-ERROR".to_string());
                 }
-                _ => Ok(EvalResult::MultipleValues(vec![EvalResult::Nil, EvalResult::Fixnum(0)])),
+                get_array_fill_pointer(arr)
+                    .map(|fp| EvalResult::Fixnum(fp as i64))
+                    .ok_or_else(|| "TYPE-ERROR".to_string())
             }
-        }
+            _ => Err("fill-pointer requires a vector".to_string()),
+        },
+
+        "array-displacement" => match args.get(0) {
+            Some(EvalResult::Array(arr)) => {
+                if let Some((displaced, offset)) = get_array_displacement(arr) {
+                    Ok(EvalResult::MultipleValues(vec![
+                        displaced,
+                        EvalResult::Fixnum(offset as i64),
+                    ]))
+                } else {
+                    Ok(EvalResult::MultipleValues(vec![
+                        EvalResult::Nil,
+                        EvalResult::Fixnum(0),
+                    ]))
+                }
+            }
+            _ => Ok(EvalResult::MultipleValues(vec![
+                EvalResult::Nil,
+                EvalResult::Fixnum(0),
+            ])),
+        },
 
         // Aliases with different naming conventions (camelCase)
         "arrayDimension" => match args.get(0) {
-            Some(EvalResult::Array(arr)) => Ok(EvalResult::Fixnum(get_array_dims(arr).len() as i64)),
+            Some(EvalResult::Array(arr)) => {
+                Ok(EvalResult::Fixnum(get_array_dims(arr).len() as i64))
+            }
             Some(EvalResult::String(s)) => Ok(EvalResult::Fixnum(s.chars().count() as i64)),
             _ => Err("arrayDimension requires an array".to_string()),
         },
@@ -518,7 +543,9 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
         },
 
         "arrayHasFillPointerP" => match args.get(0) {
-            Some(EvalResult::Array(arr)) => Ok(EvalResult::Boolean(get_array_fill_pointer(arr).is_some())),
+            Some(EvalResult::Array(arr)) => {
+                Ok(EvalResult::Boolean(get_array_fill_pointer(arr).is_some()))
+            }
             _ => Ok(EvalResult::Boolean(false)),
         },
 
@@ -535,7 +562,9 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 if args.len() == 1 {
                     return Ok(EvalResult::Fixnum(0));
                 }
-                return Err("arrayRowMajorIndex requires no subscripts for rank-0 arrays".to_string());
+                return Err(
+                    "arrayRowMajorIndex requires no subscripts for rank-0 arrays".to_string(),
+                );
             }
             if args.len() != dims.len() + 1 {
                 return Err("arrayRowMajorIndex requires one index per dimension".to_string());
@@ -543,7 +572,8 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             let mut index = 0usize;
             for (i, dim) in dims.iter().enumerate() {
                 let sub = as_usize(
-                    args.get(i + 1).ok_or("arrayRowMajorIndex requires subscript")?,
+                    args.get(i + 1)
+                        .ok_or("arrayRowMajorIndex requires subscript")?,
                     "subscript",
                 )?;
                 if sub >= *dim {
@@ -552,7 +582,7 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 index = index.saturating_mul(*dim).saturating_add(sub);
             }
             Ok(EvalResult::Fixnum(index as i64))
-        },
+        }
 
         "arrayTotalSize" => match args.get(0) {
             Some(EvalResult::Array(arr)) => Ok(EvalResult::Fixnum(arr.borrow().len() as i64)),
@@ -573,8 +603,16 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
             }
             let idx = as_usize(args.get(1).ok_or("rowMajorAref requires index")?, "index")?;
             match args.get(0) {
-                Some(EvalResult::Array(arr)) => arr.borrow().get(idx).cloned().ok_or_else(|| "rowMajorAref out of bounds".to_string()),
-                Some(EvalResult::String(s)) => s.chars().nth(idx).map(EvalResult::Character).ok_or_else(|| "rowMajorAref out of bounds".to_string()),
+                Some(EvalResult::Array(arr)) => arr
+                    .borrow()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| "rowMajorAref out of bounds".to_string()),
+                Some(EvalResult::String(s)) => s
+                    .chars()
+                    .nth(idx)
+                    .map(EvalResult::Character)
+                    .ok_or_else(|| "rowMajorAref out of bounds".to_string()),
                 _ => Err("rowMajorAref requires an array".to_string()),
             }
         }
@@ -587,7 +625,8 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 EvalResult::Array(arr) => arr,
                 _ => return Err("vector-push requires a vector".to_string()),
             };
-            let fp = get_array_fill_pointer(vector).ok_or_else(|| "vector-push requires a vector with fill pointer".to_string())?;
+            let fp = get_array_fill_pointer(vector)
+                .ok_or_else(|| "vector-push requires a vector with fill pointer".to_string())?;
             let mut cells = vector.borrow_mut();
             if fp >= cells.len() {
                 return Ok(EvalResult::Nil);
@@ -605,9 +644,13 @@ pub fn call_array_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResult,
                 EvalResult::Array(arr) => arr,
                 _ => return Err("vector-push-extend requires a vector".to_string()),
             };
-            let fp = get_array_fill_pointer(vector)
-                .ok_or_else(|| "vector-push-extend requires a vector with fill pointer".to_string())?;
-            let extension = args.get(2).map(|v| as_usize(v, "extension-size").unwrap_or(1)).unwrap_or(1);
+            let fp = get_array_fill_pointer(vector).ok_or_else(|| {
+                "vector-push-extend requires a vector with fill pointer".to_string()
+            })?;
+            let extension = args
+                .get(2)
+                .map(|v| as_usize(v, "extension-size").unwrap_or(1))
+                .unwrap_or(1);
             if extension == 0 {
                 return Err("vector-push-extend extension size must be positive".to_string());
             }

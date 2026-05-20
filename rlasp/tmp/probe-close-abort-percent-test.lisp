@@ -1,0 +1,22 @@
+(load "clisp/in_work/regression-tests/framework.lisp")
+(in-package #:clasp-tests)
+
+(%test 'close.abort.03.probe
+       '(close-abort-form)
+       (lambda ()
+         (let* ((name (core:mkstemp "close-abort"))
+                (stream (open name :if-does-not-exist :create :direction :output))
+                (buffer (make-array 3 :element-type 'character)))
+           (write-string "foo" stream)
+           (close stream)
+           (setf stream (open name :if-does-not-exist :create :if-exists :supersede :direction :output))
+           (write-string "bar" stream)
+           (close stream)
+           (setf stream (open name :direction :input))
+           (read-sequence buffer stream :start 0 :end 3)
+           (close stream)
+           (delete-file name)
+           buffer))
+       '("bar"))
+
+(show-test-summary)

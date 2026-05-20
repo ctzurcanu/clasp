@@ -8,28 +8,47 @@
 
 use crate::object::LispObject;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Global class registry for CPL computation and class lookup
 static mut CLASS_TABLE: Option<Mutex<HashMap<String, *const Class>>> = None;
 static mut INSTANCE_TABLE: Option<Mutex<HashSet<usize>>> = None;
+static CLASS_ROOTS: std::sync::LazyLock<Mutex<Vec<usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn get_class_table() -> &'static Mutex<HashMap<String, *const Class>> {
-    unsafe {
-        CLASS_TABLE.get_or_insert_with(|| Mutex::new(HashMap::new()))
-    }
+    unsafe { CLASS_TABLE.get_or_insert_with(|| Mutex::new(HashMap::new())) }
 }
 
 fn get_instance_table() -> &'static Mutex<HashSet<usize>> {
-    unsafe {
-        INSTANCE_TABLE.get_or_insert_with(|| Mutex::new(HashSet::new()))
-    }
+    unsafe { INSTANCE_TABLE.get_or_insert_with(|| Mutex::new(HashSet::new())) }
 }
 
 /// Register a class in the global table
 pub fn register_class(name: &str, class_ptr: *const Class) {
+    root_class_ptr(class_ptr);
     let mut table = get_class_table().lock().unwrap();
     table.insert(name.to_string(), class_ptr);
+}
+
+/// Remove a class binding from the global table.
+pub fn unregister_class(name: &str) {
+    let mut table = get_class_table().lock().unwrap();
+    table.remove(name);
+}
+
+fn root_class_ptr(class_ptr: *const Class) {
+    if class_ptr.is_null() {
+        return;
+    }
+
+    // Class tables live in Rust heap allocations, which Boehm does not reliably
+    // treat as roots. Keep one explicit process-lifetime root per registered class.
+    let slot = Box::into_raw(Box::new(class_ptr as usize));
+    unsafe {
+        crate::gc::gc_add_root_range(slot as *mut u8, slot.add(1) as *mut u8);
+    }
+    CLASS_ROOTS.lock().unwrap().push(slot as usize);
 }
 
 /// Look up a class by name
@@ -42,6 +61,8 @@ pub fn find_class(name: &str) -> Option<*const Class> {
 #[repr(C)]
 pub struct Class {
     name: String,
+    /// Metaclass name for this class object.
+    metaclass_name: String,
     /// Direct slots defined by this class
     direct_slots: Vec<String>,
     /// All slots including inherited ones
@@ -60,6 +81,7 @@ impl Class {
         let cpl = vec![name.clone(), "T".to_string()];
         Self {
             name: name.clone(),
+            metaclass_name: "STANDARD-CLASS".to_string(),
             direct_slots: slots.clone(),
             all_slots: slots,
             direct_superclasses: vec!["T".to_string()],
@@ -74,6 +96,16 @@ impl Class {
         direct_slots: Vec<String>,
         superclass_names: Vec<String>,
     ) -> Self {
+        Self::new_with_superclasses_and_metaclass(name, direct_slots, superclass_names, None)
+    }
+
+    /// Create a class with superclasses and an explicit metaclass.
+    pub fn new_with_superclasses_and_metaclass(
+        name: String,
+        direct_slots: Vec<String>,
+        superclass_names: Vec<String>,
+        metaclass_name: Option<String>,
+    ) -> Self {
         // Compute CPL using C3 linearization
         let cpl = compute_cpl(&name, &superclass_names);
 
@@ -82,6 +114,7 @@ impl Class {
 
         Self {
             name: name.clone(),
+            metaclass_name: metaclass_name.unwrap_or_else(|| "STANDARD-CLASS".to_string()),
             direct_slots,
             all_slots,
             direct_superclasses: if superclass_names.is_empty() {
@@ -96,6 +129,10 @@ impl Class {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn metaclass_name(&self) -> &str {
+        &self.metaclass_name
     }
 
     /// Get all slots (direct + inherited)
@@ -120,7 +157,9 @@ impl Class {
 
     /// Check if this class is a subclass of another
     pub fn is_subclass_of(&self, other_name: &str) -> bool {
-        self.class_precedence_list.iter().any(|n| n.eq_ignore_ascii_case(other_name))
+        self.class_precedence_list
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(other_name))
     }
 
     pub fn add_method(&self, name: String, func_ptr: usize) {
@@ -147,8 +186,24 @@ impl Class {
         slots: Vec<String>,
         superclasses: Vec<String>,
     ) -> LispObject {
+        Self::allocate_with_superclasses_and_metaclass(name, slots, superclasses, None)
+    }
+
+    /// Allocate a class with superclasses and an explicit metaclass.
+    pub fn allocate_with_superclasses_and_metaclass(
+        name: String,
+        slots: Vec<String>,
+        superclasses: Vec<String>,
+        metaclass_name: Option<String>,
+    ) -> LispObject {
         let ptr = unsafe {
-            crate::gc::gc_allocate_value(Class::new_with_superclasses(name.clone(), slots, superclasses)).as_ptr()
+            crate::gc::gc_allocate_value(Class::new_with_superclasses_and_metaclass(
+                name.clone(),
+                slots,
+                superclasses,
+                metaclass_name,
+            ))
+            .as_ptr()
         };
         // Register in global table
         register_class(&name, ptr);
@@ -194,9 +249,9 @@ fn compute_cpl(class_name: &str, direct_superclasses: &[String]) -> Vec<String> 
         for (i, list) in superclass_cpls.iter().enumerate() {
             if let Some(head) = list.first() {
                 // Check if head is in the tail of any other list
-                let in_tail = superclass_cpls.iter().any(|other| {
-                    other.len() > 1 && other[1..].contains(head)
-                });
+                let in_tail = superclass_cpls
+                    .iter()
+                    .any(|other| other.len() > 1 && other[1..].contains(head));
 
                 if !in_tail && !result.contains(head) {
                     found_head = Some((i, head.clone()));
@@ -282,6 +337,10 @@ impl Instance {
         self.class
     }
 
+    pub fn set_class(&mut self, class: *const Class) {
+        self.class = class;
+    }
+
     pub fn get_slot(&self, name: &str) -> Option<LispObject> {
         let slots = self.slots.read().unwrap();
         slots.get(name).copied()
@@ -295,6 +354,14 @@ impl Instance {
     pub fn slots_count(&self) -> usize {
         let slots = self.slots.read().unwrap();
         slots.len()
+    }
+
+    pub fn slot_entries(&self) -> Vec<(String, LispObject)> {
+        let slots = self.slots.read().unwrap();
+        slots
+            .iter()
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
     }
 
     pub fn debug_print_slots(&self) {
@@ -346,7 +413,11 @@ impl LispObject {
             if (ptr as usize) < 0x1000 {
                 return None;
             }
-            if get_instance_table().lock().unwrap().contains(&(ptr as usize)) {
+            if get_instance_table()
+                .lock()
+                .unwrap()
+                .contains(&(ptr as usize))
+            {
                 Some(ptr)
             } else {
                 None
@@ -369,6 +440,9 @@ impl Drop for Class {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        get_instance_table().lock().unwrap().remove(&(self as *const Instance as usize));
+        get_instance_table()
+            .lock()
+            .unwrap()
+            .remove(&(self as *const Instance as usize));
     }
 }

@@ -50,19 +50,14 @@ impl CFuncRef {
                 .get(name.as_bytes())
                 .map_err(|e| format!("Failed to load symbol {}: {}", name, e))?;
 
-            Ok(Self::new(
-                name,
-                *symbol,
-                return_type,
-                param_types,
-                variadic,
-            ))
+            Ok(Self::new(name, *symbol, return_type, param_types, variadic))
         }
     }
 
     /// Get function signature as a string
     pub fn signature(&self) -> String {
-        let params = self.param_types
+        let params = self
+            .param_types
             .iter()
             .enumerate()
             .map(|(i, ty)| format!("arg{}: {:?}", i, ty))

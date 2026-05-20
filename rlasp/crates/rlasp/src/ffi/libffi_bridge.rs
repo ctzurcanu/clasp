@@ -6,7 +6,9 @@ pub fn lower_ccall(call: &CCall) -> Result<CCallResult, String> {
     call.validate()?;
 
     let return_type = call.function.return_type.to_ffi_type();
-    let arg_types: Vec<Type> = call.function.param_types
+    let arg_types: Vec<Type> = call
+        .function
+        .param_types
         .iter()
         .map(|t| t.to_ffi_type())
         .collect();

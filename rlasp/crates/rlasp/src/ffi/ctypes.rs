@@ -50,9 +50,10 @@ impl CType {
             CType::Double => Some(size_of::<f64>()),
             CType::Pointer(_) => Some(size_of::<*const ()>()),
             CType::Function { .. } => Some(size_of::<*const ()>()),
-            CType::Array { element_type, size: Some(n) } => {
-                element_type.size().map(|elem_size| elem_size * n)
-            }
+            CType::Array {
+                element_type,
+                size: Some(n),
+            } => element_type.size().map(|elem_size| elem_size * n),
             _ => None,
         }
     }

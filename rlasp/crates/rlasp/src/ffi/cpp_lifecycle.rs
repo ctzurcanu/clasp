@@ -88,7 +88,9 @@ fn arg_to_string(arg: &CppArg, label: &str) -> Result<String, String> {
 
 pub fn new_object(class_name: &str, ctor_args: &[CppArg]) -> Result<i64, String> {
     let class = canonical_name(class_name);
-    let mut mgr = CPP_MANAGER.lock().map_err(|_| "cpp manager poisoned".to_string())?;
+    let mut mgr = CPP_MANAGER
+        .lock()
+        .map_err(|_| "cpp manager poisoned".to_string())?;
 
     match class.as_str() {
         "testclass" => {
@@ -131,7 +133,9 @@ pub fn new_object(class_name: &str, ctor_args: &[CppArg]) -> Result<i64, String>
 }
 
 pub fn delete_object(handle: i64) -> Result<(), String> {
-    let mut mgr = CPP_MANAGER.lock().map_err(|_| "cpp manager poisoned".to_string())?;
+    let mut mgr = CPP_MANAGER
+        .lock()
+        .map_err(|_| "cpp manager poisoned".to_string())?;
     let object = mgr
         .objects
         .remove(&handle)
@@ -145,7 +149,9 @@ pub fn delete_object(handle: i64) -> Result<(), String> {
 }
 
 pub fn call_method(handle: i64, method_name: &str, args: &[CppArg]) -> Result<CppValue, String> {
-    let mut mgr = CPP_MANAGER.lock().map_err(|_| "cpp manager poisoned".to_string())?;
+    let mut mgr = CPP_MANAGER
+        .lock()
+        .map_err(|_| "cpp manager poisoned".to_string())?;
     let (is_test_class, ptr) = match mgr.objects.get(&handle) {
         Some(CppObject::TestClass(ptr)) => (true, *ptr),
         Some(CppObject::Vector(ptr)) => (false, *ptr),
@@ -158,7 +164,8 @@ pub fn call_method(handle: i64, method_name: &str, args: &[CppArg]) -> Result<Cp
             "getvalue" => Ok(CppValue::Int(unsafe { test_class_get_value(ptr) as i64 })),
             "setvalue" => {
                 let value = arg_to_i64(
-                    args.get(0).ok_or_else(|| "set-value requires value argument".to_string())?,
+                    args.get(0)
+                        .ok_or_else(|| "set-value requires value argument".to_string())?,
                     "set-value argument",
                 )? as i32;
                 unsafe { test_class_set_value(ptr, value) };
@@ -176,16 +183,19 @@ pub fn call_method(handle: i64, method_name: &str, args: &[CppArg]) -> Result<Cp
             }
             "setname" => {
                 let name = arg_to_string(
-                    args.get(0).ok_or_else(|| "set-name requires name argument".to_string())?,
+                    args.get(0)
+                        .ok_or_else(|| "set-name requires name argument".to_string())?,
                     "set-name argument",
                 )?;
-                let c_name = CString::new(name).map_err(|_| "name contains NUL byte".to_string())?;
+                let c_name =
+                    CString::new(name).map_err(|_| "name contains NUL byte".to_string())?;
                 unsafe { test_class_set_name(ptr, c_name.as_ptr()) };
                 Ok(CppValue::Nil)
             }
             "add" => {
                 let value = arg_to_i64(
-                    args.get(0).ok_or_else(|| "add requires integer argument".to_string())?,
+                    args.get(0)
+                        .ok_or_else(|| "add requires integer argument".to_string())?,
                     "add argument",
                 )? as i32;
                 Ok(CppValue::Int(unsafe { test_class_add(ptr, value) as i64 }))
@@ -198,7 +208,8 @@ pub fn call_method(handle: i64, method_name: &str, args: &[CppArg]) -> Result<Cp
             "gety" => Ok(CppValue::Float(unsafe { vector_getY(ptr) })),
             "setx" => {
                 let x = arg_to_f64(
-                    args.get(0).ok_or_else(|| "set-x requires value argument".to_string())?,
+                    args.get(0)
+                        .ok_or_else(|| "set-x requires value argument".to_string())?,
                     "set-x argument",
                 )?;
                 unsafe { vector_setX(ptr, x) };
@@ -206,7 +217,8 @@ pub fn call_method(handle: i64, method_name: &str, args: &[CppArg]) -> Result<Cp
             }
             "sety" => {
                 let y = arg_to_f64(
-                    args.get(0).ok_or_else(|| "set-y requires value argument".to_string())?,
+                    args.get(0)
+                        .ok_or_else(|| "set-y requires value argument".to_string())?,
                     "set-y argument",
                 )?;
                 unsafe { vector_setY(ptr, y) };
@@ -218,7 +230,10 @@ pub fn call_method(handle: i64, method_name: &str, args: &[CppArg]) -> Result<Cp
                     Some(CppArg::Handle(h)) => *h,
                     Some(CppArg::Int(h)) => *h,
                     Some(other) => {
-                        return Err(format!("vector add requires handle argument, got {:?}", other));
+                        return Err(format!(
+                            "vector add requires handle argument, got {:?}",
+                            other
+                        ));
                     }
                     None => return Err("vector add requires another vector handle".to_string()),
                 };

@@ -1,3 +1,5 @@
+pub mod ast;
+pub mod codegen;
 /// IR - Intermediate representation (Cleavir2-style)
 ///
 /// Three-level IR hierarchy:
@@ -6,26 +8,23 @@
 /// - BLIR (Backend Low-level IR): Memory-explicit IR
 ///
 /// Currently implementing BIR level.
-
 pub mod datum;
-pub mod instruction;
 pub mod iblock;
-pub mod module;
-pub mod ast;
-pub mod lower;
-pub mod passes;
-pub mod codegen;
-pub mod wasm_codegen;
+pub mod instruction;
 pub mod interpreter;
+pub mod lower;
+pub mod module;
+pub mod passes;
+pub mod wasm_codegen;
 
-pub use rlasp_runtime::FloatFormat;
-pub use datum::*;
-pub use instruction::*;
-pub use iblock::*;
-pub use module::*;
 pub use ast::*;
-pub use lower::*;
-pub use passes::*;
 pub use codegen::*;
-pub use wasm_codegen::*;
+pub use datum::*;
+pub use iblock::*;
+pub use instruction::*;
 pub use interpreter::*;
+pub use lower::*;
+pub use module::*;
+pub use passes::*;
+pub use rlasp_runtime::FloatFormat;
+pub use wasm_codegen::*;

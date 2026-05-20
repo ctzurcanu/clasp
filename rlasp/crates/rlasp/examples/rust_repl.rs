@@ -24,7 +24,11 @@ pub fn pow(base: f64, exp: f64) -> f64 {
 /// Check if even
 #[lisp_fn]
 pub fn is_even(n: i64) -> i64 {
-    if n % 2 == 0 { 1 } else { 0 }
+    if n % 2 == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 fn main() {

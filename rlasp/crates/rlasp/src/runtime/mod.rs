@@ -1,7 +1,7 @@
-pub mod object;
 pub mod handles;
+pub mod object;
 pub mod rooting;
 
-pub use object::*;
 pub use handles::*;
+pub use object::*;
 pub use rooting::*;

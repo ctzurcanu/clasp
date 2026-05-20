@@ -11,10 +11,10 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Tag {
-    Fixnum = 0b00,      // Immediate 62-bit signed integer
-    Cons = 0b01,        // Cons cell pointer (heap)
-    Character = 0b10,   // Immediate 30-bit Unicode character
-    General = 0b11,     // General heap object pointer
+    Fixnum = 0b00,    // Immediate 62-bit signed integer
+    Cons = 0b01,      // Cons cell pointer (heap)
+    Character = 0b10, // Immediate 30-bit Unicode character
+    General = 0b11,   // General heap object pointer
 }
 
 impl Tag {
@@ -272,7 +272,7 @@ impl fmt::Display for LispObject {
                 }
             }
             Tag::Character => write!(f, "#\\{}", self.as_character_unchecked()),
-            Tag::Cons => write!(f, "(...)"),  // Will be handled by cons module
+            Tag::Cons => write!(f, "(...)"), // Will be handled by cons module
             Tag::General => write!(f, "#<OBJECT>"),
         }
     }

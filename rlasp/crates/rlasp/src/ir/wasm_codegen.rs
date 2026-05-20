@@ -1,10 +1,11 @@
 /// LLVM-based code generation from BIR
 ///
 /// Uses LLVM backend to compile BIR → LLVM IR → WASM/Native
-
 use super::module::Module;
 use inkwell::context::Context;
-use inkwell::targets::{InitializationConfig, Target, TargetMachine, RelocMode, CodeModel, FileType};
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
 use inkwell::OptimizationLevel;
 use std::path::Path;
 
@@ -75,15 +76,15 @@ impl WasmCodegen {
             CompileTarget::Native => TargetMachine::get_default_triple(),
         };
 
-        let target = Target::from_triple(&triple)
-            .map_err(|e| format!("Failed to create target: {}", e))?;
+        let target =
+            Target::from_triple(&triple).map_err(|e| format!("Failed to create target: {}", e))?;
 
         let target_machine = target
             .create_target_machine(
                 &triple,
                 "",
                 "",
-                OptimizationLevel::None,  // Disable optimizations to see actual instructions
+                OptimizationLevel::None, // Disable optimizations to see actual instructions
                 RelocMode::Default,
                 CodeModel::Default,
             )
@@ -143,12 +144,14 @@ impl WasmCodegen {
         llvm_module: &inkwell::module::Module<'ctx>,
         builder: &inkwell::builder::Builder<'ctx>,
     ) -> Result<(), String> {
+        use super::datum::{ConstantValue, Datum};
+        use super::instruction::InstructionKind;
         use inkwell::values::BasicValueEnum;
         use std::collections::HashMap;
-        use super::instruction::InstructionKind;
-        use super::datum::{Datum, ConstantValue};
 
-        let func = self._module.get_function(func_id)
+        let func = self
+            ._module
+            .get_function(func_id)
             .ok_or_else(|| format!("Function {} not found", func_id))?;
 
         // Create LLVM function with external linkage so it gets exported
@@ -177,17 +180,21 @@ impl WasmCodegen {
                 } else {
                     return Err(format!("Value for datum {:?} not found", $datum_id));
                 }
-            }}
+            }};
         }
 
         // Get entry block
-        let bir_block = self._module.get_block(func.entry)
+        let bir_block = self
+            ._module
+            .get_block(func.entry)
             .ok_or_else(|| format!("Entry block not found"))?;
 
         // Walk through instructions
         let mut current_inst = bir_block.start;
         while let Some(inst_id) = current_inst {
-            let inst = self._module.get_instruction(inst_id)
+            let inst = self
+                ._module
+                .get_instruction(inst_id)
                 .ok_or_else(|| format!("Instruction {:?} not found", inst_id))?;
 
             match &inst.kind {
@@ -195,9 +202,7 @@ impl WasmCodegen {
                     // Load constant value
                     if let Some(Datum::Constant(c)) = self._module.get_datum(*value_id) {
                         let llvm_val = match &c.value {
-                            ConstantValue::Fixnum(n) => {
-                                i64_type.const_int(*n as u64, true).into()
-                            }
+                            ConstantValue::Fixnum(n) => i64_type.const_int(*n as u64, true).into(),
                             _ => return Err(format!("Unsupported constant type")),
                         };
                         // Store in outputs

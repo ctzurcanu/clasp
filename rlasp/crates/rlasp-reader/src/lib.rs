@@ -19,14 +19,14 @@
 //! let expr = reader.read().unwrap();
 //! ```
 
-pub mod token;
+pub mod error;
 pub mod lexer;
 pub mod parser;
 pub mod reader;
-pub mod error;
+pub mod token;
 
-pub use reader::{Reader, read_from_string, read_all_from_string, read_from_string_with_positions};
 pub use error::{ReaderError, ReaderResult};
-pub use token::Token;
 pub use lexer::Lexer;
-pub use parser::{Parser, is_skip_marker};
+pub use parser::{is_skip_marker, Parser};
+pub use reader::{read_all_from_string, read_from_string, read_from_string_with_positions, Reader};
+pub use token::Token;

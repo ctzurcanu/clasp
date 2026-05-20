@@ -238,12 +238,16 @@ pub mod boehm {
 
         /// Enable garbage collection
         pub fn enable(&self) {
-            unsafe { super::ffi::GC_enable(); }
+            unsafe {
+                super::ffi::GC_enable();
+            }
         }
 
         /// Disable garbage collection
         pub fn disable(&self) {
-            unsafe { super::ffi::GC_disable(); }
+            unsafe {
+                super::ffi::GC_disable();
+            }
         }
 
         /// Register a finalizer for an object
@@ -399,6 +403,36 @@ pub fn gc_enable() {
     #[cfg(feature = "boehm-gc")]
     unsafe {
         ffi::GC_enable();
+    }
+}
+
+/// Register an address range that contains LispObject raw pointers.
+///
+/// Boehm scans C/Rust stacks conservatively, but raw values stored inside Rust
+/// heap maps are not a reliable root source. Runtime registries that keep raw
+/// LispObject words must register stable slots explicitly.
+pub unsafe fn gc_add_root_range(low: *mut u8, high: *mut u8) {
+    #[cfg(feature = "boehm-gc")]
+    {
+        use std::os::raw::c_void;
+        ffi::GC_add_roots(low as *mut c_void, high as *mut c_void);
+    }
+    #[cfg(not(feature = "boehm-gc"))]
+    {
+        let _ = (low, high);
+    }
+}
+
+/// Remove a root range previously registered with `gc_add_root_range`.
+pub unsafe fn gc_remove_root_range(low: *mut u8, high: *mut u8) {
+    #[cfg(feature = "boehm-gc")]
+    {
+        use std::os::raw::c_void;
+        ffi::GC_remove_roots(low as *mut c_void, high as *mut c_void);
+    }
+    #[cfg(not(feature = "boehm-gc"))]
+    {
+        let _ = (low, high);
     }
 }
 

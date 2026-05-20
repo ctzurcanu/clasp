@@ -1,25 +1,28 @@
 use anyhow::Result;
-use std::collections::HashMap;
 use rlasp::ir::ASTNode;
+use std::collections::HashMap;
 
-pub mod lowering;
 pub mod jit;
 pub mod jit_fixed;
-pub mod lib_stack;  // New stack-based code generator
+pub mod lib_stack;
+pub mod lowering; // New stack-based code generator
+pub mod semantic;
+
+pub use semantic::{MlirLowerer, MlirModule};
 
 /// MLIR text generator for Lisp compilation
 /// Generates MLIR in text format with dynamic typing support
 pub struct MLIRCodegen {
     module_name: String,
     output: String,
-    pending_functions: Vec<String>,  // Buffer for local functions to emit at module level
-    pending_string_constants: Vec<(String, String)>,  // (name, value) for global string constants
+    pending_functions: Vec<String>, // Buffer for local functions to emit at module level
+    pending_string_constants: Vec<(String, String)>, // (name, value) for global string constants
     indent_level: usize,
     next_ssa_id: usize,
-    symbol_table: HashMap<String, String>,  // variable name -> SSA value
+    symbol_table: HashMap<String, String>, // variable name -> SSA value
     functions: Vec<String>,
-    local_function_map: HashMap<String, String>,  // original name -> mangled name
-    function_counter: usize,  // for generating unique names
+    local_function_map: HashMap<String, String>, // original name -> mangled name
+    function_counter: usize,                     // for generating unique names
 }
 
 impl MLIRCodegen {
@@ -108,28 +111,28 @@ impl MLIRCodegen {
         self.writeln("func.func private @cc_set_cdr(i64, i64) -> i64");
 
         // Argument extraction - get Nth argument from args list
-        self.writeln("func.func private @cc_arg(i64, i64) -> i64");  // cc_arg(args, index) -> value
+        self.writeln("func.func private @cc_arg(i64, i64) -> i64"); // cc_arg(args, index) -> value
 
         // Function object support - single uniform calling convention
         // All functions take ONE argument: a structure containing args + environment
-        self.writeln("func.func private @cc_make_lambda_ref_str(!llvm.ptr) -> i64");  // Create lambda ref from C string name
-        self.writeln("func.func private @cc_funcall(i64, i64) -> i64");  // funcall(func_ref, args_and_env)
+        self.writeln("func.func private @cc_make_lambda_ref_str(!llvm.ptr) -> i64"); // Create lambda ref from C string name
+        self.writeln("func.func private @cc_funcall(i64, i64) -> i64"); // funcall(func_ref, args_and_env)
         self.writeln("func.func private @cc_apply(i64, i64) -> i64");
         self.writeln("func.func private @cc_dotimes(i64) -> i64");
 
         // Logical operators (take args list)
-        self.writeln("func.func private @cc_and(i64) -> i64");  // and(args) - returns NIL if any arg is NIL
-        self.writeln("func.func private @cc_or(i64) -> i64");   // or(args) - returns first non-NIL arg
+        self.writeln("func.func private @cc_and(i64) -> i64"); // and(args) - returns NIL if any arg is NIL
+        self.writeln("func.func private @cc_or(i64) -> i64"); // or(args) - returns first non-NIL arg
 
         // Math functions
-        self.writeln("func.func private @cc_magnitude(i64) -> i64");  // magnitude(obj) - stub
-        self.writeln("func.func private @cc_complex(i64) -> i64");    // complex(real, imag) - stub
-        self.writeln("func.func private @cc_ratio(i64) -> i64");      // ratio(num, den) - stub
+        self.writeln("func.func private @cc_magnitude(i64) -> i64"); // magnitude(obj) - stub
+        self.writeln("func.func private @cc_complex(i64) -> i64"); // complex(real, imag) - stub
+        self.writeln("func.func private @cc_ratio(i64) -> i64"); // ratio(num, den) - stub
 
         // Compilation
-        self.writeln("func.func private @cc_compile(i64) -> i64");    // compile(form) - stub
+        self.writeln("func.func private @cc_compile(i64) -> i64"); // compile(form) - stub
 
-        self.writeln("");  // Blank line for readability
+        self.writeln(""); // Blank line for readability
     }
 
     fn indent(&mut self) {
@@ -164,7 +167,10 @@ impl MLIRCodegen {
         };
 
         // MLIR requires quoting for names with dashes, dots, or other special chars
-        if base_name.chars().any(|c| c == '-' || c == '.' || !c.is_alphanumeric() && c != '_') {
+        if base_name
+            .chars()
+            .any(|c| c == '-' || c == '.' || !c.is_alphanumeric() && c != '_')
+        {
             format!("\"{}\"", base_name)
         } else {
             base_name.to_string()
@@ -177,15 +183,20 @@ impl MLIRCodegen {
         let const_name = self.create_string_constant(name);
         // Get address of the string constant (using opaque pointers)
         let str_ptr = self.fresh_ssa();
-        self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr",
-            str_ptr, const_name));
+        self.writeln(&format!(
+            "{} = llvm.mlir.addressof {} : !llvm.ptr",
+            str_ptr, const_name
+        ));
         // Get string length
         let len = name.len();
         let len_ssa = self.fresh_ssa();
         self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
         // Create symbol using cc_make_symbol
         let sym = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64", sym, str_ptr, len_ssa));
+        self.writeln(&format!(
+            "{} = func.call @cc_make_symbol({}, {}) : (!llvm.ptr, i64) -> i64",
+            sym, str_ptr, len_ssa
+        ));
         sym
     }
 
@@ -193,7 +204,8 @@ impl MLIRCodegen {
     fn create_string_constant(&mut self, s: &str) -> String {
         // Add to pending string constants
         let const_name = format!("@str{}", self.pending_string_constants.len());
-        self.pending_string_constants.push((const_name.clone(), s.to_string()));
+        self.pending_string_constants
+            .push((const_name.clone(), s.to_string()));
         const_name
     }
 
@@ -203,29 +215,36 @@ impl MLIRCodegen {
         // Buffer the output to emit at module level
         let saved_output = std::mem::take(&mut self.output);
         let saved_indent = self.indent_level;
-        self.indent_level = 1;  // Module level functions have indent 1
+        self.indent_level = 1; // Module level functions have indent 1
 
         let _slot_name_ssa = format!("slot_{}", self.function_counter);
         self.function_counter += 1;
 
         // Start function
-        self.writeln(&format!("func.func @{}(%args_and_env: i64) -> i64 {{",
-            Self::quote_func_name(accessor_name)));
+        self.writeln(&format!(
+            "func.func @{}(%args_and_env: i64) -> i64 {{",
+            Self::quote_func_name(accessor_name)
+        ));
         self.indent();
 
         // Extract the object parameter
         let idx = self.fresh_ssa();
-        self.writeln(&format!("{} = arith.constant 0 : i64", idx));  // Index 0
+        self.writeln(&format!("{} = arith.constant 0 : i64", idx)); // Index 0
         let obj = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_arg(%args_and_env, {}) : (i64, i64) -> i64", obj, idx));
+        self.writeln(&format!(
+            "{} = func.call @cc_arg(%args_and_env, {}) : (i64, i64) -> i64",
+            obj, idx
+        ));
 
         // Create symbol for slot name
         let slot_sym = self.create_symbol_constant(slot_name);
 
         // Call cc_slot_value
         let result = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_slot_value({}, {}) : (i64, i64) -> i64",
-            result, obj, slot_sym));
+        self.writeln(&format!(
+            "{} = func.call @cc_slot_value({}, {}) : (i64, i64) -> i64",
+            result, obj, slot_sym
+        ));
 
         // Return
         self.writeln(&format!("func.return {} : i64", result));
@@ -245,7 +264,13 @@ impl MLIRCodegen {
     /// Compile a Lisp function to MLIR
     /// All values are i64 (tagged pointers for dynamic typing)
     /// If is_local=true, the function is buffered to be emitted at module level
-    fn compile_function_internal(&mut self, name: &str, params: &[String], body: &rlasp::ir::ASTNode, is_local: bool) -> Result<()> {
+    fn compile_function_internal(
+        &mut self,
+        name: &str,
+        params: &[String],
+        body: &rlasp::ir::ASTNode,
+        is_local: bool,
+    ) -> Result<()> {
         // Save current output if this is a local function
         let saved_output = if is_local {
             std::mem::take(&mut self.output)
@@ -267,13 +292,18 @@ impl MLIRCodegen {
             let param_str = if params.is_empty() {
                 String::new()
             } else {
-                params.iter()
+                params
+                    .iter()
                     .enumerate()
                     .map(|(i, _)| format!("%arg{}: i64", i))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            self.writeln(&format!("func.func @{}({}) -> i64 {{", Self::quote_func_name(name), param_str));
+            self.writeln(&format!(
+                "func.func @{}({}) -> i64 {{",
+                Self::quote_func_name(name),
+                param_str
+            ));
             self.indent();
 
             // Bind parameters directly
@@ -283,16 +313,22 @@ impl MLIRCodegen {
             }
         } else {
             // Regular Lisp function - uniform calling convention
-            self.writeln(&format!("func.func @{}(%args_and_env: i64) -> i64 {{", Self::quote_func_name(name)));
+            self.writeln(&format!(
+                "func.func @{}(%args_and_env: i64) -> i64 {{",
+                Self::quote_func_name(name)
+            ));
             self.indent();
 
             // Extract parameters from args_and_env using cc_arg(args, index)
             for (i, param) in params.iter().enumerate() {
                 let idx = self.fresh_ssa();
-                let tagged_idx = (i as i64) << 2;  // Tag the index like other fixnums
+                let tagged_idx = (i as i64) << 2; // Tag the index like other fixnums
                 self.writeln(&format!("{} = arith.constant {} : i64", idx, tagged_idx));
                 let arg_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_arg(%args_and_env, {}) : (i64, i64) -> i64", arg_val, idx));
+                self.writeln(&format!(
+                    "{} = func.call @cc_arg(%args_and_env, {}) : (i64, i64) -> i64",
+                    arg_val, idx
+                ));
                 self.symbol_table.insert(param.clone(), arg_val);
             }
         }
@@ -322,13 +358,19 @@ impl MLIRCodegen {
 
         // If local function, save to pending and restore original output
         if is_local {
-            self.pending_functions.push(std::mem::replace(&mut self.output, saved_output));
+            self.pending_functions
+                .push(std::mem::replace(&mut self.output, saved_output));
         }
 
         Ok(())
     }
 
-    pub fn compile_function(&mut self, name: &str, params: &[String], body: &rlasp::ir::ASTNode) -> Result<()> {
+    pub fn compile_function(
+        &mut self,
+        name: &str,
+        params: &[String],
+        body: &rlasp::ir::ASTNode,
+    ) -> Result<()> {
         self.compile_function_internal(name, params, body, false)
     }
 
@@ -350,17 +392,23 @@ impl MLIRCodegen {
                 let float_val = self.fresh_ssa();
                 // Format float to always have a decimal point
                 let float_str = if f.fract() == 0.0 && f.is_finite() {
-                    format!("{:.1}", f)  // e.g., 0.0, 1.0, 42.0
+                    format!("{:.1}", f) // e.g., 0.0, 1.0, 42.0
                 } else {
                     format!("{}", f)
                 };
-                self.writeln(&format!("{} = arith.constant {} : f64", float_val, float_str));
+                self.writeln(&format!(
+                    "{} = arith.constant {} : f64",
+                    float_val, float_str
+                ));
                 let result = self.fresh_ssa();
                 let box_name = match format {
                     rlasp::ir::FloatFormat::Single => "cc_box_single_float",
                     rlasp::ir::FloatFormat::Double => "cc_box_float",
                 };
-                self.writeln(&format!("{} = func.call @{}({}) : (f64) -> i64", result, box_name, float_val));
+                self.writeln(&format!(
+                    "{} = func.call @{}({}) : (f64) -> i64",
+                    result, box_name, float_val
+                ));
                 Ok(result)
             }
 
@@ -381,8 +429,10 @@ impl MLIRCodegen {
                 let const_name = self.create_string_constant(s);
                 // Get address of the string constant (using opaque pointers)
                 let str_ptr = self.fresh_ssa();
-                self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr",
-                    str_ptr, const_name));
+                self.writeln(&format!(
+                    "{} = llvm.mlir.addressof {} : !llvm.ptr",
+                    str_ptr, const_name
+                ));
                 // Get pointer to the actual string data (GEP to skip the length prefix if any)
                 // For now, just use the string pointer directly
                 // Create string object using cc_make_string
@@ -390,17 +440,18 @@ impl MLIRCodegen {
                 let len_ssa = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_string({}, {}) : (!llvm.ptr, i64) -> i64",
-                    result, str_ptr, len_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_string({}, {}) : (!llvm.ptr, i64) -> i64",
+                    result, str_ptr, len_ssa
+                ));
                 Ok(result)
             }
 
-            rlasp::ir::ASTNode::Variable(name) => {
-                self.symbol_table
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Undefined variable: {}", name))
-            }
+            rlasp::ir::ASTNode::Variable(name) => self
+                .symbol_table
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Undefined variable: {}", name)),
 
             rlasp::ir::ASTNode::Progn { exprs } => {
                 // Execute all expressions in sequence, return the last one
@@ -447,19 +498,29 @@ impl MLIRCodegen {
                 Ok(value_ssa)
             }
 
-            rlasp::ir::ASTNode::If { test, then_branch, else_branch } => {
+            rlasp::ir::ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => {
                 // Compile test condition
                 let test_ssa = self.compile_expr(test)?;
 
                 // Check truthiness using cc_truthiness (returns 0 for NIL, 1 for anything else)
                 let truth_val = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_truthiness({}) : (i64) -> i64", truth_val, test_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_truthiness({}) : (i64) -> i64",
+                    truth_val, test_ssa
+                ));
 
                 // Convert to boolean for scf.if
                 let zero = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant 0 : i64", zero));
                 let bool_cond = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", bool_cond, truth_val, zero));
+                self.writeln(&format!(
+                    "{} = arith.cmpi ne, {}, {} : i64",
+                    bool_cond, truth_val, zero
+                ));
 
                 // Save symbol table before branches
                 let saved_symbols = self.symbol_table.clone();
@@ -513,7 +574,8 @@ impl MLIRCodegen {
                 } else {
                     // Create a Progn node - but we can't easily do this without allocating
                     // For now, just use the last expression (this is a simplification)
-                    body.last().ok_or_else(|| anyhow::anyhow!("Empty lambda body"))?
+                    body.last()
+                        .ok_or_else(|| anyhow::anyhow!("Empty lambda body"))?
                 };
 
                 // Compile lambda as a separate function
@@ -526,19 +588,31 @@ impl MLIRCodegen {
 
                 // Create a global string constant for the lambda name
                 let str_global_name = format!("@__{}_name", lambda_name);
-                self.pending_string_constants.push((str_global_name.clone(), lambda_name.clone()));
+                self.pending_string_constants
+                    .push((str_global_name.clone(), lambda_name.clone()));
 
                 // Get pointer to the string constant
                 let str_ptr = self.fresh_ssa();
-                self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", str_ptr, str_global_name));
+                self.writeln(&format!(
+                    "{} = llvm.mlir.addressof {} : !llvm.ptr",
+                    str_ptr, str_global_name
+                ));
 
                 // Call runtime to create function reference from the lambda name
                 let func_obj = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", func_obj, str_ptr));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64",
+                    func_obj, str_ptr
+                ));
                 Ok(func_obj)
             }
 
-            rlasp::ir::ASTNode::Dotimes { var, count, result: result_expr, body } => {
+            rlasp::ir::ASTNode::Dotimes {
+                var,
+                count,
+                result: result_expr,
+                body,
+            } => {
                 // Compile dotimes as a loop using SCF dialect
                 // (dotimes (var count result) body...)
 
@@ -551,9 +625,15 @@ impl MLIRCodegen {
                 let shift_amount = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant 2 : i64", shift_amount));
                 let count_i64 = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.shrsi {}, {} : i64", count_i64, count_tagged, shift_amount));
+                self.writeln(&format!(
+                    "{} = arith.shrsi {}, {} : i64",
+                    count_i64, count_tagged, shift_amount
+                ));
                 let count_val = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.index_cast {} : i64 to index", count_val, count_i64));
+                self.writeln(&format!(
+                    "{} = arith.index_cast {} : i64 to index",
+                    count_val, count_i64
+                ));
 
                 // Start value is always 0
                 let start_val = self.fresh_ssa();
@@ -571,19 +651,27 @@ impl MLIRCodegen {
                 let loop_result = self.fresh_ssa();
                 // Use unique dummy name based on loop variable to avoid conflicts in nested loops
                 let dummy_name = format!("{}_dummy", var);
-                self.writeln(&format!("{} = scf.for %{}_idx = {} to {} step {} iter_args(%{} = {}) -> (i64) {{",
-                    loop_result, var, start_val, count_val, step, dummy_name, nil_init));
+                self.writeln(&format!(
+                    "{} = scf.for %{}_idx = {} to {} step {} iter_args(%{} = {}) -> (i64) {{",
+                    loop_result, var, start_val, count_val, step, dummy_name, nil_init
+                ));
                 self.indent();
 
                 // Convert loop index to i64 and set in symbol table
                 let var_i64 = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.index_cast %{}_idx : index to i64", var_i64, var));
+                self.writeln(&format!(
+                    "{} = arith.index_cast %{}_idx : index to i64",
+                    var_i64, var
+                ));
 
                 // Tag the index as a fixnum (shift left by 2)
                 let shift_amount = self.fresh_ssa();
                 self.writeln(&format!("{} = arith.constant 2 : i64", shift_amount));
                 let var_tagged = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.shli {}, {} : i64", var_tagged, var_i64, shift_amount));
+                self.writeln(&format!(
+                    "{} = arith.shli {}, {} : i64",
+                    var_tagged, var_i64, shift_amount
+                ));
                 self.symbol_table.insert(var.clone(), var_tagged);
 
                 // Compile body expressions (for side effects)
@@ -610,7 +698,16 @@ impl MLIRCodegen {
                 }
             }
 
-            rlasp::ir::ASTNode::Loop { var, start, limit, when_condition, collect, sum, else_collect, else_sum } => {
+            rlasp::ir::ASTNode::Loop {
+                var,
+                start,
+                limit,
+                when_condition,
+                collect,
+                sum,
+                else_collect,
+                else_sum,
+            } => {
                 // Compile loop with full Common Lisp semantics using SCF dialect
                 // (loop for i from start below limit when cond sum expr else sum expr2)
 
@@ -632,12 +729,18 @@ impl MLIRCodegen {
                     ssa
                 };
                 let start_val = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.index_cast {} : i64 to index", start_val, start_i64));
+                self.writeln(&format!(
+                    "{} = arith.index_cast {} : i64 to index",
+                    start_val, start_i64
+                ));
 
                 // Compile limit value and convert to index
                 let limit_i64 = self.compile_expr(limit)?;
                 let limit_val = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.index_cast {} : i64 to index", limit_val, limit_i64));
+                self.writeln(&format!(
+                    "{} = arith.index_cast {} : i64 to index",
+                    limit_val, limit_i64
+                ));
 
                 // Initialize accumulator
                 let accum_init = if is_sum {
@@ -657,13 +760,18 @@ impl MLIRCodegen {
                 let loop_result = self.fresh_ssa();
 
                 // Generate SCF for loop with iter_args
-                self.writeln(&format!("{} = scf.for %{}_idx = {} to {} step {} iter_args(%accum = {}) -> (i64) {{",
-                    loop_result, var, start_val, limit_val, step, accum_init));
+                self.writeln(&format!(
+                    "{} = scf.for %{}_idx = {} to {} step {} iter_args(%accum = {}) -> (i64) {{",
+                    loop_result, var, start_val, limit_val, step, accum_init
+                ));
                 self.indent();
 
                 // Convert loop index to i64 and set in symbol table
                 let var_i64 = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.index_cast %{}_idx : index to i64", var_i64, var));
+                self.writeln(&format!(
+                    "{} = arith.index_cast %{}_idx : index to i64",
+                    var_i64, var
+                ));
                 self.symbol_table.insert(var.clone(), var_i64);
 
                 // Compile the accumulation expression based on the when condition
@@ -677,7 +785,10 @@ impl MLIRCodegen {
                     let zero = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant 0 : i64", zero));
                     let bool_cond = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", bool_cond, cond_ssa, zero));
+                    self.writeln(&format!(
+                        "{} = arith.cmpi ne, {}, {} : i64",
+                        bool_cond, cond_ssa, zero
+                    ));
 
                     // Generate scf.if for conditional accumulation
                     let if_result = self.fresh_ssa();
@@ -700,13 +811,14 @@ impl MLIRCodegen {
                     self.indent();
 
                     // Else branch - compile the else sum/collect expression
-                    let else_val = if let Some(else_expr) = else_sum.as_ref().or(else_collect.as_ref()) {
-                        self.compile_expr(else_expr)?
-                    } else {
-                        let ssa = self.fresh_ssa();
-                        self.writeln(&format!("{} = arith.constant 0 : i64", ssa));
-                        ssa
-                    };
+                    let else_val =
+                        if let Some(else_expr) = else_sum.as_ref().or(else_collect.as_ref()) {
+                            self.compile_expr(else_expr)?
+                        } else {
+                            let ssa = self.fresh_ssa();
+                            self.writeln(&format!("{} = arith.constant 0 : i64", ssa));
+                            ssa
+                        };
                     self.writeln(&format!("scf.yield {} : i64", else_val));
 
                     self.dedent();
@@ -728,12 +840,18 @@ impl MLIRCodegen {
                 let new_accum = if is_sum {
                     // For sum, add to accumulator
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.addi %accum, {} : i64", result, iteration_value));
+                    self.writeln(&format!(
+                        "{} = arith.addi %accum, {} : i64",
+                        result, iteration_value
+                    ));
                     result
                 } else {
                     // For collect, cons onto accumulator
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, %accum) : (i64, i64) -> i64", result, iteration_value));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, %accum) : (i64, i64) -> i64",
+                        result, iteration_value
+                    ));
                     result
                 };
 
@@ -794,13 +912,14 @@ impl MLIRCodegen {
                         "flet" | "labels" if args.len() >= 2 => {
                             self.compile_flet_labels(func_name == "labels", args)
                         }
-                        _ => self.compile_call(func_name, args)
+                        _ => self.compile_call(func_name, args),
                     }
                 } else {
                     // Function is not a simple variable - could be a lambda call
                     // Use uniform calling convention
                     let func_ssa = self.compile_expr(function)?;
-                    let arg_ssas: Result<Vec<_>> = args.iter().map(|arg| self.compile_expr(arg)).collect();
+                    let arg_ssas: Result<Vec<_>> =
+                        args.iter().map(|arg| self.compile_expr(arg)).collect();
                     let arg_ssas = arg_ssas?;
 
                     // Build args_and_env list
@@ -814,20 +933,30 @@ impl MLIRCodegen {
 
                         for arg_ssa in arg_ssas.iter().rev() {
                             let new_result = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                                new_result, arg_ssa, result));
+                            self.writeln(&format!(
+                                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                                new_result, arg_ssa, result
+                            ));
                             result = new_result;
                         }
                         result
                     };
 
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_funcall({}, {}) : (i64, i64) -> i64", result, func_ssa, args_and_env));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_funcall({}, {}) : (i64, i64) -> i64",
+                        result, func_ssa, args_and_env
+                    ));
                     Ok(result)
                 }
             }
 
-            rlasp::ir::ASTNode::Defclass { name, superclasses, slots } => {
+            rlasp::ir::ASTNode::Defclass {
+                name,
+                superclasses,
+                slots,
+                metaclass,
+            } => {
                 // Generate defclass: (cc_defclass 'class-name '(slot1 slot2 ...) '(superclass1 ...))
 
                 // Create class name symbol
@@ -840,8 +969,10 @@ impl MLIRCodegen {
                 for slot in slots.iter().rev() {
                     let slot_name_ssa = self.create_symbol_constant(&slot.name);
                     let new_list = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                        new_list, slot_name_ssa, slots_list));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                        new_list, slot_name_ssa, slots_list
+                    ));
                     slots_list = new_list;
                 }
 
@@ -852,15 +983,27 @@ impl MLIRCodegen {
                 for superclass in superclasses.iter().rev() {
                     let super_name_ssa = self.create_symbol_constant(superclass);
                     let new_list = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                        new_list, super_name_ssa, super_list));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                        new_list, super_name_ssa, super_list
+                    ));
                     super_list = new_list;
                 }
 
-                // Call cc_defclass
+                // Call runtime class constructor, honoring an explicit metaclass when present.
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_defclass({}, {}, {}) : (i64, i64, i64) -> i64",
-                    result, class_name_ssa, slots_list, super_list));
+                if let Some(metaclass_name) = metaclass {
+                    let metaclass_ssa = self.create_symbol_constant(metaclass_name);
+                    self.writeln(&format!(
+                        "{} = func.call @cc_defclass_with_metaclass({}, {}, {}, {}) : (i64, i64, i64, i64) -> i64",
+                        result, class_name_ssa, slots_list, super_list, metaclass_ssa
+                    ));
+                } else {
+                    self.writeln(&format!(
+                        "{} = func.call @cc_defclass({}, {}, {}) : (i64, i64, i64) -> i64",
+                        result, class_name_ssa, slots_list, super_list
+                    ));
+                }
 
                 // Generate accessor functions for each slot with :accessor
                 for slot in slots {
@@ -886,20 +1029,27 @@ impl MLIRCodegen {
 
                 // Create lambda list
                 let mut params_list = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", params_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_nil() : () -> i64",
+                    params_list
+                ));
 
                 for param in lambda_list.iter().rev() {
                     let param_ssa = self.create_symbol_constant(param);
                     let new_list = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                        new_list, param_ssa, params_list));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                        new_list, param_ssa, params_list
+                    ));
                     params_list = new_list;
                 }
 
                 // Call cc_defgeneric
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_defgeneric({}, {}) : (i64, i64) -> i64",
-                    result, name_ssa, params_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_defgeneric({}, {}) : (i64, i64) -> i64",
+                    result, name_ssa, params_list
+                ));
 
                 // Create a trampoline function that dispatches to the generic function
                 // The trampoline takes args_and_env and calls cc_call_generic
@@ -908,14 +1058,15 @@ impl MLIRCodegen {
                 self.function_counter += 1;
 
                 // Escape the name for the string constant
-                let name_escaped = name.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                let name_escaped = name
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n");
                 let str_const_name = format!("@__gf_str_{}", str_id);
 
                 // Add string constant for the name
-                self.pending_string_constants.push((
-                    str_const_name.clone(),
-                    name_escaped.clone()
-                ));
+                self.pending_string_constants
+                    .push((str_const_name.clone(), name_escaped.clone()));
 
                 // Create the trampoline function that recreates the symbol and calls cc_call_generic
                 let trampoline = format!(
@@ -928,7 +1079,13 @@ impl MLIRCodegen {
                 Ok(result)
             }
 
-            rlasp::ir::ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => {
+            rlasp::ir::ASTNode::Defmethod {
+                generic_name,
+                qualifier,
+                specializers,
+                params,
+                body,
+            } => {
                 // Generate defmethod:
                 // 1. Create a method function
                 // 2. Register it with cc_defmethod_qualified
@@ -937,7 +1094,12 @@ impl MLIRCodegen {
                 self.function_counter += 1;
 
                 // Compile the method as a regular function (buffered to module level)
-                self.compile_function_internal(&method_fn_name, params, &rlasp::ir::ASTNode::progn(body.clone()), true)?;
+                self.compile_function_internal(
+                    &method_fn_name,
+                    params,
+                    &rlasp::ir::ASTNode::progn(body.clone()),
+                    true,
+                )?;
 
                 // Now register the method
                 let generic_name_ssa = self.create_symbol_constant(generic_name);
@@ -949,25 +1111,34 @@ impl MLIRCodegen {
                 for spec in specializers.iter().rev() {
                     let spec_ssa = self.create_symbol_constant(spec);
                     let new_list = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                        new_list, spec_ssa, spec_list));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                        new_list, spec_ssa, spec_list
+                    ));
                     spec_list = new_list;
                 }
 
                 // Get function pointer for the method
                 let method_name_const = self.create_string_constant(&method_fn_name);
                 let method_name_ptr = self.fresh_ssa();
-                self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr",
-                    method_name_ptr, method_name_const));
+                self.writeln(&format!(
+                    "{} = llvm.mlir.addressof {} : !llvm.ptr",
+                    method_name_ptr, method_name_const
+                ));
                 let func_ptr = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64",
-                    func_ptr, method_name_ptr));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64",
+                    func_ptr, method_name_ptr
+                ));
 
                 // Create arity constant
                 let arity = self.fresh_ssa();
                 let arity_val = params.len() as i64;
                 let tagged_arity = arity_val << 2;
-                self.writeln(&format!("{} = arith.constant {} : i64", arity, tagged_arity));
+                self.writeln(&format!(
+                    "{} = arith.constant {} : i64",
+                    arity, tagged_arity
+                ));
 
                 // Convert qualifier to numeric code: 0=primary, 1=before, 2=after, 3=around
                 let qualifier_code = match qualifier.as_ref().map(|s| s.to_uppercase()).as_deref() {
@@ -977,7 +1148,10 @@ impl MLIRCodegen {
                     _ => 0, // Primary
                 };
                 let qualifier_ssa = self.fresh_ssa();
-                self.writeln(&format!("{} = arith.constant {} : i64", qualifier_ssa, qualifier_code));
+                self.writeln(&format!(
+                    "{} = arith.constant {} : i64",
+                    qualifier_ssa, qualifier_code
+                ));
 
                 // Call cc_defmethod_qualified
                 let result = self.fresh_ssa();
@@ -1010,11 +1184,17 @@ impl MLIRCodegen {
 
                     // Check truthiness
                     let truth_val = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_truthiness({}) : (i64) -> i64", truth_val, test_ssa));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_truthiness({}) : (i64) -> i64",
+                        truth_val, test_ssa
+                    ));
                     let zero = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant 0 : i64", zero));
                     let bool_cond = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.cmpi ne, {}, {} : i64", bool_cond, truth_val, zero));
+                    self.writeln(&format!(
+                        "{} = arith.cmpi ne, {}, {} : i64",
+                        bool_cond, truth_val, zero
+                    ));
 
                     let if_result = self.fresh_ssa();
                     self.writeln(&format!("{} = scf.if {} -> (i64) {{", if_result, bool_cond));
@@ -1053,7 +1233,12 @@ impl MLIRCodegen {
                 Ok(result.unwrap())
             }
 
-            rlasp::ir::ASTNode::Dolist { var, list, result: result_expr, body } => {
+            rlasp::ir::ASTNode::Dolist {
+                var,
+                list,
+                result: result_expr,
+                body,
+            } => {
                 // (dolist (var list result) body...)
                 // Iterate over list elements
                 // Implementation: use runtime function cc_dolist_iterate that handles iteration
@@ -1082,7 +1267,8 @@ impl MLIRCodegen {
                     &body[0]
                 } else {
                     // Create a progn - we'll just use the last expr as simplification
-                    body.last().ok_or_else(|| anyhow::anyhow!("Empty dolist body"))?
+                    body.last()
+                        .ok_or_else(|| anyhow::anyhow!("Empty dolist body"))?
                 };
 
                 self.compile_function_internal(&lambda_name, &[var.clone()], body_progn, true)?;
@@ -1095,13 +1281,22 @@ impl MLIRCodegen {
                 // Create function reference for the body
                 let body_fn_const = self.create_string_constant(&lambda_name);
                 let body_fn_ptr = self.fresh_ssa();
-                self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr", body_fn_ptr, body_fn_const));
+                self.writeln(&format!(
+                    "{} = llvm.mlir.addressof {} : !llvm.ptr",
+                    body_fn_ptr, body_fn_const
+                ));
                 let body_fn_ref = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64", body_fn_ref, body_fn_ptr));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64",
+                    body_fn_ref, body_fn_ptr
+                ));
 
                 // Call runtime dolist iterator
                 let loop_result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_dolist({}, {}) : (i64, i64) -> i64", loop_result, list_ssa, body_fn_ref));
+                self.writeln(&format!(
+                    "{} = func.call @cc_dolist({}, {}) : (i64, i64) -> i64",
+                    loop_result, list_ssa, body_fn_ref
+                ));
 
                 // Restore symbol table
                 self.symbol_table = saved_symbols;
@@ -1121,7 +1316,10 @@ impl MLIRCodegen {
                 let car_ssa = self.compile_expr(car)?;
                 let cdr_ssa = self.compile_expr(cdr)?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", result, car_ssa, cdr_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                    result, car_ssa, cdr_ssa
+                ));
                 Ok(result)
             }
 
@@ -1144,14 +1342,20 @@ impl MLIRCodegen {
             rlasp::ir::ASTNode::HashTable { entries } => {
                 // Build hash table from literal entries
                 let ht = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_hash_table() : () -> i64", ht));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_hash_table() : () -> i64",
+                    ht
+                ));
 
                 // Insert each key-value pair
                 for (key_expr, value_expr) in entries {
                     let key = self.compile_expr(key_expr)?;
                     let value = self.compile_expr(value_expr)?;
                     let _ = self.fresh_ssa();
-                    self.writeln(&format!("%_ = func.call @cc_puthash({}, {}, {}) : (i64, i64, i64) -> i64", key, value, ht));
+                    self.writeln(&format!(
+                        "%_ = func.call @cc_puthash({}, {}, {}) : (i64, i64, i64) -> i64",
+                        key, value, ht
+                    ));
                 }
 
                 Ok(ht)
@@ -1160,7 +1364,8 @@ impl MLIRCodegen {
             rlasp::ir::ASTNode::Vector(elements) => {
                 // Build vector from elements
                 // First, compile all elements
-                let element_ssas: Result<Vec<_>> = elements.iter().map(|e| self.compile_expr(e)).collect();
+                let element_ssas: Result<Vec<_>> =
+                    elements.iter().map(|e| self.compile_expr(e)).collect();
                 let element_ssas = element_ssas?;
 
                 // Create vector with the given size
@@ -1169,14 +1374,20 @@ impl MLIRCodegen {
                 self.writeln(&format!("{} = arith.constant {} : i64", len_ssa, len));
 
                 let vec = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_vector({}) : (i64) -> i64", vec, len_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_vector({}) : (i64) -> i64",
+                    vec, len_ssa
+                ));
 
                 // Set each element
                 for (i, elem_ssa) in element_ssas.iter().enumerate() {
                     let idx = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant {} : i64", idx, i));
                     let _ = self.fresh_ssa();
-                    self.writeln(&format!("%_ = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64", vec, idx, elem_ssa));
+                    self.writeln(&format!(
+                        "%_ = func.call @cc_svset({}, {}, {}) : (i64, i64, i64) -> i64",
+                        vec, idx, elem_ssa
+                    ));
                 }
 
                 Ok(vec)
@@ -1188,7 +1399,8 @@ impl MLIRCodegen {
                 let func_name_ssa = self.create_symbol_constant(function);
 
                 // Build args list
-                let arg_ssas: Result<Vec<_>> = args.iter().map(|arg| self.compile_expr(arg)).collect();
+                let arg_ssas: Result<Vec<_>> =
+                    args.iter().map(|arg| self.compile_expr(arg)).collect();
                 let arg_ssas = arg_ssas?;
 
                 let args_list = if arg_ssas.is_empty() {
@@ -1200,25 +1412,36 @@ impl MLIRCodegen {
                     self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", result));
                     for arg_ssa in arg_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_result, arg_ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, arg_ssa, result
+                        ));
                         result = new_result;
                     }
                     result
                 };
 
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_ccall({}, {}) : (i64, i64) -> i64", result, func_name_ssa, args_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_ccall({}, {}) : (i64, i64) -> i64",
+                    result, func_name_ssa, args_list
+                ));
                 Ok(result)
             }
 
-            rlasp::ir::ASTNode::CppMethodCall { object, method, args } => {
+            rlasp::ir::ASTNode::CppMethodCall {
+                object,
+                method,
+                args,
+            } => {
                 // C++ method call via FFI
                 // Call runtime bridge function cc_cpp_method_call(object, method_name, args_list)
                 let obj_ssa = self.compile_expr(object)?;
                 let method_name_ssa = self.create_symbol_constant(method);
 
                 // Build args list
-                let arg_ssas: Result<Vec<_>> = args.iter().map(|arg| self.compile_expr(arg)).collect();
+                let arg_ssas: Result<Vec<_>> =
+                    args.iter().map(|arg| self.compile_expr(arg)).collect();
                 let arg_ssas = arg_ssas?;
 
                 let args_list = if arg_ssas.is_empty() {
@@ -1230,14 +1453,20 @@ impl MLIRCodegen {
                     self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", result));
                     for arg_ssa in arg_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_result, arg_ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, arg_ssa, result
+                        ));
                         result = new_result;
                     }
                     result
                 };
 
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cpp_method_call({}, {}, {}) : (i64, i64, i64) -> i64", result, obj_ssa, method_name_ssa, args_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cpp_method_call({}, {}, {}) : (i64, i64, i64) -> i64",
+                    result, obj_ssa, method_name_ssa, args_list
+                ));
                 Ok(result)
             }
 
@@ -1265,8 +1494,8 @@ impl MLIRCodegen {
         use rlasp::ir::ConstantValue;
 
         match ast {
-            rlasp::ir::ASTNode::Constant(ConstantValue::Nil) |
-            rlasp::ir::ASTNode::Constant(ConstantValue::T) => {
+            rlasp::ir::ASTNode::Constant(ConstantValue::Nil)
+            | rlasp::ir::ASTNode::Constant(ConstantValue::T) => {
                 // Already a constant, just compile it
                 self.compile_expr(ast)
             }
@@ -1297,7 +1526,11 @@ impl MLIRCodegen {
     }
 
     /// Compile a quoted list into cons cells
-    fn compile_quoted_list(&mut self, first: &rlasp::ir::ASTNode, rest: &[rlasp::ir::ASTNode]) -> Result<String> {
+    fn compile_quoted_list(
+        &mut self,
+        first: &rlasp::ir::ASTNode,
+        rest: &[rlasp::ir::ASTNode],
+    ) -> Result<String> {
         // Build from right to left: (cons first (cons ... (cons last nil)))
         let mut result = self.fresh_ssa();
         self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", result));
@@ -1306,16 +1539,20 @@ impl MLIRCodegen {
         for elem in rest.iter().rev() {
             let elem_ssa = self.compile_quoted(elem)?;
             let new_result = self.fresh_ssa();
-            self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                new_result, elem_ssa, result));
+            self.writeln(&format!(
+                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                new_result, elem_ssa, result
+            ));
             result = new_result;
         }
 
         // Add first element
         let first_ssa = self.compile_quoted(first)?;
         let final_result = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-            final_result, first_ssa, result));
+        self.writeln(&format!(
+            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+            final_result, first_ssa, result
+        ));
 
         Ok(final_result)
     }
@@ -1327,19 +1564,13 @@ impl MLIRCodegen {
 
         match ast {
             // Unquote - evaluate the expression
-            rlasp::ir::ASTNode::Unquote(expr) => {
-                self.compile_expr(expr)
-            }
+            rlasp::ir::ASTNode::Unquote(expr) => self.compile_expr(expr),
 
             // Constants - return as-is (quoted)
-            rlasp::ir::ASTNode::Constant(_) => {
-                self.compile_expr(ast)
-            }
+            rlasp::ir::ASTNode::Constant(_) => self.compile_expr(ast),
 
             // Variables in backquote are quoted
-            rlasp::ir::ASTNode::Variable(sym) => {
-                Ok(self.create_symbol_constant(sym))
-            }
+            rlasp::ir::ASTNode::Variable(sym) => Ok(self.create_symbol_constant(sym)),
 
             // Lists - recursively process elements
             rlasp::ir::ASTNode::Call { function, args } => {
@@ -1366,14 +1597,15 @@ impl MLIRCodegen {
                 let car_ssa = self.compile_backquote(car)?;
                 let cdr_ssa = self.compile_backquote(cdr)?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", result, car_ssa, cdr_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                    result, car_ssa, cdr_ssa
+                ));
                 Ok(result)
             }
 
             // Nested backquote - for now, treat as quoted
-            rlasp::ir::ASTNode::Backquote(inner) => {
-                self.compile_backquote(inner)
-            }
+            rlasp::ir::ASTNode::Backquote(inner) => self.compile_backquote(inner),
 
             _ => {
                 // Other forms - quote them
@@ -1383,7 +1615,11 @@ impl MLIRCodegen {
     }
 
     /// Compile a backquoted list (without splicing)
-    fn compile_backquote_list(&mut self, first: &rlasp::ir::ASTNode, rest: &[rlasp::ir::ASTNode]) -> Result<String> {
+    fn compile_backquote_list(
+        &mut self,
+        first: &rlasp::ir::ASTNode,
+        rest: &[rlasp::ir::ASTNode],
+    ) -> Result<String> {
         // Build from right to left
         let mut result = self.fresh_ssa();
         self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", result));
@@ -1392,28 +1628,37 @@ impl MLIRCodegen {
         for elem in rest.iter().rev() {
             let elem_ssa = self.compile_backquote(elem)?;
             let new_result = self.fresh_ssa();
-            self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                new_result, elem_ssa, result));
+            self.writeln(&format!(
+                "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                new_result, elem_ssa, result
+            ));
             result = new_result;
         }
 
         // Add first element
         let first_ssa = self.compile_backquote(first)?;
         let final_result = self.fresh_ssa();
-        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-            final_result, first_ssa, result));
+        self.writeln(&format!(
+            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+            final_result, first_ssa, result
+        ));
 
         Ok(final_result)
     }
 
     /// Compile a backquoted list with unquote-splicing support
-    fn compile_backquote_list_with_splicing(&mut self, first: &rlasp::ir::ASTNode, rest: &[rlasp::ir::ASTNode]) -> Result<String> {
+    fn compile_backquote_list_with_splicing(
+        &mut self,
+        first: &rlasp::ir::ASTNode,
+        rest: &[rlasp::ir::ASTNode],
+    ) -> Result<String> {
         // Build list dynamically, appending spliced lists
         let mut result = self.fresh_ssa();
         self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", result));
 
         // Process all elements (first + rest) in reverse
-        let all_elems: Vec<&rlasp::ir::ASTNode> = std::iter::once(first).chain(rest.iter()).collect();
+        let all_elems: Vec<&rlasp::ir::ASTNode> =
+            std::iter::once(first).chain(rest.iter()).collect();
 
         for elem in all_elems.iter().rev() {
             match elem {
@@ -1421,16 +1666,20 @@ impl MLIRCodegen {
                     // Evaluate and append the list
                     let list_val = self.compile_expr(expr)?;
                     let new_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_append({}, {}) : (i64, i64) -> i64",
-                        new_result, list_val, result));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_append({}, {}) : (i64, i64) -> i64",
+                        new_result, list_val, result
+                    ));
                     result = new_result;
                 }
                 _ => {
                     // Regular element - cons it
                     let elem_ssa = self.compile_backquote(elem)?;
                     let new_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                        new_result, elem_ssa, result));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                        new_result, elem_ssa, result
+                    ));
                     result = new_result;
                 }
             }
@@ -1458,7 +1707,10 @@ impl MLIRCodegen {
                 for arg in &args[1..] {
                     let right = self.compile_expr(arg)?;
                     let new_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_add({}, {}) : (i64, i64) -> i64", new_result, result, right));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_add({}, {}) : (i64, i64) -> i64",
+                        new_result, result, right
+                    ));
                     result = new_result;
                 }
                 Ok(result)
@@ -1473,7 +1725,10 @@ impl MLIRCodegen {
                     let zero = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant 0 : i64", zero));
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64", result, zero, arg));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64",
+                        result, zero, arg
+                    ));
                     return Ok(result);
                 }
 
@@ -1482,7 +1737,10 @@ impl MLIRCodegen {
                 for arg in &args[1..] {
                     let right = self.compile_expr(arg)?;
                     let new_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64", new_result, result, right));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_sub({}, {}) : (i64, i64) -> i64",
+                        new_result, result, right
+                    ));
                     result = new_result;
                 }
                 Ok(result)
@@ -1504,7 +1762,10 @@ impl MLIRCodegen {
                 for arg in &args[1..] {
                     let right = self.compile_expr(arg)?;
                     let new_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_mul({}, {}) : (i64, i64) -> i64", new_result, result, right));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_mul({}, {}) : (i64, i64) -> i64",
+                        new_result, result, right
+                    ));
                     result = new_result;
                 }
                 Ok(result)
@@ -1519,7 +1780,10 @@ impl MLIRCodegen {
                     let one = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant 1 : i64", one));
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_div({}, {}) : (i64, i64) -> i64", result, one, arg));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_div({}, {}) : (i64, i64) -> i64",
+                        result, one, arg
+                    ));
                     return Ok(result);
                 }
 
@@ -1528,7 +1792,10 @@ impl MLIRCodegen {
                 for arg in &args[1..] {
                     let right = self.compile_expr(arg)?;
                     let new_result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_div({}, {}) : (i64, i64) -> i64", new_result, result, right));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_div({}, {}) : (i64, i64) -> i64",
+                        new_result, result, right
+                    ));
                     result = new_result;
                 }
                 Ok(result)
@@ -1539,7 +1806,10 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_mod({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_mod({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
@@ -1547,21 +1817,30 @@ impl MLIRCodegen {
                 let base = self.compile_expr(&args[0])?;
                 let power = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_expt({}, {}) : (i64, i64) -> i64", result, base, power));
+                self.writeln(&format!(
+                    "{} = func.call @cc_expt({}, {}) : (i64, i64) -> i64",
+                    result, base, power
+                ));
                 Ok(result)
             }
 
             "sqrt" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_sqrt({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_sqrt({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
             "round" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_round({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_round({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
@@ -1570,11 +1849,17 @@ impl MLIRCodegen {
                 let result = if args.len() == 2 {
                     let y = self.compile_expr(&args[1])?;
                     let ssa = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_truncate_2({}, {}) : (i64, i64) -> i64", ssa, x, y));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_truncate_2({}, {}) : (i64, i64) -> i64",
+                        ssa, x, y
+                    ));
                     ssa
                 } else {
                     let ssa = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_truncate({}) : (i64) -> i64", ssa, x));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_truncate({}) : (i64) -> i64",
+                        ssa, x
+                    ));
                     ssa
                 };
                 Ok(result)
@@ -1583,14 +1868,20 @@ impl MLIRCodegen {
             "evenp" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_evenp({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_evenp({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
             "oddp" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_oddp({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_oddp({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
@@ -1598,7 +1889,10 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_lt({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_lt({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
@@ -1606,7 +1900,10 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_gt({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_gt({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
@@ -1614,7 +1911,10 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_le({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_le({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
@@ -1622,7 +1922,10 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_ge({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_ge({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
@@ -1630,7 +1933,10 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_eq({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_eq({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
@@ -1639,7 +1945,8 @@ impl MLIRCodegen {
                 // Create a function reference for the referenced function
                 if let rlasp::ir::ASTNode::Variable(func_name) = &args[0] {
                     // Check if this is a known local function
-                    let actual_name = self.local_function_map
+                    let actual_name = self
+                        .local_function_map
                         .get(func_name)
                         .cloned()
                         .unwrap_or_else(|| func_name.clone());
@@ -1648,12 +1955,16 @@ impl MLIRCodegen {
                     let const_name = self.create_string_constant(&actual_name);
                     // Get address of the string constant (using opaque pointers)
                     let str_ptr = self.fresh_ssa();
-                    self.writeln(&format!("{} = llvm.mlir.addressof {} : !llvm.ptr",
-                        str_ptr, const_name));
+                    self.writeln(&format!(
+                        "{} = llvm.mlir.addressof {} : !llvm.ptr",
+                        str_ptr, const_name
+                    ));
                     // Create function reference
                     let func_ref = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64",
-                        func_ref, str_ptr));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_make_lambda_ref_str({}) : (!llvm.ptr) -> i64",
+                        func_ref, str_ptr
+                    ));
                     Ok(func_ref)
                 } else {
                     // Complex function reference - compile it
@@ -1664,7 +1975,8 @@ impl MLIRCodegen {
             // Function application with uniform calling convention
             "funcall" if !args.is_empty() => {
                 let func = self.compile_expr(&args[0])?;
-                let arg_ssas: Result<Vec<_>> = args[1..].iter().map(|arg| self.compile_expr(arg)).collect();
+                let arg_ssas: Result<Vec<_>> =
+                    args[1..].iter().map(|arg| self.compile_expr(arg)).collect();
                 let arg_ssas = arg_ssas?;
 
                 // Build args_and_env list (just args for now, environment capture comes later)
@@ -1679,15 +1991,20 @@ impl MLIRCodegen {
 
                     for arg_ssa in arg_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                            new_result, arg_ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, arg_ssa, result
+                        ));
                         result = new_result;
                     }
                     result
                 };
 
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_funcall({}, {}) : (i64, i64) -> i64", result, func, args_and_env));
+                self.writeln(&format!(
+                    "{} = func.call @cc_funcall({}, {}) : (i64, i64) -> i64",
+                    result, func, args_and_env
+                ));
                 Ok(result)
             }
 
@@ -1713,7 +2030,10 @@ impl MLIRCodegen {
                 }
 
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_apply({}, {}) : (i64, i64) -> i64", result, func, arg_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_apply({}, {}) : (i64, i64) -> i64",
+                    result, func, arg_list
+                ));
                 Ok(result)
             }
 
@@ -1721,8 +2041,10 @@ impl MLIRCodegen {
             "incf" if args.len() >= 1 => {
                 // (incf place [delta]) - for now, just handle simple variables
                 if let rlasp::ir::ASTNode::Variable(var) = &args[0] {
-                    let current = self.symbol_table.get(var).cloned()
-                        .ok_or_else(|| anyhow::anyhow!("Undefined variable in incf: {}", var))?;
+                    let current =
+                        self.symbol_table.get(var).cloned().ok_or_else(|| {
+                            anyhow::anyhow!("Undefined variable in incf: {}", var)
+                        })?;
                     let delta = if args.len() > 1 {
                         self.compile_expr(&args[1])?
                     } else {
@@ -1731,14 +2053,20 @@ impl MLIRCodegen {
                         one
                     };
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = arith.addi {}, {} : i64", result, current, delta));
+                    self.writeln(&format!(
+                        "{} = arith.addi {}, {} : i64",
+                        result, current, delta
+                    ));
                     self.symbol_table.insert(var.clone(), result.clone());
                     Ok(result)
                 } else {
                     // Complex place - use runtime function
                     let place = self.compile_expr(&args[0])?;
                     let result = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @cc_incf({}) : (i64) -> i64", result, place));
+                    self.writeln(&format!(
+                        "{} = func.call @cc_incf({}) : (i64) -> i64",
+                        result, place
+                    ));
                     Ok(result)
                 }
             }
@@ -1747,28 +2075,40 @@ impl MLIRCodegen {
             "numerator" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_numerator({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_numerator({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
             "denominator" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_denominator({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_denominator({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
             "realpart" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_realpart({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_realpart({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
             "imagpart" if args.len() == 1 => {
                 let arg = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_imagpart({}) : (i64) -> i64", result, arg));
+                self.writeln(&format!(
+                    "{} = func.call @cc_imagpart({}) : (i64) -> i64",
+                    result, arg
+                ));
                 Ok(result)
             }
 
@@ -1776,7 +2116,10 @@ impl MLIRCodegen {
             "make-array" if args.len() >= 1 => {
                 let size = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_array({}) : (i64) -> i64", result, size));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_array({}) : (i64) -> i64",
+                    result, size
+                ));
                 Ok(result)
             }
 
@@ -1784,14 +2127,20 @@ impl MLIRCodegen {
                 let array = self.compile_expr(&args[0])?;
                 let index = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64", result, array, index));
+                self.writeln(&format!(
+                    "{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64",
+                    result, array, index
+                ));
                 Ok(result)
             }
 
             // Hash table operations
             "make-hash-table" => {
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_hash_table() : () -> i64", result));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_hash_table() : () -> i64",
+                    result
+                ));
                 Ok(result)
             }
 
@@ -1806,8 +2155,10 @@ impl MLIRCodegen {
                     nil
                 };
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_gethash({}, {}, {}) : (i64, i64, i64) -> i64",
-                    result, key, table, default));
+                self.writeln(&format!(
+                    "{} = func.call @cc_gethash({}, {}, {}) : (i64, i64, i64) -> i64",
+                    result, key, table, default
+                ));
                 Ok(result)
             }
 
@@ -1815,7 +2166,10 @@ impl MLIRCodegen {
             "make-string" if args.len() >= 1 => {
                 let size = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_string_repeat({}, {}) : (i64, i64) -> i64", result, size, size));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_string_repeat({}, {}) : (i64, i64) -> i64",
+                    result, size, size
+                ));
                 Ok(result)
             }
 
@@ -1823,7 +2177,10 @@ impl MLIRCodegen {
                 let string = self.compile_expr(&args[0])?;
                 let index = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64", result, string, index));
+                self.writeln(&format!(
+                    "{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64",
+                    result, string, index
+                ));
                 Ok(result)
             }
 
@@ -1831,14 +2188,20 @@ impl MLIRCodegen {
                 let a = self.compile_expr(&args[0])?;
                 let b = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_string_equal({}, {}) : (i64, i64) -> i64", result, a, b));
+                self.writeln(&format!(
+                    "{} = func.call @cc_string_equal({}, {}) : (i64, i64) -> i64",
+                    result, a, b
+                ));
                 Ok(result)
             }
 
             "copy-seq" if args.len() == 1 => {
                 let seq = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_copy_seq({}) : (i64) -> i64", result, seq));
+                self.writeln(&format!(
+                    "{} = func.call @cc_copy_seq({}) : (i64) -> i64",
+                    result, seq
+                ));
                 Ok(result)
             }
 
@@ -1847,7 +2210,10 @@ impl MLIRCodegen {
                 let func = self.compile_expr(&args[0])?;
                 let seq = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_reduce({}, {}) : (i64, i64) -> i64", result, func, seq));
+                self.writeln(&format!(
+                    "{} = func.call @cc_reduce({}, {}) : (i64, i64) -> i64",
+                    result, func, seq
+                ));
                 Ok(result)
             }
 
@@ -1855,21 +2221,30 @@ impl MLIRCodegen {
             "fboundp" if args.len() == 1 => {
                 let sym = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_fboundp({}) : (i64) -> i64", result, sym));
+                self.writeln(&format!(
+                    "{} = func.call @cc_fboundp({}) : (i64) -> i64",
+                    result, sym
+                ));
                 Ok(result)
             }
 
             "boundp" if args.len() == 1 => {
                 let sym = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_boundp({}) : (i64) -> i64", result, sym));
+                self.writeln(&format!(
+                    "{} = func.call @cc_boundp({}) : (i64) -> i64",
+                    result, sym
+                ));
                 Ok(result)
             }
 
             "functionp" if args.len() == 1 => {
                 let obj = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_functionp({}) : (i64) -> i64", result, obj));
+                self.writeln(&format!(
+                    "{} = func.call @cc_functionp({}) : (i64) -> i64",
+                    result, obj
+                ));
                 Ok(result)
             }
 
@@ -1879,7 +2254,8 @@ impl MLIRCodegen {
                 let dest = self.compile_expr(&args[0])?;
 
                 // Build list of control string + remaining args
-                let control_and_args_ssas: Result<Vec<_>> = args[1..].iter().map(|arg| self.compile_expr(arg)).collect();
+                let control_and_args_ssas: Result<Vec<_>> =
+                    args[1..].iter().map(|arg| self.compile_expr(arg)).collect();
                 let control_and_args_ssas = control_and_args_ssas?;
 
                 let args_list = if control_and_args_ssas.is_empty() {
@@ -1892,21 +2268,30 @@ impl MLIRCodegen {
                     self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", result));
                     for arg_ssa in control_and_args_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64", new_result, arg_ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, arg_ssa, result
+                        ));
                         result = new_result;
                     }
                     result
                 };
 
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_format({}, {}) : (i64, i64) -> i64", result, dest, args_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_format({}, {}) : (i64, i64) -> i64",
+                    result, dest, args_list
+                ));
                 Ok(result)
             }
 
             "read-from-string" if args.len() >= 1 => {
                 let string = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_read_from_string({}) : (i64) -> i64", result, string));
+                self.writeln(&format!(
+                    "{} = func.call @cc_read_from_string({}) : (i64) -> i64",
+                    result, string
+                ));
                 Ok(result)
             }
 
@@ -1914,7 +2299,10 @@ impl MLIRCodegen {
             "eval" if args.len() == 1 => {
                 let form = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_eval({}) : (i64) -> i64", result, form));
+                self.writeln(&format!(
+                    "{} = func.call @cc_eval({}) : (i64) -> i64",
+                    result, form
+                ));
                 Ok(result)
             }
 
@@ -1930,7 +2318,10 @@ impl MLIRCodegen {
 
                 // Build initargs list from keyword-value pairs
                 let mut initargs_list = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_nil() : () -> i64", initargs_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_nil() : () -> i64",
+                    initargs_list
+                ));
 
                 // Process initargs in reverse to build proper list
                 for i in (1..args.len()).rev().step_by(2) {
@@ -1941,22 +2332,28 @@ impl MLIRCodegen {
 
                         // Add value to list
                         let new_list = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                            new_list, value, initargs_list));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_list, value, initargs_list
+                        ));
                         initargs_list = new_list;
 
                         // Add keyword to list
                         let new_list2 = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                            new_list2, keyword, initargs_list));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_list2, keyword, initargs_list
+                        ));
                         initargs_list = new_list2;
                     }
                 }
 
                 // Call cc_make_instance
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_make_instance({}, {}) : (i64, i64) -> i64",
-                    result, class_name_ssa, initargs_list));
+                self.writeln(&format!(
+                    "{} = func.call @cc_make_instance({}, {}) : (i64, i64) -> i64",
+                    result, class_name_ssa, initargs_list
+                ));
                 Ok(result)
             }
 
@@ -1972,22 +2369,30 @@ impl MLIRCodegen {
                         // Simple variable
                         self.symbol_table.insert(var.clone(), value.clone());
                         last_value = Some(value);
-                    } else if let rlasp::ir::ASTNode::Call { function, args: place_args } = &chunk[0] {
+                    } else if let rlasp::ir::ASTNode::Call {
+                        function,
+                        args: place_args,
+                    } = &chunk[0]
+                    {
                         // Function call as place - e.g., (setf (car x) value)
                         if let rlasp::ir::ASTNode::Variable(func_name) = function.as_ref() {
                             match func_name.as_str() {
                                 "car" if place_args.len() == 1 => {
                                     let list = self.compile_expr(&place_args[0])?;
                                     let result = self.fresh_ssa();
-                                    self.writeln(&format!("{} = func.call @cc_set_car({}, {}) : (i64, i64) -> i64",
-                                        result, list, value));
+                                    self.writeln(&format!(
+                                        "{} = func.call @cc_set_car({}, {}) : (i64, i64) -> i64",
+                                        result, list, value
+                                    ));
                                     last_value = Some(result);
                                 }
                                 "cdr" if place_args.len() == 1 => {
                                     let list = self.compile_expr(&place_args[0])?;
                                     let result = self.fresh_ssa();
-                                    self.writeln(&format!("{} = func.call @cc_set_cdr({}, {}) : (i64, i64) -> i64",
-                                        result, list, value));
+                                    self.writeln(&format!(
+                                        "{} = func.call @cc_set_cdr({}, {}) : (i64, i64) -> i64",
+                                        result, list, value
+                                    ));
                                     last_value = Some(result);
                                 }
                                 "aref" if place_args.len() == 2 => {
@@ -2030,7 +2435,8 @@ impl MLIRCodegen {
 
             // List operations
             "list" => {
-                let arg_ssas: Result<Vec<_>> = args.iter().map(|arg| self.compile_expr(arg)).collect();
+                let arg_ssas: Result<Vec<_>> =
+                    args.iter().map(|arg| self.compile_expr(arg)).collect();
                 let arg_ssas = arg_ssas?;
 
                 if arg_ssas.is_empty() {
@@ -2044,8 +2450,10 @@ impl MLIRCodegen {
 
                     for ssa in arg_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                            new_result, ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, ssa, result
+                        ));
                         result = new_result;
                     }
                     Ok(result)
@@ -2055,14 +2463,20 @@ impl MLIRCodegen {
             "car" if args.len() == 1 => {
                 let list_ssa = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_car({}) : (i64) -> i64", result, list_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_car({}) : (i64) -> i64",
+                    result, list_ssa
+                ));
                 Ok(result)
             }
 
             "cdr" if args.len() == 1 => {
                 let list_ssa = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cdr({}) : (i64) -> i64", result, list_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cdr({}) : (i64) -> i64",
+                    result, list_ssa
+                ));
                 Ok(result)
             }
 
@@ -2070,8 +2484,10 @@ impl MLIRCodegen {
                 let car_ssa = self.compile_expr(&args[0])?;
                 let cdr_ssa = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                    result, car_ssa, cdr_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                    result, car_ssa, cdr_ssa
+                ));
                 Ok(result)
             }
 
@@ -2083,7 +2499,8 @@ impl MLIRCodegen {
                     Ok(result)
                 } else {
                     // Compile all arguments first
-                    let arg_ssas: Result<Vec<_>> = args.iter().map(|arg| self.compile_expr(arg)).collect();
+                    let arg_ssas: Result<Vec<_>> =
+                        args.iter().map(|arg| self.compile_expr(arg)).collect();
                     let arg_ssas = arg_ssas?;
 
                     // Build list from right to left
@@ -2092,8 +2509,10 @@ impl MLIRCodegen {
 
                     for arg_ssa in arg_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                            new_result, arg_ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, arg_ssa, result
+                        ));
                         result = new_result;
                     }
                     Ok(result)
@@ -2104,8 +2523,10 @@ impl MLIRCodegen {
                 let list1_ssa = self.compile_expr(&args[0])?;
                 let list2_ssa = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_append({}, {}) : (i64, i64) -> i64",
-                    result, list1_ssa, list2_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_append({}, {}) : (i64, i64) -> i64",
+                    result, list1_ssa, list2_ssa
+                ));
                 Ok(result)
             }
 
@@ -2113,9 +2534,15 @@ impl MLIRCodegen {
                 // (cadr x) = (car (cdr x))
                 let list_ssa = self.compile_expr(&args[0])?;
                 let cdr_result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cdr({}) : (i64) -> i64", cdr_result, list_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cdr({}) : (i64) -> i64",
+                    cdr_result, list_ssa
+                ));
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_car({}) : (i64) -> i64", result, cdr_result));
+                self.writeln(&format!(
+                    "{} = func.call @cc_car({}) : (i64) -> i64",
+                    result, cdr_result
+                ));
                 Ok(result)
             }
 
@@ -2123,7 +2550,10 @@ impl MLIRCodegen {
                 // (shell "command") - call cc_shell directly with the string
                 let cmd_ssa = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_shell({}) : (i64) -> i64", result, cmd_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_shell({}) : (i64) -> i64",
+                    result, cmd_ssa
+                ));
                 Ok(result)
             }
 
@@ -2131,7 +2561,10 @@ impl MLIRCodegen {
                 // (print obj) - call cc_print directly with the object
                 let obj_ssa = self.compile_expr(&args[0])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_print({}) : (i64) -> i64", result, obj_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_print({}) : (i64) -> i64",
+                    result, obj_ssa
+                ));
                 Ok(result)
             }
 
@@ -2142,8 +2575,10 @@ impl MLIRCodegen {
                 let item_ssa = self.compile_expr(&args[0])?;
                 let place_ssa = self.compile_expr(&args[1])?;
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                    result, item_ssa, place_ssa));
+                self.writeln(&format!(
+                    "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                    result, item_ssa, place_ssa
+                ));
                 Ok(result)
             }
 
@@ -2161,18 +2596,20 @@ impl MLIRCodegen {
                     "compile" => "cc_compile",
                     "eval" => "cc_eval",
                     "read-from-string" => "cc_read_from_string",
-                    "x" | "y" => func_name,  // CLOS accessor functions - let them pass through
+                    "x" | "y" => func_name, // CLOS accessor functions - let them pass through
                     _ => func_name,
                 };
 
                 // Check if this is a local function (from flet/labels)
-                let actual_func_name = self.local_function_map
+                let actual_func_name = self
+                    .local_function_map
                     .get(mapped_name)
                     .cloned()
                     .unwrap_or_else(|| mapped_name.to_string());
 
                 // Uniform calling convention - build args_and_env list
-                let arg_ssas: Result<Vec<_>> = args.iter().map(|arg| self.compile_expr(arg)).collect();
+                let arg_ssas: Result<Vec<_>> =
+                    args.iter().map(|arg| self.compile_expr(arg)).collect();
                 let arg_ssas = arg_ssas?;
 
                 // Build args list
@@ -2186,16 +2623,22 @@ impl MLIRCodegen {
 
                     for arg_ssa in arg_ssas.iter().rev() {
                         let new_result = self.fresh_ssa();
-                        self.writeln(&format!("{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
-                            new_result, arg_ssa, result));
+                        self.writeln(&format!(
+                            "{} = func.call @cc_cons({}, {}) : (i64, i64) -> i64",
+                            new_result, arg_ssa, result
+                        ));
                         result = new_result;
                     }
                     result
                 };
 
                 let result = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @{}({}) : (i64) -> i64",
-                    result, Self::quote_func_name(&actual_func_name), args_and_env));
+                self.writeln(&format!(
+                    "{} = func.call @{}({}) : (i64) -> i64",
+                    result,
+                    Self::quote_func_name(&actual_func_name),
+                    args_and_env
+                ));
                 Ok(result)
             }
         }
@@ -2208,7 +2651,11 @@ impl MLIRCodegen {
         // Extract function definitions from args[0]
         // The structure is: Call { function: <def>, args: [] }
         let mut func_defs_vec = Vec::new();
-        if let ASTNode::Call { function: def, args: empty_args } = &args[0] {
+        if let ASTNode::Call {
+            function: def,
+            args: empty_args,
+        } = &args[0]
+        {
             // Single definition
             func_defs_vec.push((def.as_ref(), empty_args));
         } else {
@@ -2222,11 +2669,19 @@ impl MLIRCodegen {
         let mut parsed_defs = Vec::new();
         for (def, _) in &func_defs_vec {
             // def is Call { function: Variable(name), args: [params_node, body...] }
-            if let ASTNode::Call { function: name_node, args: func_def_parts } = def {
+            if let ASTNode::Call {
+                function: name_node,
+                args: func_def_parts,
+            } = def
+            {
                 if let ASTNode::Variable(func_name) = name_node.as_ref() {
                     if func_def_parts.len() >= 2 {
                         // Extract parameter from Call { function: Variable(param), args: [] }
-                        let params = if let ASTNode::Call { function: param_var, args: _ } = &func_def_parts[0] {
+                        let params = if let ASTNode::Call {
+                            function: param_var,
+                            args: _,
+                        } = &func_def_parts[0]
+                        {
                             if let ASTNode::Variable(param_name) = param_var.as_ref() {
                                 vec![param_name.clone()]
                             } else {
@@ -2247,7 +2702,12 @@ impl MLIRCodegen {
         self.compile_flet_labels_internal(is_labels, &parsed_defs, body_exprs)
     }
 
-    fn compile_flet_labels_internal(&mut self, is_labels: bool, func_defs: &[(String, Vec<String>, ASTNode)], body_exprs: &[ASTNode]) -> Result<String> {
+    fn compile_flet_labels_internal(
+        &mut self,
+        is_labels: bool,
+        func_defs: &[(String, Vec<String>, ASTNode)],
+        body_exprs: &[ASTNode],
+    ) -> Result<String> {
         // Save current symbol table and indentation
         let saved_symbols = self.symbol_table.clone();
         let saved_indent = self.indent_level;
@@ -2304,8 +2764,10 @@ impl MLIRCodegen {
             let c_str = format!("{}\\00", value);
             let len = value.len() + 1;
             // name already includes @, so don't add another one
-            self.writeln(&format!("llvm.mlir.global private constant {}(\"{}\") : !llvm.array<{} x i8>",
-                name, c_str, len));
+            self.writeln(&format!(
+                "llvm.mlir.global private constant {}(\"{}\") : !llvm.array<{} x i8>",
+                name, c_str, len
+            ));
         }
 
         self.dedent();
@@ -2333,7 +2795,9 @@ mod tests {
             ],
         };
 
-        codegen.compile_function("add_one", &["x".to_string()], &body).unwrap();
+        codegen
+            .compile_function("add_one", &["x".to_string()], &body)
+            .unwrap();
 
         let mlir = codegen.finalize();
         println!("{}", mlir);

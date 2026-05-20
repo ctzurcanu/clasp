@@ -1,0 +1,5 @@
+(in-package :cl-user)
+(multiple-value-bind (fasl warnings-p failure-p)
+    (compile-file "tmp/probe-env-test-fn.lisp")
+  (declare (ignore warnings-p failure-p))
+  (load fasl))

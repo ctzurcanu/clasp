@@ -2,15 +2,18 @@
 //!
 //! Following Clasp's to_object/from_object pattern
 
-use rlasp_runtime::{LispObject, Cons, Symbol, Number};
-use std::ffi::{CString, CStr};
-use std::os::raw::{c_char, c_int, c_long, c_double, c_void};
+use rlasp_runtime::{Cons, LispObject, Number, Symbol};
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_double, c_int, c_long, c_void};
 
 /// Error type for conversion failures
 #[derive(Debug, thiserror::Error)]
 pub enum TypeError {
     #[error("Expected {expected}, got {actual}")]
-    TypeMismatch { expected: &'static str, actual: &'static str },
+    TypeMismatch {
+        expected: &'static str,
+        actual: &'static str,
+    },
 
     #[error("Invalid UTF-8 in string")]
     InvalidUtf8,

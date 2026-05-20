@@ -1,6 +1,6 @@
 //! Pathname representation for Common Lisp pathnames
 
-use crate::header::{TypeHeader, ObjectType};
+use crate::header::{ObjectType, TypeHeader};
 use crate::object::LispObject;
 
 /// A pathname represents a file system path
@@ -63,9 +63,7 @@ impl LispObject {
             if ptr.is_null() {
                 return false;
             }
-            unsafe {
-                TypeHeader::from_ptr(ptr) == Some(ObjectType::Pathname)
-            }
+            unsafe { TypeHeader::from_ptr(ptr) == Some(ObjectType::Pathname) }
         } else {
             false
         }

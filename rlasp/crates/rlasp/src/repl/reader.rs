@@ -1,7 +1,6 @@
 /// Simple S-expression reader
 ///
 /// Parses Lisp syntax into AST nodes
-
 use crate::ir::{ASTNode, ConstantValue};
 
 const READER_SKIP_MARKER: &str = "__RLASP_READER_SKIP__";
@@ -83,11 +82,17 @@ impl Reader {
             }
             '#' => self.read_sharp(),
             _ if ch.is_ascii_digit() => self.read_number(),
-            _ if ch == '-' && self.pos + 1 < self.input.len() && self.input[self.pos + 1].is_ascii_digit() => {
+            _ if ch == '-'
+                && self.pos + 1 < self.input.len()
+                && self.input[self.pos + 1].is_ascii_digit() =>
+            {
                 // Negative number
                 self.read_number()
             }
-            _ if ch == '.' && self.pos + 1 < self.input.len() && self.input[self.pos + 1].is_ascii_digit() => {
+            _ if ch == '.'
+                && self.pos + 1 < self.input.len()
+                && self.input[self.pos + 1].is_ascii_digit() =>
+            {
                 // Float starting with decimal point (e.g., .5)
                 self.read_number()
             }
@@ -245,7 +250,10 @@ impl Reader {
             } else {
                 // Too large for i64, store as bignum
                 // Validate it's a valid integer
-                if num_str.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+') {
+                if num_str
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '+')
+                {
                     Ok(ASTNode::Constant(crate::ir::ConstantValue::Bignum(num_str)))
                 } else {
                     Err(ReadError::InvalidNumber(num_str))
@@ -265,7 +273,10 @@ impl Reader {
                 self.advance();
             } else if ch.is_alphanumeric() {
                 // Invalid digit for this radix
-                return Err(ReadError::InvalidNumber(format!("Invalid digit for radix {}: {}", radix, ch)));
+                return Err(ReadError::InvalidNumber(format!(
+                    "Invalid digit for radix {}: {}",
+                    radix, ch
+                )));
             } else {
                 break;
             }
@@ -385,11 +396,17 @@ impl Reader {
                 self.advance();
                 let mut depth = 1;
                 while depth > 0 && !self.is_eof() {
-                    if self.peek() == '#' && self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '|' {
+                    if self.peek() == '#'
+                        && self.pos + 1 < self.input.len()
+                        && self.input[self.pos + 1] == '|'
+                    {
                         depth += 1;
                         self.advance();
                         self.advance();
-                    } else if self.peek() == '|' && self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '#' {
+                    } else if self.peek() == '|'
+                        && self.pos + 1 < self.input.len()
+                        && self.input[self.pos + 1] == '#'
+                    {
                         depth -= 1;
                         self.advance();
                         self.advance();
@@ -779,16 +796,25 @@ impl Reader {
             }
 
             // Block comment #|...|#
-            if self.peek() == '#' && self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '|' {
+            if self.peek() == '#'
+                && self.pos + 1 < self.input.len()
+                && self.input[self.pos + 1] == '|'
+            {
                 self.advance(); // skip #
                 self.advance(); // skip |
                 let mut depth = 1;
                 while depth > 0 && !self.is_eof() {
-                    if self.peek() == '#' && self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '|' {
+                    if self.peek() == '#'
+                        && self.pos + 1 < self.input.len()
+                        && self.input[self.pos + 1] == '|'
+                    {
                         depth += 1;
                         self.advance();
                         self.advance();
-                    } else if self.peek() == '|' && self.pos + 1 < self.input.len() && self.input[self.pos + 1] == '#' {
+                    } else if self.peek() == '|'
+                        && self.pos + 1 < self.input.len()
+                        && self.input[self.pos + 1] == '#'
+                    {
                         depth -= 1;
                         self.advance();
                         self.advance();

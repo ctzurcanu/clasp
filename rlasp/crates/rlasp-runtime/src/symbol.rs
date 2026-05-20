@@ -8,10 +8,10 @@
 //! - Property list (for arbitrary properties)
 
 use crate::object::LispObject;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Symbol structure
 ///
@@ -25,13 +25,17 @@ pub struct Symbol {
     name: Arc<str>,
 
     /// Package this symbol belongs to
-    package: AtomicUsize,  // *const Package
+    package: AtomicUsize, // *const Package
 
     /// Value cell (for SYMBOL-VALUE)
-    value: AtomicUsize,  // LispObject
+    value: AtomicUsize, // LispObject
+
+    /// Whether the value cell is bound. NIL is a valid bound value, so this
+    /// cannot be inferred from the value cell contents.
+    value_bound: AtomicBool,
 
     /// Function cell (for SYMBOL-FUNCTION)
-    function: AtomicUsize,  // LispObject
+    function: AtomicUsize, // LispObject
 
     /// Property list
     plist: RwLock<HashMap<String, LispObject>>,
@@ -51,9 +55,10 @@ impl Symbol {
         Self {
             header: crate::header::TypeHeader::new(crate::header::ObjectType::Symbol),
             name: name.into(),
-            package: AtomicUsize::new(0),  // Null package initially
+            package: AtomicUsize::new(0), // Null package initially
             // Use nil_placeholder to avoid circular dependency during NIL_SYMBOL creation
             value: AtomicUsize::new(LispObject::nil_placeholder().raw()),
+            value_bound: AtomicBool::new(false),
             function: AtomicUsize::new(LispObject::nil_placeholder().raw()),
             plist: RwLock::new(HashMap::new()),
             is_interned,
@@ -79,10 +84,25 @@ impl Symbol {
         unsafe { LispObject::from_raw(raw) }
     }
 
+    /// Check whether the value cell is bound
+    #[inline]
+    pub fn value_bound(&self) -> bool {
+        self.value_bound.load(Ordering::Acquire)
+    }
+
     /// Set value cell
     #[inline]
     pub fn set_value(&self, value: LispObject) {
         self.value.store(value.raw(), Ordering::Release);
+        self.value_bound.store(true, Ordering::Release);
+    }
+
+    /// Clear value cell binding
+    #[inline]
+    pub fn clear_value(&self) {
+        self.value
+            .store(LispObject::nil_placeholder().raw(), Ordering::Release);
+        self.value_bound.store(false, Ordering::Release);
     }
 
     /// Get function cell
@@ -115,7 +135,11 @@ impl Symbol {
 
     /// Get plist as list of (key value ...) pairs, returns raw usize for use in JIT
     pub fn plist_entries(&self) -> Vec<(String, LispObject)> {
-        self.plist.read().iter().map(|(k, v)| (k.clone(), *v)).collect()
+        self.plist
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     fn allocate_interned_raw(name: impl Into<Arc<str>>) -> LispObject {
@@ -138,7 +162,8 @@ impl Symbol {
 
     /// Allocate an uninterned symbol (not in any package's symbol table)
     pub fn allocate_uninterned(name: impl Into<Arc<str>>) -> LispObject {
-        let ptr = unsafe { crate::gc::gc_allocate_value(Symbol::with_interned(name, false)).as_ptr() };
+        let ptr =
+            unsafe { crate::gc::gc_allocate_value(Symbol::with_interned(name, false)).as_ptr() };
         LispObject::from_general_ptr(ptr)
     }
 }

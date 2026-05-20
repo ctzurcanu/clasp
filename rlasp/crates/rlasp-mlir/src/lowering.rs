@@ -1,12 +1,11 @@
 /// MLIR → LLVM IR lowering
 /// Converts generated MLIR text to LLVM IR that can be executed with ORC JIT
-
 use anyhow::Result;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +21,11 @@ fn unique_temp_path(stem: &str, ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{stem}-{pid}-{nanos}-{ctr}.{ext}"))
 }
 
+fn mlir_has_embedded_runtime_decls(mlir_text: &str) -> bool {
+    mlir_text.contains("func.func private @stack_pop_pointer() -> i64")
+        && mlir_text.contains("func.func private @cc_make_string(!llvm.ptr, i64) -> i64")
+}
+
 pub fn lower_mlir_to_llvm(mlir_text: &str) -> Result<String> {
     // First, use mlir-opt to lower all dialects to LLVM dialect
     let lowered_mlir = lower_to_llvm_dialect(mlir_text)?;
@@ -32,6 +36,11 @@ pub fn lower_mlir_to_llvm(mlir_text: &str) -> Result<String> {
 
 /// Stream user MLIR with runtime declarations into a complete module file.
 fn write_merged_mlir_to_path(mlir_text: &str, path: &std::path::Path) -> Result<()> {
+    if mlir_has_embedded_runtime_decls(mlir_text) {
+        std::fs::write(path, mlir_text)?;
+        return Ok(());
+    }
+
     let runtime_decls = include_str!("../runtime-decls.mlir");
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
@@ -55,6 +64,12 @@ fn write_merged_mlir_to_path(mlir_text: &str, path: &std::path::Path) -> Result<
 }
 
 fn write_merged_mlir_file_to_path(input_mlir_path: &str, path: &std::path::Path) -> Result<()> {
+    let input_text = std::fs::read_to_string(input_mlir_path)?;
+    if mlir_has_embedded_runtime_decls(&input_text) {
+        std::fs::write(path, input_text)?;
+        return Ok(());
+    }
+
     let runtime_decls = include_str!("../runtime-decls.mlir");
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
@@ -91,7 +106,8 @@ pub fn emit_mlir_bytecode(mlir_text: &str, output_path: &str) -> Result<()> {
         "mlir-opt",
     ];
 
-    let mlir_opt = mlir_opt_paths.iter()
+    let mlir_opt = mlir_opt_paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .ok_or_else(|| anyhow::anyhow!("mlir-opt not found"))?;
 
@@ -133,7 +149,8 @@ pub fn emit_mlir_bytecode_from_file(input_mlir_path: &str, output_path: &str) ->
         "mlir-opt",
     ];
 
-    let mlir_opt = mlir_opt_paths.iter()
+    let mlir_opt = mlir_opt_paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .ok_or_else(|| anyhow::anyhow!("mlir-opt not found"))?;
 
@@ -170,7 +187,8 @@ fn find_mlir_opt() -> Result<&'static str> {
         "/usr/local/opt/llvm/bin/mlir-opt",
         "mlir-opt",
     ];
-    mlir_opt_paths.iter()
+    mlir_opt_paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .copied()
         .ok_or_else(|| anyhow::anyhow!("mlir-opt not found. Install with: brew install llvm"))
@@ -182,7 +200,8 @@ fn find_mlir_translate() -> Result<&'static str> {
         "/usr/local/opt/llvm/bin/mlir-translate",
         "mlir-translate",
     ];
-    paths.iter()
+    paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .copied()
         .ok_or_else(|| anyhow::anyhow!("mlir-translate not found. Install with: brew install llvm"))
@@ -399,13 +418,13 @@ fn mlir_to_llvm_ir(mlir_text: &str) -> Result<String> {
             let llvm_func = convert_function_signature(trimmed)?;
             llvm_output.push_str(&llvm_func);
             llvm_output.push('\n');
-            llvm_output.push_str("entry:\n");  // Add entry block label
+            llvm_output.push_str("entry:\n"); // Add entry block label
             continue;
         }
 
         // Handle function end
         if trimmed == "}" && in_function {
-            llvm_output.push_str("}\n\n");  // Extra newline between functions
+            llvm_output.push_str("}\n\n"); // Extra newline between functions
             in_function = false;
             continue;
         }
@@ -499,9 +518,12 @@ fn convert_instruction(mlir_inst: &str) -> Result<String> {
             let rhs_parts: Vec<&str> = parts[1].split_whitespace().collect();
             if rhs_parts.len() >= 4 {
                 let value = rhs_parts[1];
-                let typ = rhs_parts[3];  // The type after ':'
+                let typ = rhs_parts[3]; // The type after ':'
                 if typ == "f64" {
-                    return Ok(format!("{} = call i64 @cc_box_float(double {})", lhs, value));
+                    return Ok(format!(
+                        "{} = call i64 @cc_box_float(double {})",
+                        lhs, value
+                    ));
                 } else {
                     return Ok(format!("{} = call i64 @cc_box_fixnum(i64 {})", lhs, value));
                 }
@@ -511,7 +533,7 @@ fn convert_instruction(mlir_inst: &str) -> Result<String> {
 
     if mlir_inst.contains("arith.bitcast") {
         // Skip bitcast instructions for now - they're handled by the constant case above
-        return Ok(String::new());  // Return empty string to skip this instruction
+        return Ok(String::new()); // Return empty string to skip this instruction
     }
 
     if mlir_inst.contains("arith.addi") {
@@ -524,7 +546,10 @@ fn convert_instruction(mlir_inst: &str) -> Result<String> {
             if ops.len() >= 4 {
                 let op1 = ops[1].trim_end_matches(',');
                 let op2 = ops[2];
-                return Ok(format!("{} = call i64 @cc_add(i64 {}, i64 {})", lhs, op1, op2));
+                return Ok(format!(
+                    "{} = call i64 @cc_add(i64 {}, i64 {})",
+                    lhs, op1, op2
+                ));
             }
         }
     }
@@ -539,7 +564,10 @@ fn convert_instruction(mlir_inst: &str) -> Result<String> {
             if ops.len() >= 4 {
                 let op1 = ops[1].trim_end_matches(',');
                 let op2 = ops[2];
-                return Ok(format!("{} = call i64 @cc_sub(i64 {}, i64 {})", lhs, op1, op2));
+                return Ok(format!(
+                    "{} = call i64 @cc_sub(i64 {}, i64 {})",
+                    lhs, op1, op2
+                ));
             }
         }
     }

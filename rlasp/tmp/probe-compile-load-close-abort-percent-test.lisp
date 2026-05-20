@@ -1,0 +1,6 @@
+(load "clisp/in_work/regression-tests/framework.lisp")
+(in-package #:clasp-tests)
+(multiple-value-bind (fasl warnings-p failure-p)
+    (compile-file "tmp/probe-close-abort-percent-test.lisp")
+  (declare (ignore warnings-p failure-p))
+  (load fasl))

@@ -1,3 +1,5 @@
+use inkwell::context::Context;
+use rlasp::ir::{ASTNode, ConstantValue};
 /// MLIR JIT Compilation Demo
 ///
 /// This demonstrates the complete MLIR-based JIT compilation pipeline:
@@ -5,10 +7,7 @@
 /// 2. Lower MLIR to LLVM IR (using mlir-opt and mlir-translate)
 /// 3. Create JIT engine from LLVM IR
 /// 4. Execute compiled functions
-
-use rlasp_mlir::{MLIRCodegen, jit::create_jit_from_mlir};
-use rlasp::ir::{ASTNode, ConstantValue};
-use inkwell::context::Context;
+use rlasp_mlir::{jit::create_jit_from_mlir, MLIRCodegen};
 
 fn main() {
     println!("=== MLIR-based JIT Compilation Demo ===\n");
@@ -23,7 +22,8 @@ fn main() {
     let mut codegen1 = MLIRCodegen::new("example1");
     let body1 = ASTNode::Constant(ConstantValue::Fixnum(42));
 
-    codegen1.compile_function("__main", &[], &body1)
+    codegen1
+        .compile_function("__main", &[], &body1)
         .expect("Failed to compile constant function");
 
     let mlir1 = codegen1.finalize();
@@ -31,11 +31,11 @@ fn main() {
     println!("{}", mlir1);
 
     println!("\nCreating JIT engine and executing...");
-    let jit1 = create_jit_from_mlir(&context, &mlir1)
-        .expect("Failed to create JIT engine");
+    let jit1 = create_jit_from_mlir(&context, &mlir1).expect("Failed to create JIT engine");
 
     unsafe {
-        let func = jit1.get_function_0("__main")
+        let func = jit1
+            .get_function_0("__main")
             .expect("Failed to get function");
         let result = func.call();
         let unboxed = rlasp_jit::intrinsics::cc_unbox_fixnum(result as usize);
@@ -57,7 +57,8 @@ fn main() {
         ],
     };
 
-    codegen2.compile_function("__main", &["x".to_string()], &body2)
+    codegen2
+        .compile_function("__main", &["x".to_string()], &body2)
         .expect("Failed to compile arithmetic function");
 
     let mlir2 = codegen2.finalize();
@@ -65,13 +66,13 @@ fn main() {
     println!("{}", mlir2);
 
     println!("\nCreating JIT engine and executing...");
-    let jit2 = create_jit_from_mlir(&context, &mlir2)
-        .expect("Failed to create JIT engine");
+    let jit2 = create_jit_from_mlir(&context, &mlir2).expect("Failed to create JIT engine");
 
     unsafe {
-        let func: inkwell::execution_engine::JitFunction<unsafe extern "C" fn(i64) -> i64>
-            = jit2.execution_engine().get_function("__main")
-                .expect("Failed to get function");
+        let func: inkwell::execution_engine::JitFunction<unsafe extern "C" fn(i64) -> i64> = jit2
+            .execution_engine()
+            .get_function("__main")
+            .expect("Failed to get function");
 
         // Test: 41 + 1 = 42
         let input = 41i64 << 2; // Tag as fixnum
@@ -107,7 +108,8 @@ fn main() {
         else_branch: Box::new(ASTNode::Constant(ConstantValue::Fixnum(0))),
     };
 
-    codegen3.compile_function("__main", &["x".to_string()], &body3)
+    codegen3
+        .compile_function("__main", &["x".to_string()], &body3)
         .expect("Failed to compile if expression");
 
     let mlir3 = codegen3.finalize();
@@ -115,13 +117,13 @@ fn main() {
     println!("{}", mlir3);
 
     println!("\nCreating JIT engine and executing...");
-    let jit3 = create_jit_from_mlir(&context, &mlir3)
-        .expect("Failed to create JIT engine");
+    let jit3 = create_jit_from_mlir(&context, &mlir3).expect("Failed to create JIT engine");
 
     unsafe {
-        let func: inkwell::execution_engine::JitFunction<unsafe extern "C" fn(i64) -> i64>
-            = jit3.execution_engine().get_function("__main")
-                .expect("Failed to get function");
+        let func: inkwell::execution_engine::JitFunction<unsafe extern "C" fn(i64) -> i64> = jit3
+            .execution_engine()
+            .get_function("__main")
+            .expect("Failed to get function");
 
         // Test: is-zero(0) = 1
         let input = 0i64 << 2;
@@ -165,7 +167,8 @@ fn main() {
         }],
     };
 
-    codegen4.compile_function("__main", &["x".to_string()], &body4)
+    codegen4
+        .compile_function("__main", &["x".to_string()], &body4)
         .expect("Failed to compile let binding");
 
     let mlir4 = codegen4.finalize();
@@ -173,13 +176,13 @@ fn main() {
     println!("{}", mlir4);
 
     println!("\nCreating JIT engine and executing...");
-    let jit4 = create_jit_from_mlir(&context, &mlir4)
-        .expect("Failed to create JIT engine");
+    let jit4 = create_jit_from_mlir(&context, &mlir4).expect("Failed to create JIT engine");
 
     unsafe {
-        let func: inkwell::execution_engine::JitFunction<unsafe extern "C" fn(i64) -> i64>
-            = jit4.execution_engine().get_function("__main")
-                .expect("Failed to get function");
+        let func: inkwell::execution_engine::JitFunction<unsafe extern "C" fn(i64) -> i64> = jit4
+            .execution_engine()
+            .get_function("__main")
+            .expect("Failed to get function");
 
         // Test: double-plus-ten(5) = 5*2 + 10 = 20
         let input = 5i64 << 2;

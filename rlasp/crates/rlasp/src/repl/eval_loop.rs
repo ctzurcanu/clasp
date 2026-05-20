@@ -27,16 +27,16 @@ use std::collections::HashMap;
 /// Pattern for destructuring in :for clauses
 #[derive(Debug)]
 enum DestructurePattern {
-    DottedPair(String, String),  // (a . b) - car and cdr vars
-    List(Vec<String>),           // (a b c) - list of vars
+    DottedPair(String, String), // (a . b) - car and cdr vars
+    List(Vec<String>),          // (a b c) - list of vars
 }
 
 /// Kind of symbols to iterate over in :being :the :symbols
 #[derive(Debug, Clone, Copy)]
 enum SymbolKind {
-    AllSymbols,       // :symbols - all accessible symbols
-    ExternalSymbols,  // :external-symbols - only external symbols
-    PresentSymbols,   // :present-symbols - symbols directly in package
+    AllSymbols,      // :symbols - all accessible symbols
+    ExternalSymbols, // :external-symbols - only external symbols
+    PresentSymbols,  // :present-symbols - symbols directly in package
 }
 
 fn ensure_binding(bindings: &mut Vec<(String, ASTNode)>, name: &str, init: ASTNode) {
@@ -47,10 +47,7 @@ fn ensure_binding(bindings: &mut Vec<(String, ASTNode)>, name: &str, init: ASTNo
 
 fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNode {
     fn canonical_name(name: &str) -> String {
-        name.rsplit(':')
-            .next()
-            .unwrap_or(name)
-            .to_ascii_lowercase()
+        name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase()
     }
     fn is_nil_designator(node: &ASTNode) -> bool {
         match node {
@@ -116,7 +113,10 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
             if let Some(name) = callee_name {
                 let normalized = canonical_name(name);
                 if normalized == "return" {
-                    let value = args.get(0).map(|a| rewrite_loop_return_calls(a, loop_name)).unwrap_or_else(ASTNode::nil);
+                    let value = args
+                        .get(0)
+                        .map(|a| rewrite_loop_return_calls(a, loop_name))
+                        .unwrap_or_else(ASTNode::nil);
                     return loop_return_form(value);
                 }
                 if normalized == "return-from" {
@@ -134,7 +134,10 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
                         })
                         .unwrap_or(false);
                     if matches_target {
-                        let value = args.get(1).map(|a| rewrite_loop_return_calls(a, loop_name)).unwrap_or_else(ASTNode::nil);
+                        let value = args
+                            .get(1)
+                            .map(|a| rewrite_loop_return_calls(a, loop_name))
+                            .unwrap_or_else(ASTNode::nil);
                         return loop_return_form(value);
                     }
                 }
@@ -142,16 +145,26 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
                     && args.get(0).map_or(false, is_nil_designator)
                     && loop_name.is_none()
                 {
-                    let value = args.get(1).map(|a| rewrite_loop_return_calls(a, loop_name)).unwrap_or_else(ASTNode::nil);
+                    let value = args
+                        .get(1)
+                        .map(|a| rewrite_loop_return_calls(a, loop_name))
+                        .unwrap_or_else(ASTNode::nil);
                     return loop_return_form(value);
                 }
             }
             ASTNode::Call {
                 function: Box::new(rewrite_loop_return_calls(function, loop_name)),
-                args: args.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| rewrite_loop_return_calls(a, loop_name))
+                    .collect(),
             }
         }
-        ASTNode::If { test, then_branch, else_branch } => ASTNode::If {
+        ASTNode::If {
+            test,
+            then_branch,
+            else_branch,
+        } => ASTNode::If {
             test: Box::new(rewrite_loop_return_calls(test, loop_name)),
             then_branch: Box::new(rewrite_loop_return_calls(then_branch, loop_name)),
             else_branch: Box::new(rewrite_loop_return_calls(else_branch, loop_name)),
@@ -172,14 +185,20 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
                 .iter()
                 .map(|(n, v)| (n.clone(), rewrite_loop_return_calls(v, loop_name)))
                 .collect(),
-            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            body: body
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
         ASTNode::LetStar { bindings, body } => ASTNode::LetStar {
             bindings: bindings
                 .iter()
                 .map(|(n, v)| (n.clone(), rewrite_loop_return_calls(v, loop_name)))
                 .collect(),
-            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            body: body
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
         ASTNode::Setq { var, value } => ASTNode::Setq {
             var: var.clone(),
@@ -195,52 +214,112 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
             } else {
                 ASTNode::ReturnFrom {
                     block_name: block_name.clone(),
-                    value: value.as_ref().map(|v| Box::new(rewrite_loop_return_calls(v, loop_name))),
+                    value: value
+                        .as_ref()
+                        .map(|v| Box::new(rewrite_loop_return_calls(v, loop_name))),
                 }
             }
         }
         ASTNode::Progn { exprs } => ASTNode::Progn {
-            exprs: exprs.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            exprs: exprs
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
-        ASTNode::Dotimes { var, count, result, body } => ASTNode::Dotimes {
+        ASTNode::Dotimes {
+            var,
+            count,
+            result,
+            body,
+        } => ASTNode::Dotimes {
             var: var.clone(),
             count: Box::new(rewrite_loop_return_calls(count, loop_name)),
-            result: result.as_ref().map(|r| Box::new(rewrite_loop_return_calls(r, loop_name))),
-            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            result: result
+                .as_ref()
+                .map(|r| Box::new(rewrite_loop_return_calls(r, loop_name))),
+            body: body
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
-        ASTNode::Dolist { var, list, result, body } => ASTNode::Dolist {
+        ASTNode::Dolist {
+            var,
+            list,
+            result,
+            body,
+        } => ASTNode::Dolist {
             var: var.clone(),
             list: Box::new(rewrite_loop_return_calls(list, loop_name)),
-            result: result.as_ref().map(|r| Box::new(rewrite_loop_return_calls(r, loop_name))),
-            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            result: result
+                .as_ref()
+                .map(|r| Box::new(rewrite_loop_return_calls(r, loop_name))),
+            body: body
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
-        ASTNode::Loop { var, start, limit, when_condition, collect, sum, else_collect, else_sum } => ASTNode::Loop {
+        ASTNode::Loop {
+            var,
+            start,
+            limit,
+            when_condition,
+            collect,
+            sum,
+            else_collect,
+            else_sum,
+        } => ASTNode::Loop {
             var: var.clone(),
-            start: start.as_ref().map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
+            start: start
+                .as_ref()
+                .map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
             limit: Box::new(rewrite_loop_return_calls(limit, loop_name)),
-            when_condition: when_condition.as_ref().map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
-            collect: collect.as_ref().map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
-            sum: sum.as_ref().map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
-            else_collect: else_collect.as_ref().map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
-            else_sum: else_sum.as_ref().map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
+            when_condition: when_condition
+                .as_ref()
+                .map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
+            collect: collect
+                .as_ref()
+                .map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
+            sum: sum
+                .as_ref()
+                .map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
+            else_collect: else_collect
+                .as_ref()
+                .map(|c| Box::new(rewrite_loop_return_calls(c, loop_name))),
+            else_sum: else_sum
+                .as_ref()
+                .map(|s| Box::new(rewrite_loop_return_calls(s, loop_name))),
         },
         ASTNode::DottedPair { car, cdr } => ASTNode::DottedPair {
             car: Box::new(rewrite_loop_return_calls(car, loop_name)),
             cdr: Box::new(rewrite_loop_return_calls(cdr, loop_name)),
         },
-        ASTNode::Backquote(inner) => ASTNode::Backquote(Box::new(rewrite_loop_return_calls(inner, loop_name))),
-        ASTNode::Unquote(inner) => ASTNode::Unquote(Box::new(rewrite_loop_return_calls(inner, loop_name))),
+        ASTNode::Backquote(inner) => {
+            ASTNode::Backquote(Box::new(rewrite_loop_return_calls(inner, loop_name)))
+        }
+        ASTNode::Unquote(inner) => {
+            ASTNode::Unquote(Box::new(rewrite_loop_return_calls(inner, loop_name)))
+        }
         ASTNode::UnquoteSplicing(inner) => {
             ASTNode::UnquoteSplicing(Box::new(rewrite_loop_return_calls(inner, loop_name)))
         }
         ASTNode::CCall { function, args } => ASTNode::CCall {
             function: function.clone(),
-            args: args.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            args: args
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
-        ASTNode::CppMethodCall { object, method, args } => ASTNode::CppMethodCall {
+        ASTNode::CppMethodCall {
+            object,
+            method,
+            args,
+        } => ASTNode::CppMethodCall {
             object: Box::new(rewrite_loop_return_calls(object, loop_name)),
             method: method.clone(),
-            args: args.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            args: args
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
         ASTNode::HashTable { entries } => ASTNode::HashTable {
             entries: entries
@@ -253,9 +332,12 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
                 })
                 .collect(),
         },
-        ASTNode::Vector(items) => {
-            ASTNode::Vector(items.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect())
-        }
+        ASTNode::Vector(items) => ASTNode::Vector(
+            items
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
+        ),
         ASTNode::ArrayLiteral { dims, elements } => ASTNode::ArrayLiteral {
             dims: dims.clone(),
             elements: elements
@@ -263,17 +345,32 @@ fn rewrite_loop_return_calls(ast: &ASTNode, loop_name: &Option<String>) -> ASTNo
                 .map(|a| rewrite_loop_return_calls(a, loop_name))
                 .collect(),
         },
-        ASTNode::Defmethod { generic_name, qualifier, specializers, params, body } => ASTNode::Defmethod {
+        ASTNode::Defmethod {
+            generic_name,
+            qualifier,
+            specializers,
+            params,
+            body,
+        } => ASTNode::Defmethod {
             generic_name: generic_name.clone(),
             qualifier: qualifier.clone(),
             specializers: specializers.clone(),
             params: params.clone(),
-            body: body.iter().map(|a| rewrite_loop_return_calls(a, loop_name)).collect(),
+            body: body
+                .iter()
+                .map(|a| rewrite_loop_return_calls(a, loop_name))
+                .collect(),
         },
-        ASTNode::Defclass { name, superclasses, slots } => ASTNode::Defclass {
+        ASTNode::Defclass {
+            name,
+            superclasses,
+            slots,
+            metaclass,
+        } => ASTNode::Defclass {
             name: name.clone(),
             superclasses: superclasses.clone(),
             slots: slots.clone(),
+            metaclass: metaclass.clone(),
         },
         ASTNode::Defgeneric { name, lambda_list } => ASTNode::Defgeneric {
             name: name.clone(),
@@ -299,21 +396,35 @@ fn contains_loop_return_state(nodes: &[ASTNode]) -> bool {
                 walk(value)
             }
             ASTNode::Call { function, args } => walk(function) || args.iter().any(walk),
-            ASTNode::If { test, then_branch, else_branch } => {
-                walk(test) || walk(then_branch) || walk(else_branch)
-            }
+            ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => walk(test) || walk(then_branch) || walk(else_branch),
             ASTNode::Cond { clauses } => clauses.iter().any(|(t, r)| walk(t) || walk(r)),
             ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
                 bindings.iter().any(|(_, v)| walk(v)) || body.iter().any(walk)
             }
             ASTNode::Progn { exprs } => exprs.iter().any(walk),
-            ASTNode::Dotimes { count, result, body, .. } => {
-                walk(count) || result.as_ref().map_or(false, |r| walk(r)) || body.iter().any(walk)
-            }
-            ASTNode::Dolist { list, result, body, .. } => {
-                walk(list) || result.as_ref().map_or(false, |r| walk(r)) || body.iter().any(walk)
-            }
-            ASTNode::Loop { start, limit, when_condition, collect, sum, else_collect, else_sum, .. } => {
+            ASTNode::Dotimes {
+                count,
+                result,
+                body,
+                ..
+            } => walk(count) || result.as_ref().map_or(false, |r| walk(r)) || body.iter().any(walk),
+            ASTNode::Dolist {
+                list, result, body, ..
+            } => walk(list) || result.as_ref().map_or(false, |r| walk(r)) || body.iter().any(walk),
+            ASTNode::Loop {
+                start,
+                limit,
+                when_condition,
+                collect,
+                sum,
+                else_collect,
+                else_sum,
+                ..
+            } => {
                 start.as_ref().map_or(false, |s| walk(s))
                     || walk(limit)
                     || when_condition.as_ref().map_or(false, |c| walk(c))
@@ -323,16 +434,24 @@ fn contains_loop_return_state(nodes: &[ASTNode]) -> bool {
                     || else_sum.as_ref().map_or(false, |s| walk(s))
             }
             ASTNode::ReturnFrom { value, .. } => value.as_ref().map_or(false, |v| walk(v)),
-            ASTNode::Quote(_) | ASTNode::Lambda { .. } | ASTNode::Macro { .. } | ASTNode::Block { .. } => false,
+            ASTNode::Quote(_)
+            | ASTNode::Lambda { .. }
+            | ASTNode::Macro { .. }
+            | ASTNode::Block { .. } => false,
             ASTNode::DottedPair { car, cdr } => walk(car) || walk(cdr),
-            ASTNode::Backquote(inner) | ASTNode::Unquote(inner) | ASTNode::UnquoteSplicing(inner) => walk(inner),
+            ASTNode::Backquote(inner)
+            | ASTNode::Unquote(inner)
+            | ASTNode::UnquoteSplicing(inner) => walk(inner),
             ASTNode::CCall { args, .. } => args.iter().any(walk),
             ASTNode::CppMethodCall { object, args, .. } => walk(object) || args.iter().any(walk),
             ASTNode::HashTable { entries } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
             ASTNode::Vector(items) => items.iter().any(walk),
             ASTNode::ArrayLiteral { elements, .. } => elements.iter().any(walk),
             ASTNode::Defmethod { body, .. } => body.iter().any(walk),
-            ASTNode::Defclass { .. } | ASTNode::Defgeneric { .. } | ASTNode::Constant(_) | ASTNode::Variable(_) => false,
+            ASTNode::Defclass { .. }
+            | ASTNode::Defgeneric { .. }
+            | ASTNode::Constant(_)
+            | ASTNode::Variable(_) => false,
         }
     }
     nodes.iter().any(walk)
@@ -367,7 +486,9 @@ fn loop_list_type_guard(list_var: &str) -> ASTNode {
                 ASTNode::nil(),
                 ASTNode::Call {
                     function: Box::new(ASTNode::Variable("error".to_string())),
-                    args: vec![ASTNode::Quote(Box::new(ASTNode::Variable("type-error".to_string())))],
+                    args: vec![ASTNode::Quote(Box::new(ASTNode::Variable(
+                        "type-error".to_string(),
+                    )))],
                 },
             ],
         }),
@@ -385,11 +506,89 @@ pub fn expand_loop(args: &[ASTNode]) -> ASTNode {
     // Check if this is a simple loop (no keywords, just body)
     let first_is_keyword = is_loop_keyword_any(&args[0]);
     if !first_is_keyword {
-        // Simple loop: (loop body...) has an implicit NIL block so (return ...)
-        // can exit with values. We still execute a single pass for now.
-        return ASTNode::Call {
-            function: Box::new(ASTNode::Variable("block".to_string())),
-            args: vec![ASTNode::nil(), ASTNode::progn(args.to_vec())],
+        // Simple loop: (loop body...) repeats forever until a non-local exit.
+        // Runtime conditions are represented as error objects in the compiled
+        // path, so preserve the first body error for HANDLER-CASE instead of
+        // discarding it as a loop body value.
+        let loop_name = None;
+        let rewritten_body: Vec<ASTNode> = args
+            .iter()
+            .map(|arg| rewrite_loop_return_calls(arg, &loop_name))
+            .collect();
+        let has_loop_return = contains_loop_return_state(&rewritten_body);
+        let body_value = ASTNode::progn(rewritten_body);
+
+        let mut bindings = vec![
+            ("__loop_break__".to_string(), ASTNode::nil()),
+            ("__loop_simple_error__".to_string(), ASTNode::nil()),
+            ("__loop_simple_value__".to_string(), ASTNode::nil()),
+        ];
+        if has_loop_return {
+            bindings.push(("__loop_returned__".to_string(), ASTNode::nil()));
+            bindings.push(("__loop_return_value__".to_string(), ASTNode::nil()));
+            bindings.push(("__loop_return_values__".to_string(), ASTNode::nil()));
+        }
+
+        let continue_condition = ASTNode::Call {
+            function: Box::new(ASTNode::Variable("and".to_string())),
+            args: vec![
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("not".to_string())),
+                    args: vec![ASTNode::Variable("__loop_break__".to_string())],
+                },
+                ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("not".to_string())),
+                    args: vec![ASTNode::Variable("__loop_simple_error__".to_string())],
+                },
+            ],
+        };
+
+        let while_form = ASTNode::Call {
+            function: Box::new(ASTNode::Variable("sys::while".to_string())),
+            args: vec![
+                continue_condition,
+                ASTNode::setq("__loop_simple_value__", body_value),
+                ASTNode::If {
+                    test: Box::new(ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("errorp".to_string())),
+                        args: vec![ASTNode::Variable("__loop_simple_value__".to_string())],
+                    }),
+                    then_branch: Box::new(ASTNode::progn(vec![
+                        ASTNode::setq(
+                            "__loop_simple_error__",
+                            ASTNode::Variable("__loop_simple_value__".to_string()),
+                        ),
+                        ASTNode::setq("__loop_break__", ASTNode::t()),
+                    ])),
+                    else_branch: Box::new(ASTNode::nil()),
+                },
+            ],
+        };
+
+        let normal_result = ASTNode::If {
+            test: Box::new(ASTNode::Variable("__loop_simple_error__".to_string())),
+            then_branch: Box::new(ASTNode::Variable("__loop_simple_error__".to_string())),
+            else_branch: Box::new(ASTNode::nil()),
+        };
+        let result = if has_loop_return {
+            ASTNode::If {
+                test: Box::new(ASTNode::Variable("__loop_returned__".to_string())),
+                then_branch: Box::new(ASTNode::Call {
+                    function: Box::new(ASTNode::Variable("values-list".to_string())),
+                    args: vec![ASTNode::Variable("__loop_return_values__".to_string())],
+                }),
+                else_branch: Box::new(normal_result),
+            }
+        } else {
+            normal_result
+        };
+
+        return ASTNode::Let {
+            bindings,
+            body: vec![ASTNode::Block {
+                name: None,
+                body: vec![while_form, result],
+            }],
         };
     }
 
@@ -412,61 +611,120 @@ fn is_loop_keyword_any(node: &ASTNode) -> bool {
         _ => None,
     };
     if let Some(kw) = kw {
-        let kw_lower = kw.rsplit(':').next().unwrap_or(kw).trim_start_matches(':').to_lowercase();
-        matches!(kw_lower.as_str(),
-            "with" | ":with" |
-            "for" | ":for" |
-            "as" | ":as" |
-            "and" | ":and" |
-            "in" | ":in" |
-            "on" | ":on" |
-            "across" | ":across" |
-            "of-type" | ":of-type" |
-            "from" | ":from" |
-            "downfrom" | ":downfrom" |
-            "upfrom" | ":upfrom" |
-            "downto" | ":downto" |
-            "to" | ":to" |
-            "below" | ":below" |
-            "above" | ":above" |
-            "by" | ":by" |
-            "being" | ":being" |
-            "the" | ":the" |
-            "hash-keys" | ":hash-keys" |
-            "hash-values" | ":hash-values" |
-            "of" | ":of" |
-            "do" | ":do" |
-            "doing" | ":doing" |
-            "collect" | ":collect" |
-            "collecting" | ":collecting" |
-            "append" | ":append" |
-            "appending" | ":appending" |
-            "nconc" | ":nconc" |
-            "nconcing" | ":nconcing" |
-            "sum" | ":sum" |
-            "summing" | ":summing" |
-            "count" | ":count" |
-            "counting" | ":counting" |
-            "maximize" | ":maximize" |
-            "maximizing" | ":maximizing" |
-            "minimize" | ":minimize" |
-            "minimizing" | ":minimizing" |
-            "into" | ":into" |
-            "when" | ":when" |
-            "if" | ":if" |
-            "unless" | ":unless" |
-            "else" | ":else" |
-            "end" | ":end" |
-            "while" | ":while" |
-            "until" | ":until" |
-            "repeat" | ":repeat" |
-            "always" | ":always" |
-            "never" | ":never" |
-            "thereis" | ":thereis" |
-            "finally" | ":finally" |
-            "return" | ":return" |
-            "initially" | ":initially" |
-            "named" | ":named"
+        let kw_lower = kw
+            .rsplit(':')
+            .next()
+            .unwrap_or(kw)
+            .trim_start_matches(':')
+            .to_lowercase();
+        matches!(
+            kw_lower.as_str(),
+            "with"
+                | ":with"
+                | "for"
+                | ":for"
+                | "as"
+                | ":as"
+                | "and"
+                | ":and"
+                | "in"
+                | ":in"
+                | "on"
+                | ":on"
+                | "across"
+                | ":across"
+                | "of-type"
+                | ":of-type"
+                | "from"
+                | ":from"
+                | "downfrom"
+                | ":downfrom"
+                | "upfrom"
+                | ":upfrom"
+                | "downto"
+                | ":downto"
+                | "to"
+                | ":to"
+                | "below"
+                | ":below"
+                | "above"
+                | ":above"
+                | "by"
+                | ":by"
+                | "being"
+                | ":being"
+                | "the"
+                | ":the"
+                | "hash-keys"
+                | ":hash-keys"
+                | "hash-values"
+                | ":hash-values"
+                | "of"
+                | ":of"
+                | "do"
+                | ":do"
+                | "doing"
+                | ":doing"
+                | "collect"
+                | ":collect"
+                | "collecting"
+                | ":collecting"
+                | "append"
+                | ":append"
+                | "appending"
+                | ":appending"
+                | "nconc"
+                | ":nconc"
+                | "nconcing"
+                | ":nconcing"
+                | "sum"
+                | ":sum"
+                | "summing"
+                | ":summing"
+                | "count"
+                | ":count"
+                | "counting"
+                | ":counting"
+                | "maximize"
+                | ":maximize"
+                | "maximizing"
+                | ":maximizing"
+                | "minimize"
+                | ":minimize"
+                | "minimizing"
+                | ":minimizing"
+                | "into"
+                | ":into"
+                | "when"
+                | ":when"
+                | "if"
+                | ":if"
+                | "unless"
+                | ":unless"
+                | "else"
+                | ":else"
+                | "end"
+                | ":end"
+                | "while"
+                | ":while"
+                | "until"
+                | ":until"
+                | "repeat"
+                | ":repeat"
+                | "always"
+                | ":always"
+                | "never"
+                | ":never"
+                | "thereis"
+                | ":thereis"
+                | "finally"
+                | ":finally"
+                | "return"
+                | ":return"
+                | "initially"
+                | ":initially"
+                | "named"
+                | ":named"
         )
     } else {
         false
@@ -481,10 +739,24 @@ fn is_loop_keyword(node: &ASTNode, keyword: &str) -> bool {
         _ => None,
     };
     if let Some(kw) = kw {
-        let kw_lower = kw.rsplit(':').next().unwrap_or(kw).trim_start_matches(':').to_lowercase();
+        let kw_lower = kw
+            .rsplit(':')
+            .next()
+            .unwrap_or(kw)
+            .trim_start_matches(':')
+            .to_lowercase();
         kw_lower == keyword
     } else {
         false
+    }
+}
+
+fn is_loop_equals_symbol(node: &ASTNode) -> bool {
+    match node {
+        ASTNode::Variable(name) | ASTNode::Constant(ConstantValue::Symbol(name)) => {
+            name.rsplit(':').next().unwrap_or(name) == "="
+        }
+        _ => false,
     }
 }
 
@@ -497,28 +769,61 @@ enum LoopClause {
     WithDestructure { vars: Vec<String>, init: ASTNode },
 
     /// :with (car . cdr) = init - dotted pair destructuring with
-    WithDotted { car_var: String, cdr_var: String, init: ASTNode },
+    WithDotted {
+        car_var: String,
+        cdr_var: String,
+        init: ASTNode,
+    },
 
     /// :for var :in list [:by step] - simple iteration
-    ForIn { var: String, list: ASTNode, by: Option<ASTNode> },
+    ForIn {
+        var: String,
+        list: ASTNode,
+        by: Option<ASTNode>,
+    },
 
     /// :for var :across sequence - iterate over sequence elements
     ForAcross { var: String, seq: ASTNode },
 
     /// :for (var1 . var2) :in list [:by step] - destructuring iteration
-    ForInDestructure { car_var: String, cdr_var: String, list: ASTNode, by: Option<ASTNode> },
+    ForInDestructure {
+        car_var: String,
+        cdr_var: String,
+        list: ASTNode,
+        by: Option<ASTNode>,
+    },
 
     /// :for var :on list [:by step] - iterate over successive cdrs
-    ForOn { var: String, list: ASTNode, by: Option<ASTNode> },
+    ForOn {
+        var: String,
+        list: ASTNode,
+        by: Option<ASTNode>,
+    },
 
     /// :for (var1 . var2) :on list [:by step] - bind car/cdr from successive cdrs
-    ForOnDotted { car_var: String, cdr_var: String, list: ASTNode, by: Option<ASTNode> },
+    ForOnDotted {
+        car_var: String,
+        cdr_var: String,
+        list: ASTNode,
+        by: Option<ASTNode>,
+    },
 
     /// :for (var1 var2 ...) :on list [:by step] - bind vars from successive cdrs
-    ForOnDestructure { vars: Vec<String>, list: ASTNode, by: Option<ASTNode> },
+    ForOnDestructure {
+        vars: Vec<String>,
+        list: ASTNode,
+        by: Option<ASTNode>,
+    },
 
     /// :for var :from start :to end [:by step]
-    ForFromTo { var: String, start: ASTNode, end: ASTNode, step: Option<ASTNode>, inclusive: bool, down: bool },
+    ForFromTo {
+        var: String,
+        start: ASTNode,
+        end: ASTNode,
+        step: Option<ASTNode>,
+        inclusive: bool,
+        down: bool,
+    },
 
     /// :for var :below limit
     ForBelow { var: String, limit: ASTNode },
@@ -530,13 +835,25 @@ enum LoopClause {
     ForHashValues { var: String, hash_table: ASTNode },
 
     /// :for var :being :the :symbols :in package
-    ForSymbols { var: String, package: ASTNode, symbol_kind: SymbolKind },
+    ForSymbols {
+        var: String,
+        package: ASTNode,
+        symbol_kind: SymbolKind,
+    },
 
     /// :for var = init [:then step] - per-iteration binding
-    ForEquals { var: String, init: ASTNode, then_expr: Option<ASTNode> },
+    ForEquals {
+        var: String,
+        init: ASTNode,
+        then_expr: Option<ASTNode>,
+    },
 
     /// :for (var1 var2 ...) = init [:then step] - destructuring per-iteration binding
-    ForEqualsDestructure { vars: Vec<String>, init: ASTNode, then_expr: Option<ASTNode> },
+    ForEqualsDestructure {
+        vars: Vec<String>,
+        init: ASTNode,
+        then_expr: Option<ASTNode>,
+    },
 
     /// :when condition
     When { condition: ASTNode },
@@ -766,15 +1083,21 @@ impl<'a> LoopParser<'a> {
 
         // Check for dotted-pair destructuring pattern (car . cdr)
         if let Some(ASTNode::DottedPair { car, cdr }) = self.current() {
-            if let (ASTNode::Variable(car_var), ASTNode::Variable(cdr_var)) = (car.as_ref(), cdr.as_ref()) {
+            if let (ASTNode::Variable(car_var), ASTNode::Variable(cdr_var)) =
+                (car.as_ref(), cdr.as_ref())
+            {
                 let car_var = car_var.clone();
                 let cdr_var = cdr_var.clone();
                 self.advance(); // consume (car . cdr) pattern
-                if let Some(ASTNode::Variable(eq)) = self.current() {
-                    if eq == "=" {
+                if let Some(node) = self.current() {
+                    if is_loop_equals_symbol(node) {
                         self.advance(); // consume =
                         let init = self.advance()?.clone();
-                        return Some(LoopClause::WithDotted { car_var, cdr_var, init });
+                        return Some(LoopClause::WithDotted {
+                            car_var,
+                            cdr_var,
+                            init,
+                        });
                     }
                 }
                 return Some(LoopClause::WithDotted {
@@ -801,16 +1124,19 @@ impl<'a> LoopParser<'a> {
                     }
                     if all_vars && !vars.is_empty() {
                         self.advance(); // consume the pattern
-                        // Expect = init
-                        if let Some(ASTNode::Variable(eq)) = self.current() {
-                            if eq == "=" {
+                                        // Expect = init
+                        if let Some(node) = self.current() {
+                            if is_loop_equals_symbol(node) {
                                 self.advance(); // consume =
                                 let init = self.advance()?.clone();
                                 return Some(LoopClause::WithDestructure { vars, init });
                             }
                         }
                         // No = means nil init for each
-                        return Some(LoopClause::WithDestructure { vars, init: ASTNode::nil() });
+                        return Some(LoopClause::WithDestructure {
+                            vars,
+                            init: ASTNode::nil(),
+                        });
                     }
                 }
             }
@@ -823,13 +1149,9 @@ impl<'a> LoopParser<'a> {
 
         // Check for = init
         let init = if let Some(node) = self.current() {
-            if let ASTNode::Variable(v) = node {
-                if v == "=" {
-                    self.advance(); // consume =
-                    Some(self.advance()?.clone())
-                } else {
-                    None
-                }
+            if is_loop_equals_symbol(node) {
+                self.advance(); // consume =
+                Some(self.advance()?.clone())
             } else {
                 None
             }
@@ -855,7 +1177,10 @@ impl<'a> LoopParser<'a> {
                     // Dotted pair: (var1 . var2)
                     if let ASTNode::Variable(car_var) = car.as_ref() {
                         if let ASTNode::Variable(cdr_var) = cdr.as_ref() {
-                            Some(DestructurePattern::DottedPair(car_var.clone(), cdr_var.clone()))
+                            Some(DestructurePattern::DottedPair(
+                                car_var.clone(),
+                                cdr_var.clone(),
+                            ))
                         } else {
                             None
                         }
@@ -886,7 +1211,7 @@ impl<'a> LoopParser<'a> {
                         None
                     }
                 }
-                _ => None
+                _ => None,
             }
         } else {
             None
@@ -929,11 +1254,7 @@ impl<'a> LoopParser<'a> {
                             self.advance(); // consume :on
                             let list = self.advance()?.clone();
                             let by = self.parse_optional_by();
-                            return Some(LoopClause::ForOnDestructure {
-                                vars,
-                                list,
-                                by,
-                            });
+                            return Some(LoopClause::ForOnDestructure { vars, list, by });
                         }
                         // List pattern can also work with :in (bind from each element)
                         if is_loop_keyword(kw, "in") {
@@ -941,30 +1262,24 @@ impl<'a> LoopParser<'a> {
                             let list = self.advance()?.clone();
                             let by = self.parse_optional_by();
                             // For :in with list pattern, destructure each list element
-                            return Some(LoopClause::ForOnDestructure {
-                                vars,
-                                list,
-                                by,
-                            });
+                            return Some(LoopClause::ForOnDestructure { vars, list, by });
                         }
                         // List pattern with = (destructuring per-iteration binding)
-                        if let ASTNode::Variable(eq) = kw {
-                            if eq == "=" {
-                                self.advance(); // consume =
-                                let init = self.advance()?.clone();
-                                let mut then_expr = None;
-                                if let Some(next_kw) = self.current() {
-                                    if is_loop_keyword(next_kw, "then") {
-                                        self.advance(); // consume :then
-                                        then_expr = Some(self.advance()?.clone());
-                                    }
+                        if is_loop_equals_symbol(kw) {
+                            self.advance(); // consume =
+                            let init = self.advance()?.clone();
+                            let mut then_expr = None;
+                            if let Some(next_kw) = self.current() {
+                                if is_loop_keyword(next_kw, "then") {
+                                    self.advance(); // consume :then
+                                    then_expr = Some(self.advance()?.clone());
                                 }
-                                return Some(LoopClause::ForEqualsDestructure {
-                                    vars,
-                                    init,
-                                    then_expr,
-                                });
                             }
+                            return Some(LoopClause::ForEqualsDestructure {
+                                vars,
+                                init,
+                                then_expr,
+                            });
                         }
                     }
                 }
@@ -989,19 +1304,21 @@ impl<'a> LoopParser<'a> {
         let keyword = self.current()?;
 
         // Check for = (binding form)
-        if let ASTNode::Variable(kw) = keyword {
-            if kw == "=" {
-                self.advance(); // consume =
-                let init = self.advance()?.clone();
-                let mut then_expr = None;
-                if let Some(next_kw) = self.current() {
-                    if is_loop_keyword(next_kw, "then") {
-                        self.advance(); // consume :then
-                        then_expr = Some(self.advance()?.clone());
-                    }
+        if is_loop_equals_symbol(keyword) {
+            self.advance(); // consume =
+            let init = self.advance()?.clone();
+            let mut then_expr = None;
+            if let Some(next_kw) = self.current() {
+                if is_loop_keyword(next_kw, "then") {
+                    self.advance(); // consume :then
+                    then_expr = Some(self.advance()?.clone());
                 }
-                return Some(LoopClause::ForEquals { var, init, then_expr });
             }
+            return Some(LoopClause::ForEquals {
+                var,
+                init,
+                then_expr,
+            });
         }
 
         if is_loop_keyword(keyword, "in") {
@@ -1062,9 +1379,23 @@ impl<'a> LoopParser<'a> {
                     function: Box::new(ASTNode::Variable("-".to_string())),
                     args: vec![neg_step],
                 };
-                Some(LoopClause::ForFromTo { var, start, end, step: Some(actual_step), inclusive, down: true })
+                Some(LoopClause::ForFromTo {
+                    var,
+                    start,
+                    end,
+                    step: Some(actual_step),
+                    inclusive,
+                    down: true,
+                })
             } else {
-                Some(LoopClause::ForFromTo { var, start, end, step, inclusive, down: false })
+                Some(LoopClause::ForFromTo {
+                    var,
+                    start,
+                    end,
+                    step,
+                    inclusive,
+                    down: false,
+                })
             }
         } else if is_loop_keyword(keyword, "downfrom") {
             self.advance(); // consume :downfrom
@@ -1097,7 +1428,14 @@ impl<'a> LoopParser<'a> {
                 args: vec![neg_step],
             };
 
-            Some(LoopClause::ForFromTo { var, start, end, step: Some(actual_step), inclusive, down: true })
+            Some(LoopClause::ForFromTo {
+                var,
+                start,
+                end,
+                step: Some(actual_step),
+                inclusive,
+                down: true,
+            })
         } else if is_loop_keyword(keyword, "upfrom") {
             self.advance(); // consume :upfrom
             let start = self.advance()?.clone();
@@ -1122,7 +1460,14 @@ impl<'a> LoopParser<'a> {
                 }
             }
 
-            Some(LoopClause::ForFromTo { var, start, end, step, inclusive, down: false })
+            Some(LoopClause::ForFromTo {
+                var,
+                start,
+                end,
+                step,
+                inclusive,
+                down: false,
+            })
         } else if is_loop_keyword(keyword, "below") {
             self.advance(); // consume :below
             let limit = self.advance()?.clone();
@@ -1175,7 +1520,11 @@ impl<'a> LoopParser<'a> {
                     }
 
                     let package = self.advance()?.clone();
-                    Some(LoopClause::ForSymbols { var, package, symbol_kind: SymbolKind::AllSymbols })
+                    Some(LoopClause::ForSymbols {
+                        var,
+                        package,
+                        symbol_kind: SymbolKind::AllSymbols,
+                    })
                 } else if is_loop_keyword(kw, "external-symbols") {
                     self.advance(); // consume :external-symbols
 
@@ -1187,7 +1536,11 @@ impl<'a> LoopParser<'a> {
                     }
 
                     let package = self.advance()?.clone();
-                    Some(LoopClause::ForSymbols { var, package, symbol_kind: SymbolKind::ExternalSymbols })
+                    Some(LoopClause::ForSymbols {
+                        var,
+                        package,
+                        symbol_kind: SymbolKind::ExternalSymbols,
+                    })
                 } else if is_loop_keyword(kw, "present-symbols") {
                     self.advance(); // consume :present-symbols
 
@@ -1199,7 +1552,11 @@ impl<'a> LoopParser<'a> {
                     }
 
                     let package = self.advance()?.clone();
-                    Some(LoopClause::ForSymbols { var, package, symbol_kind: SymbolKind::PresentSymbols })
+                    Some(LoopClause::ForSymbols {
+                        var,
+                        package,
+                        symbol_kind: SymbolKind::PresentSymbols,
+                    })
                 } else {
                     None
                 }
@@ -1533,15 +1890,15 @@ impl<'a> LoopParser<'a> {
 
         // Collect all bindings
         let mut bindings: Vec<(String, ASTNode)> = Vec::new();
-        let mut collect_var: Option<String> = None;  // Default collect var (no :into)
-        let mut sum_var: Option<String> = None;      // Default sum var (no :into)
-        let mut count_var: Option<String> = None;    // Default count var (no :into)
-        let mut all_list_vars: HashSet<String> = HashSet::new();  // All :into vars for list ops
-        let mut all_sum_vars: HashSet<String> = HashSet::new();   // All :into vars for sum ops
+        let mut collect_var: Option<String> = None; // Default collect var (no :into)
+        let mut sum_var: Option<String> = None; // Default sum var (no :into)
+        let mut count_var: Option<String> = None; // Default count var (no :into)
+        let mut all_list_vars: HashSet<String> = HashSet::new(); // All :into vars for list ops
+        let mut all_sum_vars: HashSet<String> = HashSet::new(); // All :into vars for sum ops
         let mut all_count_vars: HashSet<String> = HashSet::new(); // All :into vars for count ops
-        // LOOP bindings frequently depend on earlier LOOP variables
-        // (e.g. :with lineage = ... then :for x :in lineage), so use
-        // sequential semantics by default.
+                                                                  // LOOP bindings frequently depend on earlier LOOP variables
+                                                                  // (e.g. :with lineage = ... then :for x :in lineage), so use
+                                                                  // sequential semantics by default.
         let mut needs_sequential_bindings = true;
         // Multiple parallel :in iterators are allowed (e.g. FOR x IN ... FOR y IN ...).
         // Tuple: (loop var, hidden list var, optional :by step function)
@@ -1553,8 +1910,9 @@ impl<'a> LoopParser<'a> {
         let mut on_iter: Option<(String, ASTNode, Option<ASTNode>)> = None; // Simple :on iteration
         let mut on_dotted: Option<(String, String, ASTNode, Option<ASTNode>)> = None; // :on with dotted pair
         let mut on_destructure: Option<(Vec<String>, ASTNode, Option<ASTNode>)> = None; // :on with list pattern
-        // (var, start, end, step, inclusive, down)
-        let mut numeric_iters: Vec<(String, ASTNode, ASTNode, Option<ASTNode>, bool, bool)> = Vec::new();
+                                                                                        // (var, start, end, step, inclusive, down)
+        let mut numeric_iters: Vec<(String, ASTNode, ASTNode, Option<ASTNode>, bool, bool)> =
+            Vec::new();
         let mut hash_iter: Option<(String, ASTNode, bool)> = None; // (var, hash-table, is_keys)
         let mut symbol_iter: Option<(String, ASTNode, SymbolKind)> = None; // (var, package, kind)
         let mut for_equals_clauses: Vec<(String, ASTNode, Option<ASTNode>)> = Vec::new(); // :for var = init [:then step]
@@ -1569,7 +1927,7 @@ impl<'a> LoopParser<'a> {
         let mut has_thereis = false;
         let mut has_always = false;
         let mut has_never = false;
-        let mut while_conditions: Vec<ASTNode> = Vec::new();  // :while conditions
+        let mut while_conditions: Vec<ASTNode> = Vec::new(); // :while conditions
         let mut needs_break_var = false; // Needed for ordered :while/:until handling
         let mut has_loop_return = false;
         let mut numeric_last_vars: Vec<(String, String)> = Vec::new();
@@ -1586,28 +1944,41 @@ impl<'a> LoopParser<'a> {
                     let tmp_var = format!("__loop_with_tmp_{}__", bindings.len());
                     bindings.push((tmp_var.clone(), init.clone()));
                     for (i, v) in vars.iter().enumerate() {
-                        bindings.push((v.clone(), ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("nth".to_string())),
-                            args: vec![
-                                ASTNode::Constant(ConstantValue::Fixnum(i as i64)),
-                                ASTNode::Variable(tmp_var.clone()),
-                            ],
-                        }));
+                        bindings.push((
+                            v.clone(),
+                            ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("nth".to_string())),
+                                args: vec![
+                                    ASTNode::Constant(ConstantValue::Fixnum(i as i64)),
+                                    ASTNode::Variable(tmp_var.clone()),
+                                ],
+                            },
+                        ));
                     }
                 }
-                LoopClause::WithDotted { car_var, cdr_var, init } => {
+                LoopClause::WithDotted {
+                    car_var,
+                    cdr_var,
+                    init,
+                } => {
                     // WITH (a . b) = expr → a=(car tmp), b=(cdr tmp)
                     needs_sequential_bindings = true;
                     let tmp_var = format!("__loop_with_tmp_{}__", bindings.len());
                     bindings.push((tmp_var.clone(), init.clone()));
-                    bindings.push((car_var.clone(), ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("car".to_string())),
-                        args: vec![ASTNode::Variable(tmp_var.clone())],
-                    }));
-                    bindings.push((cdr_var.clone(), ASTNode::Call {
-                        function: Box::new(ASTNode::Variable("cdr".to_string())),
-                        args: vec![ASTNode::Variable(tmp_var)],
-                    }));
+                    bindings.push((
+                        car_var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("car".to_string())),
+                            args: vec![ASTNode::Variable(tmp_var.clone())],
+                        },
+                    ));
+                    bindings.push((
+                        cdr_var.clone(),
+                        ASTNode::Call {
+                            function: Box::new(ASTNode::Variable("cdr".to_string())),
+                            args: vec![ASTNode::Variable(tmp_var)],
+                        },
+                    ));
                 }
                 LoopClause::ForIn { var, list, by } => {
                     ensure_binding(&mut bindings, var, ASTNode::nil());
@@ -1619,9 +1990,17 @@ impl<'a> LoopParser<'a> {
                     across_iter = Some((var.clone(), seq.clone()));
                     ensure_binding(&mut bindings, var, ASTNode::nil());
                     bindings.push(("__loop_across_seq__".to_string(), seq.clone()));
-                    bindings.push(("__loop_across_i__".to_string(), ASTNode::Constant(ConstantValue::Fixnum(0))));
+                    bindings.push((
+                        "__loop_across_i__".to_string(),
+                        ASTNode::Constant(ConstantValue::Fixnum(0)),
+                    ));
                 }
-                LoopClause::ForInDestructure { car_var, cdr_var, list, by } => {
+                LoopClause::ForInDestructure {
+                    car_var,
+                    cdr_var,
+                    list,
+                    by,
+                } => {
                     destructure = Some((car_var.clone(), cdr_var.clone()));
                     iter_list = Some(list.clone());
                     iter_step = by.clone();
@@ -1634,7 +2013,12 @@ impl<'a> LoopParser<'a> {
                     ensure_binding(&mut bindings, var, ASTNode::nil());
                     bindings.push(("__loop_list__".to_string(), list.clone()));
                 }
-                LoopClause::ForOnDotted { car_var, cdr_var, list, by } => {
+                LoopClause::ForOnDotted {
+                    car_var,
+                    cdr_var,
+                    list,
+                    by,
+                } => {
                     on_dotted = Some((car_var.clone(), cdr_var.clone(), list.clone(), by.clone()));
                     ensure_binding(&mut bindings, car_var, ASTNode::nil());
                     ensure_binding(&mut bindings, cdr_var, ASTNode::nil());
@@ -1659,18 +2043,30 @@ impl<'a> LoopParser<'a> {
                     // We'll use __loop_hash_values__ to store the list of values
                     bindings.push(("__loop_hash_values__".to_string(), ASTNode::nil()));
                 }
-                LoopClause::ForSymbols { var, package, symbol_kind } => {
+                LoopClause::ForSymbols {
+                    var,
+                    package,
+                    symbol_kind,
+                } => {
                     symbol_iter = Some((var.clone(), package.clone(), *symbol_kind));
                     ensure_binding(&mut bindings, var, ASTNode::nil());
                     // We'll use __loop_symbols__ to store the list of symbols
                     bindings.push(("__loop_symbols__".to_string(), ASTNode::nil()));
                 }
-                LoopClause::ForEquals { var, init, then_expr } => {
+                LoopClause::ForEquals {
+                    var,
+                    init,
+                    then_expr,
+                } => {
                     // Bind var without evaluating init yet to avoid referencing other loop vars too early.
                     bindings.push((var.clone(), ASTNode::nil()));
                     for_equals_clauses.push((var.clone(), init.clone(), then_expr.clone()));
                 }
-                LoopClause::ForEqualsDestructure { vars, init, then_expr } => {
+                LoopClause::ForEqualsDestructure {
+                    vars,
+                    init,
+                    then_expr,
+                } => {
                     // Use a temp var and destructure with nth
                     let tmp_var = format!("__loop_destr_{}__", bindings.len());
                     bindings.push((tmp_var.clone(), ASTNode::nil()));
@@ -1681,31 +2077,60 @@ impl<'a> LoopParser<'a> {
                     for_equals_clauses.push((tmp_var.clone(), init.clone(), then_expr.clone()));
                     // Add destructuring assignments that happen after tmp is set
                     for (i, v) in vars.iter().enumerate() {
-                        for_equals_clauses.push((v.clone(), ASTNode::Call {
-                            function: Box::new(ASTNode::Variable("nth".to_string())),
-                            args: vec![
-                                ASTNode::Constant(ConstantValue::Fixnum(i as i64)),
-                                ASTNode::Variable(tmp_var.clone()),
-                            ],
-                        }, None));
+                        for_equals_clauses.push((
+                            v.clone(),
+                            ASTNode::Call {
+                                function: Box::new(ASTNode::Variable("nth".to_string())),
+                                args: vec![
+                                    ASTNode::Constant(ConstantValue::Fixnum(i as i64)),
+                                    ASTNode::Variable(tmp_var.clone()),
+                                ],
+                            },
+                            None,
+                        ));
                     }
                 }
                 LoopClause::ForBelow { var, limit } => {
-                    numeric_iters.push((var.clone(), ASTNode::Constant(ConstantValue::Fixnum(0)), limit.clone(), None, false, false));
+                    numeric_iters.push((
+                        var.clone(),
+                        ASTNode::Constant(ConstantValue::Fixnum(0)),
+                        limit.clone(),
+                        None,
+                        false,
+                        false,
+                    ));
                     bindings.push((var.clone(), ASTNode::Constant(ConstantValue::Fixnum(0))));
                     let last_var = format!("__loop_last_num_{}__", numeric_last_vars.len());
                     bindings.push((last_var.clone(), ASTNode::nil()));
                     numeric_last_vars.push((var.clone(), last_var));
                 }
-                LoopClause::ForFromTo { var, start, end, step, inclusive, down } => {
-                    numeric_iters.push((var.clone(), start.clone(), end.clone(), step.clone(), *inclusive, *down));
+                LoopClause::ForFromTo {
+                    var,
+                    start,
+                    end,
+                    step,
+                    inclusive,
+                    down,
+                } => {
+                    numeric_iters.push((
+                        var.clone(),
+                        start.clone(),
+                        end.clone(),
+                        step.clone(),
+                        *inclusive,
+                        *down,
+                    ));
                     bindings.push((var.clone(), start.clone()));
                     let last_var = format!("__loop_last_num_{}__", numeric_last_vars.len());
                     bindings.push((last_var.clone(), ASTNode::nil()));
                     numeric_last_vars.push((var.clone(), last_var));
                 }
-                LoopClause::Collect { into, .. } | LoopClause::Append { into, .. } | LoopClause::Nconc { into, .. } => {
-                    let var = into.clone().unwrap_or_else(|| "__loop_result__".to_string());
+                LoopClause::Collect { into, .. }
+                | LoopClause::Append { into, .. }
+                | LoopClause::Nconc { into, .. } => {
+                    let var = into
+                        .clone()
+                        .unwrap_or_else(|| "__loop_result__".to_string());
                     if !all_list_vars.contains(&var) {
                         all_list_vars.insert(var.clone());
                         bindings.push((var.clone(), ASTNode::nil()));
@@ -1757,7 +2182,10 @@ impl<'a> LoopParser<'a> {
                 LoopClause::Repeat { count } => {
                     repeat_count = Some(count.clone());
                     bindings.push(("__loop_repeat_count__".to_string(), count.clone()));
-                    bindings.push(("__loop_repeat_i__".to_string(), ASTNode::Constant(ConstantValue::Fixnum(0))));
+                    bindings.push((
+                        "__loop_repeat_i__".to_string(),
+                        ASTNode::Constant(ConstantValue::Fixnum(0)),
+                    ));
                 }
                 LoopClause::Initially { body } => {
                     initially_body = Some(body.clone());
@@ -1797,7 +2225,8 @@ impl<'a> LoopParser<'a> {
         }
 
         // Build the loop body
-        let mut body = self.build_body(&collect_var, &sum_var, &count_var, &destructure, &loop_name);
+        let mut body =
+            self.build_body(&collect_var, &sum_var, &count_var, &destructure, &loop_name);
         if contains_loop_return_state(&body) {
             needs_break_var = true;
             has_loop_return = true;
@@ -1917,7 +2346,10 @@ impl<'a> LoopParser<'a> {
             if !numeric_last_vars.is_empty() {
                 while_body.push(ASTNode::setq("__loop_any_iter__".to_string(), ASTNode::t()));
                 for (var, last_var) in &numeric_last_vars {
-                    while_body.push(ASTNode::setq(last_var.clone(), ASTNode::Variable(var.clone())));
+                    while_body.push(ASTNode::setq(
+                        last_var.clone(),
+                        ASTNode::Variable(var.clone()),
+                    ));
                 }
             }
 
@@ -1925,13 +2357,15 @@ impl<'a> LoopParser<'a> {
 
             // Add step expressions for ALL numeric iterators
             for (var, _start, _end, step, _inclusive, _down) in numeric_iters.iter().rev() {
-                let step_expr = step.clone().unwrap_or_else(|| ASTNode::Constant(ConstantValue::Fixnum(1)));
+                let step_expr = step
+                    .clone()
+                    .unwrap_or_else(|| ASTNode::Constant(ConstantValue::Fixnum(1)));
                 while_body.push(ASTNode::setq(
                     var.clone(),
                     ASTNode::Call {
                         function: Box::new(ASTNode::Variable("+".to_string())),
                         args: vec![ASTNode::Variable(var.clone()), step_expr],
-                    }
+                    },
                 ));
             }
 
@@ -1958,10 +2392,7 @@ impl<'a> LoopParser<'a> {
                         args: vec![ASTNode::Variable("__loop_list__".to_string())],
                     }
                 };
-                while_body.push(ASTNode::setq(
-                    "__loop_list__".to_string(),
-                    next_list,
-                ));
+                while_body.push(ASTNode::setq("__loop_list__".to_string(), next_list));
             }
             for (_var, list_var, by) in in_iters.iter().rev() {
                 let next_list = if let Some(step) = by {
@@ -1997,9 +2428,17 @@ impl<'a> LoopParser<'a> {
                     continue;
                 }
                 let cmp_op = if *down {
-                    if *inclusive { ">=" } else { ">" }
+                    if *inclusive {
+                        ">="
+                    } else {
+                        ">"
+                    }
                 } else {
-                    if *inclusive { "<=" } else { "<" }
+                    if *inclusive {
+                        "<="
+                    } else {
+                        "<"
+                    }
                 };
                 conditions.push(ASTNode::Call {
                     function: Box::new(ASTNode::Variable(cmp_op.to_string())),
@@ -2079,10 +2518,7 @@ impl<'a> LoopParser<'a> {
                 args: vec![
                     ASTNode::Variable("__loop_list__".to_string()),
                     inner_body,
-                    ASTNode::setq(
-                        "__loop_list__".to_string(),
-                        next_list
-                    ),
+                    ASTNode::setq("__loop_list__".to_string(), next_list),
                 ],
             }
         } else if let Some((vars, _list, on_by)) = &on_destructure {
@@ -2095,13 +2531,16 @@ impl<'a> LoopParser<'a> {
             let mut iter_body = Vec::new();
             iter_body.push(loop_list_type_guard("__loop_list__"));
             for (i, var) in vars.iter().enumerate() {
-                iter_body.push(ASTNode::setq(var.clone(), ASTNode::Call {
-                    function: Box::new(ASTNode::Variable("nth".to_string())),
-                    args: vec![
-                        ASTNode::Constant(ConstantValue::Fixnum(i as i64)),
-                        ASTNode::Variable("__loop_list__".to_string()),
-                    ],
-                }));
+                iter_body.push(ASTNode::setq(
+                    var.clone(),
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable("nth".to_string())),
+                        args: vec![
+                            ASTNode::Constant(ConstantValue::Fixnum(i as i64)),
+                            ASTNode::Variable("__loop_list__".to_string()),
+                        ],
+                    },
+                ));
             }
 
             iter_body.extend(body.clone());
@@ -2134,10 +2573,7 @@ impl<'a> LoopParser<'a> {
                 args: vec![
                     ASTNode::Variable("__loop_list__".to_string()),
                     inner_body,
-                    ASTNode::setq(
-                        "__loop_list__".to_string(),
-                        next_list
-                    ),
+                    ASTNode::setq("__loop_list__".to_string(), next_list),
                 ],
             }
         } else if let Some((var, _list, on_by)) = &on_iter {
@@ -2145,7 +2581,10 @@ impl<'a> LoopParser<'a> {
             // var = __loop_list__ (the current tail)
             let mut iter_body = Vec::new();
             iter_body.push(loop_list_type_guard("__loop_list__"));
-            iter_body.push(ASTNode::setq(var.clone(), ASTNode::Variable("__loop_list__".to_string())));
+            iter_body.push(ASTNode::setq(
+                var.clone(),
+                ASTNode::Variable("__loop_list__".to_string()),
+            ));
             iter_body.extend(body.clone());
             let inner_body = ASTNode::progn(iter_body);
             let next_list = if let Some(step) = on_by {
@@ -2176,10 +2615,7 @@ impl<'a> LoopParser<'a> {
                 args: vec![
                     ASTNode::Variable("__loop_list__".to_string()),
                     inner_body,
-                    ASTNode::setq(
-                        "__loop_list__".to_string(),
-                        next_list
-                    ),
+                    ASTNode::setq("__loop_list__".to_string(), next_list),
                 ],
             }
         } else if let Some((var, _seq)) = &across_iter {
@@ -2220,7 +2656,7 @@ impl<'a> LoopParser<'a> {
                                 ASTNode::Variable("__loop_across_i__".to_string()),
                                 ASTNode::Constant(ConstantValue::Fixnum(1)),
                             ],
-                        }
+                        },
                     ),
                 ],
             }
@@ -2375,18 +2811,21 @@ impl<'a> LoopParser<'a> {
                         ASTNode::Call {
                             function: Box::new(ASTNode::Variable("cdr".to_string())),
                             args: vec![ASTNode::Variable(list_var.to_string())],
-                        }
+                        },
                     ),
                 ],
             };
 
             // Wrap in let that initializes the keys/values list
             ASTNode::let_bindings(
-                vec![(list_var.to_string(), ASTNode::Call {
-                    function: Box::new(ASTNode::Variable(getter_fn.to_string())),
-                    args: vec![hash_table.clone()],
-                })],
-                vec![while_loop]
+                vec![(
+                    list_var.to_string(),
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable(getter_fn.to_string())),
+                        args: vec![hash_table.clone()],
+                    },
+                )],
+                vec![while_loop],
             )
         } else if let Some((var, package, symbol_kind)) = &symbol_iter {
             // Package symbol iteration
@@ -2418,18 +2857,21 @@ impl<'a> LoopParser<'a> {
                         ASTNode::Call {
                             function: Box::new(ASTNode::Variable("cdr".to_string())),
                             args: vec![ASTNode::Variable("__loop_symbols__".to_string())],
-                        }
+                        },
                     ),
                 ],
             };
 
             // Wrap in let that initializes the symbols list
             ASTNode::let_bindings(
-                vec![("__loop_symbols__".to_string(), ASTNode::Call {
-                    function: Box::new(ASTNode::Variable(getter_fn.to_string())),
-                    args: vec![package.clone()],
-                })],
-                vec![while_loop]
+                vec![(
+                    "__loop_symbols__".to_string(),
+                    ASTNode::Call {
+                        function: Box::new(ASTNode::Variable(getter_fn.to_string())),
+                        args: vec![package.clone()],
+                    },
+                )],
+                vec![while_loop],
             )
         } else if repeat_count.is_some() {
             // Repeat iteration: (while (< __loop_repeat_i__ __loop_repeat_count__) body (incf __loop_repeat_i__))
@@ -2442,7 +2884,7 @@ impl<'a> LoopParser<'a> {
                         ASTNode::Variable("__loop_repeat_i__".to_string()),
                         ASTNode::Constant(ConstantValue::Fixnum(1)),
                     ],
-                }
+                },
             ));
 
             ASTNode::Call {
@@ -2453,7 +2895,9 @@ impl<'a> LoopParser<'a> {
                         ASTNode::Variable("__loop_repeat_i__".to_string()),
                         ASTNode::Variable("__loop_repeat_count__".to_string()),
                     ],
-                }).chain(while_body).collect(),
+                })
+                .chain(while_body)
+                .collect(),
             }
         } else if !for_equals_clauses.is_empty() {
             // Infinite loop driven only by :for var = init [:then step]
@@ -2515,7 +2959,10 @@ impl<'a> LoopParser<'a> {
         if !numeric_last_vars.is_empty() {
             let mut restore_body = Vec::new();
             for (var, last_var) in &numeric_last_vars {
-                restore_body.push(ASTNode::setq(var.clone(), ASTNode::Variable(last_var.clone())));
+                restore_body.push(ASTNode::setq(
+                    var.clone(),
+                    ASTNode::Variable(last_var.clone()),
+                ));
             }
             full_body.push(ASTNode::If {
                 test: Box::new(ASTNode::Variable("__loop_any_iter__".to_string())),
@@ -2594,8 +3041,11 @@ impl<'a> LoopParser<'a> {
         let mut cond_stack: Vec<(ASTNode, Vec<ASTNode>, Vec<ASTNode>, bool)> = Vec::new();
 
         // Helper to add an expression to the current context
-        let add_expr = |body: &mut Vec<ASTNode>, cond_stack: &mut Vec<(ASTNode, Vec<ASTNode>, Vec<ASTNode>, bool)>, expr: ASTNode| {
-            if let Some((_, ref mut then_body, ref mut else_body, in_else)) = cond_stack.last_mut() {
+        let add_expr = |body: &mut Vec<ASTNode>,
+                        cond_stack: &mut Vec<(ASTNode, Vec<ASTNode>, Vec<ASTNode>, bool)>,
+                        expr: ASTNode| {
+            if let Some((_, ref mut then_body, ref mut else_body, in_else)) = cond_stack.last_mut()
+            {
                 if *in_else {
                     else_body.push(expr);
                 } else {
@@ -2628,7 +3078,8 @@ impl<'a> LoopParser<'a> {
                 }
                 LoopClause::Else { body: else_do } => {
                     // Switch to else branch of current conditional
-                    if let Some((_, _, ref mut else_body, ref mut in_else)) = cond_stack.last_mut() {
+                    if let Some((_, _, ref mut else_body, ref mut in_else)) = cond_stack.last_mut()
+                    {
                         *in_else = true;
                         else_body.extend(else_do.clone());
                     }
@@ -2654,9 +3105,11 @@ impl<'a> LoopParser<'a> {
                 }
                 LoopClause::Collect { expr, into } => {
                     // Use specific :into var if provided, else use default collect var
-                    let var = into.clone().unwrap_or_else(||
-                        collect_var.clone().unwrap_or_else(|| "__loop_result__".to_string())
-                    );
+                    let var = into.clone().unwrap_or_else(|| {
+                        collect_var
+                            .clone()
+                            .unwrap_or_else(|| "__loop_result__".to_string())
+                    });
                     let collect_expr = ASTNode::setq(
                         var.clone(),
                         ASTNode::Call {
@@ -2668,44 +3121,50 @@ impl<'a> LoopParser<'a> {
                                     args: vec![expr.clone()],
                                 },
                             ],
-                        }
+                        },
                     );
                     add_expr(&mut body, &mut cond_stack, collect_expr);
                 }
                 LoopClause::Append { expr, into } => {
                     // Use specific :into var if provided, else use default collect var
-                    let var = into.clone().unwrap_or_else(||
-                        collect_var.clone().unwrap_or_else(|| "__loop_result__".to_string())
-                    );
+                    let var = into.clone().unwrap_or_else(|| {
+                        collect_var
+                            .clone()
+                            .unwrap_or_else(|| "__loop_result__".to_string())
+                    });
                     // (setq var (append var expr))
                     let append_expr = ASTNode::setq(
                         var.clone(),
                         ASTNode::Call {
                             function: Box::new(ASTNode::Variable("append".to_string())),
                             args: vec![ASTNode::Variable(var), expr.clone()],
-                        }
+                        },
                     );
                     add_expr(&mut body, &mut cond_stack, append_expr);
                 }
                 LoopClause::Sum { expr, into } => {
                     // Use specific :into var if provided, else use default sum var
-                    let var = into.clone().unwrap_or_else(||
-                        sum_var.clone().unwrap_or_else(|| "__loop_sum__".to_string())
-                    );
+                    let var = into.clone().unwrap_or_else(|| {
+                        sum_var
+                            .clone()
+                            .unwrap_or_else(|| "__loop_sum__".to_string())
+                    });
                     let add_e = ASTNode::setq(
                         var.clone(),
                         ASTNode::Call {
                             function: Box::new(ASTNode::Variable("+".to_string())),
                             args: vec![ASTNode::Variable(var), expr.clone()],
-                        }
+                        },
                     );
                     add_expr(&mut body, &mut cond_stack, add_e);
                 }
                 LoopClause::Count { expr, into } => {
                     // Use specific :into var if provided, else use default count var
-                    let var = into.clone().unwrap_or_else(||
-                        count_var.clone().unwrap_or_else(|| "__loop_count__".to_string())
-                    );
+                    let var = into.clone().unwrap_or_else(|| {
+                        count_var
+                            .clone()
+                            .unwrap_or_else(|| "__loop_count__".to_string())
+                    });
                     // (when expr (incf var))
                     let incf_expr = ASTNode::If {
                         test: Box::new(expr.clone()),
@@ -2717,7 +3176,7 @@ impl<'a> LoopParser<'a> {
                                     ASTNode::Variable(var),
                                     ASTNode::Constant(ConstantValue::Fixnum(1)),
                                 ],
-                            }
+                            },
                         )),
                         else_branch: Box::new(ASTNode::nil()),
                     };
@@ -2730,7 +3189,9 @@ impl<'a> LoopParser<'a> {
                         ASTNode::setq(
                             "__loop_return_values__".to_string(),
                             ASTNode::Call {
-                                function: Box::new(ASTNode::Variable("multiple-value-list".to_string())),
+                                function: Box::new(ASTNode::Variable(
+                                    "multiple-value-list".to_string(),
+                                )),
                                 args: vec![expr.clone()],
                             },
                         ),
@@ -2752,16 +3213,18 @@ impl<'a> LoopParser<'a> {
                 }
                 LoopClause::Nconc { expr, into } => {
                     // Use specific :into var if provided, else use default collect var
-                    let var = into.clone().unwrap_or_else(||
-                        collect_var.clone().unwrap_or_else(|| "__loop_result__".to_string())
-                    );
+                    let var = into.clone().unwrap_or_else(|| {
+                        collect_var
+                            .clone()
+                            .unwrap_or_else(|| "__loop_result__".to_string())
+                    });
                     // (setq var (nconc var expr))
                     let nconc_expr = ASTNode::setq(
                         var.clone(),
                         ASTNode::Call {
                             function: Box::new(ASTNode::Variable("nconc".to_string())),
                             args: vec![ASTNode::Variable(var), expr.clone()],
-                        }
+                        },
                     );
                     add_expr(&mut body, &mut cond_stack, nconc_expr);
                 }
@@ -2787,7 +3250,10 @@ impl<'a> LoopParser<'a> {
                                     },
                                 ],
                             }),
-                            then_branch: Box::new(ASTNode::setq(var, ASTNode::Variable("__loop_val__".to_string()))),
+                            then_branch: Box::new(ASTNode::setq(
+                                var,
+                                ASTNode::Variable("__loop_val__".to_string()),
+                            )),
                             else_branch: Box::new(ASTNode::nil()),
                         }],
                     };
@@ -2815,7 +3281,10 @@ impl<'a> LoopParser<'a> {
                                     },
                                 ],
                             }),
-                            then_branch: Box::new(ASTNode::setq(var, ASTNode::Variable("__loop_val__".to_string()))),
+                            then_branch: Box::new(ASTNode::setq(
+                                var,
+                                ASTNode::Variable("__loop_val__".to_string()),
+                            )),
                             else_branch: Box::new(ASTNode::nil()),
                         }],
                     };
@@ -2902,7 +3371,9 @@ impl<'a> LoopParser<'a> {
                     else_branch: Box::new(ASTNode::progn(else_body)),
                 }
             };
-            if let Some((_, ref mut parent_then, ref mut parent_else, in_else)) = cond_stack.last_mut() {
+            if let Some((_, ref mut parent_then, ref mut parent_else, in_else)) =
+                cond_stack.last_mut()
+            {
                 if *in_else {
                     parent_else.push(if_expr);
                 } else {
@@ -2913,8 +3384,7 @@ impl<'a> LoopParser<'a> {
             }
         }
 
-        body
-            .into_iter()
+        body.into_iter()
             .map(|expr| rewrite_loop_return_calls(&expr, loop_name))
             .collect()
     }

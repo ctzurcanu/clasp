@@ -1,13 +1,12 @@
+use crate::repl::Repl;
+use crate::repl::RustCAbiFn;
+use libloading::Library;
 /// C ABI for librlasp
 ///
 /// This module provides the C-compatible interface for embedding librlasp
 /// in other applications or linking from the irlasp executable.
-
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
-use crate::repl::Repl;
-use crate::repl::RustCAbiFn;
-use libloading::Library;
 
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
@@ -184,7 +183,11 @@ pub extern "C" fn rlasp_compile(
                     }
                 }
             }
-            if output_path.exists() { 0 } else { -1 }
+            if output_path.exists() {
+                0
+            } else {
+                -1
+            }
         }
         Err(e) => {
             eprintln!("rlasp_compile failed: {}", e);
@@ -196,10 +199,7 @@ pub extern "C" fn rlasp_compile(
 /// Load a compiled LLVM IR image (.ll file) into ORC JIT
 /// Returns 0 on success, non-zero on error
 #[no_mangle]
-pub extern "C" fn rlasp_load_image(
-    runtime: *mut RlaspRuntime,
-    image_path: *const c_char,
-) -> c_int {
+pub extern "C" fn rlasp_load_image(runtime: *mut RlaspRuntime, image_path: *const c_char) -> c_int {
     if runtime.is_null() || image_path.is_null() {
         return -1;
     }
@@ -219,7 +219,10 @@ pub extern "C" fn rlasp_load_image(
 
     // If this is a compiled Lisp image (.fasl/.lisp), load it through the Lisp loader.
     if matches!(ext.as_str(), "fasl" | "lisp" | "lsp" | "") {
-        let form = format!("(load \"{}\" :verbose nil :print nil)", escape_lisp_string(path));
+        let form = format!(
+            "(load \"{}\" :verbose nil :print nil)",
+            escape_lisp_string(path)
+        );
         return match runtime.repl.eval(&form) {
             Ok(_) => 0,
             Err(e) => {
@@ -318,7 +321,10 @@ pub extern "C" fn rlasp_load_rust_plugin(
 
     let rc = unsafe { register(runtime) };
     if rc != 0 {
-        eprintln!("rlasp_load_rust_plugin register call failed for {} with rc={}", path, rc);
+        eprintln!(
+            "rlasp_load_rust_plugin register call failed for {} with rc={}",
+            path, rc
+        );
         return -1;
     }
 
@@ -359,7 +365,11 @@ mod tests {
         rlasp_shutdown(runtime);
     }
 
-    unsafe extern "C" fn native_add(argc: usize, argv: *const usize, result_out: *mut usize) -> c_int {
+    unsafe extern "C" fn native_add(
+        argc: usize,
+        argv: *const usize,
+        result_out: *mut usize,
+    ) -> c_int {
         if result_out.is_null() {
             return -1;
         }
@@ -381,13 +391,18 @@ mod tests {
         assert!(!runtime.is_null());
 
         let name = CString::new("native-add").unwrap();
-        assert_eq!(0, rlasp_register_rust_fn(runtime, name.as_ptr(), Some(native_add)));
+        assert_eq!(
+            0,
+            rlasp_register_rust_fn(runtime, name.as_ptr(), Some(native_add))
+        );
 
         let expr = CString::new("(native-add 7 8)").unwrap();
         let mut result_ptr: *mut c_char = std::ptr::null_mut();
         assert_eq!(0, rlasp_eval(runtime, expr.as_ptr(), &mut result_ptr));
         assert!(!result_ptr.is_null());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().to_string();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .to_string();
         rlasp_free_string(result_ptr);
         assert_eq!("15", result);
 
@@ -407,14 +422,19 @@ mod tests {
 
         let input_c = CString::new(input.to_string_lossy().to_string()).unwrap();
         let output_c = CString::new(output.to_string_lossy().to_string()).unwrap();
-        assert_eq!(0, rlasp_compile(runtime, input_c.as_ptr(), output_c.as_ptr()));
+        assert_eq!(
+            0,
+            rlasp_compile(runtime, input_c.as_ptr(), output_c.as_ptr())
+        );
         assert!(output.exists());
         assert_eq!(0, rlasp_load_image(runtime, output_c.as_ptr()));
 
         let expr = CString::new("*c-api-test*").unwrap();
         let mut result_ptr: *mut c_char = std::ptr::null_mut();
         assert_eq!(0, rlasp_eval(runtime, expr.as_ptr(), &mut result_ptr));
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().to_string();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .to_string();
         rlasp_free_string(result_ptr);
         assert_eq!("42", result);
 

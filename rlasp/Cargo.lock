@@ -453,6 +453,7 @@ dependencies = [
  "llvm-sys",
  "num-complex",
  "rlasp",
+ "rlasp-compiler",
  "rlasp-jit",
  "rlasp-mlir",
  "rlasp-reader",
@@ -780,10 +781,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rlasp-evaluator"
-version = "0.1.0"
-
-[[package]]
 name = "rlasp-ffi"
 version = "0.1.0"
 dependencies = [
@@ -826,7 +823,9 @@ dependencies = [
  "anyhow",
  "inkwell",
  "rlasp",
+ "rlasp-compiler",
  "rlasp-jit",
+ "rlasp-runtime",
  "thiserror 1.0.69",
 ]
 

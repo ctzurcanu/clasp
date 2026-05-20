@@ -1,11 +1,10 @@
 /// Types and data structures for the evaluator
-
 use crate::ir::ASTNode;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::cell::{Cell, RefCell};
 use malachite::Integer;
 use malachite::Rational;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 // Thread-local storage for complex return values and gensym counter
 thread_local! {
@@ -79,13 +78,12 @@ pub fn unregister_special_variable(name: &str) {
     }
     DECLARED_SPECIAL_VARS.with(|vars| {
         let target_base = base_symbol_name(name).to_ascii_lowercase();
-        vars.borrow_mut()
-            .retain(|declared| {
-                !declared.eq_ignore_ascii_case(name)
-                    && !base_symbol_name(declared).eq_ignore_ascii_case(name)
-                    && !declared.eq_ignore_ascii_case(&target_base)
-                    && !base_symbol_name(declared).eq_ignore_ascii_case(&target_base)
-            });
+        vars.borrow_mut().retain(|declared| {
+            !declared.eq_ignore_ascii_case(name)
+                && !base_symbol_name(declared).eq_ignore_ascii_case(name)
+                && !declared.eq_ignore_ascii_case(&target_base)
+                && !base_symbol_name(declared).eq_ignore_ascii_case(&target_base)
+        });
     });
 }
 
@@ -146,7 +144,11 @@ pub fn clear_dynamic_var(name: &str) {
 /// Register a class with its superclasses
 pub fn register_class_hierarchy(class_name: &str, superclasses: Vec<String>) {
     let class_upper_full = class_name.to_uppercase();
-    let class_upper = class_name.rsplit(':').next().unwrap_or(class_name).to_uppercase();
+    let class_upper = class_name
+        .rsplit(':')
+        .next()
+        .unwrap_or(class_name)
+        .to_uppercase();
     let normalized_supers: Vec<String> = superclasses
         .iter()
         .map(|s| s.rsplit(':').next().unwrap_or(s).to_uppercase())
@@ -161,11 +163,33 @@ pub fn register_class_hierarchy(class_name: &str, superclasses: Vec<String>) {
     });
 }
 
+pub fn unregister_class_hierarchy(class_name: &str) {
+    let class_upper_full = class_name.to_uppercase();
+    let class_upper = class_name
+        .rsplit(':')
+        .next()
+        .unwrap_or(class_name)
+        .to_uppercase();
+    CLASS_HIERARCHY.with(|h| {
+        let mut h = h.borrow_mut();
+        h.remove(&class_upper);
+        h.remove(&class_upper_full);
+    });
+}
+
 /// Check if a class is a subclass of another (including itself)
 pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
     let class_upper_full = class_name.to_uppercase();
-    let class_upper = class_name.rsplit(':').next().unwrap_or(class_name).to_uppercase();
-    let super_upper = superclass_name.rsplit(':').next().unwrap_or(superclass_name).to_uppercase();
+    let class_upper = class_name
+        .rsplit(':')
+        .next()
+        .unwrap_or(class_name)
+        .to_uppercase();
+    let super_upper = superclass_name
+        .rsplit(':')
+        .next()
+        .unwrap_or(superclass_name)
+        .to_uppercase();
 
     // T matches everything
     if super_upper == "T" {
@@ -192,12 +216,18 @@ pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
 
     // Numeric tower relationships.
     if class_upper == "FIXNUM" {
-        if matches!(super_upper.as_str(), "INTEGER" | "RATIONAL" | "REAL" | "NUMBER") {
+        if matches!(
+            super_upper.as_str(),
+            "INTEGER" | "RATIONAL" | "REAL" | "NUMBER"
+        ) {
             return true;
         }
     }
     if class_upper == "BIGNUM" {
-        if matches!(super_upper.as_str(), "INTEGER" | "RATIONAL" | "REAL" | "NUMBER") {
+        if matches!(
+            super_upper.as_str(),
+            "INTEGER" | "RATIONAL" | "REAL" | "NUMBER"
+        ) {
             return true;
         }
     }
@@ -216,7 +246,10 @@ pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
             return true;
         }
     }
-    if matches!(class_upper.as_str(), "FLOAT" | "SINGLE-FLOAT" | "DOUBLE-FLOAT" | "SHORT-FLOAT" | "LONG-FLOAT") {
+    if matches!(
+        class_upper.as_str(),
+        "FLOAT" | "SINGLE-FLOAT" | "DOUBLE-FLOAT" | "SHORT-FLOAT" | "LONG-FLOAT"
+    ) {
         if matches!(super_upper.as_str(), "FLOAT" | "REAL" | "NUMBER") {
             return true;
         }
@@ -234,7 +267,10 @@ pub fn is_subclass(class_name: &str, superclass_name: &str) -> bool {
         }
     }
     if class_upper == "SIMPLE-STRING" {
-        if matches!(super_upper.as_str(), "STRING" | "VECTOR" | "SEQUENCE" | "ARRAY") {
+        if matches!(
+            super_upper.as_str(),
+            "STRING" | "VECTOR" | "SEQUENCE" | "ARRAY"
+        ) {
             return true;
         }
     }
@@ -296,8 +332,8 @@ pub fn next_instance_id() -> u64 {
 /// CLOS Method: function with specializers for dispatch
 #[derive(Clone)]
 pub struct Method {
-    pub qualifier: Option<String>,  // :before, :after, :around, or None for primary
-    pub specializers: Vec<String>,  // Class names for each parameter
+    pub qualifier: Option<String>, // :before, :after, :around, or None for primary
+    pub specializers: Vec<String>, // Class names for each parameter
     pub params: Vec<String>,
     pub body: Vec<ASTNode>,
     pub env: Rc<RefCell<HashMap<String, EvalResult>>>,
@@ -318,19 +354,19 @@ pub enum EvalResult {
     Float(f64),
     /// Preserves explicit `single-float` literals during macro data conversion.
     FloatSingle(f64),
-    Complex(f64, f64),  // Complex number (real, imaginary)
+    Complex(f64, f64), // Complex number (real, imaginary)
     Bool(bool),
-    Boolean(bool),  // CL boolean type
+    Boolean(bool), // CL boolean type
     Nil,
     String(String),
     Symbol(String),
-    Character(char),  // CL character type
+    Character(char), // CL character type
     Cons(Rc<RefCell<EvalResult>>, Rc<RefCell<EvalResult>>),
     Lambda {
         params: Vec<String>,
-        defaults: HashMap<String, ASTNode>,  // Default values for params
-        supplied_p_vars: HashMap<String, String>,  // Maps param -> supplied-p var
-        key_params: HashMap<String, String>,  // Maps param -> keyword name (no leading :)
+        defaults: HashMap<String, ASTNode>, // Default values for params
+        supplied_p_vars: HashMap<String, String>, // Maps param -> supplied-p var
+        key_params: HashMap<String, String>, // Maps param -> keyword name (no leading :)
         body: Vec<ASTNode>,
         env: Rc<RefCell<HashMap<String, EvalResult>>>,
         dynamic_env: bool, // If true, prefer caller env for bindings (flet/labels approximation)
@@ -343,23 +379,24 @@ pub enum EvalResult {
     /// Expands to (setf place (function place args...))
     ModifyMacro {
         name: String,
-        params: Vec<String>,  // place + lambda-list params
-        function: String,     // The function to call
-        has_rest: bool,       // Whether lambda-list has &rest
+        params: Vec<String>, // place + lambda-list params
+        function: String,    // The function to call
+        has_rest: bool,      // Whether lambda-list has &rest
     },
     HashTable(Rc<RefCell<HashMap<String, EvalResult>>>),
-    Array(Rc<RefCell<Vec<EvalResult>>>),  // Simple 1D array/vector
+    Array(Rc<RefCell<Vec<EvalResult>>>), // Simple 1D array/vector
     /// Deferred class slot initform AST (evaluated at instance initialization time).
     InitForm(ASTNode),
     WasmBytes(Vec<u8>),
-    BuiltinFunction(String),  // Name of builtin function
-    MultipleValues(Vec<EvalResult>),  // Multiple return values
-    ForeignLibrary(Rc<rlasp_ffi::Library>),  // FFI library (wrapped in Rc since Library may not be Clone)
-    ForeignFunction(Rc<rlasp_ffi::ForeignFunction>),  // FFI function (wrapped in Rc)
-    Instance(Instance),  // CLOS instance with class metadata
-    GenericFunction(Rc<RefCell<GenericFunction>>),  // CLOS generic function with methods
-    Condition(Rc<RefCell<super::eval_conditions::ConditionInstance>>),  // Condition instance
-    Package(String),  // Package object (stores package name)
+    BuiltinFunction(String),                // Name of builtin function
+    MultipleValues(Vec<EvalResult>),        // Multiple return values
+    ForeignLibrary(Rc<rlasp_ffi::Library>), // FFI library (wrapped in Rc since Library may not be Clone)
+    ForeignFunction(Rc<rlasp_ffi::ForeignFunction>), // FFI function (wrapped in Rc)
+    Instance(Instance),                     // CLOS instance with class metadata
+    GenericFunction(Rc<RefCell<GenericFunction>>), // CLOS generic function with methods
+    Condition(Rc<RefCell<super::eval_conditions::ConditionInstance>>), // Condition instance
+    Restart(String),                        // Condition system restart designator
+    Package(String),                        // Package object (stores package name)
 }
 
 // Special error type for non-local exits (return, return-from)
@@ -406,8 +443,14 @@ impl std::fmt::Display for EvalResult {
             }
             EvalResult::ForeignLibrary(_) => write!(f, "#<FOREIGN-LIBRARY>"),
             EvalResult::ForeignFunction(_) => write!(f, "#<FOREIGN-FUNCTION>"),
-            EvalResult::Instance(inst) => write!(f, "#<{} instance>", class_of(&EvalResult::Instance(inst.clone()))),
-            EvalResult::GenericFunction(gf) => write!(f, "#<GENERIC-FUNCTION {}>", gf.borrow().name),
+            EvalResult::Instance(inst) => write!(
+                f,
+                "#<{} instance>",
+                class_of(&EvalResult::Instance(inst.clone()))
+            ),
+            EvalResult::GenericFunction(gf) => {
+                write!(f, "#<GENERIC-FUNCTION {}>", gf.borrow().name)
+            }
             EvalResult::Condition(cond) => {
                 let cond_ref = cond.borrow();
                 if let Some(EvalResult::String(msg)) = cond_ref.slots.get("FORMAT-CONTROL") {
@@ -416,6 +459,7 @@ impl std::fmt::Display for EvalResult {
                     write!(f, "#<CONDITION {}>", cond_ref.type_name)
                 }
             }
+            EvalResult::Restart(name) => write!(f, "#<RESTART {}>", name),
             EvalResult::Package(name) => write!(f, "#<PACKAGE \"{}\">", name),
         }
     }
@@ -450,12 +494,23 @@ impl std::fmt::Debug for EvalResult {
 
 /// Helper function to check structural equality for values
 pub(super) fn structural_equal(a: &EvalResult, b: &EvalResult) -> bool {
+    fn array_items(arr: &Rc<RefCell<Vec<EvalResult>>>) -> Vec<EvalResult> {
+        let cells = arr.borrow();
+        let active_len = super::eval_system::get_array_fill_pointer(arr).unwrap_or(cells.len());
+        cells.iter().take(active_len).cloned().collect()
+    }
+
     match (a, b) {
         (EvalResult::Fixnum(a), EvalResult::Fixnum(b)) => a == b,
+        (EvalResult::Bignum(a), EvalResult::Bignum(b)) => a == b,
+        (EvalResult::Ratio(a), EvalResult::Ratio(b)) => a == b,
         (EvalResult::Float(a), EvalResult::Float(b)) => a == b,
         (EvalResult::FloatSingle(a), EvalResult::FloatSingle(b)) => a == b,
         (EvalResult::Float(a), EvalResult::FloatSingle(b))
         | (EvalResult::FloatSingle(a), EvalResult::Float(b)) => a == b,
+        (EvalResult::Complex(a_re, a_im), EvalResult::Complex(b_re, b_im)) => {
+            a_re == b_re && a_im == b_im
+        }
         (EvalResult::Bool(a), EvalResult::Bool(b)) => a == b,
         (EvalResult::Boolean(a), EvalResult::Boolean(b)) => a == b,
         (EvalResult::Bool(a), EvalResult::Boolean(b))
@@ -474,6 +529,20 @@ pub(super) fn structural_equal(a: &EvalResult, b: &EvalResult) -> bool {
         (EvalResult::Character(a), EvalResult::Character(b)) => a == b,
         (EvalResult::String(a), EvalResult::String(b)) => a == b,
         (EvalResult::Symbol(a), EvalResult::Symbol(b)) => a.eq_ignore_ascii_case(b),
+        (EvalResult::Restart(a), EvalResult::Restart(b)) => a.eq_ignore_ascii_case(b),
+        (EvalResult::Cons(a_car, a_cdr), EvalResult::Cons(b_car, b_cdr)) => {
+            structural_equal(&a_car.borrow(), &b_car.borrow())
+                && structural_equal(&a_cdr.borrow(), &b_cdr.borrow())
+        }
+        (EvalResult::Array(a_arr), EvalResult::Array(b_arr)) => {
+            let a_items = array_items(a_arr);
+            let b_items = array_items(b_arr);
+            a_items.len() == b_items.len()
+                && a_items
+                    .iter()
+                    .zip(b_items.iter())
+                    .all(|(lhs, rhs)| structural_equal(lhs, rhs))
+        }
         _ => false,
     }
 }
@@ -498,7 +567,11 @@ pub(super) fn primary_value(val: EvalResult) -> EvalResult {
 pub fn class_of(val: &EvalResult) -> String {
     match val {
         EvalResult::Instance(inst) => {
-            if let Some(EvalResult::Symbol(name)) = inst.slots.borrow().get(super::eval_clos::CLASS_NAME_OVERRIDE_SLOT_KEY) {
+            if let Some(EvalResult::Symbol(name)) = inst
+                .slots
+                .borrow()
+                .get(super::eval_clos::CLASS_NAME_OVERRIDE_SLOT_KEY)
+            {
                 name.clone()
             } else {
                 inst.class_name.clone()
@@ -520,9 +593,15 @@ pub fn class_of(val: &EvalResult) -> String {
         EvalResult::Macro { .. } => "MACRO".to_string(),
         EvalResult::ModifyMacro { .. } => "MACRO".to_string(),
         EvalResult::HashTable(_) => "HASH-TABLE".to_string(),
-        // Runtime arrays are currently 1-D vector-backed, so dispatch as VECTOR.
-        EvalResult::Array(_) => "VECTOR".to_string(),
+        EvalResult::Array(arr) => {
+            if super::eval_system::array_dims_for_bridge(arr).len() == 1 {
+                "VECTOR".to_string()
+            } else {
+                "ARRAY".to_string()
+            }
+        }
         EvalResult::GenericFunction(_) => "GENERIC-FUNCTION".to_string(),
+        EvalResult::Restart(_) => "RESTART".to_string(),
         EvalResult::InitForm(_) => "T".to_string(),
         _ => "T".to_string(),
     }
