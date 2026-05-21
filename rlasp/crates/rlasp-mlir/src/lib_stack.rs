@@ -2107,9 +2107,12 @@ impl StackMLIRCodegen {
                 let base = name.rsplit(':').next().unwrap_or(name.as_str());
                 extra_raw_bindings.contains(name)
                     || extra_raw_bindings.contains(base)
+                    || self.symbol_fixnum_raw_table.contains_key(name)
+                    || self.symbol_fixnum_raw_table.contains_key(base)
                     || self.symbol_table_lookup_key_ci(name).is_some_and(|key| {
                         self.symbol_fixnum_raw_table.contains_key(&key)
                             || self.symbol_fixnum_raw_table.contains_key(name)
+                            || self.symbol_fixnum_raw_table.contains_key(base)
                     })
             }
             ASTNode::Call { function, args } => {
@@ -2202,6 +2205,10 @@ impl StackMLIRCodegen {
                     }
                 }
                 if let Some(raw) = self.symbol_fixnum_raw_table.get(name) {
+                    return Ok(raw.clone());
+                }
+                let base = name.rsplit(':').next().unwrap_or(name.as_str());
+                if let Some(raw) = self.symbol_fixnum_raw_table.get(base) {
                     return Ok(raw.clone());
                 }
                 anyhow::bail!("{} is not a proven raw fixnum", name)
@@ -8083,6 +8090,7 @@ impl StackMLIRCodegen {
                 debug_println!("DEBUG: Compiling ASTNode::Loop");
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw_symbols = self.symbol_fixnum_raw_table.clone();
 
                 // Determine starting value (default 0)
                 let start_val = if let Some(start_expr) = start {
@@ -8174,6 +8182,12 @@ impl StackMLIRCodegen {
 
                 // Box and bind loop variable
                 self.symbol_table.insert(var.clone(), loop_var.clone());
+                let loop_var_raw = self.emit_unbox_fixnum_raw(&loop_var);
+                self.symbol_fixnum_raw_table
+                    .insert(var.clone(), loop_var_raw.clone());
+                let loop_var_base = var.rsplit(':').next().unwrap_or(var.as_str());
+                self.symbol_fixnum_raw_table
+                    .insert(loop_var_base.to_string(), loop_var_raw);
 
                 // Evaluate condition (if present)
                 let should_process = if let Some(cond_expr) = when_condition {
@@ -8203,6 +8217,7 @@ impl StackMLIRCodegen {
                     // Use scf.if to conditionally update accumulator
                     // CRITICAL: Save symbol_table before scf.if
                     let saved_symbols = self.symbol_table.clone();
+                    let saved_fixnum_raw_symbols = self.symbol_fixnum_raw_table.clone();
                     let result_accum = self.fresh_ssa();
                     self.writeln(&format!(
                         "{} = scf.if {} -> i64 {{",
@@ -8260,6 +8275,7 @@ impl StackMLIRCodegen {
                     self.indent();
                     // Restore symbol_table before else branch
                     self.symbol_table = saved_symbols.clone();
+                    self.symbol_fixnum_raw_table = saved_fixnum_raw_symbols.clone();
 
                     if let Some(else_collect_expr) = else_collect {
                         self.compile_expr(else_collect_expr)?;
@@ -8310,6 +8326,7 @@ impl StackMLIRCodegen {
                     self.writeln("}");
                     // Restore symbol_table after scf.if closes
                     self.symbol_table = saved_symbols;
+                    self.symbol_fixnum_raw_table = saved_fixnum_raw_symbols;
                     result_accum
                 } else {
                     // No condition, always process
@@ -8393,6 +8410,7 @@ impl StackMLIRCodegen {
 
                 // Restore symbol table
                 self.symbol_table = saved_symbols;
+                self.symbol_fixnum_raw_table = saved_fixnum_raw_symbols;
                 Ok(())
             }
 
@@ -15192,6 +15210,82 @@ impl StackMLIRCodegen {
                     return self.compile_user_function_call(base_name, args);
                 }
 
+                if Self::compile_target_is_aot() && base_name_lower == "=" && args.len() == 2 {
+                    let aref_eq = match (&args[0], &args[1]) {
+                        (
+                            ASTNode::Call {
+                                function,
+                                args: aref_args,
+                            },
+                            ASTNode::Constant(ConstantValue::Fixnum(expected)),
+                        ) if matches!(function.as_ref(), ASTNode::Variable(name) if name.rsplit(':').next().unwrap_or(name.as_str()).eq_ignore_ascii_case("aref"))
+                            && aref_args.len() == 2
+                            && Self::is_cl_fixnum_value(*expected) =>
+                        {
+                            Some((aref_args[0].clone(), aref_args[1].clone(), *expected))
+                        }
+                        (
+                            ASTNode::Constant(ConstantValue::Fixnum(expected)),
+                            ASTNode::Call {
+                                function,
+                                args: aref_args,
+                            },
+                        ) if matches!(function.as_ref(), ASTNode::Variable(name) if name.rsplit(':').next().unwrap_or(name.as_str()).eq_ignore_ascii_case("aref"))
+                            && aref_args.len() == 2
+                            && Self::is_cl_fixnum_value(*expected) =>
+                        {
+                            Some((aref_args[0].clone(), aref_args[1].clone(), *expected))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some((array_arg, index_arg, expected)) = aref_eq {
+                        let array = self.compile_expr_as_ssa(&array_arg)?;
+                        let raw_index = if self.ast_is_fixnum_raw_compilable(&index_arg) {
+                            self.compile_fixnum_raw_ssa(&index_arg)?
+                        } else {
+                            let index = self.compile_expr_as_ssa(&index_arg)?;
+                            self.emit_unbox_fixnum_raw(&index)
+                        };
+                        let expected_raw = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = arith.constant {} : i64",
+                            expected_raw, expected
+                        ));
+                        let eq_raw = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = func.call @cc_aref_raw_index_eq_fixnum({}, {}, {}) : (i64, i64, i64) -> i64",
+                            eq_raw, array, raw_index, expected_raw
+                        ));
+                        let one = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 1 : i64", one));
+                        let all_true = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = arith.cmpi eq, {}, {} : i64",
+                            all_true, eq_raw, one
+                        ));
+                        let nil_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil_val));
+                        let t_val = self.fresh_ssa();
+                        self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                        let result = self.fresh_ssa();
+                        self.writeln(&format!("{} = scf.if {} -> (i64) {{", result, all_true));
+                        self.indent();
+                        self.writeln(&format!("scf.yield {} : i64", t_val));
+                        self.dedent();
+                        self.writeln("} else {");
+                        self.indent();
+                        self.writeln(&format!("scf.yield {} : i64", nil_val));
+                        self.dedent();
+                        self.writeln("}");
+                        self.writeln(&format!(
+                            "func.call @stack_push_pointer({}) : (i64) -> ()",
+                            result
+                        ));
+                        return Ok(());
+                    }
+                }
+
                 let mut values: Vec<String> = Vec::with_capacity(args.len());
                 for arg in args {
                     self.compile_expr(arg)?;
@@ -15361,16 +15455,9 @@ impl StackMLIRCodegen {
                     anyhow::bail!("hash-set requires exactly 3 arguments");
                 }
 
-                self.compile_expr(&args[0])?; // key
-                self.compile_expr(&args[1])?; // table
-                self.compile_expr(&args[2])?; // value
-
-                let value = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", value));
-                let table = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", table));
-                let key = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key));
+                let key = self.compile_expr_as_ssa(&args[0])?;
+                let table = self.compile_expr_as_ssa(&args[1])?;
+                let value = self.compile_expr_as_ssa(&args[2])?;
 
                 let result = self.fresh_ssa();
                 self.writeln(&format!(
@@ -15386,16 +15473,9 @@ impl StackMLIRCodegen {
                     anyhow::bail!("puthash requires exactly 3 arguments");
                 }
 
-                self.compile_expr(&args[0])?; // key
-                self.compile_expr(&args[1])?; // value
-                self.compile_expr(&args[2])?; // table
-
-                let table = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", table));
-                let value = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", value));
-                let key = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key));
+                let key = self.compile_expr_as_ssa(&args[0])?;
+                let value = self.compile_expr_as_ssa(&args[1])?;
+                let table = self.compile_expr_as_ssa(&args[2])?;
 
                 let result = self.fresh_ssa();
                 self.writeln(&format!(
@@ -15428,24 +15508,15 @@ impl StackMLIRCodegen {
                     anyhow::bail!("gethash requires at least 2 arguments");
                 }
 
-                // Evaluate key and hash-table
-                self.compile_expr(&args[0])?;
-                self.compile_expr(&args[1])?;
-
-                // Get default if provided, otherwise nil
-                if args.len() >= 3 {
-                    self.compile_expr(&args[2])?;
+                let key = self.compile_expr_as_ssa(&args[0])?;
+                let table = self.compile_expr_as_ssa(&args[1])?;
+                let default = if args.len() >= 3 {
+                    self.compile_expr_as_ssa(&args[2])?
                 } else {
-                    self.writeln("func.call @stack_push_nil() : () -> ()");
-                }
-
-                // Pop in reverse: default, table, key
-                let default = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", default));
-                let table = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", table));
-                let key = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key));
+                    let nil = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+                    nil
+                };
 
                 let result = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @cc_gethash({}, {}, {}) : (i64, i64, i64) -> i64",
@@ -16370,23 +16441,14 @@ impl StackMLIRCodegen {
                         }
 
                         // Hash table: (setf (gethash key ht) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("gethash")) => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.rsplit(':').next().unwrap_or(name.as_str()).eq_ignore_ascii_case("gethash")) => {
                             if place_args.len() < 2 {
                                 anyhow::bail!("setf gethash requires key and table");
                             }
 
-                            // Evaluate key, table, and value
-                            self.compile_expr(&place_args[0])?; // key
-                            self.compile_expr(&place_args[1])?; // table
-                            self.compile_expr(value)?;           // value
-
-                            // Pop in reverse: value, table, key
-                            let val_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
-                            let table_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", table_ssa));
-                            let key_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", key_ssa));
+                            let key_ssa = self.compile_expr_as_ssa(&place_args[0])?;
+                            let table_ssa = self.compile_expr_as_ssa(&place_args[1])?;
+                            let val_ssa = self.compile_expr_as_ssa(value)?;
 
                             // Call cc_puthash
                             let result = self.fresh_ssa();
@@ -16421,35 +16483,52 @@ impl StackMLIRCodegen {
                         }
 
                         // Array: (setf (aref array index) value)
-                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.eq_ignore_ascii_case("aref")) => {
+                        ASTNode::Call { function, args: place_args } if matches!(function.as_ref(), ASTNode::Variable(name) if name.rsplit(':').next().unwrap_or(name.as_str()).eq_ignore_ascii_case("aref")) => {
                             if place_args.is_empty() {
                                 anyhow::bail!("setf aref requires an array argument");
                             }
 
-                            // Evaluate array, optional index, and value
-                            self.compile_expr(&place_args[0])?; // array
-                            let idx_ssa = self.fresh_ssa();
-                            if place_args.len() >= 2 {
-                                self.compile_expr(&place_args[1])?; // index
-                                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", idx_ssa));
+                            let arr_ssa = self.compile_expr_as_ssa(&place_args[0])?;
+                            let raw_idx_ssa = if place_args.len() >= 2
+                                && Self::compile_target_is_aot()
+                                && self.ast_is_fixnum_raw_compilable(&place_args[1])
+                            {
+                                Some(self.compile_fixnum_raw_ssa(&place_args[1])?)
                             } else {
-                                // Rank-0 arrays are represented with one storage slot.
-                                let zero_raw = self.fresh_ssa();
-                                self.writeln(&format!("{} = arith.constant 0 : i64", zero_raw));
-                                self.writeln(&format!("{} = func.call @cc_box_fixnum({}) : (i64) -> i64", idx_ssa, zero_raw));
-                            }
-                            self.compile_expr(value)?;           // value
+                                None
+                            };
+                            let idx_ssa = if raw_idx_ssa.is_none() {
+                                if place_args.len() >= 2 {
+                                    Some(self.compile_expr_as_ssa(&place_args[1])?)
+                                } else {
+                                    let zero_raw = self.fresh_ssa();
+                                    let boxed_zero = self.fresh_ssa();
+                                    self.writeln(&format!("{} = arith.constant 0 : i64", zero_raw));
+                                    self.writeln(&format!(
+                                        "{} = func.call @cc_box_fixnum({}) : (i64) -> i64",
+                                        boxed_zero, zero_raw
+                                    ));
+                                    Some(boxed_zero)
+                                }
+                            } else {
+                                None
+                            };
+                            let val_ssa = self.compile_expr_as_ssa(value)?;
 
-                            // Pop in reverse: value, array (index already materialized as SSA)
-                            let val_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
-                            let arr_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arr_ssa));
-
-                            // Call cc_set_aref
                             let result = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @cc_set_aref({}, {}, {}) : (i64, i64, i64) -> i64",
-                                result, arr_ssa, idx_ssa, val_ssa));
+                            if let Some(raw_idx) = raw_idx_ssa {
+                                self.writeln(&format!("{} = func.call @cc_set_aref_raw_index({}, {}, {}) : (i64, i64, i64) -> i64",
+                                    result, arr_ssa, raw_idx, val_ssa));
+                            } else if Self::compile_target_is_aot() {
+                                let idx_ssa = idx_ssa.expect("boxed aref index should be present");
+                                let raw_idx = self.emit_unbox_fixnum_raw(&idx_ssa);
+                                self.writeln(&format!("{} = func.call @cc_set_aref_raw_index({}, {}, {}) : (i64, i64, i64) -> i64",
+                                    result, arr_ssa, raw_idx, val_ssa));
+                            } else {
+                                let idx_ssa = idx_ssa.expect("boxed aref index should be present");
+                                self.writeln(&format!("{} = func.call @cc_set_aref({}, {}, {}) : (i64, i64, i64) -> i64",
+                                    result, arr_ssa, idx_ssa, val_ssa));
+                            }
 
                             // Push result
                             self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
@@ -16842,6 +16921,25 @@ impl StackMLIRCodegen {
                                         "set-stream-external-format",
                                         &[place_args[0].clone(), value.clone()],
                                     )?;
+                                } else if accessor_name
+                                    .rsplit(':')
+                                    .next()
+                                    .map(|b| b.eq_ignore_ascii_case("gethash"))
+                                    .unwrap_or(false)
+                                    && place_args.len() >= 2
+                                {
+                                    let key_ssa = self.compile_expr_as_ssa(&place_args[0])?;
+                                    let table_ssa = self.compile_expr_as_ssa(&place_args[1])?;
+                                    let val_ssa = self.compile_expr_as_ssa(value)?;
+                                    let result = self.fresh_ssa();
+                                    self.writeln(&format!(
+                                        "{} = func.call @cc_puthash({}, {}, {}) : (i64, i64, i64) -> i64",
+                                        result, key_ssa, val_ssa, table_ssa
+                                    ));
+                                    self.writeln(&format!(
+                                        "func.call @stack_push_pointer({}) : (i64) -> ()",
+                                        result
+                                    ));
                                 } else {
                                     // Build setf function name: (setf accessor-name)
                                     let setf_fn_name = format!("(setf {})", accessor_name);
@@ -17592,17 +17690,34 @@ impl StackMLIRCodegen {
                 if args.len() == 2 {
                     // Fast path for the common rank-1 form (aref array index).
                     // cc_aref preserves CL bounds/type error behavior for vectors/strings.
-                    self.compile_expr(&args[0])?;
-                    self.compile_expr(&args[1])?;
-                    let index = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", index));
-                    let array = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", array));
+                    let array = self.compile_expr_as_ssa(&args[0])?;
+                    let raw_index = if Self::compile_target_is_aot()
+                        && self.ast_is_fixnum_raw_compilable(&args[1])
+                    {
+                        Some(self.compile_fixnum_raw_ssa(&args[1])?)
+                    } else {
+                        None
+                    };
                     let result = self.fresh_ssa();
-                    self.writeln(&format!(
-                        "{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64",
-                        result, array, index
-                    ));
+                    if let Some(index) = raw_index {
+                        self.writeln(&format!(
+                            "{} = func.call @cc_aref_raw_index({}, {}) : (i64, i64) -> i64",
+                            result, array, index
+                        ));
+                    } else if Self::compile_target_is_aot() {
+                        let index = self.compile_expr_as_ssa(&args[1])?;
+                        let raw_index = self.emit_unbox_fixnum_raw(&index);
+                        self.writeln(&format!(
+                            "{} = func.call @cc_aref_raw_index({}, {}) : (i64, i64) -> i64",
+                            result, array, raw_index
+                        ));
+                    } else {
+                        let index = self.compile_expr_as_ssa(&args[1])?;
+                        self.writeln(&format!(
+                            "{} = func.call @cc_aref({}, {}) : (i64, i64) -> i64",
+                            result, array, index
+                        ));
+                    }
                     self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                     Ok(())
                 } else {
@@ -21838,6 +21953,26 @@ impl StackMLIRCodegen {
     fn compile_user_function_call(&mut self, base_name: &str, args: &[ASTNode]) -> Result<()> {
         // User-defined function call
         // base_name already has package qualifier stripped from the beginning of compile_call
+
+        let base_name_lc = base_name.to_ascii_lowercase();
+        if base_name_lc.starts_with("(setf") && base_name_lc.contains("gethash") {
+            if args.len() != 3 {
+                anyhow::bail!("(setf gethash) requires value, key, and table arguments");
+            }
+            let value = self.compile_expr_as_ssa(&args[0])?;
+            let key = self.compile_expr_as_ssa(&args[1])?;
+            let table = self.compile_expr_as_ssa(&args[2])?;
+            let result = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_puthash({}, {}, {}) : (i64, i64, i64) -> i64",
+                result, key, value, table
+            ));
+            self.writeln(&format!(
+                "func.call @stack_push_pointer({}) : (i64) -> ()",
+                result
+            ));
+            return Ok(());
+        }
 
         if let Some(local_func_val) = self.local_function_value_lookup_ci(base_name) {
             for arg in args {

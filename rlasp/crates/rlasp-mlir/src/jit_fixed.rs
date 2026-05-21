@@ -211,8 +211,32 @@ fn map_intrinsics(execution_engine: &ExecutionEngine, module: &Module) {
     map_if_exists(
         execution_engine,
         module,
+        "cc_aref",
+        cc_aref as usize,
+    );
+    map_if_exists(
+        execution_engine,
+        module,
+        "cc_aref_raw_index",
+        cc_aref_raw_index as usize,
+    );
+    map_if_exists(
+        execution_engine,
+        module,
+        "cc_aref_raw_index_eq_fixnum",
+        cc_aref_raw_index_eq_fixnum as usize,
+    );
+    map_if_exists(
+        execution_engine,
+        module,
         "cc_set_aref",
         cc_set_aref as usize,
+    );
+    map_if_exists(
+        execution_engine,
+        module,
+        "cc_set_aref_raw_index",
+        cc_set_aref_raw_index as usize,
     );
     map_if_exists(
         execution_engine,

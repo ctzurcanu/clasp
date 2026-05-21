@@ -86,7 +86,10 @@ impl MLIRCodegen {
         self.writeln("func.func private @cc_imagpart(i64) -> i64");
         self.writeln("func.func private @cc_make_array(i64) -> i64");
         self.writeln("func.func private @cc_aref(i64, i64) -> i64");
+        self.writeln("func.func private @cc_aref_raw_index(i64, i64) -> i64");
+        self.writeln("func.func private @cc_aref_raw_index_eq_fixnum(i64, i64, i64) -> i64");
         self.writeln("func.func private @cc_set_aref(i64, i64, i64) -> i64");
+        self.writeln("func.func private @cc_set_aref_raw_index(i64, i64, i64) -> i64");
         self.writeln("func.func private @cc_make_hash_table() -> i64");
         self.writeln("func.func private @cc_gethash(i64, i64, i64) -> i64");
         self.writeln("func.func private @cc_puthash(i64, i64, i64) -> i64");

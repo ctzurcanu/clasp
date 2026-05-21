@@ -51,6 +51,16 @@ float_add() {
   awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", (a + b) }'
 }
 
+float_div_or_na() {
+  awk -v num="$1" -v den="$2" 'BEGIN {
+    if (den == 0) {
+      printf "NA"
+    } else {
+      printf "%.6f", (num / den)
+    }
+  }'
+}
+
 float_sub_floor_zero() {
   awk -v a="$1" -v b="$2" 'BEGIN { v=(a-b); if (v < 0) v=0; printf "%.6f", v }'
 }
@@ -125,7 +135,7 @@ match_label() {
 }
 
 CSV_FILE="${LOG_DIR}/benchmark-results.csv"
-echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,irlasp_aot_build_s,irlasp_aot_exec_s,irlasp_aot_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,irlasp_aot_build_rc,irlasp_aot_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,irlasp_aot_match_cl,result_match" >"$CSV_FILE"
+echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,irlasp_aot_build_s,irlasp_aot_exec_s,irlasp_aot_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,irlasp_aot_build_rc,irlasp_aot_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,irlasp_aot_match_cl,result_match,relative_sbcl,relative_clasp" >"$CSV_FILE"
 echo "IRLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB"
 echo "IRLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS"
 echo "RLASP_MLIR_TARGET_AOT=$RLASP_MLIR_TARGET_AOT"
@@ -242,6 +252,8 @@ while IFS='|' read -r bench_file bench_args_raw; do
     aot_exec_s="0.000000"
   fi
   aot_total_s="$(float_add "$aot_build_s" "$aot_exec_s")"
+  relative_sbcl="$(float_div_or_na "$aot_exec_s" "$sbcl_s")"
+  relative_clasp="$(float_div_or_na "$aot_exec_s" "$clasp_s")"
 
   sbcl_result="$(result_line "$sbcl_out")"
   clasp_result="$(result_line "$clasp_out")"
@@ -279,7 +291,7 @@ while IFS='|' read -r bench_file bench_args_raw; do
   fi
 
   args_for_csv="${bench_args_raw//,/;}"
-  echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${aot_build_s},${aot_exec_s},${aot_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${aot_build_rc},${aot_exec_rc},${cl_baseline},${cl_expected_present},${interp_match_cl},${mlir_match_cl},${aot_match_cl},${result_match}" >>"$CSV_FILE"
+  echo "${bench_name},\"${args_for_csv}\",${sbcl_s},${clasp_s},${interp_s},${mlir_compile_s},${mlir_exec_s},${mlir_total_s},${aot_build_s},${aot_exec_s},${aot_total_s},${sbcl_rc},${clasp_rc},${interp_rc},${mlir_compile_rc},${mlir_exec_rc},${aot_build_rc},${aot_exec_rc},${cl_baseline},${cl_expected_present},${interp_match_cl},${mlir_match_cl},${aot_match_cl},${result_match},${relative_sbcl},${relative_clasp}" >>"$CSV_FILE"
 
   echo ""
   echo "BENCHMARK $bench_name args=(${bench_args_raw})"
@@ -309,6 +321,8 @@ while IFS='|' read -r bench_file bench_args_raw; do
   echo "    build_time_s: $aot_build_s"
   echo "    exec_exit: ${aot_exec_rc} ($(exit_label "$aot_exec_rc"))"
   echo "    exec_time_s: $aot_exec_s"
+  echo "    relative_sbcl: $relative_sbcl"
+  echo "    relative_clasp: $relative_clasp"
   echo "    total_time_s: $aot_total_s"
   print_result_output "rlasp aot" "$aot_result" "$aot_exec_out"
   echo "    matches CL baseline: $(match_label "$aot_match_cl")"

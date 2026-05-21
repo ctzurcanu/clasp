@@ -147,8 +147,11 @@ module {
   func.func private @cc_make_array_with_initial_element(i64, i64) -> i64
   func.func private @cc_make_array_stack()
   func.func private @cc_aref(i64, i64) -> i64
+  func.func private @cc_aref_raw_index(i64, i64) -> i64
+  func.func private @cc_aref_raw_index_eq_fixnum(i64, i64, i64) -> i64
   func.func private @cc_aref_stack()
   func.func private @cc_set_aref(i64, i64, i64) -> i64
+  func.func private @cc_set_aref_raw_index(i64, i64, i64) -> i64
   
   // Vectors
   func.func private @cc_make_vector(i64) -> i64
@@ -1130,7 +1133,6 @@ module {
     %517 = func.call @cc_cons(%515, %516) : (i64, i64) -> i64
     %518 = func.call @cc_values_pack(%517) : (i64) -> i64
     %519 = func.call @cc_set_symbol_value(%515, %492) : (i64, i64) -> i64
-    func.call @stack_push_pointer(%491) : (i64) -> ()
     %520 = llvm.mlir.addressof @str51 : !llvm.ptr
     %521 = arith.constant 19 : i64
     %522 = func.call @cc_make_string(%520, %521) : (!llvm.ptr, i64) -> i64
@@ -1140,3024 +1142,3009 @@ module {
     %526 = func.call @cc_cons(%524, %525) : (i64, i64) -> i64
     %527 = func.call @cc_values_pack(%526) : (i64) -> i64
     %528 = func.call @cc_symbol_value(%524) : (i64) -> i64
-    func.call @stack_push_pointer(%528) : (i64) -> ()
-    func.call @stack_push_nil() : () -> ()
-    %529 = func.call @stack_pop_pointer() : () -> i64
-    %530 = func.call @stack_pop_pointer() : () -> i64
-    %531 = func.call @stack_pop_pointer() : () -> i64
-    %532 = func.call @cc_gethash(%531, %530, %529) : (i64, i64, i64) -> i64
+    %529 = func.call @cc_nil_value() : () -> i64
+    %530 = func.call @cc_gethash(%491, %528, %529) : (i64, i64, i64) -> i64
     %__rlasp_stack_elide_zero_23 = arith.constant 0 : i64
-    %533 = arith.addi %532, %__rlasp_stack_elide_zero_23 : i64
-    %534 = func.call @cc_nil_value() : () -> i64
-    %535 = arith.cmpi ne, %533, %534 : i64
-    scf.if %535 {
-      %536 = func.call @cc_nil_value() : () -> i64
-      %537 = func.call @cc_nil_value() : () -> i64
-      %538 = func.call @cc_errorp(%536) : (i64) -> i64
-      %539 = arith.cmpi ne, %538, %537 : i64
-      %540 = scf.if %539 -> (i64) {
-        scf.yield %536 : i64
+    %531 = arith.addi %530, %__rlasp_stack_elide_zero_23 : i64
+    %532 = func.call @cc_nil_value() : () -> i64
+    %533 = arith.cmpi ne, %531, %532 : i64
+    scf.if %533 {
+      %534 = func.call @cc_nil_value() : () -> i64
+      %535 = func.call @cc_nil_value() : () -> i64
+      %536 = func.call @cc_errorp(%534) : (i64) -> i64
+      %537 = arith.cmpi ne, %536, %535 : i64
+      %538 = scf.if %537 -> (i64) {
+        scf.yield %534 : i64
       } else {
         %__rlasp_stack_elide_zero_24 = arith.constant 0 : i64
-        %541 = arith.addi %491, %__rlasp_stack_elide_zero_24 : i64
-        %542 = llvm.mlir.addressof @str52 : !llvm.ptr
-        %543 = arith.constant 17 : i64
-        %544 = func.call @cc_make_string(%542, %543) : (!llvm.ptr, i64) -> i64
+        %539 = arith.addi %491, %__rlasp_stack_elide_zero_24 : i64
+        %540 = llvm.mlir.addressof @str52 : !llvm.ptr
+        %541 = arith.constant 17 : i64
+        %542 = func.call @cc_make_string(%540, %541) : (!llvm.ptr, i64) -> i64
+        %543 = func.call @cc_nil_value() : () -> i64
+        %544 = func.call @cc_intern(%542, %543) : (i64, i64) -> i64
         %545 = func.call @cc_nil_value() : () -> i64
-        %546 = func.call @cc_intern(%544, %545) : (i64, i64) -> i64
-        %547 = func.call @cc_nil_value() : () -> i64
-        %548 = func.call @cc_cons(%546, %547) : (i64, i64) -> i64
-        %549 = func.call @cc_values_pack(%548) : (i64) -> i64
-        %550 = func.call @cc_symbol_value(%546) : (i64) -> i64
-        %551 = func.call @cc_cons(%541, %550) : (i64, i64) -> i64
-        %552 = llvm.mlir.addressof @str53 : !llvm.ptr
-        %553 = arith.constant 17 : i64
-        %554 = func.call @cc_make_string(%552, %553) : (!llvm.ptr, i64) -> i64
+        %546 = func.call @cc_cons(%544, %545) : (i64, i64) -> i64
+        %547 = func.call @cc_values_pack(%546) : (i64) -> i64
+        %548 = func.call @cc_symbol_value(%544) : (i64) -> i64
+        %549 = func.call @cc_cons(%539, %548) : (i64, i64) -> i64
+        %550 = llvm.mlir.addressof @str53 : !llvm.ptr
+        %551 = arith.constant 17 : i64
+        %552 = func.call @cc_make_string(%550, %551) : (!llvm.ptr, i64) -> i64
+        %553 = func.call @cc_nil_value() : () -> i64
+        %554 = func.call @cc_intern(%552, %553) : (i64, i64) -> i64
         %555 = func.call @cc_nil_value() : () -> i64
-        %556 = func.call @cc_intern(%554, %555) : (i64, i64) -> i64
-        %557 = func.call @cc_nil_value() : () -> i64
-        %558 = func.call @cc_cons(%556, %557) : (i64, i64) -> i64
-        %559 = func.call @cc_values_pack(%558) : (i64) -> i64
-        %560 = func.call @cc_set_symbol_value(%556, %551) : (i64, i64) -> i64
+        %556 = func.call @cc_cons(%554, %555) : (i64, i64) -> i64
+        %557 = func.call @cc_values_pack(%556) : (i64) -> i64
+        %558 = func.call @cc_set_symbol_value(%554, %549) : (i64, i64) -> i64
         %__rlasp_stack_elide_zero_25 = arith.constant 0 : i64
-        %561 = arith.addi %551, %__rlasp_stack_elide_zero_25 : i64
-        scf.yield %561 : i64
+        %559 = arith.addi %549, %__rlasp_stack_elide_zero_25 : i64
+        scf.yield %559 : i64
       }
-      %562 = func.call @cc_nil_value() : () -> i64
-      %563 = func.call @cc_errorp(%540) : (i64) -> i64
-      %564 = arith.cmpi ne, %563, %562 : i64
-      %565 = scf.if %564 -> (i64) {
-        scf.yield %540 : i64
+      %560 = func.call @cc_nil_value() : () -> i64
+      %561 = func.call @cc_errorp(%538) : (i64) -> i64
+      %562 = arith.cmpi ne, %561, %560 : i64
+      %563 = scf.if %562 -> (i64) {
+        scf.yield %538 : i64
       } else {
-        %566 = llvm.mlir.addressof @str54 : !llvm.ptr
-        %567 = arith.constant 21 : i64
-        %568 = func.call @cc_make_string(%566, %567) : (!llvm.ptr, i64) -> i64
-        %569 = func.call @cc_nil_value() : () -> i64
-        %570 = func.call @cc_errorp(%568) : (i64) -> i64
-        %571 = arith.cmpi ne, %570, %569 : i64
-        %572 = arith.cmpi eq, %569, %569 : i64
-        %573 = arith.andi %571, %572 : i1
-        %574 = scf.if %573 -> (i64) {
-          scf.yield %568 : i64
+        %564 = llvm.mlir.addressof @str54 : !llvm.ptr
+        %565 = arith.constant 21 : i64
+        %566 = func.call @cc_make_string(%564, %565) : (!llvm.ptr, i64) -> i64
+        %567 = func.call @cc_nil_value() : () -> i64
+        %568 = func.call @cc_errorp(%566) : (i64) -> i64
+        %569 = arith.cmpi ne, %568, %567 : i64
+        %570 = arith.cmpi eq, %567, %567 : i64
+        %571 = arith.andi %569, %570 : i1
+        %572 = scf.if %571 -> (i64) {
+          scf.yield %566 : i64
         } else {
-          scf.yield %569 : i64
+          scf.yield %567 : i64
         }
-        %575 = func.call @cc_errorp(%491) : (i64) -> i64
-        %576 = arith.cmpi ne, %575, %569 : i64
-        %577 = arith.cmpi eq, %574, %569 : i64
-        %578 = arith.andi %576, %577 : i1
-        %579 = scf.if %578 -> (i64) {
+        %573 = func.call @cc_errorp(%491) : (i64) -> i64
+        %574 = arith.cmpi ne, %573, %567 : i64
+        %575 = arith.cmpi eq, %572, %567 : i64
+        %576 = arith.andi %574, %575 : i1
+        %577 = scf.if %576 -> (i64) {
           scf.yield %491 : i64
         } else {
-          scf.yield %574 : i64
+          scf.yield %572 : i64
         }
-        %580 = arith.cmpi ne, %579, %569 : i64
-        scf.if %580 {
-          func.call @stack_push_pointer(%579) : (i64) -> ()
+        %578 = arith.cmpi ne, %577, %567 : i64
+        scf.if %578 {
+          func.call @stack_push_pointer(%577) : (i64) -> ()
         } else {
-          func.call @stack_push_pointer(%568) : (i64) -> ()
+          func.call @stack_push_pointer(%566) : (i64) -> ()
           func.call @stack_push_pointer(%491) : (i64) -> ()
-          %581 = llvm.mlir.addressof @str55 : !llvm.ptr
-          %582 = func.call @cc_make_function_ref_const(%581) : (!llvm.ptr) -> i64
-          %583 = arith.constant 2 : i64
-          func.call @cc_funcall_stack(%582, %583) : (i64, i64) -> ()
+          %579 = llvm.mlir.addressof @str55 : !llvm.ptr
+          %580 = func.call @cc_make_function_ref_const(%579) : (!llvm.ptr) -> i64
+          %581 = arith.constant 2 : i64
+          func.call @cc_funcall_stack(%580, %581) : (i64, i64) -> ()
         }
-        %584 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %584 : i64
+        %582 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %582 : i64
       }
-      func.call @stack_push_pointer(%565) : (i64) -> ()
+      func.call @stack_push_pointer(%563) : (i64) -> ()
     } else {
-      %585 = func.call @cc_t_value() : () -> i64
+      %583 = func.call @cc_t_value() : () -> i64
       %__rlasp_stack_elide_zero_26 = arith.constant 0 : i64
-      %586 = arith.addi %585, %__rlasp_stack_elide_zero_26 : i64
-      %587 = func.call @cc_nil_value() : () -> i64
-      %588 = arith.cmpi ne, %586, %587 : i64
-      scf.if %588 {
-        func.call @stack_push_pointer(%491) : (i64) -> ()
-        %589 = llvm.mlir.addressof @str56 : !llvm.ptr
-        %590 = arith.constant 19 : i64
-        %591 = func.call @cc_make_string(%589, %590) : (!llvm.ptr, i64) -> i64
+      %584 = arith.addi %583, %__rlasp_stack_elide_zero_26 : i64
+      %585 = func.call @cc_nil_value() : () -> i64
+      %586 = arith.cmpi ne, %584, %585 : i64
+      scf.if %586 {
+        %587 = llvm.mlir.addressof @str56 : !llvm.ptr
+        %588 = arith.constant 19 : i64
+        %589 = func.call @cc_make_string(%587, %588) : (!llvm.ptr, i64) -> i64
+        %590 = func.call @cc_nil_value() : () -> i64
+        %591 = func.call @cc_intern(%589, %590) : (i64, i64) -> i64
         %592 = func.call @cc_nil_value() : () -> i64
-        %593 = func.call @cc_intern(%591, %592) : (i64, i64) -> i64
-        %594 = func.call @cc_nil_value() : () -> i64
-        %595 = func.call @cc_cons(%593, %594) : (i64, i64) -> i64
-        %596 = func.call @cc_values_pack(%595) : (i64) -> i64
-        %597 = func.call @cc_symbol_value(%593) : (i64) -> i64
+        %593 = func.call @cc_cons(%591, %592) : (i64, i64) -> i64
+        %594 = func.call @cc_values_pack(%593) : (i64) -> i64
+        %595 = func.call @cc_symbol_value(%591) : (i64) -> i64
+        %596 = func.call @cc_t_value() : () -> i64
+        %597 = func.call @cc_puthash(%491, %596, %595) : (i64, i64, i64) -> i64
         func.call @stack_push_pointer(%597) : (i64) -> ()
-        %598 = func.call @cc_t_value() : () -> i64
-        %__rlasp_stack_elide_zero_27 = arith.constant 0 : i64
-        %599 = arith.addi %598, %__rlasp_stack_elide_zero_27 : i64
-        %600 = func.call @stack_pop_pointer() : () -> i64
-        %601 = func.call @stack_pop_pointer() : () -> i64
-        func.call @stack_push_pointer(%599) : (i64) -> ()
-        func.call @stack_push_pointer(%601) : (i64) -> ()
-        func.call @stack_push_pointer(%600) : (i64) -> ()
-        %602 = llvm.mlir.addressof @str57 : !llvm.ptr
-        %603 = func.call @cc_make_function_ref_const(%602) : (!llvm.ptr) -> i64
-        %604 = arith.constant 3 : i64
-        func.call @cc_funcall_stack(%603, %604) : (i64, i64) -> ()
       } else {
         func.call @stack_push_nil() : () -> ()
       }
     }
-    %605 = func.call @stack_pop_pointer() : () -> i64
-    %606 = func.call @cc_multiple_value_list(%605) : (i64) -> i64
-    %607 = llvm.mlir.addressof @str58 : !llvm.ptr
-    %608 = arith.constant 37 : i64
-    %609 = func.call @cc_make_string(%607, %608) : (!llvm.ptr, i64) -> i64
-    %610 = func.call @cc_nil_value() : () -> i64
-    %611 = func.call @cc_intern(%609, %610) : (i64, i64) -> i64
+    %598 = func.call @stack_pop_pointer() : () -> i64
+    %599 = func.call @cc_multiple_value_list(%598) : (i64) -> i64
+    %600 = llvm.mlir.addressof @str57 : !llvm.ptr
+    %601 = arith.constant 37 : i64
+    %602 = func.call @cc_make_string(%600, %601) : (!llvm.ptr, i64) -> i64
+    %603 = func.call @cc_nil_value() : () -> i64
+    %604 = func.call @cc_intern(%602, %603) : (i64, i64) -> i64
+    %605 = func.call @cc_nil_value() : () -> i64
+    %606 = func.call @cc_cons(%604, %605) : (i64, i64) -> i64
+    %607 = func.call @cc_values_pack(%606) : (i64) -> i64
+    %608 = func.call @cc_symbol_value(%604) : (i64) -> i64
+    %609 = llvm.mlir.addressof @str58 : !llvm.ptr
+    %610 = arith.constant 39 : i64
+    %611 = func.call @cc_make_string(%609, %610) : (!llvm.ptr, i64) -> i64
     %612 = func.call @cc_nil_value() : () -> i64
-    %613 = func.call @cc_cons(%611, %612) : (i64, i64) -> i64
-    %614 = func.call @cc_values_pack(%613) : (i64) -> i64
-    %615 = func.call @cc_symbol_value(%611) : (i64) -> i64
-    %616 = llvm.mlir.addressof @str59 : !llvm.ptr
-    %617 = arith.constant 39 : i64
-    %618 = func.call @cc_make_string(%616, %617) : (!llvm.ptr, i64) -> i64
-    %619 = func.call @cc_nil_value() : () -> i64
-    %620 = func.call @cc_intern(%618, %619) : (i64, i64) -> i64
-    %621 = func.call @cc_nil_value() : () -> i64
-    %622 = func.call @cc_cons(%620, %621) : (i64, i64) -> i64
-    %623 = func.call @cc_values_pack(%622) : (i64) -> i64
-    %624 = func.call @cc_symbol_value(%620) : (i64) -> i64
-    %625 = func.call @cc_nil_value() : () -> i64
-    %626 = arith.cmpi ne, %615, %625 : i64
-    %627 = scf.if %626 -> (i64) {
-      scf.yield %624 : i64
+    %613 = func.call @cc_intern(%611, %612) : (i64, i64) -> i64
+    %614 = func.call @cc_nil_value() : () -> i64
+    %615 = func.call @cc_cons(%613, %614) : (i64, i64) -> i64
+    %616 = func.call @cc_values_pack(%615) : (i64) -> i64
+    %617 = func.call @cc_symbol_value(%613) : (i64) -> i64
+    %618 = func.call @cc_nil_value() : () -> i64
+    %619 = arith.cmpi ne, %608, %618 : i64
+    %620 = scf.if %619 -> (i64) {
+      scf.yield %617 : i64
     } else {
-      scf.yield %606 : i64
+      scf.yield %599 : i64
     }
-    %628 = func.call @cc_values_pack(%627) : (i64) -> i64
-    func.call @stack_push_pointer(%628) : (i64) -> ()
+    %621 = func.call @cc_values_pack(%620) : (i64) -> i64
+    func.call @stack_push_pointer(%621) : (i64) -> ()
     func.return
   }
   func.func @"%FN%note-compile-error"() {
-    %629 = llvm.mlir.addressof @str60 : !llvm.ptr
-    %630 = arith.constant 18 : i64
-    %631 = func.call @cc_make_string(%629, %630) : (!llvm.ptr, i64) -> i64
-    %632 = func.call @cc_nil_value() : () -> i64
-    %633 = func.call @cc_intern(%631, %632) : (i64, i64) -> i64
-    %634 = func.call @cc_nil_value() : () -> i64
-    %635 = func.call @cc_cons(%633, %634) : (i64, i64) -> i64
-    %636 = func.call @cc_values_pack(%635) : (i64) -> i64
-    %637 = llvm.mlir.addressof @str61 : !llvm.ptr
-    %638 = arith.constant 10 : i64
-    %639 = func.call @cc_make_string(%637, %638) : (!llvm.ptr, i64) -> i64
-    %640 = func.call @cc_register_function_lambda_list_metadata_raw(%633, %639) : (i64, i64) -> i64
-    %641 = func.call @stack_pop_pointer() : () -> i64
-    %642 = func.call @cc_nil_value() : () -> i64
-    %643 = llvm.mlir.addressof @str62 : !llvm.ptr
-    %644 = arith.constant 37 : i64
-    %645 = func.call @cc_make_string(%643, %644) : (!llvm.ptr, i64) -> i64
-    %646 = func.call @cc_nil_value() : () -> i64
-    %647 = func.call @cc_intern(%645, %646) : (i64, i64) -> i64
+    %622 = llvm.mlir.addressof @str59 : !llvm.ptr
+    %623 = arith.constant 18 : i64
+    %624 = func.call @cc_make_string(%622, %623) : (!llvm.ptr, i64) -> i64
+    %625 = func.call @cc_nil_value() : () -> i64
+    %626 = func.call @cc_intern(%624, %625) : (i64, i64) -> i64
+    %627 = func.call @cc_nil_value() : () -> i64
+    %628 = func.call @cc_cons(%626, %627) : (i64, i64) -> i64
+    %629 = func.call @cc_values_pack(%628) : (i64) -> i64
+    %630 = llvm.mlir.addressof @str60 : !llvm.ptr
+    %631 = arith.constant 10 : i64
+    %632 = func.call @cc_make_string(%630, %631) : (!llvm.ptr, i64) -> i64
+    %633 = func.call @cc_register_function_lambda_list_metadata_raw(%626, %632) : (i64, i64) -> i64
+    %634 = func.call @stack_pop_pointer() : () -> i64
+    %635 = func.call @cc_nil_value() : () -> i64
+    %636 = llvm.mlir.addressof @str61 : !llvm.ptr
+    %637 = arith.constant 37 : i64
+    %638 = func.call @cc_make_string(%636, %637) : (!llvm.ptr, i64) -> i64
+    %639 = func.call @cc_nil_value() : () -> i64
+    %640 = func.call @cc_intern(%638, %639) : (i64, i64) -> i64
+    %641 = func.call @cc_nil_value() : () -> i64
+    %642 = func.call @cc_cons(%640, %641) : (i64, i64) -> i64
+    %643 = func.call @cc_values_pack(%642) : (i64) -> i64
+    %644 = func.call @cc_set_symbol_value(%640, %635) : (i64, i64) -> i64
+    %645 = llvm.mlir.addressof @str62 : !llvm.ptr
+    %646 = arith.constant 38 : i64
+    %647 = func.call @cc_make_string(%645, %646) : (!llvm.ptr, i64) -> i64
     %648 = func.call @cc_nil_value() : () -> i64
-    %649 = func.call @cc_cons(%647, %648) : (i64, i64) -> i64
-    %650 = func.call @cc_values_pack(%649) : (i64) -> i64
-    %651 = func.call @cc_set_symbol_value(%647, %642) : (i64, i64) -> i64
-    %652 = llvm.mlir.addressof @str63 : !llvm.ptr
-    %653 = arith.constant 38 : i64
-    %654 = func.call @cc_make_string(%652, %653) : (!llvm.ptr, i64) -> i64
-    %655 = func.call @cc_nil_value() : () -> i64
-    %656 = func.call @cc_intern(%654, %655) : (i64, i64) -> i64
+    %649 = func.call @cc_intern(%647, %648) : (i64, i64) -> i64
+    %650 = func.call @cc_nil_value() : () -> i64
+    %651 = func.call @cc_cons(%649, %650) : (i64, i64) -> i64
+    %652 = func.call @cc_values_pack(%651) : (i64) -> i64
+    %653 = func.call @cc_set_symbol_value(%649, %635) : (i64, i64) -> i64
+    %654 = llvm.mlir.addressof @str63 : !llvm.ptr
+    %655 = arith.constant 39 : i64
+    %656 = func.call @cc_make_string(%654, %655) : (!llvm.ptr, i64) -> i64
     %657 = func.call @cc_nil_value() : () -> i64
-    %658 = func.call @cc_cons(%656, %657) : (i64, i64) -> i64
-    %659 = func.call @cc_values_pack(%658) : (i64) -> i64
-    %660 = func.call @cc_set_symbol_value(%656, %642) : (i64, i64) -> i64
-    %661 = llvm.mlir.addressof @str64 : !llvm.ptr
-    %662 = arith.constant 39 : i64
-    %663 = func.call @cc_make_string(%661, %662) : (!llvm.ptr, i64) -> i64
-    %664 = func.call @cc_nil_value() : () -> i64
-    %665 = func.call @cc_intern(%663, %664) : (i64, i64) -> i64
-    %666 = func.call @cc_nil_value() : () -> i64
-    %667 = func.call @cc_cons(%665, %666) : (i64, i64) -> i64
-    %668 = func.call @cc_values_pack(%667) : (i64) -> i64
-    %669 = func.call @cc_set_symbol_value(%665, %642) : (i64, i64) -> i64
+    %658 = func.call @cc_intern(%656, %657) : (i64, i64) -> i64
+    %659 = func.call @cc_nil_value() : () -> i64
+    %660 = func.call @cc_cons(%658, %659) : (i64, i64) -> i64
+    %661 = func.call @cc_values_pack(%660) : (i64) -> i64
+    %662 = func.call @cc_set_symbol_value(%658, %635) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_27 = arith.constant 0 : i64
+    %663 = arith.addi %634, %__rlasp_stack_elide_zero_27 : i64
+    %664 = llvm.mlir.addressof @str64 : !llvm.ptr
+    %665 = arith.constant 25 : i64
+    %666 = func.call @cc_make_string(%664, %665) : (!llvm.ptr, i64) -> i64
+    %667 = func.call @cc_nil_value() : () -> i64
+    %668 = func.call @cc_intern(%666, %667) : (i64, i64) -> i64
+    %669 = func.call @cc_nil_value() : () -> i64
+    %670 = func.call @cc_cons(%668, %669) : (i64, i64) -> i64
+    %671 = func.call @cc_values_pack(%670) : (i64) -> i64
+    %672 = func.call @cc_symbol_value(%668) : (i64) -> i64
+    %673 = func.call @cc_cons(%663, %672) : (i64, i64) -> i64
+    %674 = llvm.mlir.addressof @str65 : !llvm.ptr
+    %675 = arith.constant 25 : i64
+    %676 = func.call @cc_make_string(%674, %675) : (!llvm.ptr, i64) -> i64
+    %677 = func.call @cc_nil_value() : () -> i64
+    %678 = func.call @cc_intern(%676, %677) : (i64, i64) -> i64
+    %679 = func.call @cc_nil_value() : () -> i64
+    %680 = func.call @cc_cons(%678, %679) : (i64, i64) -> i64
+    %681 = func.call @cc_values_pack(%680) : (i64) -> i64
+    %682 = func.call @cc_set_symbol_value(%678, %673) : (i64, i64) -> i64
     %__rlasp_stack_elide_zero_28 = arith.constant 0 : i64
-    %670 = arith.addi %641, %__rlasp_stack_elide_zero_28 : i64
-    %671 = llvm.mlir.addressof @str65 : !llvm.ptr
-    %672 = arith.constant 25 : i64
-    %673 = func.call @cc_make_string(%671, %672) : (!llvm.ptr, i64) -> i64
-    %674 = func.call @cc_nil_value() : () -> i64
-    %675 = func.call @cc_intern(%673, %674) : (i64, i64) -> i64
-    %676 = func.call @cc_nil_value() : () -> i64
-    %677 = func.call @cc_cons(%675, %676) : (i64, i64) -> i64
-    %678 = func.call @cc_values_pack(%677) : (i64) -> i64
-    %679 = func.call @cc_symbol_value(%675) : (i64) -> i64
-    %680 = func.call @cc_cons(%670, %679) : (i64, i64) -> i64
-    %681 = llvm.mlir.addressof @str66 : !llvm.ptr
-    %682 = arith.constant 25 : i64
-    %683 = func.call @cc_make_string(%681, %682) : (!llvm.ptr, i64) -> i64
-    %684 = func.call @cc_nil_value() : () -> i64
-    %685 = func.call @cc_intern(%683, %684) : (i64, i64) -> i64
-    %686 = func.call @cc_nil_value() : () -> i64
-    %687 = func.call @cc_cons(%685, %686) : (i64, i64) -> i64
-    %688 = func.call @cc_values_pack(%687) : (i64) -> i64
-    %689 = func.call @cc_set_symbol_value(%685, %680) : (i64, i64) -> i64
-    %__rlasp_stack_elide_zero_29 = arith.constant 0 : i64
-    %690 = arith.addi %680, %__rlasp_stack_elide_zero_29 : i64
-    %691 = func.call @cc_multiple_value_list(%690) : (i64) -> i64
-    %692 = llvm.mlir.addressof @str67 : !llvm.ptr
-    %693 = arith.constant 37 : i64
-    %694 = func.call @cc_make_string(%692, %693) : (!llvm.ptr, i64) -> i64
-    %695 = func.call @cc_nil_value() : () -> i64
-    %696 = func.call @cc_intern(%694, %695) : (i64, i64) -> i64
+    %683 = arith.addi %673, %__rlasp_stack_elide_zero_28 : i64
+    %684 = func.call @cc_multiple_value_list(%683) : (i64) -> i64
+    %685 = llvm.mlir.addressof @str66 : !llvm.ptr
+    %686 = arith.constant 37 : i64
+    %687 = func.call @cc_make_string(%685, %686) : (!llvm.ptr, i64) -> i64
+    %688 = func.call @cc_nil_value() : () -> i64
+    %689 = func.call @cc_intern(%687, %688) : (i64, i64) -> i64
+    %690 = func.call @cc_nil_value() : () -> i64
+    %691 = func.call @cc_cons(%689, %690) : (i64, i64) -> i64
+    %692 = func.call @cc_values_pack(%691) : (i64) -> i64
+    %693 = func.call @cc_symbol_value(%689) : (i64) -> i64
+    %694 = llvm.mlir.addressof @str67 : !llvm.ptr
+    %695 = arith.constant 39 : i64
+    %696 = func.call @cc_make_string(%694, %695) : (!llvm.ptr, i64) -> i64
     %697 = func.call @cc_nil_value() : () -> i64
-    %698 = func.call @cc_cons(%696, %697) : (i64, i64) -> i64
-    %699 = func.call @cc_values_pack(%698) : (i64) -> i64
-    %700 = func.call @cc_symbol_value(%696) : (i64) -> i64
-    %701 = llvm.mlir.addressof @str68 : !llvm.ptr
-    %702 = arith.constant 39 : i64
-    %703 = func.call @cc_make_string(%701, %702) : (!llvm.ptr, i64) -> i64
-    %704 = func.call @cc_nil_value() : () -> i64
-    %705 = func.call @cc_intern(%703, %704) : (i64, i64) -> i64
-    %706 = func.call @cc_nil_value() : () -> i64
-    %707 = func.call @cc_cons(%705, %706) : (i64, i64) -> i64
-    %708 = func.call @cc_values_pack(%707) : (i64) -> i64
-    %709 = func.call @cc_symbol_value(%705) : (i64) -> i64
-    %710 = func.call @cc_nil_value() : () -> i64
-    %711 = arith.cmpi ne, %700, %710 : i64
-    %712 = scf.if %711 -> (i64) {
-      scf.yield %709 : i64
+    %698 = func.call @cc_intern(%696, %697) : (i64, i64) -> i64
+    %699 = func.call @cc_nil_value() : () -> i64
+    %700 = func.call @cc_cons(%698, %699) : (i64, i64) -> i64
+    %701 = func.call @cc_values_pack(%700) : (i64) -> i64
+    %702 = func.call @cc_symbol_value(%698) : (i64) -> i64
+    %703 = func.call @cc_nil_value() : () -> i64
+    %704 = arith.cmpi ne, %693, %703 : i64
+    %705 = scf.if %704 -> (i64) {
+      scf.yield %702 : i64
     } else {
-      scf.yield %691 : i64
+      scf.yield %684 : i64
     }
-    %713 = func.call @cc_values_pack(%712) : (i64) -> i64
-    func.call @stack_push_pointer(%713) : (i64) -> ()
+    %706 = func.call @cc_values_pack(%705) : (i64) -> i64
+    func.call @stack_push_pointer(%706) : (i64) -> ()
     func.return
   }
   func.func @"%FN%show-test-summary"() {
-    %714 = llvm.mlir.addressof @str69 : !llvm.ptr
-    %715 = arith.constant 17 : i64
-    %716 = func.call @cc_make_string(%714, %715) : (!llvm.ptr, i64) -> i64
-    %717 = func.call @cc_nil_value() : () -> i64
-    %718 = func.call @cc_intern(%716, %717) : (i64, i64) -> i64
+    %707 = llvm.mlir.addressof @str68 : !llvm.ptr
+    %708 = arith.constant 17 : i64
+    %709 = func.call @cc_make_string(%707, %708) : (!llvm.ptr, i64) -> i64
+    %710 = func.call @cc_nil_value() : () -> i64
+    %711 = func.call @cc_intern(%709, %710) : (i64, i64) -> i64
+    %712 = func.call @cc_nil_value() : () -> i64
+    %713 = func.call @cc_cons(%711, %712) : (i64, i64) -> i64
+    %714 = func.call @cc_values_pack(%713) : (i64) -> i64
+    %715 = func.call @cc_nil_value() : () -> i64
+    %716 = llvm.mlir.addressof @str69 : !llvm.ptr
+    %717 = arith.constant 37 : i64
+    %718 = func.call @cc_make_string(%716, %717) : (!llvm.ptr, i64) -> i64
     %719 = func.call @cc_nil_value() : () -> i64
-    %720 = func.call @cc_cons(%718, %719) : (i64, i64) -> i64
-    %721 = func.call @cc_values_pack(%720) : (i64) -> i64
-    %722 = func.call @cc_nil_value() : () -> i64
-    %723 = llvm.mlir.addressof @str70 : !llvm.ptr
-    %724 = arith.constant 37 : i64
-    %725 = func.call @cc_make_string(%723, %724) : (!llvm.ptr, i64) -> i64
-    %726 = func.call @cc_nil_value() : () -> i64
-    %727 = func.call @cc_intern(%725, %726) : (i64, i64) -> i64
+    %720 = func.call @cc_intern(%718, %719) : (i64, i64) -> i64
+    %721 = func.call @cc_nil_value() : () -> i64
+    %722 = func.call @cc_cons(%720, %721) : (i64, i64) -> i64
+    %723 = func.call @cc_values_pack(%722) : (i64) -> i64
+    %724 = func.call @cc_set_symbol_value(%720, %715) : (i64, i64) -> i64
+    %725 = llvm.mlir.addressof @str70 : !llvm.ptr
+    %726 = arith.constant 38 : i64
+    %727 = func.call @cc_make_string(%725, %726) : (!llvm.ptr, i64) -> i64
     %728 = func.call @cc_nil_value() : () -> i64
-    %729 = func.call @cc_cons(%727, %728) : (i64, i64) -> i64
-    %730 = func.call @cc_values_pack(%729) : (i64) -> i64
-    %731 = func.call @cc_set_symbol_value(%727, %722) : (i64, i64) -> i64
-    %732 = llvm.mlir.addressof @str71 : !llvm.ptr
-    %733 = arith.constant 38 : i64
-    %734 = func.call @cc_make_string(%732, %733) : (!llvm.ptr, i64) -> i64
-    %735 = func.call @cc_nil_value() : () -> i64
-    %736 = func.call @cc_intern(%734, %735) : (i64, i64) -> i64
+    %729 = func.call @cc_intern(%727, %728) : (i64, i64) -> i64
+    %730 = func.call @cc_nil_value() : () -> i64
+    %731 = func.call @cc_cons(%729, %730) : (i64, i64) -> i64
+    %732 = func.call @cc_values_pack(%731) : (i64) -> i64
+    %733 = func.call @cc_set_symbol_value(%729, %715) : (i64, i64) -> i64
+    %734 = llvm.mlir.addressof @str71 : !llvm.ptr
+    %735 = arith.constant 39 : i64
+    %736 = func.call @cc_make_string(%734, %735) : (!llvm.ptr, i64) -> i64
     %737 = func.call @cc_nil_value() : () -> i64
-    %738 = func.call @cc_cons(%736, %737) : (i64, i64) -> i64
-    %739 = func.call @cc_values_pack(%738) : (i64) -> i64
-    %740 = func.call @cc_set_symbol_value(%736, %722) : (i64, i64) -> i64
-    %741 = llvm.mlir.addressof @str72 : !llvm.ptr
-    %742 = arith.constant 39 : i64
-    %743 = func.call @cc_make_string(%741, %742) : (!llvm.ptr, i64) -> i64
+    %738 = func.call @cc_intern(%736, %737) : (i64, i64) -> i64
+    %739 = func.call @cc_nil_value() : () -> i64
+    %740 = func.call @cc_cons(%738, %739) : (i64, i64) -> i64
+    %741 = func.call @cc_values_pack(%740) : (i64) -> i64
+    %742 = func.call @cc_set_symbol_value(%738, %715) : (i64, i64) -> i64
+    %743 = func.call @cc_nil_value() : () -> i64
     %744 = func.call @cc_nil_value() : () -> i64
-    %745 = func.call @cc_intern(%743, %744) : (i64, i64) -> i64
-    %746 = func.call @cc_nil_value() : () -> i64
-    %747 = func.call @cc_cons(%745, %746) : (i64, i64) -> i64
-    %748 = func.call @cc_values_pack(%747) : (i64) -> i64
-    %749 = func.call @cc_set_symbol_value(%745, %722) : (i64, i64) -> i64
-    %750 = func.call @cc_nil_value() : () -> i64
-    %751 = func.call @cc_nil_value() : () -> i64
-    %752 = func.call @cc_errorp(%750) : (i64) -> i64
-    %753 = arith.cmpi ne, %752, %751 : i64
-    %754 = scf.if %753 -> (i64) {
-      scf.yield %750 : i64
+    %745 = func.call @cc_errorp(%743) : (i64) -> i64
+    %746 = arith.cmpi ne, %745, %744 : i64
+    %747 = scf.if %746 -> (i64) {
+      scf.yield %743 : i64
     } else {
-      %755 = llvm.mlir.addressof @str73 : !llvm.ptr
-      %756 = arith.constant 4 : i64
-      %757 = func.call @cc_make_string(%755, %756) : (!llvm.ptr, i64) -> i64
+      %748 = llvm.mlir.addressof @str72 : !llvm.ptr
+      %749 = arith.constant 4 : i64
+      %750 = func.call @cc_make_string(%748, %749) : (!llvm.ptr, i64) -> i64
+      %751 = llvm.mlir.addressof @str73 : !llvm.ptr
+      %752 = arith.constant 7 : i64
+      %753 = func.call @cc_make_string(%751, %752) : (!llvm.ptr, i64) -> i64
+      %754 = func.call @cc_intern(%750, %753) : (i64, i64) -> i64
+      %755 = func.call @cc_nil_value() : () -> i64
+      %756 = func.call @cc_cons(%754, %755) : (i64, i64) -> i64
+      %757 = func.call @cc_values_pack(%756) : (i64) -> i64
       %758 = llvm.mlir.addressof @str74 : !llvm.ptr
-      %759 = arith.constant 7 : i64
+      %759 = arith.constant 147 : i64
       %760 = func.call @cc_make_string(%758, %759) : (!llvm.ptr, i64) -> i64
-      %761 = func.call @cc_intern(%757, %760) : (i64, i64) -> i64
-      %762 = func.call @cc_nil_value() : () -> i64
-      %763 = func.call @cc_cons(%761, %762) : (i64, i64) -> i64
-      %764 = func.call @cc_values_pack(%763) : (i64) -> i64
-      %765 = llvm.mlir.addressof @str75 : !llvm.ptr
-      %766 = arith.constant 147 : i64
-      %767 = func.call @cc_make_string(%765, %766) : (!llvm.ptr, i64) -> i64
-      %768 = llvm.mlir.addressof @str76 : !llvm.ptr
-      %769 = arith.constant 25 : i64
-      %770 = func.call @cc_make_string(%768, %769) : (!llvm.ptr, i64) -> i64
-      %771 = func.call @cc_nil_value() : () -> i64
-      %772 = func.call @cc_intern(%770, %771) : (i64, i64) -> i64
-      %773 = func.call @cc_nil_value() : () -> i64
-      %774 = func.call @cc_cons(%772, %773) : (i64, i64) -> i64
-      %775 = func.call @cc_values_pack(%774) : (i64) -> i64
-      %776 = func.call @cc_symbol_value(%772) : (i64) -> i64
+      %761 = llvm.mlir.addressof @str75 : !llvm.ptr
+      %762 = arith.constant 25 : i64
+      %763 = func.call @cc_make_string(%761, %762) : (!llvm.ptr, i64) -> i64
+      %764 = func.call @cc_nil_value() : () -> i64
+      %765 = func.call @cc_intern(%763, %764) : (i64, i64) -> i64
+      %766 = func.call @cc_nil_value() : () -> i64
+      %767 = func.call @cc_cons(%765, %766) : (i64, i64) -> i64
+      %768 = func.call @cc_values_pack(%767) : (i64) -> i64
+      %769 = func.call @cc_symbol_value(%765) : (i64) -> i64
+      %__rlasp_stack_elide_zero_29 = arith.constant 0 : i64
+      %770 = arith.addi %769, %__rlasp_stack_elide_zero_29 : i64
+      %771 = func.call @cc_reverse(%770) : (i64) -> i64
       %__rlasp_stack_elide_zero_30 = arith.constant 0 : i64
-      %777 = arith.addi %776, %__rlasp_stack_elide_zero_30 : i64
-      %778 = func.call @cc_reverse(%777) : (i64) -> i64
+      %772 = arith.addi %771, %__rlasp_stack_elide_zero_30 : i64
+      %773 = llvm.mlir.addressof @str76 : !llvm.ptr
+      %774 = arith.constant 25 : i64
+      %775 = func.call @cc_make_string(%773, %774) : (!llvm.ptr, i64) -> i64
+      %776 = func.call @cc_nil_value() : () -> i64
+      %777 = func.call @cc_intern(%775, %776) : (i64, i64) -> i64
+      %778 = func.call @cc_nil_value() : () -> i64
+      %779 = func.call @cc_cons(%777, %778) : (i64, i64) -> i64
+      %780 = func.call @cc_values_pack(%779) : (i64) -> i64
+      %781 = func.call @cc_symbol_value(%777) : (i64) -> i64
       %__rlasp_stack_elide_zero_31 = arith.constant 0 : i64
-      %779 = arith.addi %778, %__rlasp_stack_elide_zero_31 : i64
-      %780 = llvm.mlir.addressof @str77 : !llvm.ptr
-      %781 = arith.constant 25 : i64
-      %782 = func.call @cc_make_string(%780, %781) : (!llvm.ptr, i64) -> i64
-      %783 = func.call @cc_nil_value() : () -> i64
-      %784 = func.call @cc_intern(%782, %783) : (i64, i64) -> i64
-      %785 = func.call @cc_nil_value() : () -> i64
-      %786 = func.call @cc_cons(%784, %785) : (i64, i64) -> i64
-      %787 = func.call @cc_values_pack(%786) : (i64) -> i64
-      %788 = func.call @cc_symbol_value(%784) : (i64) -> i64
+      %782 = arith.addi %781, %__rlasp_stack_elide_zero_31 : i64
+      %783 = func.call @cc_reverse(%782) : (i64) -> i64
       %__rlasp_stack_elide_zero_32 = arith.constant 0 : i64
-      %789 = arith.addi %788, %__rlasp_stack_elide_zero_32 : i64
-      %790 = func.call @cc_reverse(%789) : (i64) -> i64
+      %784 = arith.addi %783, %__rlasp_stack_elide_zero_32 : i64
+      %785 = llvm.mlir.addressof @str77 : !llvm.ptr
+      %786 = arith.constant 23 : i64
+      %787 = func.call @cc_make_string(%785, %786) : (!llvm.ptr, i64) -> i64
+      %788 = func.call @cc_nil_value() : () -> i64
+      %789 = func.call @cc_intern(%787, %788) : (i64, i64) -> i64
+      %790 = func.call @cc_nil_value() : () -> i64
+      %791 = func.call @cc_cons(%789, %790) : (i64, i64) -> i64
+      %792 = func.call @cc_values_pack(%791) : (i64) -> i64
+      %793 = func.call @cc_symbol_value(%789) : (i64) -> i64
       %__rlasp_stack_elide_zero_33 = arith.constant 0 : i64
-      %791 = arith.addi %790, %__rlasp_stack_elide_zero_33 : i64
-      %792 = llvm.mlir.addressof @str78 : !llvm.ptr
-      %793 = arith.constant 23 : i64
-      %794 = func.call @cc_make_string(%792, %793) : (!llvm.ptr, i64) -> i64
-      %795 = func.call @cc_nil_value() : () -> i64
-      %796 = func.call @cc_intern(%794, %795) : (i64, i64) -> i64
-      %797 = func.call @cc_nil_value() : () -> i64
-      %798 = func.call @cc_cons(%796, %797) : (i64, i64) -> i64
-      %799 = func.call @cc_values_pack(%798) : (i64) -> i64
-      %800 = func.call @cc_symbol_value(%796) : (i64) -> i64
+      %794 = arith.addi %793, %__rlasp_stack_elide_zero_33 : i64
+      %795 = func.call @cc_reverse(%794) : (i64) -> i64
       %__rlasp_stack_elide_zero_34 = arith.constant 0 : i64
-      %801 = arith.addi %800, %__rlasp_stack_elide_zero_34 : i64
-      %802 = func.call @cc_reverse(%801) : (i64) -> i64
+      %796 = arith.addi %795, %__rlasp_stack_elide_zero_34 : i64
+      %797 = llvm.mlir.addressof @str78 : !llvm.ptr
+      %798 = arith.constant 23 : i64
+      %799 = func.call @cc_make_string(%797, %798) : (!llvm.ptr, i64) -> i64
+      %800 = func.call @cc_nil_value() : () -> i64
+      %801 = func.call @cc_intern(%799, %800) : (i64, i64) -> i64
+      %802 = func.call @cc_nil_value() : () -> i64
+      %803 = func.call @cc_cons(%801, %802) : (i64, i64) -> i64
+      %804 = func.call @cc_values_pack(%803) : (i64) -> i64
+      %805 = func.call @cc_symbol_value(%801) : (i64) -> i64
       %__rlasp_stack_elide_zero_35 = arith.constant 0 : i64
-      %803 = arith.addi %802, %__rlasp_stack_elide_zero_35 : i64
-      %804 = llvm.mlir.addressof @str79 : !llvm.ptr
-      %805 = arith.constant 23 : i64
-      %806 = func.call @cc_make_string(%804, %805) : (!llvm.ptr, i64) -> i64
-      %807 = func.call @cc_nil_value() : () -> i64
-      %808 = func.call @cc_intern(%806, %807) : (i64, i64) -> i64
-      %809 = func.call @cc_nil_value() : () -> i64
-      %810 = func.call @cc_cons(%808, %809) : (i64, i64) -> i64
-      %811 = func.call @cc_values_pack(%810) : (i64) -> i64
-      %812 = func.call @cc_symbol_value(%808) : (i64) -> i64
+      %806 = arith.addi %805, %__rlasp_stack_elide_zero_35 : i64
+      %807 = func.call @cc_length(%806) : (i64) -> i64
       %__rlasp_stack_elide_zero_36 = arith.constant 0 : i64
-      %813 = arith.addi %812, %__rlasp_stack_elide_zero_36 : i64
-      %814 = func.call @cc_length(%813) : (i64) -> i64
+      %808 = arith.addi %807, %__rlasp_stack_elide_zero_36 : i64
+      func.call @stack_push_pointer(%754) : (i64) -> ()
+      func.call @stack_push_pointer(%760) : (i64) -> ()
+      func.call @stack_push_pointer(%772) : (i64) -> ()
+      func.call @stack_push_pointer(%784) : (i64) -> ()
+      func.call @stack_push_pointer(%796) : (i64) -> ()
+      func.call @stack_push_pointer(%808) : (i64) -> ()
+      %809 = llvm.mlir.addressof @str79 : !llvm.ptr
+      %810 = func.call @cc_make_function_ref_const(%809) : (!llvm.ptr) -> i64
+      %811 = arith.constant 6 : i64
+      func.call @cc_funcall_stack(%810, %811) : (i64, i64) -> ()
+      %812 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %812 : i64
+    }
+    %813 = func.call @cc_nil_value() : () -> i64
+    %814 = func.call @cc_errorp(%747) : (i64) -> i64
+    %815 = arith.cmpi ne, %814, %813 : i64
+    %816 = scf.if %815 -> (i64) {
+      scf.yield %747 : i64
+    } else {
+      %817 = llvm.mlir.addressof @str80 : !llvm.ptr
+      %818 = arith.constant 25 : i64
+      %819 = func.call @cc_make_string(%817, %818) : (!llvm.ptr, i64) -> i64
+      %820 = func.call @cc_nil_value() : () -> i64
+      %821 = func.call @cc_intern(%819, %820) : (i64, i64) -> i64
+      %822 = func.call @cc_nil_value() : () -> i64
+      %823 = func.call @cc_cons(%821, %822) : (i64, i64) -> i64
+      %824 = func.call @cc_values_pack(%823) : (i64) -> i64
+      %825 = func.call @cc_symbol_value(%821) : (i64) -> i64
       %__rlasp_stack_elide_zero_37 = arith.constant 0 : i64
-      %815 = arith.addi %814, %__rlasp_stack_elide_zero_37 : i64
-      func.call @stack_push_pointer(%761) : (i64) -> ()
-      func.call @stack_push_pointer(%767) : (i64) -> ()
-      func.call @stack_push_pointer(%779) : (i64) -> ()
-      func.call @stack_push_pointer(%791) : (i64) -> ()
-      func.call @stack_push_pointer(%803) : (i64) -> ()
-      func.call @stack_push_pointer(%815) : (i64) -> ()
-      %816 = llvm.mlir.addressof @str80 : !llvm.ptr
-      %817 = func.call @cc_make_function_ref_const(%816) : (!llvm.ptr) -> i64
-      %818 = arith.constant 6 : i64
-      func.call @cc_funcall_stack(%817, %818) : (i64, i64) -> ()
-      %819 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %819 : i64
-    }
-    %820 = func.call @cc_nil_value() : () -> i64
-    %821 = func.call @cc_errorp(%754) : (i64) -> i64
-    %822 = arith.cmpi ne, %821, %820 : i64
-    %823 = scf.if %822 -> (i64) {
-      scf.yield %754 : i64
-    } else {
-      %824 = llvm.mlir.addressof @str81 : !llvm.ptr
-      %825 = arith.constant 25 : i64
-      %826 = func.call @cc_make_string(%824, %825) : (!llvm.ptr, i64) -> i64
+      %826 = arith.addi %825, %__rlasp_stack_elide_zero_37 : i64
       %827 = func.call @cc_nil_value() : () -> i64
-      %828 = func.call @cc_intern(%826, %827) : (i64, i64) -> i64
-      %829 = func.call @cc_nil_value() : () -> i64
-      %830 = func.call @cc_cons(%828, %829) : (i64, i64) -> i64
-      %831 = func.call @cc_values_pack(%830) : (i64) -> i64
-      %832 = func.call @cc_symbol_value(%828) : (i64) -> i64
-      %__rlasp_stack_elide_zero_38 = arith.constant 0 : i64
-      %833 = arith.addi %832, %__rlasp_stack_elide_zero_38 : i64
-      %834 = func.call @cc_nil_value() : () -> i64
-      %835 = arith.cmpi ne, %833, %834 : i64
-      scf.if %835 {
-        %836 = func.call @cc_nil_value() : () -> i64
-        %837 = func.call @cc_nil_value() : () -> i64
-        %838 = func.call @cc_errorp(%836) : (i64) -> i64
-        %839 = arith.cmpi ne, %838, %837 : i64
-        %840 = scf.if %839 -> (i64) {
-          scf.yield %836 : i64
+      %828 = arith.cmpi ne, %826, %827 : i64
+      scf.if %828 {
+        %829 = func.call @cc_nil_value() : () -> i64
+        %830 = func.call @cc_nil_value() : () -> i64
+        %831 = func.call @cc_errorp(%829) : (i64) -> i64
+        %832 = arith.cmpi ne, %831, %830 : i64
+        %833 = scf.if %832 -> (i64) {
+          scf.yield %829 : i64
         } else {
-          %841 = llvm.mlir.addressof @str82 : !llvm.ptr
-          %842 = arith.constant 25 : i64
-          %843 = func.call @cc_make_string(%841, %842) : (!llvm.ptr, i64) -> i64
-          %844 = func.call @cc_nil_value() : () -> i64
-          %845 = func.call @cc_intern(%843, %844) : (i64, i64) -> i64
-          %846 = func.call @cc_nil_value() : () -> i64
-          %847 = func.call @cc_cons(%845, %846) : (i64, i64) -> i64
-          %848 = func.call @cc_values_pack(%847) : (i64) -> i64
-          %849 = func.call @cc_symbol_value(%845) : (i64) -> i64
-          %__rlasp_stack_elide_zero_39 = arith.constant 0 : i64
-          %850 = arith.addi %849, %__rlasp_stack_elide_zero_39 : i64
-          %851:1 = scf.while (%arg0 = %850) : (i64) -> (i64) {
-            %852 = func.call @cc_is_cons(%arg0) : (i64) -> i32
-            %853 = arith.constant 0 : i32
-            %854 = arith.cmpi ne, %852, %853 : i32
-            scf.condition(%854) %arg0 : i64
+          %834 = llvm.mlir.addressof @str81 : !llvm.ptr
+          %835 = arith.constant 25 : i64
+          %836 = func.call @cc_make_string(%834, %835) : (!llvm.ptr, i64) -> i64
+          %837 = func.call @cc_nil_value() : () -> i64
+          %838 = func.call @cc_intern(%836, %837) : (i64, i64) -> i64
+          %839 = func.call @cc_nil_value() : () -> i64
+          %840 = func.call @cc_cons(%838, %839) : (i64, i64) -> i64
+          %841 = func.call @cc_values_pack(%840) : (i64) -> i64
+          %842 = func.call @cc_symbol_value(%838) : (i64) -> i64
+          %__rlasp_stack_elide_zero_38 = arith.constant 0 : i64
+          %843 = arith.addi %842, %__rlasp_stack_elide_zero_38 : i64
+          %844:1 = scf.while (%arg0 = %843) : (i64) -> (i64) {
+            %845 = func.call @cc_is_cons(%arg0) : (i64) -> i32
+            %846 = arith.constant 0 : i32
+            %847 = arith.cmpi ne, %845, %846 : i32
+            scf.condition(%847) %arg0 : i64
           } do {
-            ^bb0(%855: i64):
-            %856 = func.call @cc_car(%855) : (i64) -> i64
-            %857 = llvm.mlir.addressof @str83 : !llvm.ptr
-            %858 = arith.constant 3 : i64
-            %859 = func.call @cc_make_string(%857, %858) : (!llvm.ptr, i64) -> i64
+            ^bb0(%848: i64):
+            %849 = func.call @cc_car(%848) : (i64) -> i64
+            %850 = llvm.mlir.addressof @str82 : !llvm.ptr
+            %851 = arith.constant 3 : i64
+            %852 = func.call @cc_make_string(%850, %851) : (!llvm.ptr, i64) -> i64
+            %853 = llvm.mlir.addressof @str83 : !llvm.ptr
+            %854 = arith.constant 7 : i64
+            %855 = func.call @cc_make_string(%853, %854) : (!llvm.ptr, i64) -> i64
+            %856 = func.call @cc_intern(%852, %855) : (i64, i64) -> i64
+            %857 = func.call @cc_nil_value() : () -> i64
+            %858 = func.call @cc_cons(%856, %857) : (i64, i64) -> i64
+            %859 = func.call @cc_values_pack(%858) : (i64) -> i64
             %860 = llvm.mlir.addressof @str84 : !llvm.ptr
-            %861 = arith.constant 7 : i64
+            %861 = arith.constant 44 : i64
             %862 = func.call @cc_make_string(%860, %861) : (!llvm.ptr, i64) -> i64
-            %863 = func.call @cc_intern(%859, %862) : (i64, i64) -> i64
-            %864 = func.call @cc_nil_value() : () -> i64
-            %865 = func.call @cc_cons(%863, %864) : (i64, i64) -> i64
-            %866 = func.call @cc_values_pack(%865) : (i64) -> i64
-            %867 = llvm.mlir.addressof @str85 : !llvm.ptr
-            %868 = arith.constant 44 : i64
-            %869 = func.call @cc_make_string(%867, %868) : (!llvm.ptr, i64) -> i64
+            %__rlasp_stack_elide_zero_39 = arith.constant 0 : i64
+            %863 = arith.addi %849, %__rlasp_stack_elide_zero_39 : i64
+            %864 = func.call @cc_car(%863) : (i64) -> i64
             %__rlasp_stack_elide_zero_40 = arith.constant 0 : i64
-            %870 = arith.addi %856, %__rlasp_stack_elide_zero_40 : i64
-            %871 = func.call @cc_car(%870) : (i64) -> i64
+            %865 = arith.addi %864, %__rlasp_stack_elide_zero_40 : i64
             %__rlasp_stack_elide_zero_41 = arith.constant 0 : i64
-            %872 = arith.addi %871, %__rlasp_stack_elide_zero_41 : i64
+            %866 = arith.addi %849, %__rlasp_stack_elide_zero_41 : i64
+            %867 = func.call @cc_cdr(%866) : (i64) -> i64
+            %868 = func.call @cc_car(%867) : (i64) -> i64
             %__rlasp_stack_elide_zero_42 = arith.constant 0 : i64
-            %873 = arith.addi %856, %__rlasp_stack_elide_zero_42 : i64
-            %874 = func.call @cc_cdr(%873) : (i64) -> i64
-            %875 = func.call @cc_car(%874) : (i64) -> i64
-            %__rlasp_stack_elide_zero_43 = arith.constant 0 : i64
-            %876 = arith.addi %875, %__rlasp_stack_elide_zero_43 : i64
-            func.call @stack_push_pointer(%863) : (i64) -> ()
+            %869 = arith.addi %868, %__rlasp_stack_elide_zero_42 : i64
+            func.call @stack_push_pointer(%856) : (i64) -> ()
+            func.call @stack_push_pointer(%862) : (i64) -> ()
+            func.call @stack_push_pointer(%865) : (i64) -> ()
             func.call @stack_push_pointer(%869) : (i64) -> ()
-            func.call @stack_push_pointer(%872) : (i64) -> ()
-            func.call @stack_push_pointer(%876) : (i64) -> ()
-            %877 = llvm.mlir.addressof @str86 : !llvm.ptr
-            %878 = func.call @cc_make_function_ref_const(%877) : (!llvm.ptr) -> i64
-            %879 = arith.constant 4 : i64
-            func.call @cc_funcall_stack(%878, %879) : (i64, i64) -> ()
-            %880 = func.call @stack_depth() : () -> i64
-            %881 = arith.constant 0 : i64
-            %882 = arith.cmpi sgt, %880, %881 : i64
-            scf.if %882 {
-              %883 = func.call @stack_pop_pointer() : () -> i64
+            %870 = llvm.mlir.addressof @str85 : !llvm.ptr
+            %871 = func.call @cc_make_function_ref_const(%870) : (!llvm.ptr) -> i64
+            %872 = arith.constant 4 : i64
+            func.call @cc_funcall_stack(%871, %872) : (i64, i64) -> ()
+            %873 = func.call @stack_depth() : () -> i64
+            %874 = arith.constant 0 : i64
+            %875 = arith.cmpi sgt, %873, %874 : i64
+            scf.if %875 {
+              %876 = func.call @stack_pop_pointer() : () -> i64
             }
-            %884 = func.call @cc_cdr(%855) : (i64) -> i64
-            scf.yield %884 : i64
+            %877 = func.call @cc_cdr(%848) : (i64) -> i64
+            scf.yield %877 : i64
           }
           func.call @stack_push_nil() : () -> ()
-          %885 = func.call @stack_pop_pointer() : () -> i64
-          scf.yield %885 : i64
+          %878 = func.call @stack_pop_pointer() : () -> i64
+          scf.yield %878 : i64
         }
-        func.call @stack_push_pointer(%840) : (i64) -> ()
+        func.call @stack_push_pointer(%833) : (i64) -> ()
       } else {
         func.call @stack_push_nil() : () -> ()
       }
-      %886 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %886 : i64
+      %879 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %879 : i64
     }
-    %887 = func.call @cc_nil_value() : () -> i64
-    %888 = func.call @cc_errorp(%823) : (i64) -> i64
-    %889 = arith.cmpi ne, %888, %887 : i64
-    %890 = scf.if %889 -> (i64) {
-      scf.yield %823 : i64
+    %880 = func.call @cc_nil_value() : () -> i64
+    %881 = func.call @cc_errorp(%816) : (i64) -> i64
+    %882 = arith.cmpi ne, %881, %880 : i64
+    %883 = scf.if %882 -> (i64) {
+      scf.yield %816 : i64
     } else {
-      %891 = llvm.mlir.addressof @str87 : !llvm.ptr
-      %892 = arith.constant 17 : i64
-      %893 = func.call @cc_make_string(%891, %892) : (!llvm.ptr, i64) -> i64
+      %884 = llvm.mlir.addressof @str86 : !llvm.ptr
+      %885 = arith.constant 17 : i64
+      %886 = func.call @cc_make_string(%884, %885) : (!llvm.ptr, i64) -> i64
+      %887 = func.call @cc_nil_value() : () -> i64
+      %888 = func.call @cc_intern(%886, %887) : (i64, i64) -> i64
+      %889 = func.call @cc_nil_value() : () -> i64
+      %890 = func.call @cc_cons(%888, %889) : (i64, i64) -> i64
+      %891 = func.call @cc_values_pack(%890) : (i64) -> i64
+      %892 = func.call @cc_symbol_value(%888) : (i64) -> i64
+      %__rlasp_stack_elide_zero_43 = arith.constant 0 : i64
+      %893 = arith.addi %892, %__rlasp_stack_elide_zero_43 : i64
       %894 = func.call @cc_nil_value() : () -> i64
-      %895 = func.call @cc_intern(%893, %894) : (i64, i64) -> i64
-      %896 = func.call @cc_nil_value() : () -> i64
-      %897 = func.call @cc_cons(%895, %896) : (i64, i64) -> i64
-      %898 = func.call @cc_values_pack(%897) : (i64) -> i64
-      %899 = func.call @cc_symbol_value(%895) : (i64) -> i64
-      %__rlasp_stack_elide_zero_44 = arith.constant 0 : i64
-      %900 = arith.addi %899, %__rlasp_stack_elide_zero_44 : i64
-      %901 = func.call @cc_nil_value() : () -> i64
-      %902 = arith.cmpi ne, %900, %901 : i64
-      scf.if %902 {
-        %903 = func.call @cc_nil_value() : () -> i64
-        %904 = func.call @cc_nil_value() : () -> i64
-        %905 = func.call @cc_errorp(%903) : (i64) -> i64
-        %906 = arith.cmpi ne, %905, %904 : i64
-        %907 = scf.if %906 -> (i64) {
-          scf.yield %903 : i64
+      %895 = arith.cmpi ne, %893, %894 : i64
+      scf.if %895 {
+        %896 = func.call @cc_nil_value() : () -> i64
+        %897 = func.call @cc_nil_value() : () -> i64
+        %898 = func.call @cc_errorp(%896) : (i64) -> i64
+        %899 = arith.cmpi ne, %898, %897 : i64
+        %900 = scf.if %899 -> (i64) {
+          scf.yield %896 : i64
         } else {
-          %908 = llvm.mlir.addressof @str88 : !llvm.ptr
-          %909 = arith.constant 17 : i64
-          %910 = func.call @cc_make_string(%908, %909) : (!llvm.ptr, i64) -> i64
-          %911 = func.call @cc_nil_value() : () -> i64
-          %912 = func.call @cc_intern(%910, %911) : (i64, i64) -> i64
-          %913 = func.call @cc_nil_value() : () -> i64
-          %914 = func.call @cc_cons(%912, %913) : (i64, i64) -> i64
-          %915 = func.call @cc_values_pack(%914) : (i64) -> i64
-          %916 = func.call @cc_symbol_value(%912) : (i64) -> i64
-          %__rlasp_stack_elide_zero_45 = arith.constant 0 : i64
-          %917 = arith.addi %916, %__rlasp_stack_elide_zero_45 : i64
-          %918:1 = scf.while (%arg0 = %917) : (i64) -> (i64) {
-            %919 = func.call @cc_is_cons(%arg0) : (i64) -> i32
-            %920 = arith.constant 0 : i32
-            %921 = arith.cmpi ne, %919, %920 : i32
-            scf.condition(%921) %arg0 : i64
+          %901 = llvm.mlir.addressof @str87 : !llvm.ptr
+          %902 = arith.constant 17 : i64
+          %903 = func.call @cc_make_string(%901, %902) : (!llvm.ptr, i64) -> i64
+          %904 = func.call @cc_nil_value() : () -> i64
+          %905 = func.call @cc_intern(%903, %904) : (i64, i64) -> i64
+          %906 = func.call @cc_nil_value() : () -> i64
+          %907 = func.call @cc_cons(%905, %906) : (i64, i64) -> i64
+          %908 = func.call @cc_values_pack(%907) : (i64) -> i64
+          %909 = func.call @cc_symbol_value(%905) : (i64) -> i64
+          %__rlasp_stack_elide_zero_44 = arith.constant 0 : i64
+          %910 = arith.addi %909, %__rlasp_stack_elide_zero_44 : i64
+          %911:1 = scf.while (%arg0 = %910) : (i64) -> (i64) {
+            %912 = func.call @cc_is_cons(%arg0) : (i64) -> i32
+            %913 = arith.constant 0 : i32
+            %914 = arith.cmpi ne, %912, %913 : i32
+            scf.condition(%914) %arg0 : i64
           } do {
-            ^bb0(%922: i64):
-            %923 = func.call @cc_car(%922) : (i64) -> i64
-            %924 = llvm.mlir.addressof @str89 : !llvm.ptr
-            %925 = arith.constant 4 : i64
-            %926 = func.call @cc_make_string(%924, %925) : (!llvm.ptr, i64) -> i64
+            ^bb0(%915: i64):
+            %916 = func.call @cc_car(%915) : (i64) -> i64
+            %917 = llvm.mlir.addressof @str88 : !llvm.ptr
+            %918 = arith.constant 4 : i64
+            %919 = func.call @cc_make_string(%917, %918) : (!llvm.ptr, i64) -> i64
+            %920 = llvm.mlir.addressof @str89 : !llvm.ptr
+            %921 = arith.constant 7 : i64
+            %922 = func.call @cc_make_string(%920, %921) : (!llvm.ptr, i64) -> i64
+            %923 = func.call @cc_intern(%919, %922) : (i64, i64) -> i64
+            %924 = func.call @cc_nil_value() : () -> i64
+            %925 = func.call @cc_cons(%923, %924) : (i64, i64) -> i64
+            %926 = func.call @cc_values_pack(%925) : (i64) -> i64
             %927 = llvm.mlir.addressof @str90 : !llvm.ptr
-            %928 = arith.constant 7 : i64
+            %928 = arith.constant 17 : i64
             %929 = func.call @cc_make_string(%927, %928) : (!llvm.ptr, i64) -> i64
-            %930 = func.call @cc_intern(%926, %929) : (i64, i64) -> i64
-            %931 = func.call @cc_nil_value() : () -> i64
-            %932 = func.call @cc_cons(%930, %931) : (i64, i64) -> i64
-            %933 = func.call @cc_values_pack(%932) : (i64) -> i64
-            %934 = llvm.mlir.addressof @str91 : !llvm.ptr
-            %935 = arith.constant 17 : i64
-            %936 = func.call @cc_make_string(%934, %935) : (!llvm.ptr, i64) -> i64
-            func.call @stack_push_pointer(%930) : (i64) -> ()
-            func.call @stack_push_pointer(%936) : (i64) -> ()
             func.call @stack_push_pointer(%923) : (i64) -> ()
-            %937 = llvm.mlir.addressof @str92 : !llvm.ptr
-            %938 = func.call @cc_make_function_ref_const(%937) : (!llvm.ptr) -> i64
-            %939 = arith.constant 3 : i64
-            func.call @cc_funcall_stack(%938, %939) : (i64, i64) -> ()
-            %940 = func.call @stack_depth() : () -> i64
-            %941 = arith.constant 0 : i64
-            %942 = arith.cmpi sgt, %940, %941 : i64
-            scf.if %942 {
-              %943 = func.call @stack_pop_pointer() : () -> i64
+            func.call @stack_push_pointer(%929) : (i64) -> ()
+            func.call @stack_push_pointer(%916) : (i64) -> ()
+            %930 = llvm.mlir.addressof @str91 : !llvm.ptr
+            %931 = func.call @cc_make_function_ref_const(%930) : (!llvm.ptr) -> i64
+            %932 = arith.constant 3 : i64
+            func.call @cc_funcall_stack(%931, %932) : (i64, i64) -> ()
+            %933 = func.call @stack_depth() : () -> i64
+            %934 = arith.constant 0 : i64
+            %935 = arith.cmpi sgt, %933, %934 : i64
+            scf.if %935 {
+              %936 = func.call @stack_pop_pointer() : () -> i64
             }
-            %944 = func.call @cc_cdr(%922) : (i64) -> i64
-            scf.yield %944 : i64
+            %937 = func.call @cc_cdr(%915) : (i64) -> i64
+            scf.yield %937 : i64
           }
           func.call @stack_push_nil() : () -> ()
-          %945 = func.call @stack_pop_pointer() : () -> i64
-          scf.yield %945 : i64
+          %938 = func.call @stack_pop_pointer() : () -> i64
+          scf.yield %938 : i64
         }
-        func.call @stack_push_pointer(%907) : (i64) -> ()
+        func.call @stack_push_pointer(%900) : (i64) -> ()
       } else {
         func.call @stack_push_nil() : () -> ()
       }
-      %946 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %946 : i64
+      %939 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %939 : i64
     }
-    %947 = func.call @cc_nil_value() : () -> i64
-    %948 = func.call @cc_errorp(%890) : (i64) -> i64
-    %949 = arith.cmpi ne, %948, %947 : i64
-    %950 = scf.if %949 -> (i64) {
-      scf.yield %890 : i64
+    %940 = func.call @cc_nil_value() : () -> i64
+    %941 = func.call @cc_errorp(%883) : (i64) -> i64
+    %942 = arith.cmpi ne, %941, %940 : i64
+    %943 = scf.if %942 -> (i64) {
+      scf.yield %883 : i64
     } else {
-      %951 = llvm.mlir.addressof @str93 : !llvm.ptr
-      %952 = arith.constant 25 : i64
-      %953 = func.call @cc_make_string(%951, %952) : (!llvm.ptr, i64) -> i64
+      %944 = llvm.mlir.addressof @str92 : !llvm.ptr
+      %945 = arith.constant 25 : i64
+      %946 = func.call @cc_make_string(%944, %945) : (!llvm.ptr, i64) -> i64
+      %947 = func.call @cc_nil_value() : () -> i64
+      %948 = func.call @cc_intern(%946, %947) : (i64, i64) -> i64
+      %949 = func.call @cc_nil_value() : () -> i64
+      %950 = func.call @cc_cons(%948, %949) : (i64, i64) -> i64
+      %951 = func.call @cc_values_pack(%950) : (i64) -> i64
+      %952 = func.call @cc_symbol_value(%948) : (i64) -> i64
+      %__rlasp_stack_elide_zero_45 = arith.constant 0 : i64
+      %953 = arith.addi %952, %__rlasp_stack_elide_zero_45 : i64
       %954 = func.call @cc_nil_value() : () -> i64
-      %955 = func.call @cc_intern(%953, %954) : (i64, i64) -> i64
-      %956 = func.call @cc_nil_value() : () -> i64
-      %957 = func.call @cc_cons(%955, %956) : (i64, i64) -> i64
-      %958 = func.call @cc_values_pack(%957) : (i64) -> i64
-      %959 = func.call @cc_symbol_value(%955) : (i64) -> i64
+      %955 = func.call @cc_cons(%953, %954) : (i64, i64) -> i64
+      %956 = func.call @cc_not(%955) : (i64) -> i64
       %__rlasp_stack_elide_zero_46 = arith.constant 0 : i64
-      %960 = arith.addi %959, %__rlasp_stack_elide_zero_46 : i64
-      %961 = func.call @cc_nil_value() : () -> i64
-      %962 = func.call @cc_cons(%960, %961) : (i64, i64) -> i64
-      %963 = func.call @cc_not(%962) : (i64) -> i64
-      %__rlasp_stack_elide_zero_47 = arith.constant 0 : i64
-      %964 = arith.addi %963, %__rlasp_stack_elide_zero_47 : i64
-      scf.yield %964 : i64
+      %957 = arith.addi %956, %__rlasp_stack_elide_zero_46 : i64
+      scf.yield %957 : i64
     }
-    %__rlasp_stack_elide_zero_48 = arith.constant 0 : i64
-    %965 = arith.addi %950, %__rlasp_stack_elide_zero_48 : i64
-    %966 = func.call @cc_multiple_value_list(%965) : (i64) -> i64
-    %967 = llvm.mlir.addressof @str94 : !llvm.ptr
-    %968 = arith.constant 37 : i64
-    %969 = func.call @cc_make_string(%967, %968) : (!llvm.ptr, i64) -> i64
-    %970 = func.call @cc_nil_value() : () -> i64
-    %971 = func.call @cc_intern(%969, %970) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_47 = arith.constant 0 : i64
+    %958 = arith.addi %943, %__rlasp_stack_elide_zero_47 : i64
+    %959 = func.call @cc_multiple_value_list(%958) : (i64) -> i64
+    %960 = llvm.mlir.addressof @str93 : !llvm.ptr
+    %961 = arith.constant 37 : i64
+    %962 = func.call @cc_make_string(%960, %961) : (!llvm.ptr, i64) -> i64
+    %963 = func.call @cc_nil_value() : () -> i64
+    %964 = func.call @cc_intern(%962, %963) : (i64, i64) -> i64
+    %965 = func.call @cc_nil_value() : () -> i64
+    %966 = func.call @cc_cons(%964, %965) : (i64, i64) -> i64
+    %967 = func.call @cc_values_pack(%966) : (i64) -> i64
+    %968 = func.call @cc_symbol_value(%964) : (i64) -> i64
+    %969 = llvm.mlir.addressof @str94 : !llvm.ptr
+    %970 = arith.constant 39 : i64
+    %971 = func.call @cc_make_string(%969, %970) : (!llvm.ptr, i64) -> i64
     %972 = func.call @cc_nil_value() : () -> i64
-    %973 = func.call @cc_cons(%971, %972) : (i64, i64) -> i64
-    %974 = func.call @cc_values_pack(%973) : (i64) -> i64
-    %975 = func.call @cc_symbol_value(%971) : (i64) -> i64
-    %976 = llvm.mlir.addressof @str95 : !llvm.ptr
-    %977 = arith.constant 39 : i64
-    %978 = func.call @cc_make_string(%976, %977) : (!llvm.ptr, i64) -> i64
-    %979 = func.call @cc_nil_value() : () -> i64
-    %980 = func.call @cc_intern(%978, %979) : (i64, i64) -> i64
-    %981 = func.call @cc_nil_value() : () -> i64
-    %982 = func.call @cc_cons(%980, %981) : (i64, i64) -> i64
-    %983 = func.call @cc_values_pack(%982) : (i64) -> i64
-    %984 = func.call @cc_symbol_value(%980) : (i64) -> i64
-    %985 = func.call @cc_nil_value() : () -> i64
-    %986 = arith.cmpi ne, %975, %985 : i64
-    %987 = scf.if %986 -> (i64) {
-      scf.yield %984 : i64
+    %973 = func.call @cc_intern(%971, %972) : (i64, i64) -> i64
+    %974 = func.call @cc_nil_value() : () -> i64
+    %975 = func.call @cc_cons(%973, %974) : (i64, i64) -> i64
+    %976 = func.call @cc_values_pack(%975) : (i64) -> i64
+    %977 = func.call @cc_symbol_value(%973) : (i64) -> i64
+    %978 = func.call @cc_nil_value() : () -> i64
+    %979 = arith.cmpi ne, %968, %978 : i64
+    %980 = scf.if %979 -> (i64) {
+      scf.yield %977 : i64
     } else {
-      scf.yield %966 : i64
+      scf.yield %959 : i64
     }
-    %988 = func.call @cc_values_pack(%987) : (i64) -> i64
-    func.call @stack_push_pointer(%988) : (i64) -> ()
+    %981 = func.call @cc_values_pack(%980) : (i64) -> i64
+    func.call @stack_push_pointer(%981) : (i64) -> ()
     func.return
   }
   func.func @"%FN%%fail-test-with-error"() {
-    %989 = llvm.mlir.addressof @str96 : !llvm.ptr
-    %990 = arith.constant 21 : i64
-    %991 = func.call @cc_make_string(%989, %990) : (!llvm.ptr, i64) -> i64
-    %992 = func.call @cc_nil_value() : () -> i64
-    %993 = func.call @cc_intern(%991, %992) : (i64, i64) -> i64
-    %994 = func.call @cc_nil_value() : () -> i64
-    %995 = func.call @cc_cons(%993, %994) : (i64, i64) -> i64
-    %996 = func.call @cc_values_pack(%995) : (i64) -> i64
-    %997 = llvm.mlir.addressof @str97 : !llvm.ptr
-    %998 = arith.constant 48 : i64
-    %999 = func.call @cc_make_string(%997, %998) : (!llvm.ptr, i64) -> i64
-    %1000 = func.call @cc_register_function_lambda_list_metadata_raw(%993, %999) : (i64, i64) -> i64
-    %1001 = func.call @stack_pop_pointer() : () -> i64
-    %1002 = func.call @stack_pop_pointer() : () -> i64
-    %1003 = func.call @stack_pop_pointer() : () -> i64
-    %1004 = func.call @stack_pop_pointer() : () -> i64
-    %1005 = func.call @stack_pop_pointer() : () -> i64
-    %1006 = func.call @cc_nil_value() : () -> i64
-    %1007 = llvm.mlir.addressof @str98 : !llvm.ptr
-    %1008 = arith.constant 37 : i64
-    %1009 = func.call @cc_make_string(%1007, %1008) : (!llvm.ptr, i64) -> i64
-    %1010 = func.call @cc_nil_value() : () -> i64
-    %1011 = func.call @cc_intern(%1009, %1010) : (i64, i64) -> i64
+    %982 = llvm.mlir.addressof @str95 : !llvm.ptr
+    %983 = arith.constant 21 : i64
+    %984 = func.call @cc_make_string(%982, %983) : (!llvm.ptr, i64) -> i64
+    %985 = func.call @cc_nil_value() : () -> i64
+    %986 = func.call @cc_intern(%984, %985) : (i64, i64) -> i64
+    %987 = func.call @cc_nil_value() : () -> i64
+    %988 = func.call @cc_cons(%986, %987) : (i64, i64) -> i64
+    %989 = func.call @cc_values_pack(%988) : (i64) -> i64
+    %990 = llvm.mlir.addressof @str96 : !llvm.ptr
+    %991 = arith.constant 48 : i64
+    %992 = func.call @cc_make_string(%990, %991) : (!llvm.ptr, i64) -> i64
+    %993 = func.call @cc_register_function_lambda_list_metadata_raw(%986, %992) : (i64, i64) -> i64
+    %994 = func.call @stack_pop_pointer() : () -> i64
+    %995 = func.call @stack_pop_pointer() : () -> i64
+    %996 = func.call @stack_pop_pointer() : () -> i64
+    %997 = func.call @stack_pop_pointer() : () -> i64
+    %998 = func.call @stack_pop_pointer() : () -> i64
+    %999 = func.call @cc_nil_value() : () -> i64
+    %1000 = llvm.mlir.addressof @str97 : !llvm.ptr
+    %1001 = arith.constant 37 : i64
+    %1002 = func.call @cc_make_string(%1000, %1001) : (!llvm.ptr, i64) -> i64
+    %1003 = func.call @cc_nil_value() : () -> i64
+    %1004 = func.call @cc_intern(%1002, %1003) : (i64, i64) -> i64
+    %1005 = func.call @cc_nil_value() : () -> i64
+    %1006 = func.call @cc_cons(%1004, %1005) : (i64, i64) -> i64
+    %1007 = func.call @cc_values_pack(%1006) : (i64) -> i64
+    %1008 = func.call @cc_set_symbol_value(%1004, %999) : (i64, i64) -> i64
+    %1009 = llvm.mlir.addressof @str98 : !llvm.ptr
+    %1010 = arith.constant 38 : i64
+    %1011 = func.call @cc_make_string(%1009, %1010) : (!llvm.ptr, i64) -> i64
     %1012 = func.call @cc_nil_value() : () -> i64
-    %1013 = func.call @cc_cons(%1011, %1012) : (i64, i64) -> i64
-    %1014 = func.call @cc_values_pack(%1013) : (i64) -> i64
-    %1015 = func.call @cc_set_symbol_value(%1011, %1006) : (i64, i64) -> i64
-    %1016 = llvm.mlir.addressof @str99 : !llvm.ptr
-    %1017 = arith.constant 38 : i64
-    %1018 = func.call @cc_make_string(%1016, %1017) : (!llvm.ptr, i64) -> i64
-    %1019 = func.call @cc_nil_value() : () -> i64
-    %1020 = func.call @cc_intern(%1018, %1019) : (i64, i64) -> i64
+    %1013 = func.call @cc_intern(%1011, %1012) : (i64, i64) -> i64
+    %1014 = func.call @cc_nil_value() : () -> i64
+    %1015 = func.call @cc_cons(%1013, %1014) : (i64, i64) -> i64
+    %1016 = func.call @cc_values_pack(%1015) : (i64) -> i64
+    %1017 = func.call @cc_set_symbol_value(%1013, %999) : (i64, i64) -> i64
+    %1018 = llvm.mlir.addressof @str99 : !llvm.ptr
+    %1019 = arith.constant 39 : i64
+    %1020 = func.call @cc_make_string(%1018, %1019) : (!llvm.ptr, i64) -> i64
     %1021 = func.call @cc_nil_value() : () -> i64
-    %1022 = func.call @cc_cons(%1020, %1021) : (i64, i64) -> i64
-    %1023 = func.call @cc_values_pack(%1022) : (i64) -> i64
-    %1024 = func.call @cc_set_symbol_value(%1020, %1006) : (i64, i64) -> i64
-    %1025 = llvm.mlir.addressof @str100 : !llvm.ptr
-    %1026 = arith.constant 39 : i64
-    %1027 = func.call @cc_make_string(%1025, %1026) : (!llvm.ptr, i64) -> i64
+    %1022 = func.call @cc_intern(%1020, %1021) : (i64, i64) -> i64
+    %1023 = func.call @cc_nil_value() : () -> i64
+    %1024 = func.call @cc_cons(%1022, %1023) : (i64, i64) -> i64
+    %1025 = func.call @cc_values_pack(%1024) : (i64) -> i64
+    %1026 = func.call @cc_set_symbol_value(%1022, %999) : (i64, i64) -> i64
+    %1027 = func.call @cc_nil_value() : () -> i64
     %1028 = func.call @cc_nil_value() : () -> i64
-    %1029 = func.call @cc_intern(%1027, %1028) : (i64, i64) -> i64
-    %1030 = func.call @cc_nil_value() : () -> i64
-    %1031 = func.call @cc_cons(%1029, %1030) : (i64, i64) -> i64
-    %1032 = func.call @cc_values_pack(%1031) : (i64) -> i64
-    %1033 = func.call @cc_set_symbol_value(%1029, %1006) : (i64, i64) -> i64
-    %1034 = func.call @cc_nil_value() : () -> i64
-    %1035 = func.call @cc_nil_value() : () -> i64
-    %1036 = func.call @cc_errorp(%1034) : (i64) -> i64
-    %1037 = arith.cmpi ne, %1036, %1035 : i64
-    %1038 = scf.if %1037 -> (i64) {
-      scf.yield %1034 : i64
+    %1029 = func.call @cc_errorp(%1027) : (i64) -> i64
+    %1030 = arith.cmpi ne, %1029, %1028 : i64
+    %1031 = scf.if %1030 -> (i64) {
+      scf.yield %1027 : i64
     } else {
       func.call @stack_push_nil() : () -> ()
-      %1039 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1039 : i64
+      %1032 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1032 : i64
     }
-    %1040 = func.call @cc_nil_value() : () -> i64
-    %1041 = func.call @cc_errorp(%1038) : (i64) -> i64
-    %1042 = arith.cmpi ne, %1041, %1040 : i64
-    %1043 = scf.if %1042 -> (i64) {
-      scf.yield %1038 : i64
+    %1033 = func.call @cc_nil_value() : () -> i64
+    %1034 = func.call @cc_errorp(%1031) : (i64) -> i64
+    %1035 = arith.cmpi ne, %1034, %1033 : i64
+    %1036 = scf.if %1035 -> (i64) {
+      scf.yield %1031 : i64
     } else {
+      %__rlasp_stack_elide_zero_48 = arith.constant 0 : i64
+      %1037 = arith.addi %998, %__rlasp_stack_elide_zero_48 : i64
       %__rlasp_stack_elide_zero_49 = arith.constant 0 : i64
-      %1044 = arith.addi %1005, %__rlasp_stack_elide_zero_49 : i64
-      %__rlasp_stack_elide_zero_50 = arith.constant 0 : i64
-      %1045 = arith.addi %1002, %__rlasp_stack_elide_zero_50 : i64
-      %1046 = func.call @cc_nil_value() : () -> i64
-      %1047 = func.call @cc_errorp(%1044) : (i64) -> i64
-      %1048 = arith.cmpi ne, %1047, %1046 : i64
-      %1049 = arith.cmpi eq, %1046, %1046 : i64
-      %1050 = arith.andi %1048, %1049 : i1
-      %1051 = scf.if %1050 -> (i64) {
+      %1038 = arith.addi %995, %__rlasp_stack_elide_zero_49 : i64
+      %1039 = func.call @cc_nil_value() : () -> i64
+      %1040 = func.call @cc_errorp(%1037) : (i64) -> i64
+      %1041 = arith.cmpi ne, %1040, %1039 : i64
+      %1042 = arith.cmpi eq, %1039, %1039 : i64
+      %1043 = arith.andi %1041, %1042 : i1
+      %1044 = scf.if %1043 -> (i64) {
+        scf.yield %1037 : i64
+      } else {
+        scf.yield %1039 : i64
+      }
+      %1045 = func.call @cc_errorp(%1038) : (i64) -> i64
+      %1046 = arith.cmpi ne, %1045, %1039 : i64
+      %1047 = arith.cmpi eq, %1044, %1039 : i64
+      %1048 = arith.andi %1046, %1047 : i1
+      %1049 = scf.if %1048 -> (i64) {
+        scf.yield %1038 : i64
+      } else {
         scf.yield %1044 : i64
-      } else {
-        scf.yield %1046 : i64
       }
-      %1052 = func.call @cc_errorp(%1045) : (i64) -> i64
-      %1053 = arith.cmpi ne, %1052, %1046 : i64
-      %1054 = arith.cmpi eq, %1051, %1046 : i64
-      %1055 = arith.andi %1053, %1054 : i1
-      %1056 = scf.if %1055 -> (i64) {
-        scf.yield %1045 : i64
+      %1050 = arith.cmpi ne, %1049, %1039 : i64
+      scf.if %1050 {
+        func.call @stack_push_pointer(%1049) : (i64) -> ()
       } else {
-        scf.yield %1051 : i64
-      }
-      %1057 = arith.cmpi ne, %1056, %1046 : i64
-      scf.if %1057 {
-        func.call @stack_push_pointer(%1056) : (i64) -> ()
-      } else {
-        %1058 = func.call @cc_nil_value() : () -> i64
-        func.call @stack_push_pointer(%1058) : (i64) -> ()
+        %1051 = func.call @cc_nil_value() : () -> i64
+        func.call @stack_push_pointer(%1051) : (i64) -> ()
+        %__rlasp_stack_elide_zero_50 = arith.constant 0 : i64
+        %1052 = arith.addi %1038, %__rlasp_stack_elide_zero_50 : i64
+        %1053 = func.call @stack_pop_pointer() : () -> i64
+        %1054 = func.call @cc_cons(%1052, %1053) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1054) : (i64) -> ()
         %__rlasp_stack_elide_zero_51 = arith.constant 0 : i64
-        %1059 = arith.addi %1045, %__rlasp_stack_elide_zero_51 : i64
-        %1060 = func.call @stack_pop_pointer() : () -> i64
-        %1061 = func.call @cc_cons(%1059, %1060) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1061) : (i64) -> ()
-        %__rlasp_stack_elide_zero_52 = arith.constant 0 : i64
-        %1062 = arith.addi %1044, %__rlasp_stack_elide_zero_52 : i64
-        %1063 = func.call @stack_pop_pointer() : () -> i64
-        %1064 = func.call @cc_cons(%1062, %1063) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1064) : (i64) -> ()
+        %1055 = arith.addi %1037, %__rlasp_stack_elide_zero_51 : i64
+        %1056 = func.call @stack_pop_pointer() : () -> i64
+        %1057 = func.call @cc_cons(%1055, %1056) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1057) : (i64) -> ()
       }
-      %1065 = func.call @stack_pop_pointer() : () -> i64
-      %1066 = llvm.mlir.addressof @str101 : !llvm.ptr
-      %1067 = arith.constant 20 : i64
-      %1068 = func.call @cc_make_string(%1066, %1067) : (!llvm.ptr, i64) -> i64
-      %1069 = func.call @cc_nil_value() : () -> i64
-      %1070 = func.call @cc_intern(%1068, %1069) : (i64, i64) -> i64
-      %1071 = func.call @cc_nil_value() : () -> i64
-      %1072 = func.call @cc_cons(%1070, %1071) : (i64, i64) -> i64
-      %1073 = func.call @cc_values_pack(%1072) : (i64) -> i64
-      %1074 = func.call @cc_symbol_value(%1070) : (i64) -> i64
-      %1075 = func.call @cc_cons(%1065, %1074) : (i64, i64) -> i64
-      %1076 = llvm.mlir.addressof @str102 : !llvm.ptr
-      %1077 = arith.constant 20 : i64
-      %1078 = func.call @cc_make_string(%1076, %1077) : (!llvm.ptr, i64) -> i64
-      %1079 = func.call @cc_nil_value() : () -> i64
-      %1080 = func.call @cc_intern(%1078, %1079) : (i64, i64) -> i64
-      %1081 = func.call @cc_nil_value() : () -> i64
-      %1082 = func.call @cc_cons(%1080, %1081) : (i64, i64) -> i64
-      %1083 = func.call @cc_values_pack(%1082) : (i64) -> i64
-      %1084 = func.call @cc_set_symbol_value(%1080, %1075) : (i64, i64) -> i64
+      %1058 = func.call @stack_pop_pointer() : () -> i64
+      %1059 = llvm.mlir.addressof @str100 : !llvm.ptr
+      %1060 = arith.constant 20 : i64
+      %1061 = func.call @cc_make_string(%1059, %1060) : (!llvm.ptr, i64) -> i64
+      %1062 = func.call @cc_nil_value() : () -> i64
+      %1063 = func.call @cc_intern(%1061, %1062) : (i64, i64) -> i64
+      %1064 = func.call @cc_nil_value() : () -> i64
+      %1065 = func.call @cc_cons(%1063, %1064) : (i64, i64) -> i64
+      %1066 = func.call @cc_values_pack(%1065) : (i64) -> i64
+      %1067 = func.call @cc_symbol_value(%1063) : (i64) -> i64
+      %1068 = func.call @cc_cons(%1058, %1067) : (i64, i64) -> i64
+      %1069 = llvm.mlir.addressof @str101 : !llvm.ptr
+      %1070 = arith.constant 20 : i64
+      %1071 = func.call @cc_make_string(%1069, %1070) : (!llvm.ptr, i64) -> i64
+      %1072 = func.call @cc_nil_value() : () -> i64
+      %1073 = func.call @cc_intern(%1071, %1072) : (i64, i64) -> i64
+      %1074 = func.call @cc_nil_value() : () -> i64
+      %1075 = func.call @cc_cons(%1073, %1074) : (i64, i64) -> i64
+      %1076 = func.call @cc_values_pack(%1075) : (i64) -> i64
+      %1077 = func.call @cc_set_symbol_value(%1073, %1068) : (i64, i64) -> i64
+      %__rlasp_stack_elide_zero_52 = arith.constant 0 : i64
+      %1078 = arith.addi %1068, %__rlasp_stack_elide_zero_52 : i64
+      scf.yield %1078 : i64
+    }
+    %1079 = func.call @cc_nil_value() : () -> i64
+    %1080 = func.call @cc_errorp(%1036) : (i64) -> i64
+    %1081 = arith.cmpi ne, %1080, %1079 : i64
+    %1082 = scf.if %1081 -> (i64) {
+      scf.yield %1036 : i64
+    } else {
+      func.call @stack_push_pointer(%998) : (i64) -> ()
+      %1083 = llvm.mlir.addressof @str102 : !llvm.ptr
+      %1084 = arith.constant 19 : i64
+      %1085 = func.call @cc_make_string(%1083, %1084) : (!llvm.ptr, i64) -> i64
+      %1086 = func.call @cc_nil_value() : () -> i64
+      %1087 = func.call @cc_intern(%1085, %1086) : (i64, i64) -> i64
+      %1088 = func.call @cc_nil_value() : () -> i64
+      %1089 = func.call @cc_cons(%1087, %1088) : (i64, i64) -> i64
+      %1090 = func.call @cc_values_pack(%1089) : (i64) -> i64
+      %1091 = func.call @cc_symbol_value(%1087) : (i64) -> i64
       %__rlasp_stack_elide_zero_53 = arith.constant 0 : i64
-      %1085 = arith.addi %1075, %__rlasp_stack_elide_zero_53 : i64
-      scf.yield %1085 : i64
-    }
-    %1086 = func.call @cc_nil_value() : () -> i64
-    %1087 = func.call @cc_errorp(%1043) : (i64) -> i64
-    %1088 = arith.cmpi ne, %1087, %1086 : i64
-    %1089 = scf.if %1088 -> (i64) {
-      scf.yield %1043 : i64
-    } else {
-      func.call @stack_push_pointer(%1005) : (i64) -> ()
-      %1090 = llvm.mlir.addressof @str103 : !llvm.ptr
-      %1091 = arith.constant 19 : i64
-      %1092 = func.call @cc_make_string(%1090, %1091) : (!llvm.ptr, i64) -> i64
-      %1093 = func.call @cc_nil_value() : () -> i64
-      %1094 = func.call @cc_intern(%1092, %1093) : (i64, i64) -> i64
-      %1095 = func.call @cc_nil_value() : () -> i64
-      %1096 = func.call @cc_cons(%1094, %1095) : (i64, i64) -> i64
-      %1097 = func.call @cc_values_pack(%1096) : (i64) -> i64
-      %1098 = func.call @cc_symbol_value(%1094) : (i64) -> i64
+      %1092 = arith.addi %1091, %__rlasp_stack_elide_zero_53 : i64
+      %1093 = func.call @stack_pop_pointer() : () -> i64
+      %1094 = func.call @cc_member(%1093, %1092) : (i64, i64) -> i64
       %__rlasp_stack_elide_zero_54 = arith.constant 0 : i64
-      %1099 = arith.addi %1098, %__rlasp_stack_elide_zero_54 : i64
-      %1100 = func.call @stack_pop_pointer() : () -> i64
-      %1101 = func.call @cc_member(%1100, %1099) : (i64, i64) -> i64
-      %__rlasp_stack_elide_zero_55 = arith.constant 0 : i64
-      %1102 = arith.addi %1101, %__rlasp_stack_elide_zero_55 : i64
-      %1103 = func.call @cc_nil_value() : () -> i64
-      %1104 = arith.cmpi ne, %1102, %1103 : i64
-      scf.if %1104 {
-        %__rlasp_stack_elide_zero_56 = arith.constant 0 : i64
-        %1105 = arith.addi %1005, %__rlasp_stack_elide_zero_56 : i64
-        %1106 = llvm.mlir.addressof @str104 : !llvm.ptr
-        %1107 = arith.constant 23 : i64
-        %1108 = func.call @cc_make_string(%1106, %1107) : (!llvm.ptr, i64) -> i64
-        %1109 = func.call @cc_nil_value() : () -> i64
-        %1110 = func.call @cc_intern(%1108, %1109) : (i64, i64) -> i64
-        %1111 = func.call @cc_nil_value() : () -> i64
-        %1112 = func.call @cc_cons(%1110, %1111) : (i64, i64) -> i64
-        %1113 = func.call @cc_values_pack(%1112) : (i64) -> i64
-        %1114 = func.call @cc_symbol_value(%1110) : (i64) -> i64
-        %1115 = func.call @cc_cons(%1105, %1114) : (i64, i64) -> i64
-        %1116 = llvm.mlir.addressof @str105 : !llvm.ptr
-        %1117 = arith.constant 23 : i64
-        %1118 = func.call @cc_make_string(%1116, %1117) : (!llvm.ptr, i64) -> i64
-        %1119 = func.call @cc_nil_value() : () -> i64
-        %1120 = func.call @cc_intern(%1118, %1119) : (i64, i64) -> i64
-        %1121 = func.call @cc_nil_value() : () -> i64
-        %1122 = func.call @cc_cons(%1120, %1121) : (i64, i64) -> i64
-        %1123 = func.call @cc_values_pack(%1122) : (i64) -> i64
-        %1124 = func.call @cc_set_symbol_value(%1120, %1115) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1115) : (i64) -> ()
+      %1095 = arith.addi %1094, %__rlasp_stack_elide_zero_54 : i64
+      %1096 = func.call @cc_nil_value() : () -> i64
+      %1097 = arith.cmpi ne, %1095, %1096 : i64
+      scf.if %1097 {
+        %__rlasp_stack_elide_zero_55 = arith.constant 0 : i64
+        %1098 = arith.addi %998, %__rlasp_stack_elide_zero_55 : i64
+        %1099 = llvm.mlir.addressof @str103 : !llvm.ptr
+        %1100 = arith.constant 23 : i64
+        %1101 = func.call @cc_make_string(%1099, %1100) : (!llvm.ptr, i64) -> i64
+        %1102 = func.call @cc_nil_value() : () -> i64
+        %1103 = func.call @cc_intern(%1101, %1102) : (i64, i64) -> i64
+        %1104 = func.call @cc_nil_value() : () -> i64
+        %1105 = func.call @cc_cons(%1103, %1104) : (i64, i64) -> i64
+        %1106 = func.call @cc_values_pack(%1105) : (i64) -> i64
+        %1107 = func.call @cc_symbol_value(%1103) : (i64) -> i64
+        %1108 = func.call @cc_cons(%1098, %1107) : (i64, i64) -> i64
+        %1109 = llvm.mlir.addressof @str104 : !llvm.ptr
+        %1110 = arith.constant 23 : i64
+        %1111 = func.call @cc_make_string(%1109, %1110) : (!llvm.ptr, i64) -> i64
+        %1112 = func.call @cc_nil_value() : () -> i64
+        %1113 = func.call @cc_intern(%1111, %1112) : (i64, i64) -> i64
+        %1114 = func.call @cc_nil_value() : () -> i64
+        %1115 = func.call @cc_cons(%1113, %1114) : (i64, i64) -> i64
+        %1116 = func.call @cc_values_pack(%1115) : (i64) -> i64
+        %1117 = func.call @cc_set_symbol_value(%1113, %1108) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1108) : (i64) -> ()
       } else {
-        %__rlasp_stack_elide_zero_57 = arith.constant 0 : i64
-        %1125 = arith.addi %1005, %__rlasp_stack_elide_zero_57 : i64
-        %1126 = llvm.mlir.addressof @str106 : !llvm.ptr
-        %1127 = arith.constant 25 : i64
-        %1128 = func.call @cc_make_string(%1126, %1127) : (!llvm.ptr, i64) -> i64
-        %1129 = func.call @cc_nil_value() : () -> i64
-        %1130 = func.call @cc_intern(%1128, %1129) : (i64, i64) -> i64
-        %1131 = func.call @cc_nil_value() : () -> i64
-        %1132 = func.call @cc_cons(%1130, %1131) : (i64, i64) -> i64
-        %1133 = func.call @cc_values_pack(%1132) : (i64) -> i64
-        %1134 = func.call @cc_symbol_value(%1130) : (i64) -> i64
-        %1135 = func.call @cc_cons(%1125, %1134) : (i64, i64) -> i64
-        %1136 = llvm.mlir.addressof @str107 : !llvm.ptr
-        %1137 = arith.constant 25 : i64
-        %1138 = func.call @cc_make_string(%1136, %1137) : (!llvm.ptr, i64) -> i64
-        %1139 = func.call @cc_nil_value() : () -> i64
-        %1140 = func.call @cc_intern(%1138, %1139) : (i64, i64) -> i64
-        %1141 = func.call @cc_nil_value() : () -> i64
-        %1142 = func.call @cc_cons(%1140, %1141) : (i64, i64) -> i64
-        %1143 = func.call @cc_values_pack(%1142) : (i64) -> i64
-        %1144 = func.call @cc_set_symbol_value(%1140, %1135) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1135) : (i64) -> ()
+        %__rlasp_stack_elide_zero_56 = arith.constant 0 : i64
+        %1118 = arith.addi %998, %__rlasp_stack_elide_zero_56 : i64
+        %1119 = llvm.mlir.addressof @str105 : !llvm.ptr
+        %1120 = arith.constant 25 : i64
+        %1121 = func.call @cc_make_string(%1119, %1120) : (!llvm.ptr, i64) -> i64
+        %1122 = func.call @cc_nil_value() : () -> i64
+        %1123 = func.call @cc_intern(%1121, %1122) : (i64, i64) -> i64
+        %1124 = func.call @cc_nil_value() : () -> i64
+        %1125 = func.call @cc_cons(%1123, %1124) : (i64, i64) -> i64
+        %1126 = func.call @cc_values_pack(%1125) : (i64) -> i64
+        %1127 = func.call @cc_symbol_value(%1123) : (i64) -> i64
+        %1128 = func.call @cc_cons(%1118, %1127) : (i64, i64) -> i64
+        %1129 = llvm.mlir.addressof @str106 : !llvm.ptr
+        %1130 = arith.constant 25 : i64
+        %1131 = func.call @cc_make_string(%1129, %1130) : (!llvm.ptr, i64) -> i64
+        %1132 = func.call @cc_nil_value() : () -> i64
+        %1133 = func.call @cc_intern(%1131, %1132) : (i64, i64) -> i64
+        %1134 = func.call @cc_nil_value() : () -> i64
+        %1135 = func.call @cc_cons(%1133, %1134) : (i64, i64) -> i64
+        %1136 = func.call @cc_values_pack(%1135) : (i64) -> i64
+        %1137 = func.call @cc_set_symbol_value(%1133, %1128) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1128) : (i64) -> ()
       }
-      %1145 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1145 : i64
+      %1138 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1138 : i64
     }
-    %1146 = func.call @cc_nil_value() : () -> i64
-    %1147 = func.call @cc_errorp(%1089) : (i64) -> i64
-    %1148 = arith.cmpi ne, %1147, %1146 : i64
-    %1149 = scf.if %1148 -> (i64) {
-      scf.yield %1089 : i64
+    %1139 = func.call @cc_nil_value() : () -> i64
+    %1140 = func.call @cc_errorp(%1082) : (i64) -> i64
+    %1141 = arith.cmpi ne, %1140, %1139 : i64
+    %1142 = scf.if %1141 -> (i64) {
+      scf.yield %1082 : i64
     } else {
-      %1150 = llvm.mlir.addressof @str108 : !llvm.ptr
-      %1151 = arith.constant 3 : i64
-      %1152 = func.call @cc_make_string(%1150, %1151) : (!llvm.ptr, i64) -> i64
+      %1143 = llvm.mlir.addressof @str107 : !llvm.ptr
+      %1144 = arith.constant 3 : i64
+      %1145 = func.call @cc_make_string(%1143, %1144) : (!llvm.ptr, i64) -> i64
+      %1146 = llvm.mlir.addressof @str108 : !llvm.ptr
+      %1147 = arith.constant 7 : i64
+      %1148 = func.call @cc_make_string(%1146, %1147) : (!llvm.ptr, i64) -> i64
+      %1149 = func.call @cc_intern(%1145, %1148) : (i64, i64) -> i64
+      %1150 = func.call @cc_nil_value() : () -> i64
+      %1151 = func.call @cc_cons(%1149, %1150) : (i64, i64) -> i64
+      %1152 = func.call @cc_values_pack(%1151) : (i64) -> i64
       %1153 = llvm.mlir.addressof @str109 : !llvm.ptr
-      %1154 = arith.constant 7 : i64
+      %1154 = arith.constant 9 : i64
       %1155 = func.call @cc_make_string(%1153, %1154) : (!llvm.ptr, i64) -> i64
-      %1156 = func.call @cc_intern(%1152, %1155) : (i64, i64) -> i64
-      %1157 = func.call @cc_nil_value() : () -> i64
-      %1158 = func.call @cc_cons(%1156, %1157) : (i64, i64) -> i64
-      %1159 = func.call @cc_values_pack(%1158) : (i64) -> i64
-      %1160 = llvm.mlir.addressof @str110 : !llvm.ptr
-      %1161 = arith.constant 9 : i64
-      %1162 = func.call @cc_make_string(%1160, %1161) : (!llvm.ptr, i64) -> i64
-      func.call @stack_push_pointer(%1156) : (i64) -> ()
-      func.call @stack_push_pointer(%1162) : (i64) -> ()
-      func.call @stack_push_pointer(%1005) : (i64) -> ()
-      %1163 = llvm.mlir.addressof @str111 : !llvm.ptr
-      %1164 = func.call @cc_make_function_ref_const(%1163) : (!llvm.ptr) -> i64
-      %1165 = arith.constant 3 : i64
-      func.call @cc_funcall_stack(%1164, %1165) : (i64, i64) -> ()
-      %1166 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1166 : i64
+      func.call @stack_push_pointer(%1149) : (i64) -> ()
+      func.call @stack_push_pointer(%1155) : (i64) -> ()
+      func.call @stack_push_pointer(%998) : (i64) -> ()
+      %1156 = llvm.mlir.addressof @str110 : !llvm.ptr
+      %1157 = func.call @cc_make_function_ref_const(%1156) : (!llvm.ptr) -> i64
+      %1158 = arith.constant 3 : i64
+      func.call @cc_funcall_stack(%1157, %1158) : (i64, i64) -> ()
+      %1159 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1159 : i64
     }
-    %1167 = func.call @cc_nil_value() : () -> i64
-    %1168 = func.call @cc_errorp(%1149) : (i64) -> i64
-    %1169 = arith.cmpi ne, %1168, %1167 : i64
-    %1170 = scf.if %1169 -> (i64) {
-      scf.yield %1149 : i64
+    %1160 = func.call @cc_nil_value() : () -> i64
+    %1161 = func.call @cc_errorp(%1142) : (i64) -> i64
+    %1162 = arith.cmpi ne, %1161, %1160 : i64
+    %1163 = scf.if %1162 -> (i64) {
+      scf.yield %1142 : i64
     } else {
-      %1171 = llvm.mlir.addressof @str112 : !llvm.ptr
-      %1172 = arith.constant 4 : i64
-      %1173 = func.call @cc_make_string(%1171, %1172) : (!llvm.ptr, i64) -> i64
+      %1164 = llvm.mlir.addressof @str111 : !llvm.ptr
+      %1165 = arith.constant 4 : i64
+      %1166 = func.call @cc_make_string(%1164, %1165) : (!llvm.ptr, i64) -> i64
+      %1167 = llvm.mlir.addressof @str112 : !llvm.ptr
+      %1168 = arith.constant 7 : i64
+      %1169 = func.call @cc_make_string(%1167, %1168) : (!llvm.ptr, i64) -> i64
+      %1170 = func.call @cc_intern(%1166, %1169) : (i64, i64) -> i64
+      %1171 = func.call @cc_nil_value() : () -> i64
+      %1172 = func.call @cc_cons(%1170, %1171) : (i64, i64) -> i64
+      %1173 = func.call @cc_values_pack(%1172) : (i64) -> i64
       %1174 = llvm.mlir.addressof @str113 : !llvm.ptr
-      %1175 = arith.constant 7 : i64
+      %1175 = arith.constant 46 : i64
       %1176 = func.call @cc_make_string(%1174, %1175) : (!llvm.ptr, i64) -> i64
-      %1177 = func.call @cc_intern(%1173, %1176) : (i64, i64) -> i64
-      %1178 = func.call @cc_nil_value() : () -> i64
-      %1179 = func.call @cc_cons(%1177, %1178) : (i64, i64) -> i64
-      %1180 = func.call @cc_values_pack(%1179) : (i64) -> i64
-      %1181 = llvm.mlir.addressof @str114 : !llvm.ptr
-      %1182 = arith.constant 46 : i64
-      %1183 = func.call @cc_make_string(%1181, %1182) : (!llvm.ptr, i64) -> i64
-      func.call @stack_push_pointer(%1177) : (i64) -> ()
-      func.call @stack_push_pointer(%1183) : (i64) -> ()
-      func.call @stack_push_pointer(%1002) : (i64) -> ()
-      func.call @stack_push_pointer(%1004) : (i64) -> ()
-      %1184 = llvm.mlir.addressof @str115 : !llvm.ptr
-      %1185 = func.call @cc_make_function_ref_const(%1184) : (!llvm.ptr) -> i64
-      %1186 = arith.constant 4 : i64
-      func.call @cc_funcall_stack(%1185, %1186) : (i64, i64) -> ()
-      %1187 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1187 : i64
+      func.call @stack_push_pointer(%1170) : (i64) -> ()
+      func.call @stack_push_pointer(%1176) : (i64) -> ()
+      func.call @stack_push_pointer(%995) : (i64) -> ()
+      func.call @stack_push_pointer(%997) : (i64) -> ()
+      %1177 = llvm.mlir.addressof @str114 : !llvm.ptr
+      %1178 = func.call @cc_make_function_ref_const(%1177) : (!llvm.ptr) -> i64
+      %1179 = arith.constant 4 : i64
+      func.call @cc_funcall_stack(%1178, %1179) : (i64, i64) -> ()
+      %1180 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1180 : i64
     }
-    %1188 = func.call @cc_nil_value() : () -> i64
-    %1189 = func.call @cc_errorp(%1170) : (i64) -> i64
-    %1190 = arith.cmpi ne, %1189, %1188 : i64
-    %1191 = scf.if %1190 -> (i64) {
-      scf.yield %1170 : i64
+    %1181 = func.call @cc_nil_value() : () -> i64
+    %1182 = func.call @cc_errorp(%1163) : (i64) -> i64
+    %1183 = arith.cmpi ne, %1182, %1181 : i64
+    %1184 = scf.if %1183 -> (i64) {
+      scf.yield %1163 : i64
     } else {
-      %__rlasp_stack_elide_zero_58 = arith.constant 0 : i64
-      %1192 = arith.addi %1001, %__rlasp_stack_elide_zero_58 : i64
-      %1193 = func.call @cc_nil_value() : () -> i64
-      %1194 = arith.cmpi ne, %1192, %1193 : i64
-      scf.if %1194 {
-        %1195 = func.call @cc_nil_value() : () -> i64
-        %1196 = func.call @cc_nil_value() : () -> i64
-        %1197 = func.call @cc_errorp(%1195) : (i64) -> i64
-        %1198 = arith.cmpi ne, %1197, %1196 : i64
-        %1199 = scf.if %1198 -> (i64) {
-          scf.yield %1195 : i64
+      %__rlasp_stack_elide_zero_57 = arith.constant 0 : i64
+      %1185 = arith.addi %994, %__rlasp_stack_elide_zero_57 : i64
+      %1186 = func.call @cc_nil_value() : () -> i64
+      %1187 = arith.cmpi ne, %1185, %1186 : i64
+      scf.if %1187 {
+        %1188 = func.call @cc_nil_value() : () -> i64
+        %1189 = func.call @cc_nil_value() : () -> i64
+        %1190 = func.call @cc_errorp(%1188) : (i64) -> i64
+        %1191 = arith.cmpi ne, %1190, %1189 : i64
+        %1192 = scf.if %1191 -> (i64) {
+          scf.yield %1188 : i64
         } else {
-          %1200 = llvm.mlir.addressof @str116 : !llvm.ptr
-          %1201 = arith.constant 4 : i64
-          %1202 = func.call @cc_make_string(%1200, %1201) : (!llvm.ptr, i64) -> i64
+          %1193 = llvm.mlir.addressof @str115 : !llvm.ptr
+          %1194 = arith.constant 4 : i64
+          %1195 = func.call @cc_make_string(%1193, %1194) : (!llvm.ptr, i64) -> i64
+          %1196 = llvm.mlir.addressof @str116 : !llvm.ptr
+          %1197 = arith.constant 7 : i64
+          %1198 = func.call @cc_make_string(%1196, %1197) : (!llvm.ptr, i64) -> i64
+          %1199 = func.call @cc_intern(%1195, %1198) : (i64, i64) -> i64
+          %1200 = func.call @cc_nil_value() : () -> i64
+          %1201 = func.call @cc_cons(%1199, %1200) : (i64, i64) -> i64
+          %1202 = func.call @cc_values_pack(%1201) : (i64) -> i64
           %1203 = llvm.mlir.addressof @str117 : !llvm.ptr
-          %1204 = arith.constant 7 : i64
+          %1204 = arith.constant 2 : i64
           %1205 = func.call @cc_make_string(%1203, %1204) : (!llvm.ptr, i64) -> i64
-          %1206 = func.call @cc_intern(%1202, %1205) : (i64, i64) -> i64
-          %1207 = func.call @cc_nil_value() : () -> i64
-          %1208 = func.call @cc_cons(%1206, %1207) : (i64, i64) -> i64
-          %1209 = func.call @cc_values_pack(%1208) : (i64) -> i64
-          %1210 = llvm.mlir.addressof @str118 : !llvm.ptr
-          %1211 = arith.constant 2 : i64
-          %1212 = func.call @cc_make_string(%1210, %1211) : (!llvm.ptr, i64) -> i64
-          func.call @stack_push_pointer(%1206) : (i64) -> ()
-          func.call @stack_push_pointer(%1212) : (i64) -> ()
-          func.call @stack_push_pointer(%1001) : (i64) -> ()
-          %1213 = llvm.mlir.addressof @str119 : !llvm.ptr
-          %1214 = func.call @cc_make_function_ref_const(%1213) : (!llvm.ptr) -> i64
-          %1215 = arith.constant 3 : i64
-          func.call @cc_funcall_stack(%1214, %1215) : (i64, i64) -> ()
-          %1216 = func.call @stack_pop_pointer() : () -> i64
-          scf.yield %1216 : i64
+          func.call @stack_push_pointer(%1199) : (i64) -> ()
+          func.call @stack_push_pointer(%1205) : (i64) -> ()
+          func.call @stack_push_pointer(%994) : (i64) -> ()
+          %1206 = llvm.mlir.addressof @str118 : !llvm.ptr
+          %1207 = func.call @cc_make_function_ref_const(%1206) : (!llvm.ptr) -> i64
+          %1208 = arith.constant 3 : i64
+          func.call @cc_funcall_stack(%1207, %1208) : (i64, i64) -> ()
+          %1209 = func.call @stack_pop_pointer() : () -> i64
+          scf.yield %1209 : i64
         }
-        func.call @stack_push_pointer(%1199) : (i64) -> ()
+        func.call @stack_push_pointer(%1192) : (i64) -> ()
       } else {
         func.call @stack_push_nil() : () -> ()
       }
-      %1217 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1217 : i64
+      %1210 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1210 : i64
     }
-    %__rlasp_stack_elide_zero_59 = arith.constant 0 : i64
-    %1218 = arith.addi %1191, %__rlasp_stack_elide_zero_59 : i64
-    %1219 = func.call @cc_multiple_value_list(%1218) : (i64) -> i64
-    %1220 = llvm.mlir.addressof @str120 : !llvm.ptr
-    %1221 = arith.constant 37 : i64
-    %1222 = func.call @cc_make_string(%1220, %1221) : (!llvm.ptr, i64) -> i64
-    %1223 = func.call @cc_nil_value() : () -> i64
-    %1224 = func.call @cc_intern(%1222, %1223) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_58 = arith.constant 0 : i64
+    %1211 = arith.addi %1184, %__rlasp_stack_elide_zero_58 : i64
+    %1212 = func.call @cc_multiple_value_list(%1211) : (i64) -> i64
+    %1213 = llvm.mlir.addressof @str119 : !llvm.ptr
+    %1214 = arith.constant 37 : i64
+    %1215 = func.call @cc_make_string(%1213, %1214) : (!llvm.ptr, i64) -> i64
+    %1216 = func.call @cc_nil_value() : () -> i64
+    %1217 = func.call @cc_intern(%1215, %1216) : (i64, i64) -> i64
+    %1218 = func.call @cc_nil_value() : () -> i64
+    %1219 = func.call @cc_cons(%1217, %1218) : (i64, i64) -> i64
+    %1220 = func.call @cc_values_pack(%1219) : (i64) -> i64
+    %1221 = func.call @cc_symbol_value(%1217) : (i64) -> i64
+    %1222 = llvm.mlir.addressof @str120 : !llvm.ptr
+    %1223 = arith.constant 39 : i64
+    %1224 = func.call @cc_make_string(%1222, %1223) : (!llvm.ptr, i64) -> i64
     %1225 = func.call @cc_nil_value() : () -> i64
-    %1226 = func.call @cc_cons(%1224, %1225) : (i64, i64) -> i64
-    %1227 = func.call @cc_values_pack(%1226) : (i64) -> i64
-    %1228 = func.call @cc_symbol_value(%1224) : (i64) -> i64
-    %1229 = llvm.mlir.addressof @str121 : !llvm.ptr
-    %1230 = arith.constant 39 : i64
-    %1231 = func.call @cc_make_string(%1229, %1230) : (!llvm.ptr, i64) -> i64
-    %1232 = func.call @cc_nil_value() : () -> i64
-    %1233 = func.call @cc_intern(%1231, %1232) : (i64, i64) -> i64
-    %1234 = func.call @cc_nil_value() : () -> i64
-    %1235 = func.call @cc_cons(%1233, %1234) : (i64, i64) -> i64
-    %1236 = func.call @cc_values_pack(%1235) : (i64) -> i64
-    %1237 = func.call @cc_symbol_value(%1233) : (i64) -> i64
-    %1238 = func.call @cc_nil_value() : () -> i64
-    %1239 = arith.cmpi ne, %1228, %1238 : i64
-    %1240 = scf.if %1239 -> (i64) {
-      scf.yield %1237 : i64
+    %1226 = func.call @cc_intern(%1224, %1225) : (i64, i64) -> i64
+    %1227 = func.call @cc_nil_value() : () -> i64
+    %1228 = func.call @cc_cons(%1226, %1227) : (i64, i64) -> i64
+    %1229 = func.call @cc_values_pack(%1228) : (i64) -> i64
+    %1230 = func.call @cc_symbol_value(%1226) : (i64) -> i64
+    %1231 = func.call @cc_nil_value() : () -> i64
+    %1232 = arith.cmpi ne, %1221, %1231 : i64
+    %1233 = scf.if %1232 -> (i64) {
+      scf.yield %1230 : i64
     } else {
-      scf.yield %1219 : i64
+      scf.yield %1212 : i64
     }
-    %1241 = func.call @cc_values_pack(%1240) : (i64) -> i64
-    func.call @stack_push_pointer(%1241) : (i64) -> ()
+    %1234 = func.call @cc_values_pack(%1233) : (i64) -> i64
+    func.call @stack_push_pointer(%1234) : (i64) -> ()
     func.return
   }
   func.func @"%FN%%fail-test"() {
-    %1242 = llvm.mlir.addressof @str122 : !llvm.ptr
-    %1243 = arith.constant 10 : i64
-    %1244 = func.call @cc_make_string(%1242, %1243) : (!llvm.ptr, i64) -> i64
-    %1245 = func.call @cc_nil_value() : () -> i64
-    %1246 = func.call @cc_intern(%1244, %1245) : (i64, i64) -> i64
-    %1247 = func.call @cc_nil_value() : () -> i64
-    %1248 = func.call @cc_cons(%1246, %1247) : (i64, i64) -> i64
-    %1249 = func.call @cc_values_pack(%1248) : (i64) -> i64
-    %1250 = llvm.mlir.addressof @str123 : !llvm.ptr
-    %1251 = arith.constant 42 : i64
-    %1252 = func.call @cc_make_string(%1250, %1251) : (!llvm.ptr, i64) -> i64
-    %1253 = func.call @cc_register_function_lambda_list_metadata_raw(%1246, %1252) : (i64, i64) -> i64
-    %1254 = func.call @stack_pop_pointer() : () -> i64
-    %1255 = func.call @stack_pop_pointer() : () -> i64
-    %1256 = func.call @stack_pop_pointer() : () -> i64
-    %1257 = func.call @stack_pop_pointer() : () -> i64
-    %1258 = func.call @stack_pop_pointer() : () -> i64
-    %1259 = func.call @stack_pop_pointer() : () -> i64
-    %1260 = func.call @cc_nil_value() : () -> i64
-    %1261 = llvm.mlir.addressof @str124 : !llvm.ptr
-    %1262 = arith.constant 37 : i64
-    %1263 = func.call @cc_make_string(%1261, %1262) : (!llvm.ptr, i64) -> i64
-    %1264 = func.call @cc_nil_value() : () -> i64
-    %1265 = func.call @cc_intern(%1263, %1264) : (i64, i64) -> i64
+    %1235 = llvm.mlir.addressof @str121 : !llvm.ptr
+    %1236 = arith.constant 10 : i64
+    %1237 = func.call @cc_make_string(%1235, %1236) : (!llvm.ptr, i64) -> i64
+    %1238 = func.call @cc_nil_value() : () -> i64
+    %1239 = func.call @cc_intern(%1237, %1238) : (i64, i64) -> i64
+    %1240 = func.call @cc_nil_value() : () -> i64
+    %1241 = func.call @cc_cons(%1239, %1240) : (i64, i64) -> i64
+    %1242 = func.call @cc_values_pack(%1241) : (i64) -> i64
+    %1243 = llvm.mlir.addressof @str122 : !llvm.ptr
+    %1244 = arith.constant 42 : i64
+    %1245 = func.call @cc_make_string(%1243, %1244) : (!llvm.ptr, i64) -> i64
+    %1246 = func.call @cc_register_function_lambda_list_metadata_raw(%1239, %1245) : (i64, i64) -> i64
+    %1247 = func.call @stack_pop_pointer() : () -> i64
+    %1248 = func.call @stack_pop_pointer() : () -> i64
+    %1249 = func.call @stack_pop_pointer() : () -> i64
+    %1250 = func.call @stack_pop_pointer() : () -> i64
+    %1251 = func.call @stack_pop_pointer() : () -> i64
+    %1252 = func.call @stack_pop_pointer() : () -> i64
+    %1253 = func.call @cc_nil_value() : () -> i64
+    %1254 = llvm.mlir.addressof @str123 : !llvm.ptr
+    %1255 = arith.constant 37 : i64
+    %1256 = func.call @cc_make_string(%1254, %1255) : (!llvm.ptr, i64) -> i64
+    %1257 = func.call @cc_nil_value() : () -> i64
+    %1258 = func.call @cc_intern(%1256, %1257) : (i64, i64) -> i64
+    %1259 = func.call @cc_nil_value() : () -> i64
+    %1260 = func.call @cc_cons(%1258, %1259) : (i64, i64) -> i64
+    %1261 = func.call @cc_values_pack(%1260) : (i64) -> i64
+    %1262 = func.call @cc_set_symbol_value(%1258, %1253) : (i64, i64) -> i64
+    %1263 = llvm.mlir.addressof @str124 : !llvm.ptr
+    %1264 = arith.constant 38 : i64
+    %1265 = func.call @cc_make_string(%1263, %1264) : (!llvm.ptr, i64) -> i64
     %1266 = func.call @cc_nil_value() : () -> i64
-    %1267 = func.call @cc_cons(%1265, %1266) : (i64, i64) -> i64
-    %1268 = func.call @cc_values_pack(%1267) : (i64) -> i64
-    %1269 = func.call @cc_set_symbol_value(%1265, %1260) : (i64, i64) -> i64
-    %1270 = llvm.mlir.addressof @str125 : !llvm.ptr
-    %1271 = arith.constant 38 : i64
-    %1272 = func.call @cc_make_string(%1270, %1271) : (!llvm.ptr, i64) -> i64
-    %1273 = func.call @cc_nil_value() : () -> i64
-    %1274 = func.call @cc_intern(%1272, %1273) : (i64, i64) -> i64
+    %1267 = func.call @cc_intern(%1265, %1266) : (i64, i64) -> i64
+    %1268 = func.call @cc_nil_value() : () -> i64
+    %1269 = func.call @cc_cons(%1267, %1268) : (i64, i64) -> i64
+    %1270 = func.call @cc_values_pack(%1269) : (i64) -> i64
+    %1271 = func.call @cc_set_symbol_value(%1267, %1253) : (i64, i64) -> i64
+    %1272 = llvm.mlir.addressof @str125 : !llvm.ptr
+    %1273 = arith.constant 39 : i64
+    %1274 = func.call @cc_make_string(%1272, %1273) : (!llvm.ptr, i64) -> i64
     %1275 = func.call @cc_nil_value() : () -> i64
-    %1276 = func.call @cc_cons(%1274, %1275) : (i64, i64) -> i64
-    %1277 = func.call @cc_values_pack(%1276) : (i64) -> i64
-    %1278 = func.call @cc_set_symbol_value(%1274, %1260) : (i64, i64) -> i64
-    %1279 = llvm.mlir.addressof @str126 : !llvm.ptr
-    %1280 = arith.constant 39 : i64
-    %1281 = func.call @cc_make_string(%1279, %1280) : (!llvm.ptr, i64) -> i64
+    %1276 = func.call @cc_intern(%1274, %1275) : (i64, i64) -> i64
+    %1277 = func.call @cc_nil_value() : () -> i64
+    %1278 = func.call @cc_cons(%1276, %1277) : (i64, i64) -> i64
+    %1279 = func.call @cc_values_pack(%1278) : (i64) -> i64
+    %1280 = func.call @cc_set_symbol_value(%1276, %1253) : (i64, i64) -> i64
+    %1281 = func.call @cc_nil_value() : () -> i64
     %1282 = func.call @cc_nil_value() : () -> i64
-    %1283 = func.call @cc_intern(%1281, %1282) : (i64, i64) -> i64
-    %1284 = func.call @cc_nil_value() : () -> i64
-    %1285 = func.call @cc_cons(%1283, %1284) : (i64, i64) -> i64
-    %1286 = func.call @cc_values_pack(%1285) : (i64) -> i64
-    %1287 = func.call @cc_set_symbol_value(%1283, %1260) : (i64, i64) -> i64
-    %1288 = func.call @cc_nil_value() : () -> i64
-    %1289 = func.call @cc_nil_value() : () -> i64
-    %1290 = func.call @cc_errorp(%1288) : (i64) -> i64
-    %1291 = arith.cmpi ne, %1290, %1289 : i64
-    %1292 = scf.if %1291 -> (i64) {
-      scf.yield %1288 : i64
+    %1283 = func.call @cc_errorp(%1281) : (i64) -> i64
+    %1284 = arith.cmpi ne, %1283, %1282 : i64
+    %1285 = scf.if %1284 -> (i64) {
+      scf.yield %1281 : i64
     } else {
-      func.call @stack_push_pointer(%1259) : (i64) -> ()
-      %1293 = llvm.mlir.addressof @str127 : !llvm.ptr
-      %1294 = arith.constant 19 : i64
-      %1295 = func.call @cc_make_string(%1293, %1294) : (!llvm.ptr, i64) -> i64
-      %1296 = func.call @cc_nil_value() : () -> i64
-      %1297 = func.call @cc_intern(%1295, %1296) : (i64, i64) -> i64
-      %1298 = func.call @cc_nil_value() : () -> i64
-      %1299 = func.call @cc_cons(%1297, %1298) : (i64, i64) -> i64
-      %1300 = func.call @cc_values_pack(%1299) : (i64) -> i64
-      %1301 = func.call @cc_symbol_value(%1297) : (i64) -> i64
+      func.call @stack_push_pointer(%1252) : (i64) -> ()
+      %1286 = llvm.mlir.addressof @str126 : !llvm.ptr
+      %1287 = arith.constant 19 : i64
+      %1288 = func.call @cc_make_string(%1286, %1287) : (!llvm.ptr, i64) -> i64
+      %1289 = func.call @cc_nil_value() : () -> i64
+      %1290 = func.call @cc_intern(%1288, %1289) : (i64, i64) -> i64
+      %1291 = func.call @cc_nil_value() : () -> i64
+      %1292 = func.call @cc_cons(%1290, %1291) : (i64, i64) -> i64
+      %1293 = func.call @cc_values_pack(%1292) : (i64) -> i64
+      %1294 = func.call @cc_symbol_value(%1290) : (i64) -> i64
+      %__rlasp_stack_elide_zero_59 = arith.constant 0 : i64
+      %1295 = arith.addi %1294, %__rlasp_stack_elide_zero_59 : i64
+      %1296 = func.call @stack_pop_pointer() : () -> i64
+      %1297 = func.call @cc_member(%1296, %1295) : (i64, i64) -> i64
       %__rlasp_stack_elide_zero_60 = arith.constant 0 : i64
-      %1302 = arith.addi %1301, %__rlasp_stack_elide_zero_60 : i64
-      %1303 = func.call @stack_pop_pointer() : () -> i64
-      %1304 = func.call @cc_member(%1303, %1302) : (i64, i64) -> i64
-      %__rlasp_stack_elide_zero_61 = arith.constant 0 : i64
-      %1305 = arith.addi %1304, %__rlasp_stack_elide_zero_61 : i64
-      %1306 = func.call @cc_nil_value() : () -> i64
-      %1307 = arith.cmpi ne, %1305, %1306 : i64
-      scf.if %1307 {
-        %__rlasp_stack_elide_zero_62 = arith.constant 0 : i64
-        %1308 = arith.addi %1259, %__rlasp_stack_elide_zero_62 : i64
-        %1309 = llvm.mlir.addressof @str128 : !llvm.ptr
-        %1310 = arith.constant 23 : i64
-        %1311 = func.call @cc_make_string(%1309, %1310) : (!llvm.ptr, i64) -> i64
-        %1312 = func.call @cc_nil_value() : () -> i64
-        %1313 = func.call @cc_intern(%1311, %1312) : (i64, i64) -> i64
-        %1314 = func.call @cc_nil_value() : () -> i64
-        %1315 = func.call @cc_cons(%1313, %1314) : (i64, i64) -> i64
-        %1316 = func.call @cc_values_pack(%1315) : (i64) -> i64
-        %1317 = func.call @cc_symbol_value(%1313) : (i64) -> i64
-        %1318 = func.call @cc_cons(%1308, %1317) : (i64, i64) -> i64
-        %1319 = llvm.mlir.addressof @str129 : !llvm.ptr
-        %1320 = arith.constant 23 : i64
-        %1321 = func.call @cc_make_string(%1319, %1320) : (!llvm.ptr, i64) -> i64
-        %1322 = func.call @cc_nil_value() : () -> i64
-        %1323 = func.call @cc_intern(%1321, %1322) : (i64, i64) -> i64
-        %1324 = func.call @cc_nil_value() : () -> i64
-        %1325 = func.call @cc_cons(%1323, %1324) : (i64, i64) -> i64
-        %1326 = func.call @cc_values_pack(%1325) : (i64) -> i64
-        %1327 = func.call @cc_set_symbol_value(%1323, %1318) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1318) : (i64) -> ()
+      %1298 = arith.addi %1297, %__rlasp_stack_elide_zero_60 : i64
+      %1299 = func.call @cc_nil_value() : () -> i64
+      %1300 = arith.cmpi ne, %1298, %1299 : i64
+      scf.if %1300 {
+        %__rlasp_stack_elide_zero_61 = arith.constant 0 : i64
+        %1301 = arith.addi %1252, %__rlasp_stack_elide_zero_61 : i64
+        %1302 = llvm.mlir.addressof @str127 : !llvm.ptr
+        %1303 = arith.constant 23 : i64
+        %1304 = func.call @cc_make_string(%1302, %1303) : (!llvm.ptr, i64) -> i64
+        %1305 = func.call @cc_nil_value() : () -> i64
+        %1306 = func.call @cc_intern(%1304, %1305) : (i64, i64) -> i64
+        %1307 = func.call @cc_nil_value() : () -> i64
+        %1308 = func.call @cc_cons(%1306, %1307) : (i64, i64) -> i64
+        %1309 = func.call @cc_values_pack(%1308) : (i64) -> i64
+        %1310 = func.call @cc_symbol_value(%1306) : (i64) -> i64
+        %1311 = func.call @cc_cons(%1301, %1310) : (i64, i64) -> i64
+        %1312 = llvm.mlir.addressof @str128 : !llvm.ptr
+        %1313 = arith.constant 23 : i64
+        %1314 = func.call @cc_make_string(%1312, %1313) : (!llvm.ptr, i64) -> i64
+        %1315 = func.call @cc_nil_value() : () -> i64
+        %1316 = func.call @cc_intern(%1314, %1315) : (i64, i64) -> i64
+        %1317 = func.call @cc_nil_value() : () -> i64
+        %1318 = func.call @cc_cons(%1316, %1317) : (i64, i64) -> i64
+        %1319 = func.call @cc_values_pack(%1318) : (i64) -> i64
+        %1320 = func.call @cc_set_symbol_value(%1316, %1311) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1311) : (i64) -> ()
       } else {
-        %__rlasp_stack_elide_zero_63 = arith.constant 0 : i64
-        %1328 = arith.addi %1259, %__rlasp_stack_elide_zero_63 : i64
-        %1329 = llvm.mlir.addressof @str130 : !llvm.ptr
-        %1330 = arith.constant 25 : i64
-        %1331 = func.call @cc_make_string(%1329, %1330) : (!llvm.ptr, i64) -> i64
-        %1332 = func.call @cc_nil_value() : () -> i64
-        %1333 = func.call @cc_intern(%1331, %1332) : (i64, i64) -> i64
-        %1334 = func.call @cc_nil_value() : () -> i64
-        %1335 = func.call @cc_cons(%1333, %1334) : (i64, i64) -> i64
-        %1336 = func.call @cc_values_pack(%1335) : (i64) -> i64
-        %1337 = func.call @cc_symbol_value(%1333) : (i64) -> i64
-        %1338 = func.call @cc_cons(%1328, %1337) : (i64, i64) -> i64
-        %1339 = llvm.mlir.addressof @str131 : !llvm.ptr
-        %1340 = arith.constant 25 : i64
-        %1341 = func.call @cc_make_string(%1339, %1340) : (!llvm.ptr, i64) -> i64
-        %1342 = func.call @cc_nil_value() : () -> i64
-        %1343 = func.call @cc_intern(%1341, %1342) : (i64, i64) -> i64
-        %1344 = func.call @cc_nil_value() : () -> i64
-        %1345 = func.call @cc_cons(%1343, %1344) : (i64, i64) -> i64
-        %1346 = func.call @cc_values_pack(%1345) : (i64) -> i64
-        %1347 = func.call @cc_set_symbol_value(%1343, %1338) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1338) : (i64) -> ()
+        %__rlasp_stack_elide_zero_62 = arith.constant 0 : i64
+        %1321 = arith.addi %1252, %__rlasp_stack_elide_zero_62 : i64
+        %1322 = llvm.mlir.addressof @str129 : !llvm.ptr
+        %1323 = arith.constant 25 : i64
+        %1324 = func.call @cc_make_string(%1322, %1323) : (!llvm.ptr, i64) -> i64
+        %1325 = func.call @cc_nil_value() : () -> i64
+        %1326 = func.call @cc_intern(%1324, %1325) : (i64, i64) -> i64
+        %1327 = func.call @cc_nil_value() : () -> i64
+        %1328 = func.call @cc_cons(%1326, %1327) : (i64, i64) -> i64
+        %1329 = func.call @cc_values_pack(%1328) : (i64) -> i64
+        %1330 = func.call @cc_symbol_value(%1326) : (i64) -> i64
+        %1331 = func.call @cc_cons(%1321, %1330) : (i64, i64) -> i64
+        %1332 = llvm.mlir.addressof @str130 : !llvm.ptr
+        %1333 = arith.constant 25 : i64
+        %1334 = func.call @cc_make_string(%1332, %1333) : (!llvm.ptr, i64) -> i64
+        %1335 = func.call @cc_nil_value() : () -> i64
+        %1336 = func.call @cc_intern(%1334, %1335) : (i64, i64) -> i64
+        %1337 = func.call @cc_nil_value() : () -> i64
+        %1338 = func.call @cc_cons(%1336, %1337) : (i64, i64) -> i64
+        %1339 = func.call @cc_values_pack(%1338) : (i64) -> i64
+        %1340 = func.call @cc_set_symbol_value(%1336, %1331) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1331) : (i64) -> ()
       }
-      %1348 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1348 : i64
+      %1341 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1341 : i64
     }
-    %1349 = func.call @cc_nil_value() : () -> i64
-    %1350 = func.call @cc_errorp(%1292) : (i64) -> i64
-    %1351 = arith.cmpi ne, %1350, %1349 : i64
-    %1352 = scf.if %1351 -> (i64) {
-      scf.yield %1292 : i64
+    %1342 = func.call @cc_nil_value() : () -> i64
+    %1343 = func.call @cc_errorp(%1285) : (i64) -> i64
+    %1344 = arith.cmpi ne, %1343, %1342 : i64
+    %1345 = scf.if %1344 -> (i64) {
+      scf.yield %1285 : i64
     } else {
-      %1353 = llvm.mlir.addressof @str132 : !llvm.ptr
-      %1354 = arith.constant 3 : i64
-      %1355 = func.call @cc_make_string(%1353, %1354) : (!llvm.ptr, i64) -> i64
+      %1346 = llvm.mlir.addressof @str131 : !llvm.ptr
+      %1347 = arith.constant 3 : i64
+      %1348 = func.call @cc_make_string(%1346, %1347) : (!llvm.ptr, i64) -> i64
+      %1349 = llvm.mlir.addressof @str132 : !llvm.ptr
+      %1350 = arith.constant 7 : i64
+      %1351 = func.call @cc_make_string(%1349, %1350) : (!llvm.ptr, i64) -> i64
+      %1352 = func.call @cc_intern(%1348, %1351) : (i64, i64) -> i64
+      %1353 = func.call @cc_nil_value() : () -> i64
+      %1354 = func.call @cc_cons(%1352, %1353) : (i64, i64) -> i64
+      %1355 = func.call @cc_values_pack(%1354) : (i64) -> i64
       %1356 = llvm.mlir.addressof @str133 : !llvm.ptr
-      %1357 = arith.constant 7 : i64
+      %1357 = arith.constant 9 : i64
       %1358 = func.call @cc_make_string(%1356, %1357) : (!llvm.ptr, i64) -> i64
-      %1359 = func.call @cc_intern(%1355, %1358) : (i64, i64) -> i64
-      %1360 = func.call @cc_nil_value() : () -> i64
-      %1361 = func.call @cc_cons(%1359, %1360) : (i64, i64) -> i64
-      %1362 = func.call @cc_values_pack(%1361) : (i64) -> i64
-      %1363 = llvm.mlir.addressof @str134 : !llvm.ptr
-      %1364 = arith.constant 9 : i64
-      %1365 = func.call @cc_make_string(%1363, %1364) : (!llvm.ptr, i64) -> i64
-      func.call @stack_push_pointer(%1359) : (i64) -> ()
-      func.call @stack_push_pointer(%1365) : (i64) -> ()
-      func.call @stack_push_pointer(%1259) : (i64) -> ()
-      %1366 = llvm.mlir.addressof @str135 : !llvm.ptr
-      %1367 = func.call @cc_make_function_ref_const(%1366) : (!llvm.ptr) -> i64
-      %1368 = arith.constant 3 : i64
-      func.call @cc_funcall_stack(%1367, %1368) : (i64, i64) -> ()
-      %1369 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1369 : i64
+      func.call @stack_push_pointer(%1352) : (i64) -> ()
+      func.call @stack_push_pointer(%1358) : (i64) -> ()
+      func.call @stack_push_pointer(%1252) : (i64) -> ()
+      %1359 = llvm.mlir.addressof @str134 : !llvm.ptr
+      %1360 = func.call @cc_make_function_ref_const(%1359) : (!llvm.ptr) -> i64
+      %1361 = arith.constant 3 : i64
+      func.call @cc_funcall_stack(%1360, %1361) : (i64, i64) -> ()
+      %1362 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1362 : i64
     }
-    %1370 = func.call @cc_nil_value() : () -> i64
-    %1371 = func.call @cc_errorp(%1352) : (i64) -> i64
-    %1372 = arith.cmpi ne, %1371, %1370 : i64
-    %1373 = scf.if %1372 -> (i64) {
-      scf.yield %1352 : i64
+    %1363 = func.call @cc_nil_value() : () -> i64
+    %1364 = func.call @cc_errorp(%1345) : (i64) -> i64
+    %1365 = arith.cmpi ne, %1364, %1363 : i64
+    %1366 = scf.if %1365 -> (i64) {
+      scf.yield %1345 : i64
     } else {
-      %1374 = llvm.mlir.addressof @str136 : !llvm.ptr
-      %1375 = arith.constant 4 : i64
-      %1376 = func.call @cc_make_string(%1374, %1375) : (!llvm.ptr, i64) -> i64
+      %1367 = llvm.mlir.addressof @str135 : !llvm.ptr
+      %1368 = arith.constant 4 : i64
+      %1369 = func.call @cc_make_string(%1367, %1368) : (!llvm.ptr, i64) -> i64
+      %1370 = llvm.mlir.addressof @str136 : !llvm.ptr
+      %1371 = arith.constant 7 : i64
+      %1372 = func.call @cc_make_string(%1370, %1371) : (!llvm.ptr, i64) -> i64
+      %1373 = func.call @cc_intern(%1369, %1372) : (i64, i64) -> i64
+      %1374 = func.call @cc_nil_value() : () -> i64
+      %1375 = func.call @cc_cons(%1373, %1374) : (i64, i64) -> i64
+      %1376 = func.call @cc_values_pack(%1375) : (i64) -> i64
       %1377 = llvm.mlir.addressof @str137 : !llvm.ptr
-      %1378 = arith.constant 7 : i64
+      %1378 = arith.constant 50 : i64
       %1379 = func.call @cc_make_string(%1377, %1378) : (!llvm.ptr, i64) -> i64
-      %1380 = func.call @cc_intern(%1376, %1379) : (i64, i64) -> i64
-      %1381 = func.call @cc_nil_value() : () -> i64
-      %1382 = func.call @cc_cons(%1380, %1381) : (i64, i64) -> i64
-      %1383 = func.call @cc_values_pack(%1382) : (i64) -> i64
-      %1384 = llvm.mlir.addressof @str138 : !llvm.ptr
-      %1385 = arith.constant 50 : i64
-      %1386 = func.call @cc_make_string(%1384, %1385) : (!llvm.ptr, i64) -> i64
-      func.call @stack_push_pointer(%1380) : (i64) -> ()
-      func.call @stack_push_pointer(%1386) : (i64) -> ()
-      func.call @stack_push_pointer(%1254) : (i64) -> ()
-      func.call @stack_push_pointer(%1257) : (i64) -> ()
-      func.call @stack_push_pointer(%1256) : (i64) -> ()
-      %1387 = llvm.mlir.addressof @str139 : !llvm.ptr
-      %1388 = func.call @cc_make_function_ref_const(%1387) : (!llvm.ptr) -> i64
-      %1389 = arith.constant 5 : i64
-      func.call @cc_funcall_stack(%1388, %1389) : (i64, i64) -> ()
-      %1390 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1390 : i64
+      func.call @stack_push_pointer(%1373) : (i64) -> ()
+      func.call @stack_push_pointer(%1379) : (i64) -> ()
+      func.call @stack_push_pointer(%1247) : (i64) -> ()
+      func.call @stack_push_pointer(%1250) : (i64) -> ()
+      func.call @stack_push_pointer(%1249) : (i64) -> ()
+      %1380 = llvm.mlir.addressof @str138 : !llvm.ptr
+      %1381 = func.call @cc_make_function_ref_const(%1380) : (!llvm.ptr) -> i64
+      %1382 = arith.constant 5 : i64
+      func.call @cc_funcall_stack(%1381, %1382) : (i64, i64) -> ()
+      %1383 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1383 : i64
     }
-    %1391 = func.call @cc_nil_value() : () -> i64
-    %1392 = func.call @cc_errorp(%1373) : (i64) -> i64
-    %1393 = arith.cmpi ne, %1392, %1391 : i64
-    %1394 = scf.if %1393 -> (i64) {
-      scf.yield %1373 : i64
+    %1384 = func.call @cc_nil_value() : () -> i64
+    %1385 = func.call @cc_errorp(%1366) : (i64) -> i64
+    %1386 = arith.cmpi ne, %1385, %1384 : i64
+    %1387 = scf.if %1386 -> (i64) {
+      scf.yield %1366 : i64
     } else {
-      %1395 = llvm.mlir.addressof @str140 : !llvm.ptr
-      %1396 = arith.constant 4 : i64
-      %1397 = func.call @cc_make_string(%1395, %1396) : (!llvm.ptr, i64) -> i64
+      %1388 = llvm.mlir.addressof @str139 : !llvm.ptr
+      %1389 = arith.constant 4 : i64
+      %1390 = func.call @cc_make_string(%1388, %1389) : (!llvm.ptr, i64) -> i64
+      %1391 = llvm.mlir.addressof @str140 : !llvm.ptr
+      %1392 = arith.constant 7 : i64
+      %1393 = func.call @cc_make_string(%1391, %1392) : (!llvm.ptr, i64) -> i64
+      %1394 = func.call @cc_intern(%1390, %1393) : (i64, i64) -> i64
+      %1395 = func.call @cc_nil_value() : () -> i64
+      %1396 = func.call @cc_cons(%1394, %1395) : (i64, i64) -> i64
+      %1397 = func.call @cc_values_pack(%1396) : (i64) -> i64
       %1398 = llvm.mlir.addressof @str141 : !llvm.ptr
-      %1399 = arith.constant 7 : i64
+      %1399 = arith.constant 24 : i64
       %1400 = func.call @cc_make_string(%1398, %1399) : (!llvm.ptr, i64) -> i64
-      %1401 = func.call @cc_intern(%1397, %1400) : (i64, i64) -> i64
-      %1402 = func.call @cc_nil_value() : () -> i64
-      %1403 = func.call @cc_cons(%1401, %1402) : (i64, i64) -> i64
-      %1404 = func.call @cc_values_pack(%1403) : (i64) -> i64
-      %1405 = llvm.mlir.addressof @str142 : !llvm.ptr
-      %1406 = arith.constant 24 : i64
-      %1407 = func.call @cc_make_string(%1405, %1406) : (!llvm.ptr, i64) -> i64
-      func.call @stack_push_pointer(%1401) : (i64) -> ()
-      func.call @stack_push_pointer(%1407) : (i64) -> ()
-      func.call @stack_push_pointer(%1258) : (i64) -> ()
-      %1408 = llvm.mlir.addressof @str143 : !llvm.ptr
-      %1409 = func.call @cc_make_function_ref_const(%1408) : (!llvm.ptr) -> i64
-      %1410 = arith.constant 3 : i64
-      func.call @cc_funcall_stack(%1409, %1410) : (i64, i64) -> ()
-      %1411 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1411 : i64
+      func.call @stack_push_pointer(%1394) : (i64) -> ()
+      func.call @stack_push_pointer(%1400) : (i64) -> ()
+      func.call @stack_push_pointer(%1251) : (i64) -> ()
+      %1401 = llvm.mlir.addressof @str142 : !llvm.ptr
+      %1402 = func.call @cc_make_function_ref_const(%1401) : (!llvm.ptr) -> i64
+      %1403 = arith.constant 3 : i64
+      func.call @cc_funcall_stack(%1402, %1403) : (i64, i64) -> ()
+      %1404 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1404 : i64
     }
-    %1412 = func.call @cc_nil_value() : () -> i64
-    %1413 = func.call @cc_errorp(%1394) : (i64) -> i64
-    %1414 = arith.cmpi ne, %1413, %1412 : i64
-    %1415 = scf.if %1414 -> (i64) {
-      scf.yield %1394 : i64
+    %1405 = func.call @cc_nil_value() : () -> i64
+    %1406 = func.call @cc_errorp(%1387) : (i64) -> i64
+    %1407 = arith.cmpi ne, %1406, %1405 : i64
+    %1408 = scf.if %1407 -> (i64) {
+      scf.yield %1387 : i64
     } else {
-      %__rlasp_stack_elide_zero_64 = arith.constant 0 : i64
-      %1416 = arith.addi %1255, %__rlasp_stack_elide_zero_64 : i64
-      %1417 = func.call @cc_nil_value() : () -> i64
-      %1418 = arith.cmpi ne, %1416, %1417 : i64
-      scf.if %1418 {
-        %1419 = func.call @cc_nil_value() : () -> i64
-        %1420 = func.call @cc_nil_value() : () -> i64
-        %1421 = func.call @cc_errorp(%1419) : (i64) -> i64
-        %1422 = arith.cmpi ne, %1421, %1420 : i64
-        %1423 = scf.if %1422 -> (i64) {
-          scf.yield %1419 : i64
+      %__rlasp_stack_elide_zero_63 = arith.constant 0 : i64
+      %1409 = arith.addi %1248, %__rlasp_stack_elide_zero_63 : i64
+      %1410 = func.call @cc_nil_value() : () -> i64
+      %1411 = arith.cmpi ne, %1409, %1410 : i64
+      scf.if %1411 {
+        %1412 = func.call @cc_nil_value() : () -> i64
+        %1413 = func.call @cc_nil_value() : () -> i64
+        %1414 = func.call @cc_errorp(%1412) : (i64) -> i64
+        %1415 = arith.cmpi ne, %1414, %1413 : i64
+        %1416 = scf.if %1415 -> (i64) {
+          scf.yield %1412 : i64
         } else {
-          %1424 = llvm.mlir.addressof @str144 : !llvm.ptr
-          %1425 = arith.constant 4 : i64
-          %1426 = func.call @cc_make_string(%1424, %1425) : (!llvm.ptr, i64) -> i64
+          %1417 = llvm.mlir.addressof @str143 : !llvm.ptr
+          %1418 = arith.constant 4 : i64
+          %1419 = func.call @cc_make_string(%1417, %1418) : (!llvm.ptr, i64) -> i64
+          %1420 = llvm.mlir.addressof @str144 : !llvm.ptr
+          %1421 = arith.constant 7 : i64
+          %1422 = func.call @cc_make_string(%1420, %1421) : (!llvm.ptr, i64) -> i64
+          %1423 = func.call @cc_intern(%1419, %1422) : (i64, i64) -> i64
+          %1424 = func.call @cc_nil_value() : () -> i64
+          %1425 = func.call @cc_cons(%1423, %1424) : (i64, i64) -> i64
+          %1426 = func.call @cc_values_pack(%1425) : (i64) -> i64
           %1427 = llvm.mlir.addressof @str145 : !llvm.ptr
-          %1428 = arith.constant 7 : i64
+          %1428 = arith.constant 2 : i64
           %1429 = func.call @cc_make_string(%1427, %1428) : (!llvm.ptr, i64) -> i64
-          %1430 = func.call @cc_intern(%1426, %1429) : (i64, i64) -> i64
-          %1431 = func.call @cc_nil_value() : () -> i64
-          %1432 = func.call @cc_cons(%1430, %1431) : (i64, i64) -> i64
-          %1433 = func.call @cc_values_pack(%1432) : (i64) -> i64
-          %1434 = llvm.mlir.addressof @str146 : !llvm.ptr
-          %1435 = arith.constant 2 : i64
-          %1436 = func.call @cc_make_string(%1434, %1435) : (!llvm.ptr, i64) -> i64
-          func.call @stack_push_pointer(%1430) : (i64) -> ()
-          func.call @stack_push_pointer(%1436) : (i64) -> ()
-          func.call @stack_push_pointer(%1255) : (i64) -> ()
-          %1437 = llvm.mlir.addressof @str147 : !llvm.ptr
-          %1438 = func.call @cc_make_function_ref_const(%1437) : (!llvm.ptr) -> i64
-          %1439 = arith.constant 3 : i64
-          func.call @cc_funcall_stack(%1438, %1439) : (i64, i64) -> ()
-          %1440 = func.call @stack_pop_pointer() : () -> i64
-          scf.yield %1440 : i64
+          func.call @stack_push_pointer(%1423) : (i64) -> ()
+          func.call @stack_push_pointer(%1429) : (i64) -> ()
+          func.call @stack_push_pointer(%1248) : (i64) -> ()
+          %1430 = llvm.mlir.addressof @str146 : !llvm.ptr
+          %1431 = func.call @cc_make_function_ref_const(%1430) : (!llvm.ptr) -> i64
+          %1432 = arith.constant 3 : i64
+          func.call @cc_funcall_stack(%1431, %1432) : (i64, i64) -> ()
+          %1433 = func.call @stack_pop_pointer() : () -> i64
+          scf.yield %1433 : i64
         }
-        func.call @stack_push_pointer(%1423) : (i64) -> ()
+        func.call @stack_push_pointer(%1416) : (i64) -> ()
       } else {
         func.call @stack_push_nil() : () -> ()
       }
-      %1441 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1441 : i64
+      %1434 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1434 : i64
     }
-    %__rlasp_stack_elide_zero_65 = arith.constant 0 : i64
-    %1442 = arith.addi %1415, %__rlasp_stack_elide_zero_65 : i64
-    %1443 = func.call @cc_multiple_value_list(%1442) : (i64) -> i64
-    %1444 = llvm.mlir.addressof @str148 : !llvm.ptr
-    %1445 = arith.constant 37 : i64
-    %1446 = func.call @cc_make_string(%1444, %1445) : (!llvm.ptr, i64) -> i64
-    %1447 = func.call @cc_nil_value() : () -> i64
-    %1448 = func.call @cc_intern(%1446, %1447) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_64 = arith.constant 0 : i64
+    %1435 = arith.addi %1408, %__rlasp_stack_elide_zero_64 : i64
+    %1436 = func.call @cc_multiple_value_list(%1435) : (i64) -> i64
+    %1437 = llvm.mlir.addressof @str147 : !llvm.ptr
+    %1438 = arith.constant 37 : i64
+    %1439 = func.call @cc_make_string(%1437, %1438) : (!llvm.ptr, i64) -> i64
+    %1440 = func.call @cc_nil_value() : () -> i64
+    %1441 = func.call @cc_intern(%1439, %1440) : (i64, i64) -> i64
+    %1442 = func.call @cc_nil_value() : () -> i64
+    %1443 = func.call @cc_cons(%1441, %1442) : (i64, i64) -> i64
+    %1444 = func.call @cc_values_pack(%1443) : (i64) -> i64
+    %1445 = func.call @cc_symbol_value(%1441) : (i64) -> i64
+    %1446 = llvm.mlir.addressof @str148 : !llvm.ptr
+    %1447 = arith.constant 39 : i64
+    %1448 = func.call @cc_make_string(%1446, %1447) : (!llvm.ptr, i64) -> i64
     %1449 = func.call @cc_nil_value() : () -> i64
-    %1450 = func.call @cc_cons(%1448, %1449) : (i64, i64) -> i64
-    %1451 = func.call @cc_values_pack(%1450) : (i64) -> i64
-    %1452 = func.call @cc_symbol_value(%1448) : (i64) -> i64
-    %1453 = llvm.mlir.addressof @str149 : !llvm.ptr
-    %1454 = arith.constant 39 : i64
-    %1455 = func.call @cc_make_string(%1453, %1454) : (!llvm.ptr, i64) -> i64
-    %1456 = func.call @cc_nil_value() : () -> i64
-    %1457 = func.call @cc_intern(%1455, %1456) : (i64, i64) -> i64
-    %1458 = func.call @cc_nil_value() : () -> i64
-    %1459 = func.call @cc_cons(%1457, %1458) : (i64, i64) -> i64
-    %1460 = func.call @cc_values_pack(%1459) : (i64) -> i64
-    %1461 = func.call @cc_symbol_value(%1457) : (i64) -> i64
-    %1462 = func.call @cc_nil_value() : () -> i64
-    %1463 = arith.cmpi ne, %1452, %1462 : i64
-    %1464 = scf.if %1463 -> (i64) {
-      scf.yield %1461 : i64
+    %1450 = func.call @cc_intern(%1448, %1449) : (i64, i64) -> i64
+    %1451 = func.call @cc_nil_value() : () -> i64
+    %1452 = func.call @cc_cons(%1450, %1451) : (i64, i64) -> i64
+    %1453 = func.call @cc_values_pack(%1452) : (i64) -> i64
+    %1454 = func.call @cc_symbol_value(%1450) : (i64) -> i64
+    %1455 = func.call @cc_nil_value() : () -> i64
+    %1456 = arith.cmpi ne, %1445, %1455 : i64
+    %1457 = scf.if %1456 -> (i64) {
+      scf.yield %1454 : i64
     } else {
-      scf.yield %1443 : i64
+      scf.yield %1436 : i64
     }
-    %1465 = func.call @cc_values_pack(%1464) : (i64) -> i64
-    func.call @stack_push_pointer(%1465) : (i64) -> ()
+    %1458 = func.call @cc_values_pack(%1457) : (i64) -> i64
+    func.call @stack_push_pointer(%1458) : (i64) -> ()
     func.return
   }
   func.func @"%FN%%succeed-test"() {
-    %1466 = llvm.mlir.addressof @str150 : !llvm.ptr
-    %1467 = arith.constant 13 : i64
-    %1468 = func.call @cc_make_string(%1466, %1467) : (!llvm.ptr, i64) -> i64
-    %1469 = func.call @cc_nil_value() : () -> i64
-    %1470 = func.call @cc_intern(%1468, %1469) : (i64, i64) -> i64
-    %1471 = func.call @cc_nil_value() : () -> i64
-    %1472 = func.call @cc_cons(%1470, %1471) : (i64, i64) -> i64
-    %1473 = func.call @cc_values_pack(%1472) : (i64) -> i64
-    %1474 = llvm.mlir.addressof @str151 : !llvm.ptr
-    %1475 = arith.constant 4 : i64
-    %1476 = func.call @cc_make_string(%1474, %1475) : (!llvm.ptr, i64) -> i64
-    %1477 = func.call @cc_register_function_lambda_list_metadata_raw(%1470, %1476) : (i64, i64) -> i64
-    %1478 = func.call @stack_pop_pointer() : () -> i64
-    %1479 = func.call @cc_nil_value() : () -> i64
-    %1480 = llvm.mlir.addressof @str152 : !llvm.ptr
-    %1481 = arith.constant 37 : i64
-    %1482 = func.call @cc_make_string(%1480, %1481) : (!llvm.ptr, i64) -> i64
-    %1483 = func.call @cc_nil_value() : () -> i64
-    %1484 = func.call @cc_intern(%1482, %1483) : (i64, i64) -> i64
+    %1459 = llvm.mlir.addressof @str149 : !llvm.ptr
+    %1460 = arith.constant 13 : i64
+    %1461 = func.call @cc_make_string(%1459, %1460) : (!llvm.ptr, i64) -> i64
+    %1462 = func.call @cc_nil_value() : () -> i64
+    %1463 = func.call @cc_intern(%1461, %1462) : (i64, i64) -> i64
+    %1464 = func.call @cc_nil_value() : () -> i64
+    %1465 = func.call @cc_cons(%1463, %1464) : (i64, i64) -> i64
+    %1466 = func.call @cc_values_pack(%1465) : (i64) -> i64
+    %1467 = llvm.mlir.addressof @str150 : !llvm.ptr
+    %1468 = arith.constant 4 : i64
+    %1469 = func.call @cc_make_string(%1467, %1468) : (!llvm.ptr, i64) -> i64
+    %1470 = func.call @cc_register_function_lambda_list_metadata_raw(%1463, %1469) : (i64, i64) -> i64
+    %1471 = func.call @stack_pop_pointer() : () -> i64
+    %1472 = func.call @cc_nil_value() : () -> i64
+    %1473 = llvm.mlir.addressof @str151 : !llvm.ptr
+    %1474 = arith.constant 37 : i64
+    %1475 = func.call @cc_make_string(%1473, %1474) : (!llvm.ptr, i64) -> i64
+    %1476 = func.call @cc_nil_value() : () -> i64
+    %1477 = func.call @cc_intern(%1475, %1476) : (i64, i64) -> i64
+    %1478 = func.call @cc_nil_value() : () -> i64
+    %1479 = func.call @cc_cons(%1477, %1478) : (i64, i64) -> i64
+    %1480 = func.call @cc_values_pack(%1479) : (i64) -> i64
+    %1481 = func.call @cc_set_symbol_value(%1477, %1472) : (i64, i64) -> i64
+    %1482 = llvm.mlir.addressof @str152 : !llvm.ptr
+    %1483 = arith.constant 38 : i64
+    %1484 = func.call @cc_make_string(%1482, %1483) : (!llvm.ptr, i64) -> i64
     %1485 = func.call @cc_nil_value() : () -> i64
-    %1486 = func.call @cc_cons(%1484, %1485) : (i64, i64) -> i64
-    %1487 = func.call @cc_values_pack(%1486) : (i64) -> i64
-    %1488 = func.call @cc_set_symbol_value(%1484, %1479) : (i64, i64) -> i64
-    %1489 = llvm.mlir.addressof @str153 : !llvm.ptr
-    %1490 = arith.constant 38 : i64
-    %1491 = func.call @cc_make_string(%1489, %1490) : (!llvm.ptr, i64) -> i64
-    %1492 = func.call @cc_nil_value() : () -> i64
-    %1493 = func.call @cc_intern(%1491, %1492) : (i64, i64) -> i64
+    %1486 = func.call @cc_intern(%1484, %1485) : (i64, i64) -> i64
+    %1487 = func.call @cc_nil_value() : () -> i64
+    %1488 = func.call @cc_cons(%1486, %1487) : (i64, i64) -> i64
+    %1489 = func.call @cc_values_pack(%1488) : (i64) -> i64
+    %1490 = func.call @cc_set_symbol_value(%1486, %1472) : (i64, i64) -> i64
+    %1491 = llvm.mlir.addressof @str153 : !llvm.ptr
+    %1492 = arith.constant 39 : i64
+    %1493 = func.call @cc_make_string(%1491, %1492) : (!llvm.ptr, i64) -> i64
     %1494 = func.call @cc_nil_value() : () -> i64
-    %1495 = func.call @cc_cons(%1493, %1494) : (i64, i64) -> i64
-    %1496 = func.call @cc_values_pack(%1495) : (i64) -> i64
-    %1497 = func.call @cc_set_symbol_value(%1493, %1479) : (i64, i64) -> i64
-    %1498 = llvm.mlir.addressof @str154 : !llvm.ptr
-    %1499 = arith.constant 39 : i64
-    %1500 = func.call @cc_make_string(%1498, %1499) : (!llvm.ptr, i64) -> i64
+    %1495 = func.call @cc_intern(%1493, %1494) : (i64, i64) -> i64
+    %1496 = func.call @cc_nil_value() : () -> i64
+    %1497 = func.call @cc_cons(%1495, %1496) : (i64, i64) -> i64
+    %1498 = func.call @cc_values_pack(%1497) : (i64) -> i64
+    %1499 = func.call @cc_set_symbol_value(%1495, %1472) : (i64, i64) -> i64
+    %1500 = func.call @cc_nil_value() : () -> i64
     %1501 = func.call @cc_nil_value() : () -> i64
-    %1502 = func.call @cc_intern(%1500, %1501) : (i64, i64) -> i64
-    %1503 = func.call @cc_nil_value() : () -> i64
-    %1504 = func.call @cc_cons(%1502, %1503) : (i64, i64) -> i64
-    %1505 = func.call @cc_values_pack(%1504) : (i64) -> i64
-    %1506 = func.call @cc_set_symbol_value(%1502, %1479) : (i64, i64) -> i64
-    %1507 = func.call @cc_nil_value() : () -> i64
-    %1508 = func.call @cc_nil_value() : () -> i64
-    %1509 = func.call @cc_errorp(%1507) : (i64) -> i64
-    %1510 = arith.cmpi ne, %1509, %1508 : i64
-    %1511 = scf.if %1510 -> (i64) {
-      scf.yield %1507 : i64
+    %1502 = func.call @cc_errorp(%1500) : (i64) -> i64
+    %1503 = arith.cmpi ne, %1502, %1501 : i64
+    %1504 = scf.if %1503 -> (i64) {
+      scf.yield %1500 : i64
     } else {
-      func.call @stack_push_pointer(%1478) : (i64) -> ()
-      %1512 = llvm.mlir.addressof @str155 : !llvm.ptr
-      %1513 = arith.constant 19 : i64
-      %1514 = func.call @cc_make_string(%1512, %1513) : (!llvm.ptr, i64) -> i64
-      %1515 = func.call @cc_nil_value() : () -> i64
-      %1516 = func.call @cc_intern(%1514, %1515) : (i64, i64) -> i64
-      %1517 = func.call @cc_nil_value() : () -> i64
-      %1518 = func.call @cc_cons(%1516, %1517) : (i64, i64) -> i64
-      %1519 = func.call @cc_values_pack(%1518) : (i64) -> i64
-      %1520 = func.call @cc_symbol_value(%1516) : (i64) -> i64
+      func.call @stack_push_pointer(%1471) : (i64) -> ()
+      %1505 = llvm.mlir.addressof @str154 : !llvm.ptr
+      %1506 = arith.constant 19 : i64
+      %1507 = func.call @cc_make_string(%1505, %1506) : (!llvm.ptr, i64) -> i64
+      %1508 = func.call @cc_nil_value() : () -> i64
+      %1509 = func.call @cc_intern(%1507, %1508) : (i64, i64) -> i64
+      %1510 = func.call @cc_nil_value() : () -> i64
+      %1511 = func.call @cc_cons(%1509, %1510) : (i64, i64) -> i64
+      %1512 = func.call @cc_values_pack(%1511) : (i64) -> i64
+      %1513 = func.call @cc_symbol_value(%1509) : (i64) -> i64
+      %__rlasp_stack_elide_zero_65 = arith.constant 0 : i64
+      %1514 = arith.addi %1513, %__rlasp_stack_elide_zero_65 : i64
+      %1515 = func.call @stack_pop_pointer() : () -> i64
+      %1516 = func.call @cc_member(%1515, %1514) : (i64, i64) -> i64
       %__rlasp_stack_elide_zero_66 = arith.constant 0 : i64
-      %1521 = arith.addi %1520, %__rlasp_stack_elide_zero_66 : i64
-      %1522 = func.call @stack_pop_pointer() : () -> i64
-      %1523 = func.call @cc_member(%1522, %1521) : (i64, i64) -> i64
-      %__rlasp_stack_elide_zero_67 = arith.constant 0 : i64
-      %1524 = arith.addi %1523, %__rlasp_stack_elide_zero_67 : i64
-      %1525 = func.call @cc_nil_value() : () -> i64
-      %1526 = arith.cmpi ne, %1524, %1525 : i64
-      scf.if %1526 {
-        %__rlasp_stack_elide_zero_68 = arith.constant 0 : i64
-        %1527 = arith.addi %1478, %__rlasp_stack_elide_zero_68 : i64
-        %1528 = llvm.mlir.addressof @str156 : !llvm.ptr
-        %1529 = arith.constant 25 : i64
-        %1530 = func.call @cc_make_string(%1528, %1529) : (!llvm.ptr, i64) -> i64
-        %1531 = func.call @cc_nil_value() : () -> i64
-        %1532 = func.call @cc_intern(%1530, %1531) : (i64, i64) -> i64
-        %1533 = func.call @cc_nil_value() : () -> i64
-        %1534 = func.call @cc_cons(%1532, %1533) : (i64, i64) -> i64
-        %1535 = func.call @cc_values_pack(%1534) : (i64) -> i64
-        %1536 = func.call @cc_symbol_value(%1532) : (i64) -> i64
-        %1537 = func.call @cc_cons(%1527, %1536) : (i64, i64) -> i64
-        %1538 = llvm.mlir.addressof @str157 : !llvm.ptr
-        %1539 = arith.constant 25 : i64
-        %1540 = func.call @cc_make_string(%1538, %1539) : (!llvm.ptr, i64) -> i64
-        %1541 = func.call @cc_nil_value() : () -> i64
-        %1542 = func.call @cc_intern(%1540, %1541) : (i64, i64) -> i64
-        %1543 = func.call @cc_nil_value() : () -> i64
-        %1544 = func.call @cc_cons(%1542, %1543) : (i64, i64) -> i64
-        %1545 = func.call @cc_values_pack(%1544) : (i64) -> i64
-        %1546 = func.call @cc_set_symbol_value(%1542, %1537) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1537) : (i64) -> ()
+      %1517 = arith.addi %1516, %__rlasp_stack_elide_zero_66 : i64
+      %1518 = func.call @cc_nil_value() : () -> i64
+      %1519 = arith.cmpi ne, %1517, %1518 : i64
+      scf.if %1519 {
+        %__rlasp_stack_elide_zero_67 = arith.constant 0 : i64
+        %1520 = arith.addi %1471, %__rlasp_stack_elide_zero_67 : i64
+        %1521 = llvm.mlir.addressof @str155 : !llvm.ptr
+        %1522 = arith.constant 25 : i64
+        %1523 = func.call @cc_make_string(%1521, %1522) : (!llvm.ptr, i64) -> i64
+        %1524 = func.call @cc_nil_value() : () -> i64
+        %1525 = func.call @cc_intern(%1523, %1524) : (i64, i64) -> i64
+        %1526 = func.call @cc_nil_value() : () -> i64
+        %1527 = func.call @cc_cons(%1525, %1526) : (i64, i64) -> i64
+        %1528 = func.call @cc_values_pack(%1527) : (i64) -> i64
+        %1529 = func.call @cc_symbol_value(%1525) : (i64) -> i64
+        %1530 = func.call @cc_cons(%1520, %1529) : (i64, i64) -> i64
+        %1531 = llvm.mlir.addressof @str156 : !llvm.ptr
+        %1532 = arith.constant 25 : i64
+        %1533 = func.call @cc_make_string(%1531, %1532) : (!llvm.ptr, i64) -> i64
+        %1534 = func.call @cc_nil_value() : () -> i64
+        %1535 = func.call @cc_intern(%1533, %1534) : (i64, i64) -> i64
+        %1536 = func.call @cc_nil_value() : () -> i64
+        %1537 = func.call @cc_cons(%1535, %1536) : (i64, i64) -> i64
+        %1538 = func.call @cc_values_pack(%1537) : (i64) -> i64
+        %1539 = func.call @cc_set_symbol_value(%1535, %1530) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1530) : (i64) -> ()
       } else {
-        %__rlasp_stack_elide_zero_69 = arith.constant 0 : i64
-        %1547 = arith.addi %1478, %__rlasp_stack_elide_zero_69 : i64
-        %1548 = llvm.mlir.addressof @str158 : !llvm.ptr
-        %1549 = arith.constant 23 : i64
-        %1550 = func.call @cc_make_string(%1548, %1549) : (!llvm.ptr, i64) -> i64
-        %1551 = func.call @cc_nil_value() : () -> i64
-        %1552 = func.call @cc_intern(%1550, %1551) : (i64, i64) -> i64
-        %1553 = func.call @cc_nil_value() : () -> i64
-        %1554 = func.call @cc_cons(%1552, %1553) : (i64, i64) -> i64
-        %1555 = func.call @cc_values_pack(%1554) : (i64) -> i64
-        %1556 = func.call @cc_symbol_value(%1552) : (i64) -> i64
-        %1557 = func.call @cc_cons(%1547, %1556) : (i64, i64) -> i64
-        %1558 = llvm.mlir.addressof @str159 : !llvm.ptr
-        %1559 = arith.constant 23 : i64
-        %1560 = func.call @cc_make_string(%1558, %1559) : (!llvm.ptr, i64) -> i64
-        %1561 = func.call @cc_nil_value() : () -> i64
-        %1562 = func.call @cc_intern(%1560, %1561) : (i64, i64) -> i64
-        %1563 = func.call @cc_nil_value() : () -> i64
-        %1564 = func.call @cc_cons(%1562, %1563) : (i64, i64) -> i64
-        %1565 = func.call @cc_values_pack(%1564) : (i64) -> i64
-        %1566 = func.call @cc_set_symbol_value(%1562, %1557) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1557) : (i64) -> ()
+        %__rlasp_stack_elide_zero_68 = arith.constant 0 : i64
+        %1540 = arith.addi %1471, %__rlasp_stack_elide_zero_68 : i64
+        %1541 = llvm.mlir.addressof @str157 : !llvm.ptr
+        %1542 = arith.constant 23 : i64
+        %1543 = func.call @cc_make_string(%1541, %1542) : (!llvm.ptr, i64) -> i64
+        %1544 = func.call @cc_nil_value() : () -> i64
+        %1545 = func.call @cc_intern(%1543, %1544) : (i64, i64) -> i64
+        %1546 = func.call @cc_nil_value() : () -> i64
+        %1547 = func.call @cc_cons(%1545, %1546) : (i64, i64) -> i64
+        %1548 = func.call @cc_values_pack(%1547) : (i64) -> i64
+        %1549 = func.call @cc_symbol_value(%1545) : (i64) -> i64
+        %1550 = func.call @cc_cons(%1540, %1549) : (i64, i64) -> i64
+        %1551 = llvm.mlir.addressof @str158 : !llvm.ptr
+        %1552 = arith.constant 23 : i64
+        %1553 = func.call @cc_make_string(%1551, %1552) : (!llvm.ptr, i64) -> i64
+        %1554 = func.call @cc_nil_value() : () -> i64
+        %1555 = func.call @cc_intern(%1553, %1554) : (i64, i64) -> i64
+        %1556 = func.call @cc_nil_value() : () -> i64
+        %1557 = func.call @cc_cons(%1555, %1556) : (i64, i64) -> i64
+        %1558 = func.call @cc_values_pack(%1557) : (i64) -> i64
+        %1559 = func.call @cc_set_symbol_value(%1555, %1550) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1550) : (i64) -> ()
       }
-      %1567 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1567 : i64
+      %1560 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1560 : i64
     }
-    %1568 = func.call @cc_nil_value() : () -> i64
-    %1569 = func.call @cc_errorp(%1511) : (i64) -> i64
-    %1570 = arith.cmpi ne, %1569, %1568 : i64
-    %1571 = scf.if %1570 -> (i64) {
-      scf.yield %1511 : i64
+    %1561 = func.call @cc_nil_value() : () -> i64
+    %1562 = func.call @cc_errorp(%1504) : (i64) -> i64
+    %1563 = arith.cmpi ne, %1562, %1561 : i64
+    %1564 = scf.if %1563 -> (i64) {
+      scf.yield %1504 : i64
     } else {
-      %1572 = llvm.mlir.addressof @str160 : !llvm.ptr
-      %1573 = arith.constant 4 : i64
-      %1574 = func.call @cc_make_string(%1572, %1573) : (!llvm.ptr, i64) -> i64
+      %1565 = llvm.mlir.addressof @str159 : !llvm.ptr
+      %1566 = arith.constant 4 : i64
+      %1567 = func.call @cc_make_string(%1565, %1566) : (!llvm.ptr, i64) -> i64
+      %1568 = llvm.mlir.addressof @str160 : !llvm.ptr
+      %1569 = arith.constant 7 : i64
+      %1570 = func.call @cc_make_string(%1568, %1569) : (!llvm.ptr, i64) -> i64
+      %1571 = func.call @cc_intern(%1567, %1570) : (i64, i64) -> i64
+      %1572 = func.call @cc_nil_value() : () -> i64
+      %1573 = func.call @cc_cons(%1571, %1572) : (i64, i64) -> i64
+      %1574 = func.call @cc_values_pack(%1573) : (i64) -> i64
       %1575 = llvm.mlir.addressof @str161 : !llvm.ptr
-      %1576 = arith.constant 7 : i64
+      %1576 = arith.constant 9 : i64
       %1577 = func.call @cc_make_string(%1575, %1576) : (!llvm.ptr, i64) -> i64
-      %1578 = func.call @cc_intern(%1574, %1577) : (i64, i64) -> i64
-      %1579 = func.call @cc_nil_value() : () -> i64
-      %1580 = func.call @cc_cons(%1578, %1579) : (i64, i64) -> i64
-      %1581 = func.call @cc_values_pack(%1580) : (i64) -> i64
-      %1582 = llvm.mlir.addressof @str162 : !llvm.ptr
-      %1583 = arith.constant 9 : i64
-      %1584 = func.call @cc_make_string(%1582, %1583) : (!llvm.ptr, i64) -> i64
-      func.call @stack_push_pointer(%1578) : (i64) -> ()
-      func.call @stack_push_pointer(%1584) : (i64) -> ()
-      func.call @stack_push_pointer(%1478) : (i64) -> ()
-      %1585 = llvm.mlir.addressof @str163 : !llvm.ptr
-      %1586 = func.call @cc_make_function_ref_const(%1585) : (!llvm.ptr) -> i64
-      %1587 = arith.constant 3 : i64
-      func.call @cc_funcall_stack(%1586, %1587) : (i64, i64) -> ()
-      %1588 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1588 : i64
+      func.call @stack_push_pointer(%1571) : (i64) -> ()
+      func.call @stack_push_pointer(%1577) : (i64) -> ()
+      func.call @stack_push_pointer(%1471) : (i64) -> ()
+      %1578 = llvm.mlir.addressof @str162 : !llvm.ptr
+      %1579 = func.call @cc_make_function_ref_const(%1578) : (!llvm.ptr) -> i64
+      %1580 = arith.constant 3 : i64
+      func.call @cc_funcall_stack(%1579, %1580) : (i64, i64) -> ()
+      %1581 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1581 : i64
     }
-    %__rlasp_stack_elide_zero_70 = arith.constant 0 : i64
-    %1589 = arith.addi %1571, %__rlasp_stack_elide_zero_70 : i64
-    %1590 = func.call @cc_multiple_value_list(%1589) : (i64) -> i64
-    %1591 = llvm.mlir.addressof @str164 : !llvm.ptr
-    %1592 = arith.constant 37 : i64
-    %1593 = func.call @cc_make_string(%1591, %1592) : (!llvm.ptr, i64) -> i64
-    %1594 = func.call @cc_nil_value() : () -> i64
-    %1595 = func.call @cc_intern(%1593, %1594) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_69 = arith.constant 0 : i64
+    %1582 = arith.addi %1564, %__rlasp_stack_elide_zero_69 : i64
+    %1583 = func.call @cc_multiple_value_list(%1582) : (i64) -> i64
+    %1584 = llvm.mlir.addressof @str163 : !llvm.ptr
+    %1585 = arith.constant 37 : i64
+    %1586 = func.call @cc_make_string(%1584, %1585) : (!llvm.ptr, i64) -> i64
+    %1587 = func.call @cc_nil_value() : () -> i64
+    %1588 = func.call @cc_intern(%1586, %1587) : (i64, i64) -> i64
+    %1589 = func.call @cc_nil_value() : () -> i64
+    %1590 = func.call @cc_cons(%1588, %1589) : (i64, i64) -> i64
+    %1591 = func.call @cc_values_pack(%1590) : (i64) -> i64
+    %1592 = func.call @cc_symbol_value(%1588) : (i64) -> i64
+    %1593 = llvm.mlir.addressof @str164 : !llvm.ptr
+    %1594 = arith.constant 39 : i64
+    %1595 = func.call @cc_make_string(%1593, %1594) : (!llvm.ptr, i64) -> i64
     %1596 = func.call @cc_nil_value() : () -> i64
-    %1597 = func.call @cc_cons(%1595, %1596) : (i64, i64) -> i64
-    %1598 = func.call @cc_values_pack(%1597) : (i64) -> i64
-    %1599 = func.call @cc_symbol_value(%1595) : (i64) -> i64
-    %1600 = llvm.mlir.addressof @str165 : !llvm.ptr
-    %1601 = arith.constant 39 : i64
-    %1602 = func.call @cc_make_string(%1600, %1601) : (!llvm.ptr, i64) -> i64
-    %1603 = func.call @cc_nil_value() : () -> i64
-    %1604 = func.call @cc_intern(%1602, %1603) : (i64, i64) -> i64
-    %1605 = func.call @cc_nil_value() : () -> i64
-    %1606 = func.call @cc_cons(%1604, %1605) : (i64, i64) -> i64
-    %1607 = func.call @cc_values_pack(%1606) : (i64) -> i64
-    %1608 = func.call @cc_symbol_value(%1604) : (i64) -> i64
-    %1609 = func.call @cc_nil_value() : () -> i64
-    %1610 = arith.cmpi ne, %1599, %1609 : i64
-    %1611 = scf.if %1610 -> (i64) {
-      scf.yield %1608 : i64
+    %1597 = func.call @cc_intern(%1595, %1596) : (i64, i64) -> i64
+    %1598 = func.call @cc_nil_value() : () -> i64
+    %1599 = func.call @cc_cons(%1597, %1598) : (i64, i64) -> i64
+    %1600 = func.call @cc_values_pack(%1599) : (i64) -> i64
+    %1601 = func.call @cc_symbol_value(%1597) : (i64) -> i64
+    %1602 = func.call @cc_nil_value() : () -> i64
+    %1603 = arith.cmpi ne, %1592, %1602 : i64
+    %1604 = scf.if %1603 -> (i64) {
+      scf.yield %1601 : i64
     } else {
-      scf.yield %1590 : i64
+      scf.yield %1583 : i64
     }
-    %1612 = func.call @cc_values_pack(%1611) : (i64) -> i64
-    func.call @stack_push_pointer(%1612) : (i64) -> ()
+    %1605 = func.call @cc_values_pack(%1604) : (i64) -> i64
+    func.call @stack_push_pointer(%1605) : (i64) -> ()
     func.return
   }
   func.func @"%FN%%test"() {
-    %1613 = llvm.mlir.addressof @str166 : !llvm.ptr
-    %1614 = arith.constant 5 : i64
-    %1615 = func.call @cc_make_string(%1613, %1614) : (!llvm.ptr, i64) -> i64
-    %1616 = func.call @cc_nil_value() : () -> i64
-    %1617 = func.call @cc_intern(%1615, %1616) : (i64, i64) -> i64
-    %1618 = func.call @cc_nil_value() : () -> i64
-    %1619 = func.call @cc_cons(%1617, %1618) : (i64, i64) -> i64
-    %1620 = func.call @cc_values_pack(%1619) : (i64) -> i64
-    %1621 = llvm.mlir.addressof @str167 : !llvm.ptr
-    %1622 = arith.constant 41 : i64
-    %1623 = func.call @cc_make_string(%1621, %1622) : (!llvm.ptr, i64) -> i64
-    %1624 = func.call @cc_register_function_lambda_list_metadata_raw(%1617, %1623) : (i64, i64) -> i64
-    %1625 = func.call @stack_pop_pointer() : () -> i64
-    %1626 = arith.constant 0 : i64
-    %1627 = func.call @cc_arg(%1625, %1626) : (i64, i64) -> i64
-    %1628 = arith.constant 4 : i64
-    %1629 = func.call @cc_arg(%1625, %1628) : (i64, i64) -> i64
-    %1630 = arith.constant 8 : i64
-    %1631 = func.call @cc_arg(%1625, %1630) : (i64, i64) -> i64
-    %1632 = arith.constant 12 : i64
-    %1633 = func.call @cc_arg(%1625, %1632) : (i64, i64) -> i64
-    %1634 = llvm.mlir.addressof @str168 : !llvm.ptr
-    %1635 = arith.constant 11 : i64
-    %1636 = func.call @cc_make_string(%1634, %1635) : (!llvm.ptr, i64) -> i64
+    %1606 = llvm.mlir.addressof @str165 : !llvm.ptr
+    %1607 = arith.constant 5 : i64
+    %1608 = func.call @cc_make_string(%1606, %1607) : (!llvm.ptr, i64) -> i64
+    %1609 = func.call @cc_nil_value() : () -> i64
+    %1610 = func.call @cc_intern(%1608, %1609) : (i64, i64) -> i64
+    %1611 = func.call @cc_nil_value() : () -> i64
+    %1612 = func.call @cc_cons(%1610, %1611) : (i64, i64) -> i64
+    %1613 = func.call @cc_values_pack(%1612) : (i64) -> i64
+    %1614 = llvm.mlir.addressof @str166 : !llvm.ptr
+    %1615 = arith.constant 41 : i64
+    %1616 = func.call @cc_make_string(%1614, %1615) : (!llvm.ptr, i64) -> i64
+    %1617 = func.call @cc_register_function_lambda_list_metadata_raw(%1610, %1616) : (i64, i64) -> i64
+    %1618 = func.call @stack_pop_pointer() : () -> i64
+    %1619 = arith.constant 0 : i64
+    %1620 = func.call @cc_arg(%1618, %1619) : (i64, i64) -> i64
+    %1621 = arith.constant 4 : i64
+    %1622 = func.call @cc_arg(%1618, %1621) : (i64, i64) -> i64
+    %1623 = arith.constant 8 : i64
+    %1624 = func.call @cc_arg(%1618, %1623) : (i64, i64) -> i64
+    %1625 = arith.constant 12 : i64
+    %1626 = func.call @cc_arg(%1618, %1625) : (i64, i64) -> i64
+    %1627 = llvm.mlir.addressof @str167 : !llvm.ptr
+    %1628 = arith.constant 11 : i64
+    %1629 = func.call @cc_make_string(%1627, %1628) : (!llvm.ptr, i64) -> i64
+    %1630 = func.call @cc_nil_value() : () -> i64
+    %1631 = func.call @cc_intern(%1629, %1630) : (i64, i64) -> i64
+    %1632 = func.call @cc_nil_value() : () -> i64
+    %1633 = func.call @cc_cons(%1631, %1632) : (i64, i64) -> i64
+    %1634 = func.call @cc_values_pack(%1633) : (i64) -> i64
+    %1635 = func.call @cc_arg(%1618, %1631) : (i64, i64) -> i64
+    %1636 = func.call @cc_arg_present(%1618, %1631) : (i64, i64) -> i64
     %1637 = func.call @cc_nil_value() : () -> i64
-    %1638 = func.call @cc_intern(%1636, %1637) : (i64, i64) -> i64
-    %1639 = func.call @cc_nil_value() : () -> i64
-    %1640 = func.call @cc_cons(%1638, %1639) : (i64, i64) -> i64
-    %1641 = func.call @cc_values_pack(%1640) : (i64) -> i64
-    %1642 = func.call @cc_arg(%1625, %1638) : (i64, i64) -> i64
-    %1643 = func.call @cc_arg_present(%1625, %1638) : (i64, i64) -> i64
-    %1644 = func.call @cc_nil_value() : () -> i64
-    %1645 = arith.cmpi ne, %1643, %1644 : i64
-    %1646 = scf.if %1645 -> (i64) {
-      scf.yield %1642 : i64
+    %1638 = arith.cmpi ne, %1636, %1637 : i64
+    %1639 = scf.if %1638 -> (i64) {
+      scf.yield %1635 : i64
     } else {
-      scf.yield %1644 : i64
+      scf.yield %1637 : i64
     }
-    %1647 = llvm.mlir.addressof @str169 : !llvm.ptr
-    %1648 = arith.constant 4 : i64
-    %1649 = func.call @cc_make_string(%1647, %1648) : (!llvm.ptr, i64) -> i64
+    %1640 = llvm.mlir.addressof @str168 : !llvm.ptr
+    %1641 = arith.constant 4 : i64
+    %1642 = func.call @cc_make_string(%1640, %1641) : (!llvm.ptr, i64) -> i64
+    %1643 = func.call @cc_nil_value() : () -> i64
+    %1644 = func.call @cc_intern(%1642, %1643) : (i64, i64) -> i64
+    %1645 = func.call @cc_nil_value() : () -> i64
+    %1646 = func.call @cc_cons(%1644, %1645) : (i64, i64) -> i64
+    %1647 = func.call @cc_values_pack(%1646) : (i64) -> i64
+    %1648 = func.call @cc_arg(%1618, %1644) : (i64, i64) -> i64
+    %1649 = func.call @cc_arg_present(%1618, %1644) : (i64, i64) -> i64
     %1650 = func.call @cc_nil_value() : () -> i64
-    %1651 = func.call @cc_intern(%1649, %1650) : (i64, i64) -> i64
-    %1652 = func.call @cc_nil_value() : () -> i64
-    %1653 = func.call @cc_cons(%1651, %1652) : (i64, i64) -> i64
-    %1654 = func.call @cc_values_pack(%1653) : (i64) -> i64
-    %1655 = func.call @cc_arg(%1625, %1651) : (i64, i64) -> i64
-    %1656 = func.call @cc_arg_present(%1625, %1651) : (i64, i64) -> i64
-    %1657 = func.call @cc_nil_value() : () -> i64
-    %1658 = arith.cmpi ne, %1656, %1657 : i64
-    %1659 = scf.if %1658 -> (i64) {
-      scf.yield %1655 : i64
+    %1651 = arith.cmpi ne, %1649, %1650 : i64
+    %1652 = scf.if %1651 -> (i64) {
+      scf.yield %1648 : i64
     } else {
-      %1660 = llvm.mlir.addressof @str170 : !llvm.ptr
-      %1661 = arith.constant 6 : i64
-      %1662 = func.call @cc_make_string(%1660, %1661) : (!llvm.ptr, i64) -> i64
-      %1663 = llvm.mlir.addressof @str171 : !llvm.ptr
-      %1664 = arith.constant 11 : i64
-      %1665 = func.call @cc_make_string(%1663, %1664) : (!llvm.ptr, i64) -> i64
-      %1666 = func.call @cc_intern(%1662, %1665) : (i64, i64) -> i64
-      %1667 = func.call @cc_nil_value() : () -> i64
-      %1668 = func.call @cc_cons(%1666, %1667) : (i64, i64) -> i64
-      %1669 = func.call @cc_values_pack(%1668) : (i64) -> i64
-      %__rlasp_stack_elide_zero_71 = arith.constant 0 : i64
-      %1670 = arith.addi %1666, %__rlasp_stack_elide_zero_71 : i64
-      scf.yield %1670 : i64
+      %1653 = llvm.mlir.addressof @str169 : !llvm.ptr
+      %1654 = arith.constant 6 : i64
+      %1655 = func.call @cc_make_string(%1653, %1654) : (!llvm.ptr, i64) -> i64
+      %1656 = llvm.mlir.addressof @str170 : !llvm.ptr
+      %1657 = arith.constant 11 : i64
+      %1658 = func.call @cc_make_string(%1656, %1657) : (!llvm.ptr, i64) -> i64
+      %1659 = func.call @cc_intern(%1655, %1658) : (i64, i64) -> i64
+      %1660 = func.call @cc_nil_value() : () -> i64
+      %1661 = func.call @cc_cons(%1659, %1660) : (i64, i64) -> i64
+      %1662 = func.call @cc_values_pack(%1661) : (i64) -> i64
+      %__rlasp_stack_elide_zero_70 = arith.constant 0 : i64
+      %1663 = arith.addi %1659, %__rlasp_stack_elide_zero_70 : i64
+      scf.yield %1663 : i64
     }
-    %1671 = func.call @cc_nil_value() : () -> i64
-    %1672 = llvm.mlir.addressof @str172 : !llvm.ptr
-    %1673 = arith.constant 37 : i64
-    %1674 = func.call @cc_make_string(%1672, %1673) : (!llvm.ptr, i64) -> i64
-    %1675 = func.call @cc_nil_value() : () -> i64
-    %1676 = func.call @cc_intern(%1674, %1675) : (i64, i64) -> i64
+    %1664 = func.call @cc_nil_value() : () -> i64
+    %1665 = llvm.mlir.addressof @str171 : !llvm.ptr
+    %1666 = arith.constant 37 : i64
+    %1667 = func.call @cc_make_string(%1665, %1666) : (!llvm.ptr, i64) -> i64
+    %1668 = func.call @cc_nil_value() : () -> i64
+    %1669 = func.call @cc_intern(%1667, %1668) : (i64, i64) -> i64
+    %1670 = func.call @cc_nil_value() : () -> i64
+    %1671 = func.call @cc_cons(%1669, %1670) : (i64, i64) -> i64
+    %1672 = func.call @cc_values_pack(%1671) : (i64) -> i64
+    %1673 = func.call @cc_set_symbol_value(%1669, %1664) : (i64, i64) -> i64
+    %1674 = llvm.mlir.addressof @str172 : !llvm.ptr
+    %1675 = arith.constant 38 : i64
+    %1676 = func.call @cc_make_string(%1674, %1675) : (!llvm.ptr, i64) -> i64
     %1677 = func.call @cc_nil_value() : () -> i64
-    %1678 = func.call @cc_cons(%1676, %1677) : (i64, i64) -> i64
-    %1679 = func.call @cc_values_pack(%1678) : (i64) -> i64
-    %1680 = func.call @cc_set_symbol_value(%1676, %1671) : (i64, i64) -> i64
-    %1681 = llvm.mlir.addressof @str173 : !llvm.ptr
-    %1682 = arith.constant 38 : i64
-    %1683 = func.call @cc_make_string(%1681, %1682) : (!llvm.ptr, i64) -> i64
-    %1684 = func.call @cc_nil_value() : () -> i64
-    %1685 = func.call @cc_intern(%1683, %1684) : (i64, i64) -> i64
+    %1678 = func.call @cc_intern(%1676, %1677) : (i64, i64) -> i64
+    %1679 = func.call @cc_nil_value() : () -> i64
+    %1680 = func.call @cc_cons(%1678, %1679) : (i64, i64) -> i64
+    %1681 = func.call @cc_values_pack(%1680) : (i64) -> i64
+    %1682 = func.call @cc_set_symbol_value(%1678, %1664) : (i64, i64) -> i64
+    %1683 = llvm.mlir.addressof @str173 : !llvm.ptr
+    %1684 = arith.constant 39 : i64
+    %1685 = func.call @cc_make_string(%1683, %1684) : (!llvm.ptr, i64) -> i64
     %1686 = func.call @cc_nil_value() : () -> i64
-    %1687 = func.call @cc_cons(%1685, %1686) : (i64, i64) -> i64
-    %1688 = func.call @cc_values_pack(%1687) : (i64) -> i64
-    %1689 = func.call @cc_set_symbol_value(%1685, %1671) : (i64, i64) -> i64
-    %1690 = llvm.mlir.addressof @str174 : !llvm.ptr
-    %1691 = arith.constant 39 : i64
-    %1692 = func.call @cc_make_string(%1690, %1691) : (!llvm.ptr, i64) -> i64
+    %1687 = func.call @cc_intern(%1685, %1686) : (i64, i64) -> i64
+    %1688 = func.call @cc_nil_value() : () -> i64
+    %1689 = func.call @cc_cons(%1687, %1688) : (i64, i64) -> i64
+    %1690 = func.call @cc_values_pack(%1689) : (i64) -> i64
+    %1691 = func.call @cc_set_symbol_value(%1687, %1664) : (i64, i64) -> i64
+    %1692 = func.call @cc_nil_value() : () -> i64
     %1693 = func.call @cc_nil_value() : () -> i64
-    %1694 = func.call @cc_intern(%1692, %1693) : (i64, i64) -> i64
-    %1695 = func.call @cc_nil_value() : () -> i64
-    %1696 = func.call @cc_cons(%1694, %1695) : (i64, i64) -> i64
-    %1697 = func.call @cc_values_pack(%1696) : (i64) -> i64
-    %1698 = func.call @cc_set_symbol_value(%1694, %1671) : (i64, i64) -> i64
-    %1699 = func.call @cc_nil_value() : () -> i64
-    %1700 = func.call @cc_nil_value() : () -> i64
-    %1701 = func.call @cc_errorp(%1699) : (i64) -> i64
-    %1702 = arith.cmpi ne, %1701, %1700 : i64
-    %1703 = scf.if %1702 -> (i64) {
-      scf.yield %1699 : i64
+    %1694 = func.call @cc_errorp(%1692) : (i64) -> i64
+    %1695 = arith.cmpi ne, %1694, %1693 : i64
+    %1696 = scf.if %1695 -> (i64) {
+      scf.yield %1692 : i64
     } else {
-      %1704 = func.call @cc_nil_value() : () -> i64
-      %1705 = func.call @cc_errorp(%1627) : (i64) -> i64
-      %1706 = arith.cmpi ne, %1705, %1704 : i64
-      %1707 = arith.cmpi eq, %1704, %1704 : i64
-      %1708 = arith.andi %1706, %1707 : i1
-      %1709 = scf.if %1708 -> (i64) {
-        scf.yield %1627 : i64
+      %1697 = func.call @cc_nil_value() : () -> i64
+      %1698 = func.call @cc_errorp(%1620) : (i64) -> i64
+      %1699 = arith.cmpi ne, %1698, %1697 : i64
+      %1700 = arith.cmpi eq, %1697, %1697 : i64
+      %1701 = arith.andi %1699, %1700 : i1
+      %1702 = scf.if %1701 -> (i64) {
+        scf.yield %1620 : i64
       } else {
-        scf.yield %1704 : i64
+        scf.yield %1697 : i64
       }
-      %1710 = arith.cmpi ne, %1709, %1704 : i64
-      scf.if %1710 {
-        func.call @stack_push_pointer(%1709) : (i64) -> ()
+      %1703 = arith.cmpi ne, %1702, %1697 : i64
+      scf.if %1703 {
+        func.call @stack_push_pointer(%1702) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%1627) : (i64) -> ()
-        %1711 = llvm.mlir.addressof @str175 : !llvm.ptr
-        %1712 = func.call @cc_make_function_ref_const(%1711) : (!llvm.ptr) -> i64
-        %1713 = arith.constant 1 : i64
-        func.call @cc_funcall_stack(%1712, %1713) : (i64, i64) -> ()
+        func.call @stack_push_pointer(%1620) : (i64) -> ()
+        %1704 = llvm.mlir.addressof @str174 : !llvm.ptr
+        %1705 = func.call @cc_make_function_ref_const(%1704) : (!llvm.ptr) -> i64
+        %1706 = arith.constant 1 : i64
+        func.call @cc_funcall_stack(%1705, %1706) : (i64, i64) -> ()
       }
-      %1714 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1714 : i64
+      %1707 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1707 : i64
     }
-    %1715 = func.call @cc_nil_value() : () -> i64
-    %1716 = func.call @cc_errorp(%1703) : (i64) -> i64
-    %1717 = arith.cmpi ne, %1716, %1715 : i64
-    %1718 = scf.if %1717 -> (i64) {
-      scf.yield %1703 : i64
+    %1708 = func.call @cc_nil_value() : () -> i64
+    %1709 = func.call @cc_errorp(%1696) : (i64) -> i64
+    %1710 = arith.cmpi ne, %1709, %1708 : i64
+    %1711 = scf.if %1710 -> (i64) {
+      scf.yield %1696 : i64
     } else {
-      %1719 = func.call @cc_push_ignore_errors_trap() : () -> i64
+      %1712 = func.call @cc_push_ignore_errors_trap() : () -> i64
       func.call @cc_clear_multiple_values() : () -> ()
-      %1720 = func.call @cc_nil_value() : () -> i64
-      %1721 = func.call @cc_nil_value() : () -> i64
-      %1722 = func.call @cc_errorp(%1720) : (i64) -> i64
-      %1723 = arith.cmpi ne, %1722, %1721 : i64
-      %1724 = scf.if %1723 -> (i64) {
-        scf.yield %1720 : i64
+      %1713 = func.call @cc_nil_value() : () -> i64
+      %1714 = func.call @cc_nil_value() : () -> i64
+      %1715 = func.call @cc_errorp(%1713) : (i64) -> i64
+      %1716 = arith.cmpi ne, %1715, %1714 : i64
+      %1717 = scf.if %1716 -> (i64) {
+        scf.yield %1713 : i64
       } else {
         func.call @cc_clear_multiple_values() : () -> ()
-        %__rlasp_stack_elide_zero_72 = arith.constant 0 : i64
-        %1725 = arith.addi %1631, %__rlasp_stack_elide_zero_72 : i64
-        %1726 = arith.constant 0 : i64
-        func.call @cc_funcall_stack(%1725, %1726) : (i64, i64) -> ()
-        %1727 = func.call @stack_pop_pointer() : () -> i64
-        %1728 = func.call @cc_errorp(%1727) : (i64) -> i64
-        %1729 = func.call @cc_nil_value() : () -> i64
-        %1730 = arith.cmpi ne, %1728, %1729 : i64
-        scf.if %1730 {
-          func.call @stack_push_pointer(%1727) : (i64) -> ()
+        %__rlasp_stack_elide_zero_71 = arith.constant 0 : i64
+        %1718 = arith.addi %1624, %__rlasp_stack_elide_zero_71 : i64
+        %1719 = arith.constant 0 : i64
+        func.call @cc_funcall_stack(%1718, %1719) : (i64, i64) -> ()
+        %1720 = func.call @stack_pop_pointer() : () -> i64
+        %1721 = func.call @cc_errorp(%1720) : (i64) -> i64
+        %1722 = func.call @cc_nil_value() : () -> i64
+        %1723 = arith.cmpi ne, %1721, %1722 : i64
+        scf.if %1723 {
+          func.call @stack_push_pointer(%1720) : (i64) -> ()
         } else {
-          %1731 = func.call @cc_multiple_value_list(%1727) : (i64) -> i64
-          func.call @stack_push_pointer(%1731) : (i64) -> ()
+          %1724 = func.call @cc_multiple_value_list(%1720) : (i64) -> i64
+          func.call @stack_push_pointer(%1724) : (i64) -> ()
         }
-        %1732 = func.call @stack_pop_pointer() : () -> i64
+        %1725 = func.call @stack_pop_pointer() : () -> i64
         func.call @stack_push_nil() : () -> ()
-        %1733 = func.call @stack_pop_pointer() : () -> i64
-        %1734 = func.call @cc_nil_value() : () -> i64
-        %1735 = func.call @cc_maybe_error_from_multiple_value_list(%1732) : (i64) -> i64
-        %1736 = func.call @cc_errorp(%1735) : (i64) -> i64
-        %1737 = arith.cmpi ne, %1736, %1734 : i64
-        %1738 = arith.cmpi eq, %1734, %1734 : i64
-        %1739 = arith.andi %1737, %1738 : i1
-        %1740 = scf.if %1739 -> (i64) {
-          scf.yield %1735 : i64
+        %1726 = func.call @stack_pop_pointer() : () -> i64
+        %1727 = func.call @cc_nil_value() : () -> i64
+        %1728 = func.call @cc_maybe_error_from_multiple_value_list(%1725) : (i64) -> i64
+        %1729 = func.call @cc_errorp(%1728) : (i64) -> i64
+        %1730 = arith.cmpi ne, %1729, %1727 : i64
+        %1731 = arith.cmpi eq, %1727, %1727 : i64
+        %1732 = arith.andi %1730, %1731 : i1
+        %1733 = scf.if %1732 -> (i64) {
+          scf.yield %1728 : i64
         } else {
-          scf.yield %1734 : i64
+          scf.yield %1727 : i64
         }
-        %1741 = arith.cmpi ne, %1740, %1734 : i64
-        scf.if %1741 {
-          func.call @stack_push_pointer(%1740) : (i64) -> ()
+        %1734 = arith.cmpi ne, %1733, %1727 : i64
+        scf.if %1734 {
+          func.call @stack_push_pointer(%1733) : (i64) -> ()
         } else {
           func.call @stack_push_nil() : () -> ()
-          %1742 = func.call @stack_pop_pointer() : () -> i64
-          %1743 = func.call @cc_cons(%1733, %1742) : (i64, i64) -> i64
+          %1735 = func.call @stack_pop_pointer() : () -> i64
+          %1736 = func.call @cc_cons(%1726, %1735) : (i64, i64) -> i64
+          %__rlasp_stack_elide_zero_72 = arith.constant 0 : i64
+          %1737 = arith.addi %1736, %__rlasp_stack_elide_zero_72 : i64
+          %1738 = func.call @cc_cons(%1725, %1737) : (i64, i64) -> i64
           %__rlasp_stack_elide_zero_73 = arith.constant 0 : i64
-          %1744 = arith.addi %1743, %__rlasp_stack_elide_zero_73 : i64
-          %1745 = func.call @cc_cons(%1732, %1744) : (i64, i64) -> i64
-          %__rlasp_stack_elide_zero_74 = arith.constant 0 : i64
-          %1746 = arith.addi %1745, %__rlasp_stack_elide_zero_74 : i64
-          %1747 = func.call @cc_values_pack(%1746) : (i64) -> i64
-          func.call @stack_push_pointer(%1747) : (i64) -> ()
+          %1739 = arith.addi %1738, %__rlasp_stack_elide_zero_73 : i64
+          %1740 = func.call @cc_values_pack(%1739) : (i64) -> i64
+          func.call @stack_push_pointer(%1740) : (i64) -> ()
         }
-        %1748 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %1748 : i64
+        %1741 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %1741 : i64
       }
+      %__rlasp_stack_elide_zero_74 = arith.constant 0 : i64
+      %1742 = arith.addi %1717, %__rlasp_stack_elide_zero_74 : i64
+      %1743 = func.call @cc_pop_ignore_errors_trap() : () -> i64
+      %1744 = func.call @cc_errorp(%1742) : (i64) -> i64
+      %1745 = func.call @cc_nil_value() : () -> i64
+      %1746 = arith.cmpi ne, %1744, %1745 : i64
+      scf.if %1746 {
+        %1747 = func.call @cc_condition_value(%1742) : (i64) -> i64
+        %1748 = func.call @cc_values2(%1745, %1747) : (i64, i64) -> i64
+        func.call @stack_push_pointer(%1748) : (i64) -> ()
+      } else {
+        %1749 = func.call @cc_multiple_value_list(%1742) : (i64) -> i64
+        %1750 = func.call @cc_values_pack(%1749) : (i64) -> i64
+        func.call @stack_push_pointer(%1750) : (i64) -> ()
+      }
+      %1751 = func.call @stack_pop_pointer() : () -> i64
+      %1752 = func.call @cc_multiple_value_list(%1751) : (i64) -> i64
+      %1753 = arith.constant 0 : i64
+      %1754 = func.call @cc_box_fixnum(%1753) : (i64) -> i64
+      %1755 = func.call @cc_nth(%1754, %1752) : (i64, i64) -> i64
+      %1756 = arith.constant 1 : i64
+      %1757 = func.call @cc_box_fixnum(%1756) : (i64) -> i64
+      %1758 = func.call @cc_nth(%1757, %1752) : (i64, i64) -> i64
       %__rlasp_stack_elide_zero_75 = arith.constant 0 : i64
-      %1749 = arith.addi %1724, %__rlasp_stack_elide_zero_75 : i64
-      %1750 = func.call @cc_pop_ignore_errors_trap() : () -> i64
-      %1751 = func.call @cc_errorp(%1749) : (i64) -> i64
-      %1752 = func.call @cc_nil_value() : () -> i64
-      %1753 = arith.cmpi ne, %1751, %1752 : i64
-      scf.if %1753 {
-        %1754 = func.call @cc_condition_value(%1749) : (i64) -> i64
-        %1755 = func.call @cc_values2(%1752, %1754) : (i64, i64) -> i64
-        func.call @stack_push_pointer(%1755) : (i64) -> ()
+      %1759 = arith.addi %1758, %__rlasp_stack_elide_zero_75 : i64
+      %1760 = func.call @cc_nil_value() : () -> i64
+      %1761 = arith.cmpi ne, %1759, %1760 : i64
+      scf.if %1761 {
+        func.call @stack_push_pointer(%1620) : (i64) -> ()
+        func.call @stack_push_pointer(%1622) : (i64) -> ()
+        func.call @stack_push_pointer(%1626) : (i64) -> ()
+        func.call @stack_push_pointer(%1758) : (i64) -> ()
+        func.call @stack_push_pointer(%1639) : (i64) -> ()
+        %1762 = llvm.mlir.addressof @str175 : !llvm.ptr
+        %1763 = func.call @cc_make_function_ref_const(%1762) : (!llvm.ptr) -> i64
+        %1764 = arith.constant 5 : i64
+        func.call @cc_funcall_stack(%1763, %1764) : (i64, i64) -> ()
       } else {
-        %1756 = func.call @cc_multiple_value_list(%1749) : (i64) -> i64
-        %1757 = func.call @cc_values_pack(%1756) : (i64) -> i64
-        func.call @stack_push_pointer(%1757) : (i64) -> ()
-      }
-      %1758 = func.call @stack_pop_pointer() : () -> i64
-      %1759 = func.call @cc_multiple_value_list(%1758) : (i64) -> i64
-      %1760 = arith.constant 0 : i64
-      %1761 = func.call @cc_box_fixnum(%1760) : (i64) -> i64
-      %1762 = func.call @cc_nth(%1761, %1759) : (i64, i64) -> i64
-      %1763 = arith.constant 1 : i64
-      %1764 = func.call @cc_box_fixnum(%1763) : (i64) -> i64
-      %1765 = func.call @cc_nth(%1764, %1759) : (i64, i64) -> i64
-      %__rlasp_stack_elide_zero_76 = arith.constant 0 : i64
-      %1766 = arith.addi %1765, %__rlasp_stack_elide_zero_76 : i64
-      %1767 = func.call @cc_nil_value() : () -> i64
-      %1768 = arith.cmpi ne, %1766, %1767 : i64
-      scf.if %1768 {
-        func.call @stack_push_pointer(%1627) : (i64) -> ()
-        func.call @stack_push_pointer(%1629) : (i64) -> ()
-        func.call @stack_push_pointer(%1633) : (i64) -> ()
-        func.call @stack_push_pointer(%1765) : (i64) -> ()
-        func.call @stack_push_pointer(%1646) : (i64) -> ()
-        %1769 = llvm.mlir.addressof @str176 : !llvm.ptr
-        %1770 = func.call @cc_make_function_ref_const(%1769) : (!llvm.ptr) -> i64
-        %1771 = arith.constant 5 : i64
-        func.call @cc_funcall_stack(%1770, %1771) : (i64, i64) -> ()
-      } else {
-        %1772 = func.call @cc_nil_value() : () -> i64
+        %1765 = func.call @cc_nil_value() : () -> i64
+        %__rlasp_stack_elide_zero_76 = arith.constant 0 : i64
+        %1766 = arith.addi %1626, %__rlasp_stack_elide_zero_76 : i64
+        %1767 = func.call @cc_length(%1766) : (i64) -> i64
         %__rlasp_stack_elide_zero_77 = arith.constant 0 : i64
-        %1773 = arith.addi %1633, %__rlasp_stack_elide_zero_77 : i64
-        %1774 = func.call @cc_length(%1773) : (i64) -> i64
+        %1768 = arith.addi %1767, %__rlasp_stack_elide_zero_77 : i64
         %__rlasp_stack_elide_zero_78 = arith.constant 0 : i64
-        %1775 = arith.addi %1774, %__rlasp_stack_elide_zero_78 : i64
+        %1769 = arith.addi %1755, %__rlasp_stack_elide_zero_78 : i64
+        %1770 = func.call @cc_length(%1769) : (i64) -> i64
         %__rlasp_stack_elide_zero_79 = arith.constant 0 : i64
-        %1776 = arith.addi %1762, %__rlasp_stack_elide_zero_79 : i64
-        %1777 = func.call @cc_length(%1776) : (i64) -> i64
+        %1771 = arith.addi %1770, %__rlasp_stack_elide_zero_79 : i64
+        %1772 = arith.constant 1 : i1
+        %1774 = arith.constant 3 : i64
+        %1773 = arith.andi %1768, %1774 : i64
+        %1775 = arith.constant 0 : i64
+        %1776 = arith.cmpi eq, %1773, %1775 : i64
+        %1778 = arith.constant 3 : i64
+        %1777 = arith.andi %1771, %1778 : i64
+        %1779 = arith.constant 0 : i64
+        %1780 = arith.cmpi eq, %1777, %1779 : i64
+        %1781 = arith.andi %1776, %1780 : i1
+        %1782 = scf.if %1781 -> (i1) {
+          %1783 = arith.constant 2 : i64
+          %1784 = arith.shrsi %1768, %1783 : i64
+          %1785 = arith.constant 2 : i64
+          %1786 = arith.shrsi %1771, %1785 : i64
+          %1787 = arith.cmpi eq, %1784, %1786 : i64
+          scf.yield %1787 : i1
+        } else {
+          %1788 = func.call @cc_eq(%1768, %1771) : (i64, i64) -> i64
+          %1789 = func.call @cc_nil_value() : () -> i64
+          %1790 = arith.cmpi ne, %1788, %1789 : i64
+          scf.yield %1790 : i1
+        }
+        %1791 = arith.andi %1772, %1782 : i1
+        %1792 = func.call @cc_nil_value() : () -> i64
+        %1793 = func.call @cc_t_value() : () -> i64
+        %1794 = scf.if %1791 -> (i64) {
+          scf.yield %1793 : i64
+        } else {
+          scf.yield %1792 : i64
+        }
         %__rlasp_stack_elide_zero_80 = arith.constant 0 : i64
-        %1778 = arith.addi %1777, %__rlasp_stack_elide_zero_80 : i64
-        %1779 = arith.constant 1 : i1
-        %1781 = arith.constant 3 : i64
-        %1780 = arith.andi %1775, %1781 : i64
-        %1782 = arith.constant 0 : i64
-        %1783 = arith.cmpi eq, %1780, %1782 : i64
-        %1785 = arith.constant 3 : i64
-        %1784 = arith.andi %1778, %1785 : i64
-        %1786 = arith.constant 0 : i64
-        %1787 = arith.cmpi eq, %1784, %1786 : i64
-        %1788 = arith.andi %1783, %1787 : i1
-        %1789 = scf.if %1788 -> (i1) {
-          %1790 = arith.constant 2 : i64
-          %1791 = arith.shrsi %1775, %1790 : i64
-          %1792 = arith.constant 2 : i64
-          %1793 = arith.shrsi %1778, %1792 : i64
-          %1794 = arith.cmpi eq, %1791, %1793 : i64
-          scf.yield %1794 : i1
-        } else {
-          %1795 = func.call @cc_eq(%1775, %1778) : (i64, i64) -> i64
-          %1796 = func.call @cc_nil_value() : () -> i64
-          %1797 = arith.cmpi ne, %1795, %1796 : i64
-          scf.yield %1797 : i1
-        }
-        %1798 = arith.andi %1779, %1789 : i1
-        %1799 = func.call @cc_nil_value() : () -> i64
-        %1800 = func.call @cc_t_value() : () -> i64
-        %1801 = scf.if %1798 -> (i64) {
-          scf.yield %1800 : i64
-        } else {
-          scf.yield %1799 : i64
-        }
+        %1795 = arith.addi %1794, %__rlasp_stack_elide_zero_80 : i64
+        func.call @stack_push_pointer(%1652) : (i64) -> ()
+        func.call @stack_push_pointer(%1755) : (i64) -> ()
         %__rlasp_stack_elide_zero_81 = arith.constant 0 : i64
-        %1802 = arith.addi %1801, %__rlasp_stack_elide_zero_81 : i64
-        func.call @stack_push_pointer(%1659) : (i64) -> ()
-        func.call @stack_push_pointer(%1762) : (i64) -> ()
+        %1796 = arith.addi %1626, %__rlasp_stack_elide_zero_81 : i64
+        %1797 = func.call @stack_pop_pointer() : () -> i64
+        %1798 = func.call @stack_pop_pointer() : () -> i64
+        %1799 = func.call @cc_every2(%1798, %1797, %1796) : (i64, i64, i64) -> i64
         %__rlasp_stack_elide_zero_82 = arith.constant 0 : i64
-        %1803 = arith.addi %1633, %__rlasp_stack_elide_zero_82 : i64
-        %1804 = func.call @stack_pop_pointer() : () -> i64
-        %1805 = func.call @stack_pop_pointer() : () -> i64
-        %1806 = func.call @cc_every2(%1805, %1804, %1803) : (i64, i64, i64) -> i64
+        %1800 = arith.addi %1799, %__rlasp_stack_elide_zero_82 : i64
+        %1801 = func.call @cc_cons(%1800, %1765) : (i64, i64) -> i64
+        %1802 = func.call @cc_cons(%1795, %1801) : (i64, i64) -> i64
+        %1803 = func.call @cc_and(%1802) : (i64) -> i64
         %__rlasp_stack_elide_zero_83 = arith.constant 0 : i64
-        %1807 = arith.addi %1806, %__rlasp_stack_elide_zero_83 : i64
-        %1808 = func.call @cc_cons(%1807, %1772) : (i64, i64) -> i64
-        %1809 = func.call @cc_cons(%1802, %1808) : (i64, i64) -> i64
-        %1810 = func.call @cc_and(%1809) : (i64) -> i64
-        %__rlasp_stack_elide_zero_84 = arith.constant 0 : i64
-        %1811 = arith.addi %1810, %__rlasp_stack_elide_zero_84 : i64
-        %1812 = func.call @cc_nil_value() : () -> i64
-        %1813 = arith.cmpi ne, %1811, %1812 : i64
-        scf.if %1813 {
-          %1814 = func.call @cc_nil_value() : () -> i64
-          %1815 = func.call @cc_errorp(%1627) : (i64) -> i64
-          %1816 = arith.cmpi ne, %1815, %1814 : i64
-          %1817 = arith.cmpi eq, %1814, %1814 : i64
-          %1818 = arith.andi %1816, %1817 : i1
-          %1819 = scf.if %1818 -> (i64) {
-            scf.yield %1627 : i64
+        %1804 = arith.addi %1803, %__rlasp_stack_elide_zero_83 : i64
+        %1805 = func.call @cc_nil_value() : () -> i64
+        %1806 = arith.cmpi ne, %1804, %1805 : i64
+        scf.if %1806 {
+          %1807 = func.call @cc_nil_value() : () -> i64
+          %1808 = func.call @cc_errorp(%1620) : (i64) -> i64
+          %1809 = arith.cmpi ne, %1808, %1807 : i64
+          %1810 = arith.cmpi eq, %1807, %1807 : i64
+          %1811 = arith.andi %1809, %1810 : i1
+          %1812 = scf.if %1811 -> (i64) {
+            scf.yield %1620 : i64
           } else {
-            scf.yield %1814 : i64
+            scf.yield %1807 : i64
           }
-          %1820 = arith.cmpi ne, %1819, %1814 : i64
-          scf.if %1820 {
-            func.call @stack_push_pointer(%1819) : (i64) -> ()
+          %1813 = arith.cmpi ne, %1812, %1807 : i64
+          scf.if %1813 {
+            func.call @stack_push_pointer(%1812) : (i64) -> ()
           } else {
-            func.call @stack_push_pointer(%1627) : (i64) -> ()
+            func.call @stack_push_pointer(%1620) : (i64) -> ()
+            %1814 = llvm.mlir.addressof @str176 : !llvm.ptr
+            %1815 = func.call @cc_make_function_ref_const(%1814) : (!llvm.ptr) -> i64
+            %1816 = arith.constant 1 : i64
+            func.call @cc_funcall_stack(%1815, %1816) : (i64, i64) -> ()
+          }
+        } else {
+          %1817 = func.call @cc_t_value() : () -> i64
+          %__rlasp_stack_elide_zero_84 = arith.constant 0 : i64
+          %1818 = arith.addi %1817, %__rlasp_stack_elide_zero_84 : i64
+          %1819 = func.call @cc_nil_value() : () -> i64
+          %1820 = arith.cmpi ne, %1818, %1819 : i64
+          scf.if %1820 {
+            func.call @stack_push_pointer(%1620) : (i64) -> ()
+            func.call @stack_push_pointer(%1622) : (i64) -> ()
+            func.call @stack_push_pointer(%1626) : (i64) -> ()
+            func.call @stack_push_pointer(%1755) : (i64) -> ()
+            func.call @stack_push_pointer(%1639) : (i64) -> ()
+            func.call @stack_push_pointer(%1652) : (i64) -> ()
             %1821 = llvm.mlir.addressof @str177 : !llvm.ptr
             %1822 = func.call @cc_make_function_ref_const(%1821) : (!llvm.ptr) -> i64
-            %1823 = arith.constant 1 : i64
+            %1823 = arith.constant 6 : i64
             func.call @cc_funcall_stack(%1822, %1823) : (i64, i64) -> ()
-          }
-        } else {
-          %1824 = func.call @cc_t_value() : () -> i64
-          %__rlasp_stack_elide_zero_85 = arith.constant 0 : i64
-          %1825 = arith.addi %1824, %__rlasp_stack_elide_zero_85 : i64
-          %1826 = func.call @cc_nil_value() : () -> i64
-          %1827 = arith.cmpi ne, %1825, %1826 : i64
-          scf.if %1827 {
-            func.call @stack_push_pointer(%1627) : (i64) -> ()
-            func.call @stack_push_pointer(%1629) : (i64) -> ()
-            func.call @stack_push_pointer(%1633) : (i64) -> ()
-            func.call @stack_push_pointer(%1762) : (i64) -> ()
-            func.call @stack_push_pointer(%1646) : (i64) -> ()
-            func.call @stack_push_pointer(%1659) : (i64) -> ()
-            %1828 = llvm.mlir.addressof @str178 : !llvm.ptr
-            %1829 = func.call @cc_make_function_ref_const(%1828) : (!llvm.ptr) -> i64
-            %1830 = arith.constant 6 : i64
-            func.call @cc_funcall_stack(%1829, %1830) : (i64, i64) -> ()
         }
       }
       }
-      %1831 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %1831 : i64
+      %1824 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %1824 : i64
     }
-    %__rlasp_stack_elide_zero_86 = arith.constant 0 : i64
-    %1832 = arith.addi %1718, %__rlasp_stack_elide_zero_86 : i64
-    %1833 = func.call @cc_multiple_value_list(%1832) : (i64) -> i64
-    %1834 = llvm.mlir.addressof @str179 : !llvm.ptr
-    %1835 = arith.constant 37 : i64
-    %1836 = func.call @cc_make_string(%1834, %1835) : (!llvm.ptr, i64) -> i64
-    %1837 = func.call @cc_nil_value() : () -> i64
-    %1838 = func.call @cc_intern(%1836, %1837) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_85 = arith.constant 0 : i64
+    %1825 = arith.addi %1711, %__rlasp_stack_elide_zero_85 : i64
+    %1826 = func.call @cc_multiple_value_list(%1825) : (i64) -> i64
+    %1827 = llvm.mlir.addressof @str178 : !llvm.ptr
+    %1828 = arith.constant 37 : i64
+    %1829 = func.call @cc_make_string(%1827, %1828) : (!llvm.ptr, i64) -> i64
+    %1830 = func.call @cc_nil_value() : () -> i64
+    %1831 = func.call @cc_intern(%1829, %1830) : (i64, i64) -> i64
+    %1832 = func.call @cc_nil_value() : () -> i64
+    %1833 = func.call @cc_cons(%1831, %1832) : (i64, i64) -> i64
+    %1834 = func.call @cc_values_pack(%1833) : (i64) -> i64
+    %1835 = func.call @cc_symbol_value(%1831) : (i64) -> i64
+    %1836 = llvm.mlir.addressof @str179 : !llvm.ptr
+    %1837 = arith.constant 39 : i64
+    %1838 = func.call @cc_make_string(%1836, %1837) : (!llvm.ptr, i64) -> i64
     %1839 = func.call @cc_nil_value() : () -> i64
-    %1840 = func.call @cc_cons(%1838, %1839) : (i64, i64) -> i64
-    %1841 = func.call @cc_values_pack(%1840) : (i64) -> i64
-    %1842 = func.call @cc_symbol_value(%1838) : (i64) -> i64
-    %1843 = llvm.mlir.addressof @str180 : !llvm.ptr
-    %1844 = arith.constant 39 : i64
-    %1845 = func.call @cc_make_string(%1843, %1844) : (!llvm.ptr, i64) -> i64
-    %1846 = func.call @cc_nil_value() : () -> i64
-    %1847 = func.call @cc_intern(%1845, %1846) : (i64, i64) -> i64
-    %1848 = func.call @cc_nil_value() : () -> i64
-    %1849 = func.call @cc_cons(%1847, %1848) : (i64, i64) -> i64
-    %1850 = func.call @cc_values_pack(%1849) : (i64) -> i64
-    %1851 = func.call @cc_symbol_value(%1847) : (i64) -> i64
-    %1852 = func.call @cc_nil_value() : () -> i64
-    %1853 = arith.cmpi ne, %1842, %1852 : i64
-    %1854 = scf.if %1853 -> (i64) {
-      scf.yield %1851 : i64
+    %1840 = func.call @cc_intern(%1838, %1839) : (i64, i64) -> i64
+    %1841 = func.call @cc_nil_value() : () -> i64
+    %1842 = func.call @cc_cons(%1840, %1841) : (i64, i64) -> i64
+    %1843 = func.call @cc_values_pack(%1842) : (i64) -> i64
+    %1844 = func.call @cc_symbol_value(%1840) : (i64) -> i64
+    %1845 = func.call @cc_nil_value() : () -> i64
+    %1846 = arith.cmpi ne, %1835, %1845 : i64
+    %1847 = scf.if %1846 -> (i64) {
+      scf.yield %1844 : i64
     } else {
-      scf.yield %1833 : i64
+      scf.yield %1826 : i64
     }
-    %1855 = func.call @cc_values_pack(%1854) : (i64) -> i64
-    func.call @stack_push_pointer(%1855) : (i64) -> ()
+    %1848 = func.call @cc_values_pack(%1847) : (i64) -> i64
+    func.call @stack_push_pointer(%1848) : (i64) -> ()
     func.return
   }
   func.func @"%FN%load-if-compiled-correctly"() {
-    %1856 = llvm.mlir.addressof @str181 : !llvm.ptr
-    %1857 = arith.constant 26 : i64
-    %1858 = func.call @cc_make_string(%1856, %1857) : (!llvm.ptr, i64) -> i64
-    %1859 = func.call @cc_nil_value() : () -> i64
-    %1860 = func.call @cc_intern(%1858, %1859) : (i64, i64) -> i64
-    %1861 = func.call @cc_nil_value() : () -> i64
-    %1862 = func.call @cc_cons(%1860, %1861) : (i64, i64) -> i64
-    %1863 = func.call @cc_values_pack(%1862) : (i64) -> i64
-    %1864 = llvm.mlir.addressof @str182 : !llvm.ptr
-    %1865 = arith.constant 4 : i64
-    %1866 = func.call @cc_make_string(%1864, %1865) : (!llvm.ptr, i64) -> i64
-    %1867 = func.call @cc_register_function_lambda_list_metadata_raw(%1860, %1866) : (i64, i64) -> i64
-    %1868 = func.call @stack_pop_pointer() : () -> i64
-    %1869 = func.call @cc_nil_value() : () -> i64
-    %1870 = llvm.mlir.addressof @str183 : !llvm.ptr
-    %1871 = arith.constant 37 : i64
-    %1872 = func.call @cc_make_string(%1870, %1871) : (!llvm.ptr, i64) -> i64
-    %1873 = func.call @cc_nil_value() : () -> i64
-    %1874 = func.call @cc_intern(%1872, %1873) : (i64, i64) -> i64
+    %1849 = llvm.mlir.addressof @str180 : !llvm.ptr
+    %1850 = arith.constant 26 : i64
+    %1851 = func.call @cc_make_string(%1849, %1850) : (!llvm.ptr, i64) -> i64
+    %1852 = func.call @cc_nil_value() : () -> i64
+    %1853 = func.call @cc_intern(%1851, %1852) : (i64, i64) -> i64
+    %1854 = func.call @cc_nil_value() : () -> i64
+    %1855 = func.call @cc_cons(%1853, %1854) : (i64, i64) -> i64
+    %1856 = func.call @cc_values_pack(%1855) : (i64) -> i64
+    %1857 = llvm.mlir.addressof @str181 : !llvm.ptr
+    %1858 = arith.constant 4 : i64
+    %1859 = func.call @cc_make_string(%1857, %1858) : (!llvm.ptr, i64) -> i64
+    %1860 = func.call @cc_register_function_lambda_list_metadata_raw(%1853, %1859) : (i64, i64) -> i64
+    %1861 = func.call @stack_pop_pointer() : () -> i64
+    %1862 = func.call @cc_nil_value() : () -> i64
+    %1863 = llvm.mlir.addressof @str182 : !llvm.ptr
+    %1864 = arith.constant 37 : i64
+    %1865 = func.call @cc_make_string(%1863, %1864) : (!llvm.ptr, i64) -> i64
+    %1866 = func.call @cc_nil_value() : () -> i64
+    %1867 = func.call @cc_intern(%1865, %1866) : (i64, i64) -> i64
+    %1868 = func.call @cc_nil_value() : () -> i64
+    %1869 = func.call @cc_cons(%1867, %1868) : (i64, i64) -> i64
+    %1870 = func.call @cc_values_pack(%1869) : (i64) -> i64
+    %1871 = func.call @cc_set_symbol_value(%1867, %1862) : (i64, i64) -> i64
+    %1872 = llvm.mlir.addressof @str183 : !llvm.ptr
+    %1873 = arith.constant 38 : i64
+    %1874 = func.call @cc_make_string(%1872, %1873) : (!llvm.ptr, i64) -> i64
     %1875 = func.call @cc_nil_value() : () -> i64
-    %1876 = func.call @cc_cons(%1874, %1875) : (i64, i64) -> i64
-    %1877 = func.call @cc_values_pack(%1876) : (i64) -> i64
-    %1878 = func.call @cc_set_symbol_value(%1874, %1869) : (i64, i64) -> i64
-    %1879 = llvm.mlir.addressof @str184 : !llvm.ptr
-    %1880 = arith.constant 38 : i64
-    %1881 = func.call @cc_make_string(%1879, %1880) : (!llvm.ptr, i64) -> i64
-    %1882 = func.call @cc_nil_value() : () -> i64
-    %1883 = func.call @cc_intern(%1881, %1882) : (i64, i64) -> i64
+    %1876 = func.call @cc_intern(%1874, %1875) : (i64, i64) -> i64
+    %1877 = func.call @cc_nil_value() : () -> i64
+    %1878 = func.call @cc_cons(%1876, %1877) : (i64, i64) -> i64
+    %1879 = func.call @cc_values_pack(%1878) : (i64) -> i64
+    %1880 = func.call @cc_set_symbol_value(%1876, %1862) : (i64, i64) -> i64
+    %1881 = llvm.mlir.addressof @str184 : !llvm.ptr
+    %1882 = arith.constant 39 : i64
+    %1883 = func.call @cc_make_string(%1881, %1882) : (!llvm.ptr, i64) -> i64
     %1884 = func.call @cc_nil_value() : () -> i64
-    %1885 = func.call @cc_cons(%1883, %1884) : (i64, i64) -> i64
-    %1886 = func.call @cc_values_pack(%1885) : (i64) -> i64
-    %1887 = func.call @cc_set_symbol_value(%1883, %1869) : (i64, i64) -> i64
-    %1888 = llvm.mlir.addressof @str185 : !llvm.ptr
-    %1889 = arith.constant 39 : i64
-    %1890 = func.call @cc_make_string(%1888, %1889) : (!llvm.ptr, i64) -> i64
+    %1885 = func.call @cc_intern(%1883, %1884) : (i64, i64) -> i64
+    %1886 = func.call @cc_nil_value() : () -> i64
+    %1887 = func.call @cc_cons(%1885, %1886) : (i64, i64) -> i64
+    %1888 = func.call @cc_values_pack(%1887) : (i64) -> i64
+    %1889 = func.call @cc_set_symbol_value(%1885, %1862) : (i64, i64) -> i64
+    %1890 = func.call @cc_nil_value() : () -> i64
     %1891 = func.call @cc_nil_value() : () -> i64
-    %1892 = func.call @cc_intern(%1890, %1891) : (i64, i64) -> i64
-    %1893 = func.call @cc_nil_value() : () -> i64
-    %1894 = func.call @cc_cons(%1892, %1893) : (i64, i64) -> i64
-    %1895 = func.call @cc_values_pack(%1894) : (i64) -> i64
-    %1896 = func.call @cc_set_symbol_value(%1892, %1869) : (i64, i64) -> i64
-    %1897 = func.call @cc_nil_value() : () -> i64
-    %1898 = func.call @cc_nil_value() : () -> i64
-    %1899 = func.call @cc_errorp(%1897) : (i64) -> i64
-    %1900 = arith.cmpi ne, %1899, %1898 : i64
-    %1901 = scf.if %1900 -> (i64) {
-      scf.yield %1897 : i64
+    %1892 = func.call @cc_errorp(%1890) : (i64) -> i64
+    %1893 = arith.cmpi ne, %1892, %1891 : i64
+    %1894 = scf.if %1893 -> (i64) {
+      scf.yield %1890 : i64
     } else {
-      %1902 = func.call @cc_nil_value() : () -> i64
-      func.call @stack_push_pointer(%1902) : (i64) -> ()
-      %1903 = llvm.mlir.addressof @str186 : !llvm.ptr
-      %1904 = arith.constant 4 : i64
-      %1905 = func.call @cc_make_string(%1903, %1904) : (!llvm.ptr, i64) -> i64
-      %1906 = func.call @cc_nil_value() : () -> i64
-      %1907 = func.call @cc_intern(%1905, %1906) : (i64, i64) -> i64
-      %1908 = func.call @cc_nil_value() : () -> i64
-      %1909 = func.call @cc_cons(%1907, %1908) : (i64, i64) -> i64
-      %1910 = func.call @cc_values_pack(%1909) : (i64) -> i64
-      %__rlasp_stack_elide_zero_87 = arith.constant 0 : i64
-      %1911 = arith.addi %1907, %__rlasp_stack_elide_zero_87 : i64
-      %1912 = func.call @stack_pop_pointer() : () -> i64
+      %1895 = func.call @cc_nil_value() : () -> i64
+      func.call @stack_push_pointer(%1895) : (i64) -> ()
+      %1896 = llvm.mlir.addressof @str185 : !llvm.ptr
+      %1897 = arith.constant 4 : i64
+      %1898 = func.call @cc_make_string(%1896, %1897) : (!llvm.ptr, i64) -> i64
+      %1899 = func.call @cc_nil_value() : () -> i64
+      %1900 = func.call @cc_intern(%1898, %1899) : (i64, i64) -> i64
+      %1901 = func.call @cc_nil_value() : () -> i64
+      %1902 = func.call @cc_cons(%1900, %1901) : (i64, i64) -> i64
+      %1903 = func.call @cc_values_pack(%1902) : (i64) -> i64
+      %__rlasp_stack_elide_zero_86 = arith.constant 0 : i64
+      %1904 = arith.addi %1900, %__rlasp_stack_elide_zero_86 : i64
+      %1905 = func.call @stack_pop_pointer() : () -> i64
+      %1906 = func.call @cc_cons(%1904, %1905) : (i64, i64) -> i64
+      func.call @stack_push_pointer(%1906) : (i64) -> ()
+      %1907 = llvm.mlir.addressof @str186 : !llvm.ptr
+      %1908 = arith.constant 12 : i64
+      %1909 = func.call @cc_make_string(%1907, %1908) : (!llvm.ptr, i64) -> i64
+      %1910 = func.call @cc_nil_value() : () -> i64
+      %1911 = func.call @cc_intern(%1909, %1910) : (i64, i64) -> i64
+      %1912 = func.call @cc_nil_value() : () -> i64
       %1913 = func.call @cc_cons(%1911, %1912) : (i64, i64) -> i64
-      func.call @stack_push_pointer(%1913) : (i64) -> ()
-      %1914 = llvm.mlir.addressof @str187 : !llvm.ptr
-      %1915 = arith.constant 12 : i64
-      %1916 = func.call @cc_make_string(%1914, %1915) : (!llvm.ptr, i64) -> i64
-      %1917 = func.call @cc_nil_value() : () -> i64
-      %1918 = func.call @cc_intern(%1916, %1917) : (i64, i64) -> i64
+      %1914 = func.call @cc_values_pack(%1913) : (i64) -> i64
+      %__rlasp_stack_elide_zero_87 = arith.constant 0 : i64
+      %1915 = arith.addi %1911, %__rlasp_stack_elide_zero_87 : i64
+      %1916 = func.call @stack_pop_pointer() : () -> i64
+      %1917 = func.call @cc_cons(%1915, %1916) : (i64, i64) -> i64
+      %__rlasp_stack_elide_zero_88 = arith.constant 0 : i64
+      %1918 = arith.addi %1917, %__rlasp_stack_elide_zero_88 : i64
       %1919 = func.call @cc_nil_value() : () -> i64
       %1920 = func.call @cc_cons(%1918, %1919) : (i64, i64) -> i64
-      %1921 = func.call @cc_values_pack(%1920) : (i64) -> i64
-      %__rlasp_stack_elide_zero_88 = arith.constant 0 : i64
-      %1922 = arith.addi %1918, %__rlasp_stack_elide_zero_88 : i64
-      %1923 = func.call @stack_pop_pointer() : () -> i64
-      %1924 = func.call @cc_cons(%1922, %1923) : (i64, i64) -> i64
-      %__rlasp_stack_elide_zero_89 = arith.constant 0 : i64
-      %1925 = arith.addi %1924, %__rlasp_stack_elide_zero_89 : i64
+      %1921 = llvm.mlir.addressof @str187 : !llvm.ptr
+      %1922 = arith.constant 4 : i64
+      %1923 = func.call @cc_make_string(%1921, %1922) : (!llvm.ptr, i64) -> i64
+      %1924 = func.call @cc_nil_value() : () -> i64
+      %1925 = func.call @cc_intern(%1923, %1924) : (i64, i64) -> i64
       %1926 = func.call @cc_nil_value() : () -> i64
       %1927 = func.call @cc_cons(%1925, %1926) : (i64, i64) -> i64
-      %1928 = llvm.mlir.addressof @str188 : !llvm.ptr
-      %1929 = arith.constant 4 : i64
-      %1930 = func.call @cc_make_string(%1928, %1929) : (!llvm.ptr, i64) -> i64
-      %1931 = func.call @cc_nil_value() : () -> i64
-      %1932 = func.call @cc_intern(%1930, %1931) : (i64, i64) -> i64
-      %1933 = func.call @cc_nil_value() : () -> i64
-      %1934 = func.call @cc_cons(%1932, %1933) : (i64, i64) -> i64
-      %1935 = func.call @cc_values_pack(%1934) : (i64) -> i64
-      %1936 = func.call @cc_symbol_value(%1932) : (i64) -> i64
-      %1937 = func.call @cc_set_symbol_value(%1932, %1868) : (i64, i64) -> i64
-      %1938 = func.call @cc_eval(%1927) : (i64) -> i64
-      %1939 = func.call @cc_multiple_value_list(%1938) : (i64) -> i64
-      %1940 = func.call @cc_symbol_value(%1932) : (i64) -> i64
-      %1941 = func.call @cc_set_symbol_value(%1932, %1936) : (i64, i64) -> i64
-      %1942 = func.call @cc_values_pack(%1939) : (i64) -> i64
-      %__rlasp_stack_elide_zero_90 = arith.constant 0 : i64
-      %1943 = arith.addi %1942, %__rlasp_stack_elide_zero_90 : i64
-      scf.yield %1943 : i64
+      %1928 = func.call @cc_values_pack(%1927) : (i64) -> i64
+      %1929 = func.call @cc_symbol_value(%1925) : (i64) -> i64
+      %1930 = func.call @cc_set_symbol_value(%1925, %1861) : (i64, i64) -> i64
+      %1931 = func.call @cc_eval(%1920) : (i64) -> i64
+      %1932 = func.call @cc_multiple_value_list(%1931) : (i64) -> i64
+      %1933 = func.call @cc_symbol_value(%1925) : (i64) -> i64
+      %1934 = func.call @cc_set_symbol_value(%1925, %1929) : (i64, i64) -> i64
+      %1935 = func.call @cc_values_pack(%1932) : (i64) -> i64
+      %__rlasp_stack_elide_zero_89 = arith.constant 0 : i64
+      %1936 = arith.addi %1935, %__rlasp_stack_elide_zero_89 : i64
+      scf.yield %1936 : i64
+    }
+    %__rlasp_stack_elide_zero_90 = arith.constant 0 : i64
+    %1937 = arith.addi %1894, %__rlasp_stack_elide_zero_90 : i64
+    %1938 = func.call @cc_multiple_value_list(%1937) : (i64) -> i64
+    %1939 = arith.constant 0 : i64
+    %1940 = func.call @cc_box_fixnum(%1939) : (i64) -> i64
+    %1941 = func.call @cc_nth(%1940, %1938) : (i64, i64) -> i64
+    %1942 = arith.constant 1 : i64
+    %1943 = func.call @cc_box_fixnum(%1942) : (i64) -> i64
+    %1944 = func.call @cc_nth(%1943, %1938) : (i64, i64) -> i64
+    %1945 = arith.constant 2 : i64
+    %1946 = func.call @cc_box_fixnum(%1945) : (i64) -> i64
+    %1947 = func.call @cc_nth(%1946, %1938) : (i64, i64) -> i64
+    func.call @stack_push_nil() : () -> ()
+    %1948 = func.call @stack_depth() : () -> i64
+    %1949 = arith.constant 0 : i64
+    %1950 = arith.cmpi sgt, %1948, %1949 : i64
+    scf.if %1950 {
+      %1951 = func.call @stack_pop_pointer() : () -> i64
     }
     %__rlasp_stack_elide_zero_91 = arith.constant 0 : i64
-    %1944 = arith.addi %1901, %__rlasp_stack_elide_zero_91 : i64
-    %1945 = func.call @cc_multiple_value_list(%1944) : (i64) -> i64
-    %1946 = arith.constant 0 : i64
-    %1947 = func.call @cc_box_fixnum(%1946) : (i64) -> i64
-    %1948 = func.call @cc_nth(%1947, %1945) : (i64, i64) -> i64
-    %1949 = arith.constant 1 : i64
-    %1950 = func.call @cc_box_fixnum(%1949) : (i64) -> i64
-    %1951 = func.call @cc_nth(%1950, %1945) : (i64, i64) -> i64
-    %1952 = arith.constant 2 : i64
-    %1953 = func.call @cc_box_fixnum(%1952) : (i64) -> i64
-    %1954 = func.call @cc_nth(%1953, %1945) : (i64, i64) -> i64
-    func.call @stack_push_nil() : () -> ()
-    %1955 = func.call @stack_depth() : () -> i64
-    %1956 = arith.constant 0 : i64
-    %1957 = arith.cmpi sgt, %1955, %1956 : i64
-    scf.if %1957 {
-      %1958 = func.call @stack_pop_pointer() : () -> i64
-    }
-    %__rlasp_stack_elide_zero_92 = arith.constant 0 : i64
-    %1959 = arith.addi %1948, %__rlasp_stack_elide_zero_92 : i64
-    %1960 = func.call @cc_nil_value() : () -> i64
-    %1961 = arith.cmpi ne, %1959, %1960 : i64
-    scf.if %1961 {
-      %1962 = func.call @cc_nil_value() : () -> i64
-      %1963 = func.call @cc_nil_value() : () -> i64
-      %1964 = func.call @cc_errorp(%1962) : (i64) -> i64
-      %1965 = arith.cmpi ne, %1964, %1963 : i64
-      %1966 = scf.if %1965 -> (i64) {
-        scf.yield %1962 : i64
+    %1952 = arith.addi %1941, %__rlasp_stack_elide_zero_91 : i64
+    %1953 = func.call @cc_nil_value() : () -> i64
+    %1954 = arith.cmpi ne, %1952, %1953 : i64
+    scf.if %1954 {
+      %1955 = func.call @cc_nil_value() : () -> i64
+      %1956 = func.call @cc_nil_value() : () -> i64
+      %1957 = func.call @cc_errorp(%1955) : (i64) -> i64
+      %1958 = arith.cmpi ne, %1957, %1956 : i64
+      %1959 = scf.if %1958 -> (i64) {
+        scf.yield %1955 : i64
       } else {
+        %__rlasp_stack_elide_zero_92 = arith.constant 0 : i64
+        %1960 = arith.addi %1941, %__rlasp_stack_elide_zero_92 : i64
+        %1961 = func.call @cc_nil_value() : () -> i64
+        %1962 = func.call @cc_cons(%1960, %1961) : (i64, i64) -> i64
+        %1963 = func.call @cc_load_stack(%1962) : (i64) -> i64
         %__rlasp_stack_elide_zero_93 = arith.constant 0 : i64
-        %1967 = arith.addi %1948, %__rlasp_stack_elide_zero_93 : i64
-        %1968 = func.call @cc_nil_value() : () -> i64
-        %1969 = func.call @cc_cons(%1967, %1968) : (i64, i64) -> i64
-        %1970 = func.call @cc_load_stack(%1969) : (i64) -> i64
-        %__rlasp_stack_elide_zero_94 = arith.constant 0 : i64
-        %1971 = arith.addi %1970, %__rlasp_stack_elide_zero_94 : i64
-        scf.yield %1971 : i64
+        %1964 = arith.addi %1963, %__rlasp_stack_elide_zero_93 : i64
+        scf.yield %1964 : i64
       }
-      func.call @stack_push_pointer(%1966) : (i64) -> ()
+      func.call @stack_push_pointer(%1959) : (i64) -> ()
     } else {
       func.call @stack_push_nil() : () -> ()
     }
-    %1972 = func.call @stack_pop_pointer() : () -> i64
-    %1973 = func.call @cc_errorp(%1972) : (i64) -> i64
-    %1974 = func.call @cc_nil_value() : () -> i64
-    %1975 = arith.cmpi ne, %1973, %1974 : i64
-    %1976 = scf.if %1975 -> (i64) {
-      %1977 = func.call @cc_condition_value(%1972) : (i64) -> i64
-      %1978 = llvm.mlir.addressof @str189 : !llvm.ptr
-      %1979 = arith.constant 5 : i64
-      %1980 = func.call @cc_make_string(%1978, %1979) : (!llvm.ptr, i64) -> i64
-      %1981 = llvm.mlir.addressof @str190 : !llvm.ptr
-      %1982 = arith.constant 11 : i64
-      %1983 = func.call @cc_make_string(%1981, %1982) : (!llvm.ptr, i64) -> i64
-      %1984 = func.call @cc_intern(%1980, %1983) : (i64, i64) -> i64
-      %1985 = func.call @cc_nil_value() : () -> i64
-      %1986 = func.call @cc_cons(%1984, %1985) : (i64, i64) -> i64
-      %1987 = func.call @cc_values_pack(%1986) : (i64) -> i64
-      %__rlasp_stack_elide_zero_95 = arith.constant 0 : i64
-      %1988 = arith.addi %1984, %__rlasp_stack_elide_zero_95 : i64
-      %1989 = func.call @cc_typep(%1977, %1988) : (i64, i64) -> i64
-      %1990 = func.call @cc_nil_value() : () -> i64
-      %1991 = arith.cmpi ne, %1989, %1990 : i64
-      %1992 = scf.if %1991 -> (i64) {
+    %1965 = func.call @stack_pop_pointer() : () -> i64
+    %1966 = func.call @cc_errorp(%1965) : (i64) -> i64
+    %1967 = func.call @cc_nil_value() : () -> i64
+    %1968 = arith.cmpi ne, %1966, %1967 : i64
+    %1969 = scf.if %1968 -> (i64) {
+      %1970 = func.call @cc_condition_value(%1965) : (i64) -> i64
+      %1971 = llvm.mlir.addressof @str188 : !llvm.ptr
+      %1972 = arith.constant 5 : i64
+      %1973 = func.call @cc_make_string(%1971, %1972) : (!llvm.ptr, i64) -> i64
+      %1974 = llvm.mlir.addressof @str189 : !llvm.ptr
+      %1975 = arith.constant 11 : i64
+      %1976 = func.call @cc_make_string(%1974, %1975) : (!llvm.ptr, i64) -> i64
+      %1977 = func.call @cc_intern(%1973, %1976) : (i64, i64) -> i64
+      %1978 = func.call @cc_nil_value() : () -> i64
+      %1979 = func.call @cc_cons(%1977, %1978) : (i64, i64) -> i64
+      %1980 = func.call @cc_values_pack(%1979) : (i64) -> i64
+      %__rlasp_stack_elide_zero_94 = arith.constant 0 : i64
+      %1981 = arith.addi %1977, %__rlasp_stack_elide_zero_94 : i64
+      %1982 = func.call @cc_typep(%1970, %1981) : (i64, i64) -> i64
+      %1983 = func.call @cc_nil_value() : () -> i64
+      %1984 = arith.cmpi ne, %1982, %1983 : i64
+      %1985 = scf.if %1984 -> (i64) {
+        %__rlasp_stack_elide_zero_95 = arith.constant 0 : i64
+        %1986 = arith.addi %1861, %__rlasp_stack_elide_zero_95 : i64
         %__rlasp_stack_elide_zero_96 = arith.constant 0 : i64
-        %1993 = arith.addi %1868, %__rlasp_stack_elide_zero_96 : i64
-        %__rlasp_stack_elide_zero_97 = arith.constant 0 : i64
-        %1994 = arith.addi %1977, %__rlasp_stack_elide_zero_97 : i64
-        %1995 = func.call @cc_nil_value() : () -> i64
-        %1996 = func.call @cc_errorp(%1993) : (i64) -> i64
-        %1997 = arith.cmpi ne, %1996, %1995 : i64
-        %1998 = arith.cmpi eq, %1995, %1995 : i64
-        %1999 = arith.andi %1997, %1998 : i1
-        %2000 = scf.if %1999 -> (i64) {
+        %1987 = arith.addi %1970, %__rlasp_stack_elide_zero_96 : i64
+        %1988 = func.call @cc_nil_value() : () -> i64
+        %1989 = func.call @cc_errorp(%1986) : (i64) -> i64
+        %1990 = arith.cmpi ne, %1989, %1988 : i64
+        %1991 = arith.cmpi eq, %1988, %1988 : i64
+        %1992 = arith.andi %1990, %1991 : i1
+        %1993 = scf.if %1992 -> (i64) {
+          scf.yield %1986 : i64
+        } else {
+          scf.yield %1988 : i64
+        }
+        %1994 = func.call @cc_errorp(%1987) : (i64) -> i64
+        %1995 = arith.cmpi ne, %1994, %1988 : i64
+        %1996 = arith.cmpi eq, %1993, %1988 : i64
+        %1997 = arith.andi %1995, %1996 : i1
+        %1998 = scf.if %1997 -> (i64) {
+          scf.yield %1987 : i64
+        } else {
           scf.yield %1993 : i64
-        } else {
-          scf.yield %1995 : i64
         }
-        %2001 = func.call @cc_errorp(%1994) : (i64) -> i64
-        %2002 = arith.cmpi ne, %2001, %1995 : i64
-        %2003 = arith.cmpi eq, %2000, %1995 : i64
-        %2004 = arith.andi %2002, %2003 : i1
-        %2005 = scf.if %2004 -> (i64) {
-          scf.yield %1994 : i64
+        %1999 = arith.cmpi ne, %1998, %1988 : i64
+        scf.if %1999 {
+          func.call @stack_push_pointer(%1998) : (i64) -> ()
         } else {
-          scf.yield %2000 : i64
-        }
-        %2006 = arith.cmpi ne, %2005, %1995 : i64
-        scf.if %2006 {
-          func.call @stack_push_pointer(%2005) : (i64) -> ()
-        } else {
-          %2007 = func.call @cc_nil_value() : () -> i64
-          func.call @stack_push_pointer(%2007) : (i64) -> ()
+          %2000 = func.call @cc_nil_value() : () -> i64
+          func.call @stack_push_pointer(%2000) : (i64) -> ()
+          %__rlasp_stack_elide_zero_97 = arith.constant 0 : i64
+          %2001 = arith.addi %1987, %__rlasp_stack_elide_zero_97 : i64
+          %2002 = func.call @stack_pop_pointer() : () -> i64
+          %2003 = func.call @cc_cons(%2001, %2002) : (i64, i64) -> i64
+          func.call @stack_push_pointer(%2003) : (i64) -> ()
           %__rlasp_stack_elide_zero_98 = arith.constant 0 : i64
-          %2008 = arith.addi %1994, %__rlasp_stack_elide_zero_98 : i64
-          %2009 = func.call @stack_pop_pointer() : () -> i64
-          %2010 = func.call @cc_cons(%2008, %2009) : (i64, i64) -> i64
-          func.call @stack_push_pointer(%2010) : (i64) -> ()
-          %__rlasp_stack_elide_zero_99 = arith.constant 0 : i64
-          %2011 = arith.addi %1993, %__rlasp_stack_elide_zero_99 : i64
-          %2012 = func.call @stack_pop_pointer() : () -> i64
-          %2013 = func.call @cc_cons(%2011, %2012) : (i64, i64) -> i64
+          %2004 = arith.addi %1986, %__rlasp_stack_elide_zero_98 : i64
+          %2005 = func.call @stack_pop_pointer() : () -> i64
+          %2006 = func.call @cc_cons(%2004, %2005) : (i64, i64) -> i64
+          func.call @stack_push_pointer(%2006) : (i64) -> ()
+        }
+        %2007 = func.call @stack_pop_pointer() : () -> i64
+        %2008 = func.call @cc_nil_value() : () -> i64
+        %2009 = func.call @cc_errorp(%2007) : (i64) -> i64
+        %2010 = arith.cmpi ne, %2009, %2008 : i64
+        %2011 = arith.cmpi eq, %2008, %2008 : i64
+        %2012 = arith.andi %2010, %2011 : i1
+        %2013 = scf.if %2012 -> (i64) {
+          scf.yield %2007 : i64
+        } else {
+          scf.yield %2008 : i64
+        }
+        %2014 = arith.cmpi ne, %2013, %2008 : i64
+        scf.if %2014 {
           func.call @stack_push_pointer(%2013) : (i64) -> ()
-        }
-        %2014 = func.call @stack_pop_pointer() : () -> i64
-        %2015 = func.call @cc_nil_value() : () -> i64
-        %2016 = func.call @cc_errorp(%2014) : (i64) -> i64
-        %2017 = arith.cmpi ne, %2016, %2015 : i64
-        %2018 = arith.cmpi eq, %2015, %2015 : i64
-        %2019 = arith.andi %2017, %2018 : i1
-        %2020 = scf.if %2019 -> (i64) {
-          scf.yield %2014 : i64
         } else {
-          scf.yield %2015 : i64
+          func.call @stack_push_pointer(%2007) : (i64) -> ()
+          %2015 = llvm.mlir.addressof @str190 : !llvm.ptr
+          %2016 = func.call @cc_make_function_ref_const(%2015) : (!llvm.ptr) -> i64
+          %2017 = arith.constant 1 : i64
+          func.call @cc_funcall_stack(%2016, %2017) : (i64, i64) -> ()
         }
-        %2021 = arith.cmpi ne, %2020, %2015 : i64
-        scf.if %2021 {
-          func.call @stack_push_pointer(%2020) : (i64) -> ()
-        } else {
-          func.call @stack_push_pointer(%2014) : (i64) -> ()
-          %2022 = llvm.mlir.addressof @str191 : !llvm.ptr
-          %2023 = func.call @cc_make_function_ref_const(%2022) : (!llvm.ptr) -> i64
-          %2024 = arith.constant 1 : i64
-          func.call @cc_funcall_stack(%2023, %2024) : (i64, i64) -> ()
+        %2018 = func.call @stack_depth() : () -> i64
+        %2019 = arith.constant 0 : i64
+        %2020 = arith.cmpi sgt, %2018, %2019 : i64
+        scf.if %2020 {
+          %2021 = func.call @stack_pop_pointer() : () -> i64
         }
-        %2025 = func.call @stack_depth() : () -> i64
-        %2026 = arith.constant 0 : i64
-        %2027 = arith.cmpi sgt, %2025, %2026 : i64
-        scf.if %2027 {
-          %2028 = func.call @stack_pop_pointer() : () -> i64
-        }
-        %2029 = llvm.mlir.addressof @str192 : !llvm.ptr
-        %2030 = arith.constant 3 : i64
-        %2031 = func.call @cc_make_string(%2029, %2030) : (!llvm.ptr, i64) -> i64
+        %2022 = llvm.mlir.addressof @str191 : !llvm.ptr
+        %2023 = arith.constant 3 : i64
+        %2024 = func.call @cc_make_string(%2022, %2023) : (!llvm.ptr, i64) -> i64
+        %2025 = llvm.mlir.addressof @str192 : !llvm.ptr
+        %2026 = arith.constant 7 : i64
+        %2027 = func.call @cc_make_string(%2025, %2026) : (!llvm.ptr, i64) -> i64
+        %2028 = func.call @cc_intern(%2024, %2027) : (i64, i64) -> i64
+        %2029 = func.call @cc_nil_value() : () -> i64
+        %2030 = func.call @cc_cons(%2028, %2029) : (i64, i64) -> i64
+        %2031 = func.call @cc_values_pack(%2030) : (i64) -> i64
         %2032 = llvm.mlir.addressof @str193 : !llvm.ptr
-        %2033 = arith.constant 7 : i64
+        %2033 = arith.constant 45 : i64
         %2034 = func.call @cc_make_string(%2032, %2033) : (!llvm.ptr, i64) -> i64
-        %2035 = func.call @cc_intern(%2031, %2034) : (i64, i64) -> i64
-        %2036 = func.call @cc_nil_value() : () -> i64
-        %2037 = func.call @cc_cons(%2035, %2036) : (i64, i64) -> i64
-        %2038 = func.call @cc_values_pack(%2037) : (i64) -> i64
-        %2039 = llvm.mlir.addressof @str194 : !llvm.ptr
-        %2040 = arith.constant 45 : i64
-        %2041 = func.call @cc_make_string(%2039, %2040) : (!llvm.ptr, i64) -> i64
-        func.call @stack_push_pointer(%2035) : (i64) -> ()
-        func.call @stack_push_pointer(%2041) : (i64) -> ()
-        func.call @stack_push_pointer(%1868) : (i64) -> ()
-        func.call @stack_push_pointer(%1977) : (i64) -> ()
-        %2042 = llvm.mlir.addressof @str195 : !llvm.ptr
-        %2043 = func.call @cc_make_function_ref_const(%2042) : (!llvm.ptr) -> i64
-        %2044 = arith.constant 4 : i64
-        func.call @cc_funcall_stack(%2043, %2044) : (i64, i64) -> ()
-        %2045 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %2045 : i64
+        func.call @stack_push_pointer(%2028) : (i64) -> ()
+        func.call @stack_push_pointer(%2034) : (i64) -> ()
+        func.call @stack_push_pointer(%1861) : (i64) -> ()
+        func.call @stack_push_pointer(%1970) : (i64) -> ()
+        %2035 = llvm.mlir.addressof @str194 : !llvm.ptr
+        %2036 = func.call @cc_make_function_ref_const(%2035) : (!llvm.ptr) -> i64
+        %2037 = arith.constant 4 : i64
+        func.call @cc_funcall_stack(%2036, %2037) : (i64, i64) -> ()
+        %2038 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %2038 : i64
       } else {
-        scf.yield %1972 : i64
+        scf.yield %1965 : i64
       }
-      scf.yield %1992 : i64
+      scf.yield %1985 : i64
     } else {
-      scf.yield %1972 : i64
+      scf.yield %1965 : i64
     }
-    %__rlasp_stack_elide_zero_100 = arith.constant 0 : i64
-    %2046 = arith.addi %1976, %__rlasp_stack_elide_zero_100 : i64
-    %2047 = func.call @cc_multiple_value_list(%2046) : (i64) -> i64
-    %2048 = llvm.mlir.addressof @str196 : !llvm.ptr
-    %2049 = arith.constant 37 : i64
-    %2050 = func.call @cc_make_string(%2048, %2049) : (!llvm.ptr, i64) -> i64
-    %2051 = func.call @cc_nil_value() : () -> i64
-    %2052 = func.call @cc_intern(%2050, %2051) : (i64, i64) -> i64
+    %__rlasp_stack_elide_zero_99 = arith.constant 0 : i64
+    %2039 = arith.addi %1969, %__rlasp_stack_elide_zero_99 : i64
+    %2040 = func.call @cc_multiple_value_list(%2039) : (i64) -> i64
+    %2041 = llvm.mlir.addressof @str195 : !llvm.ptr
+    %2042 = arith.constant 37 : i64
+    %2043 = func.call @cc_make_string(%2041, %2042) : (!llvm.ptr, i64) -> i64
+    %2044 = func.call @cc_nil_value() : () -> i64
+    %2045 = func.call @cc_intern(%2043, %2044) : (i64, i64) -> i64
+    %2046 = func.call @cc_nil_value() : () -> i64
+    %2047 = func.call @cc_cons(%2045, %2046) : (i64, i64) -> i64
+    %2048 = func.call @cc_values_pack(%2047) : (i64) -> i64
+    %2049 = func.call @cc_symbol_value(%2045) : (i64) -> i64
+    %2050 = llvm.mlir.addressof @str196 : !llvm.ptr
+    %2051 = arith.constant 39 : i64
+    %2052 = func.call @cc_make_string(%2050, %2051) : (!llvm.ptr, i64) -> i64
     %2053 = func.call @cc_nil_value() : () -> i64
-    %2054 = func.call @cc_cons(%2052, %2053) : (i64, i64) -> i64
-    %2055 = func.call @cc_values_pack(%2054) : (i64) -> i64
-    %2056 = func.call @cc_symbol_value(%2052) : (i64) -> i64
-    %2057 = llvm.mlir.addressof @str197 : !llvm.ptr
-    %2058 = arith.constant 39 : i64
-    %2059 = func.call @cc_make_string(%2057, %2058) : (!llvm.ptr, i64) -> i64
-    %2060 = func.call @cc_nil_value() : () -> i64
-    %2061 = func.call @cc_intern(%2059, %2060) : (i64, i64) -> i64
-    %2062 = func.call @cc_nil_value() : () -> i64
-    %2063 = func.call @cc_cons(%2061, %2062) : (i64, i64) -> i64
-    %2064 = func.call @cc_values_pack(%2063) : (i64) -> i64
-    %2065 = func.call @cc_symbol_value(%2061) : (i64) -> i64
-    %2066 = func.call @cc_nil_value() : () -> i64
-    %2067 = arith.cmpi ne, %2056, %2066 : i64
-    %2068 = scf.if %2067 -> (i64) {
-      scf.yield %2065 : i64
+    %2054 = func.call @cc_intern(%2052, %2053) : (i64, i64) -> i64
+    %2055 = func.call @cc_nil_value() : () -> i64
+    %2056 = func.call @cc_cons(%2054, %2055) : (i64, i64) -> i64
+    %2057 = func.call @cc_values_pack(%2056) : (i64) -> i64
+    %2058 = func.call @cc_symbol_value(%2054) : (i64) -> i64
+    %2059 = func.call @cc_nil_value() : () -> i64
+    %2060 = arith.cmpi ne, %2049, %2059 : i64
+    %2061 = scf.if %2060 -> (i64) {
+      scf.yield %2058 : i64
     } else {
-      scf.yield %2047 : i64
+      scf.yield %2040 : i64
     }
-    %2069 = func.call @cc_values_pack(%2068) : (i64) -> i64
-    func.call @stack_push_pointer(%2069) : (i64) -> ()
+    %2062 = func.call @cc_values_pack(%2061) : (i64) -> i64
+    func.call @stack_push_pointer(%2062) : (i64) -> ()
     func.return
   }
   func.func @"%FN%no-handler-case-load-if-compiled-correctly"() {
-    %2070 = llvm.mlir.addressof @str198 : !llvm.ptr
-    %2071 = arith.constant 42 : i64
-    %2072 = func.call @cc_make_string(%2070, %2071) : (!llvm.ptr, i64) -> i64
-    %2073 = func.call @cc_nil_value() : () -> i64
-    %2074 = func.call @cc_intern(%2072, %2073) : (i64, i64) -> i64
-    %2075 = func.call @cc_nil_value() : () -> i64
-    %2076 = func.call @cc_cons(%2074, %2075) : (i64, i64) -> i64
-    %2077 = func.call @cc_values_pack(%2076) : (i64) -> i64
-    %2078 = llvm.mlir.addressof @str199 : !llvm.ptr
-    %2079 = arith.constant 4 : i64
-    %2080 = func.call @cc_make_string(%2078, %2079) : (!llvm.ptr, i64) -> i64
-    %2081 = func.call @cc_register_function_lambda_list_metadata_raw(%2074, %2080) : (i64, i64) -> i64
-    %2082 = func.call @stack_pop_pointer() : () -> i64
-    %2083 = func.call @cc_nil_value() : () -> i64
-    %2084 = llvm.mlir.addressof @str200 : !llvm.ptr
-    %2085 = arith.constant 37 : i64
-    %2086 = func.call @cc_make_string(%2084, %2085) : (!llvm.ptr, i64) -> i64
-    %2087 = func.call @cc_nil_value() : () -> i64
-    %2088 = func.call @cc_intern(%2086, %2087) : (i64, i64) -> i64
+    %2063 = llvm.mlir.addressof @str197 : !llvm.ptr
+    %2064 = arith.constant 42 : i64
+    %2065 = func.call @cc_make_string(%2063, %2064) : (!llvm.ptr, i64) -> i64
+    %2066 = func.call @cc_nil_value() : () -> i64
+    %2067 = func.call @cc_intern(%2065, %2066) : (i64, i64) -> i64
+    %2068 = func.call @cc_nil_value() : () -> i64
+    %2069 = func.call @cc_cons(%2067, %2068) : (i64, i64) -> i64
+    %2070 = func.call @cc_values_pack(%2069) : (i64) -> i64
+    %2071 = llvm.mlir.addressof @str198 : !llvm.ptr
+    %2072 = arith.constant 4 : i64
+    %2073 = func.call @cc_make_string(%2071, %2072) : (!llvm.ptr, i64) -> i64
+    %2074 = func.call @cc_register_function_lambda_list_metadata_raw(%2067, %2073) : (i64, i64) -> i64
+    %2075 = func.call @stack_pop_pointer() : () -> i64
+    %2076 = func.call @cc_nil_value() : () -> i64
+    %2077 = llvm.mlir.addressof @str199 : !llvm.ptr
+    %2078 = arith.constant 37 : i64
+    %2079 = func.call @cc_make_string(%2077, %2078) : (!llvm.ptr, i64) -> i64
+    %2080 = func.call @cc_nil_value() : () -> i64
+    %2081 = func.call @cc_intern(%2079, %2080) : (i64, i64) -> i64
+    %2082 = func.call @cc_nil_value() : () -> i64
+    %2083 = func.call @cc_cons(%2081, %2082) : (i64, i64) -> i64
+    %2084 = func.call @cc_values_pack(%2083) : (i64) -> i64
+    %2085 = func.call @cc_set_symbol_value(%2081, %2076) : (i64, i64) -> i64
+    %2086 = llvm.mlir.addressof @str200 : !llvm.ptr
+    %2087 = arith.constant 38 : i64
+    %2088 = func.call @cc_make_string(%2086, %2087) : (!llvm.ptr, i64) -> i64
     %2089 = func.call @cc_nil_value() : () -> i64
-    %2090 = func.call @cc_cons(%2088, %2089) : (i64, i64) -> i64
-    %2091 = func.call @cc_values_pack(%2090) : (i64) -> i64
-    %2092 = func.call @cc_set_symbol_value(%2088, %2083) : (i64, i64) -> i64
-    %2093 = llvm.mlir.addressof @str201 : !llvm.ptr
-    %2094 = arith.constant 38 : i64
-    %2095 = func.call @cc_make_string(%2093, %2094) : (!llvm.ptr, i64) -> i64
-    %2096 = func.call @cc_nil_value() : () -> i64
-    %2097 = func.call @cc_intern(%2095, %2096) : (i64, i64) -> i64
+    %2090 = func.call @cc_intern(%2088, %2089) : (i64, i64) -> i64
+    %2091 = func.call @cc_nil_value() : () -> i64
+    %2092 = func.call @cc_cons(%2090, %2091) : (i64, i64) -> i64
+    %2093 = func.call @cc_values_pack(%2092) : (i64) -> i64
+    %2094 = func.call @cc_set_symbol_value(%2090, %2076) : (i64, i64) -> i64
+    %2095 = llvm.mlir.addressof @str201 : !llvm.ptr
+    %2096 = arith.constant 39 : i64
+    %2097 = func.call @cc_make_string(%2095, %2096) : (!llvm.ptr, i64) -> i64
     %2098 = func.call @cc_nil_value() : () -> i64
-    %2099 = func.call @cc_cons(%2097, %2098) : (i64, i64) -> i64
-    %2100 = func.call @cc_values_pack(%2099) : (i64) -> i64
-    %2101 = func.call @cc_set_symbol_value(%2097, %2083) : (i64, i64) -> i64
-    %2102 = llvm.mlir.addressof @str202 : !llvm.ptr
-    %2103 = arith.constant 39 : i64
-    %2104 = func.call @cc_make_string(%2102, %2103) : (!llvm.ptr, i64) -> i64
+    %2099 = func.call @cc_intern(%2097, %2098) : (i64, i64) -> i64
+    %2100 = func.call @cc_nil_value() : () -> i64
+    %2101 = func.call @cc_cons(%2099, %2100) : (i64, i64) -> i64
+    %2102 = func.call @cc_values_pack(%2101) : (i64) -> i64
+    %2103 = func.call @cc_set_symbol_value(%2099, %2076) : (i64, i64) -> i64
+    %2104 = func.call @cc_nil_value() : () -> i64
     %2105 = func.call @cc_nil_value() : () -> i64
-    %2106 = func.call @cc_intern(%2104, %2105) : (i64, i64) -> i64
-    %2107 = func.call @cc_nil_value() : () -> i64
-    %2108 = func.call @cc_cons(%2106, %2107) : (i64, i64) -> i64
-    %2109 = func.call @cc_values_pack(%2108) : (i64) -> i64
-    %2110 = func.call @cc_set_symbol_value(%2106, %2083) : (i64, i64) -> i64
-    %2111 = func.call @cc_nil_value() : () -> i64
-    %2112 = func.call @cc_nil_value() : () -> i64
-    %2113 = func.call @cc_errorp(%2111) : (i64) -> i64
-    %2114 = arith.cmpi ne, %2113, %2112 : i64
-    %2115 = scf.if %2114 -> (i64) {
-      scf.yield %2111 : i64
+    %2106 = func.call @cc_errorp(%2104) : (i64) -> i64
+    %2107 = arith.cmpi ne, %2106, %2105 : i64
+    %2108 = scf.if %2107 -> (i64) {
+      scf.yield %2104 : i64
     } else {
-      %2116 = func.call @cc_nil_value() : () -> i64
-      func.call @stack_push_pointer(%2116) : (i64) -> ()
-      %2117 = llvm.mlir.addressof @str203 : !llvm.ptr
-      %2118 = arith.constant 4 : i64
-      %2119 = func.call @cc_make_string(%2117, %2118) : (!llvm.ptr, i64) -> i64
-      %2120 = func.call @cc_nil_value() : () -> i64
-      %2121 = func.call @cc_intern(%2119, %2120) : (i64, i64) -> i64
-      %2122 = func.call @cc_nil_value() : () -> i64
-      %2123 = func.call @cc_cons(%2121, %2122) : (i64, i64) -> i64
-      %2124 = func.call @cc_values_pack(%2123) : (i64) -> i64
-      %__rlasp_stack_elide_zero_101 = arith.constant 0 : i64
-      %2125 = arith.addi %2121, %__rlasp_stack_elide_zero_101 : i64
-      %2126 = func.call @stack_pop_pointer() : () -> i64
+      %2109 = func.call @cc_nil_value() : () -> i64
+      func.call @stack_push_pointer(%2109) : (i64) -> ()
+      %2110 = llvm.mlir.addressof @str202 : !llvm.ptr
+      %2111 = arith.constant 4 : i64
+      %2112 = func.call @cc_make_string(%2110, %2111) : (!llvm.ptr, i64) -> i64
+      %2113 = func.call @cc_nil_value() : () -> i64
+      %2114 = func.call @cc_intern(%2112, %2113) : (i64, i64) -> i64
+      %2115 = func.call @cc_nil_value() : () -> i64
+      %2116 = func.call @cc_cons(%2114, %2115) : (i64, i64) -> i64
+      %2117 = func.call @cc_values_pack(%2116) : (i64) -> i64
+      %__rlasp_stack_elide_zero_100 = arith.constant 0 : i64
+      %2118 = arith.addi %2114, %__rlasp_stack_elide_zero_100 : i64
+      %2119 = func.call @stack_pop_pointer() : () -> i64
+      %2120 = func.call @cc_cons(%2118, %2119) : (i64, i64) -> i64
+      func.call @stack_push_pointer(%2120) : (i64) -> ()
+      %2121 = llvm.mlir.addressof @str203 : !llvm.ptr
+      %2122 = arith.constant 12 : i64
+      %2123 = func.call @cc_make_string(%2121, %2122) : (!llvm.ptr, i64) -> i64
+      %2124 = func.call @cc_nil_value() : () -> i64
+      %2125 = func.call @cc_intern(%2123, %2124) : (i64, i64) -> i64
+      %2126 = func.call @cc_nil_value() : () -> i64
       %2127 = func.call @cc_cons(%2125, %2126) : (i64, i64) -> i64
-      func.call @stack_push_pointer(%2127) : (i64) -> ()
-      %2128 = llvm.mlir.addressof @str204 : !llvm.ptr
-      %2129 = arith.constant 12 : i64
-      %2130 = func.call @cc_make_string(%2128, %2129) : (!llvm.ptr, i64) -> i64
-      %2131 = func.call @cc_nil_value() : () -> i64
-      %2132 = func.call @cc_intern(%2130, %2131) : (i64, i64) -> i64
+      %2128 = func.call @cc_values_pack(%2127) : (i64) -> i64
+      %__rlasp_stack_elide_zero_101 = arith.constant 0 : i64
+      %2129 = arith.addi %2125, %__rlasp_stack_elide_zero_101 : i64
+      %2130 = func.call @stack_pop_pointer() : () -> i64
+      %2131 = func.call @cc_cons(%2129, %2130) : (i64, i64) -> i64
+      %__rlasp_stack_elide_zero_102 = arith.constant 0 : i64
+      %2132 = arith.addi %2131, %__rlasp_stack_elide_zero_102 : i64
       %2133 = func.call @cc_nil_value() : () -> i64
       %2134 = func.call @cc_cons(%2132, %2133) : (i64, i64) -> i64
-      %2135 = func.call @cc_values_pack(%2134) : (i64) -> i64
-      %__rlasp_stack_elide_zero_102 = arith.constant 0 : i64
-      %2136 = arith.addi %2132, %__rlasp_stack_elide_zero_102 : i64
-      %2137 = func.call @stack_pop_pointer() : () -> i64
-      %2138 = func.call @cc_cons(%2136, %2137) : (i64, i64) -> i64
-      %__rlasp_stack_elide_zero_103 = arith.constant 0 : i64
-      %2139 = arith.addi %2138, %__rlasp_stack_elide_zero_103 : i64
+      %2135 = llvm.mlir.addressof @str204 : !llvm.ptr
+      %2136 = arith.constant 4 : i64
+      %2137 = func.call @cc_make_string(%2135, %2136) : (!llvm.ptr, i64) -> i64
+      %2138 = func.call @cc_nil_value() : () -> i64
+      %2139 = func.call @cc_intern(%2137, %2138) : (i64, i64) -> i64
       %2140 = func.call @cc_nil_value() : () -> i64
       %2141 = func.call @cc_cons(%2139, %2140) : (i64, i64) -> i64
-      %2142 = llvm.mlir.addressof @str205 : !llvm.ptr
-      %2143 = arith.constant 4 : i64
-      %2144 = func.call @cc_make_string(%2142, %2143) : (!llvm.ptr, i64) -> i64
-      %2145 = func.call @cc_nil_value() : () -> i64
-      %2146 = func.call @cc_intern(%2144, %2145) : (i64, i64) -> i64
-      %2147 = func.call @cc_nil_value() : () -> i64
-      %2148 = func.call @cc_cons(%2146, %2147) : (i64, i64) -> i64
-      %2149 = func.call @cc_values_pack(%2148) : (i64) -> i64
-      %2150 = func.call @cc_symbol_value(%2146) : (i64) -> i64
-      %2151 = func.call @cc_set_symbol_value(%2146, %2082) : (i64, i64) -> i64
-      %2152 = func.call @cc_eval(%2141) : (i64) -> i64
-      %2153 = func.call @cc_multiple_value_list(%2152) : (i64) -> i64
-      %2154 = func.call @cc_symbol_value(%2146) : (i64) -> i64
-      %2155 = func.call @cc_set_symbol_value(%2146, %2150) : (i64, i64) -> i64
-      %2156 = func.call @cc_values_pack(%2153) : (i64) -> i64
-      %__rlasp_stack_elide_zero_104 = arith.constant 0 : i64
-      %2157 = arith.addi %2156, %__rlasp_stack_elide_zero_104 : i64
-      scf.yield %2157 : i64
+      %2142 = func.call @cc_values_pack(%2141) : (i64) -> i64
+      %2143 = func.call @cc_symbol_value(%2139) : (i64) -> i64
+      %2144 = func.call @cc_set_symbol_value(%2139, %2075) : (i64, i64) -> i64
+      %2145 = func.call @cc_eval(%2134) : (i64) -> i64
+      %2146 = func.call @cc_multiple_value_list(%2145) : (i64) -> i64
+      %2147 = func.call @cc_symbol_value(%2139) : (i64) -> i64
+      %2148 = func.call @cc_set_symbol_value(%2139, %2143) : (i64, i64) -> i64
+      %2149 = func.call @cc_values_pack(%2146) : (i64) -> i64
+      %__rlasp_stack_elide_zero_103 = arith.constant 0 : i64
+      %2150 = arith.addi %2149, %__rlasp_stack_elide_zero_103 : i64
+      scf.yield %2150 : i64
+    }
+    %__rlasp_stack_elide_zero_104 = arith.constant 0 : i64
+    %2151 = arith.addi %2108, %__rlasp_stack_elide_zero_104 : i64
+    %2152 = func.call @cc_multiple_value_list(%2151) : (i64) -> i64
+    %2153 = arith.constant 0 : i64
+    %2154 = func.call @cc_box_fixnum(%2153) : (i64) -> i64
+    %2155 = func.call @cc_nth(%2154, %2152) : (i64, i64) -> i64
+    %2156 = arith.constant 1 : i64
+    %2157 = func.call @cc_box_fixnum(%2156) : (i64) -> i64
+    %2158 = func.call @cc_nth(%2157, %2152) : (i64, i64) -> i64
+    %2159 = arith.constant 2 : i64
+    %2160 = func.call @cc_box_fixnum(%2159) : (i64) -> i64
+    %2161 = func.call @cc_nth(%2160, %2152) : (i64, i64) -> i64
+    func.call @stack_push_nil() : () -> ()
+    %2162 = func.call @stack_depth() : () -> i64
+    %2163 = arith.constant 0 : i64
+    %2164 = arith.cmpi sgt, %2162, %2163 : i64
+    scf.if %2164 {
+      %2165 = func.call @stack_pop_pointer() : () -> i64
     }
     %__rlasp_stack_elide_zero_105 = arith.constant 0 : i64
-    %2158 = arith.addi %2115, %__rlasp_stack_elide_zero_105 : i64
-    %2159 = func.call @cc_multiple_value_list(%2158) : (i64) -> i64
-    %2160 = arith.constant 0 : i64
-    %2161 = func.call @cc_box_fixnum(%2160) : (i64) -> i64
-    %2162 = func.call @cc_nth(%2161, %2159) : (i64, i64) -> i64
-    %2163 = arith.constant 1 : i64
-    %2164 = func.call @cc_box_fixnum(%2163) : (i64) -> i64
-    %2165 = func.call @cc_nth(%2164, %2159) : (i64, i64) -> i64
-    %2166 = arith.constant 2 : i64
-    %2167 = func.call @cc_box_fixnum(%2166) : (i64) -> i64
-    %2168 = func.call @cc_nth(%2167, %2159) : (i64, i64) -> i64
-    func.call @stack_push_nil() : () -> ()
-    %2169 = func.call @stack_depth() : () -> i64
-    %2170 = arith.constant 0 : i64
-    %2171 = arith.cmpi sgt, %2169, %2170 : i64
-    scf.if %2171 {
-      %2172 = func.call @stack_pop_pointer() : () -> i64
-    }
-    %__rlasp_stack_elide_zero_106 = arith.constant 0 : i64
-    %2173 = arith.addi %2162, %__rlasp_stack_elide_zero_106 : i64
-    %2174 = func.call @cc_nil_value() : () -> i64
-    %2175 = arith.cmpi ne, %2173, %2174 : i64
-    scf.if %2175 {
-      %2176 = func.call @cc_nil_value() : () -> i64
-      %2177 = func.call @cc_nil_value() : () -> i64
-      %2178 = func.call @cc_errorp(%2176) : (i64) -> i64
-      %2179 = arith.cmpi ne, %2178, %2177 : i64
-      %2180 = scf.if %2179 -> (i64) {
-        scf.yield %2176 : i64
+    %2166 = arith.addi %2155, %__rlasp_stack_elide_zero_105 : i64
+    %2167 = func.call @cc_nil_value() : () -> i64
+    %2168 = arith.cmpi ne, %2166, %2167 : i64
+    scf.if %2168 {
+      %2169 = func.call @cc_nil_value() : () -> i64
+      %2170 = func.call @cc_nil_value() : () -> i64
+      %2171 = func.call @cc_errorp(%2169) : (i64) -> i64
+      %2172 = arith.cmpi ne, %2171, %2170 : i64
+      %2173 = scf.if %2172 -> (i64) {
+        scf.yield %2169 : i64
       } else {
+        %__rlasp_stack_elide_zero_106 = arith.constant 0 : i64
+        %2174 = arith.addi %2155, %__rlasp_stack_elide_zero_106 : i64
+        %2175 = func.call @cc_nil_value() : () -> i64
+        %2176 = func.call @cc_cons(%2174, %2175) : (i64, i64) -> i64
+        %2177 = func.call @cc_load_stack(%2176) : (i64) -> i64
         %__rlasp_stack_elide_zero_107 = arith.constant 0 : i64
-        %2181 = arith.addi %2162, %__rlasp_stack_elide_zero_107 : i64
-        %2182 = func.call @cc_nil_value() : () -> i64
-        %2183 = func.call @cc_cons(%2181, %2182) : (i64, i64) -> i64
-        %2184 = func.call @cc_load_stack(%2183) : (i64) -> i64
-        %__rlasp_stack_elide_zero_108 = arith.constant 0 : i64
-        %2185 = arith.addi %2184, %__rlasp_stack_elide_zero_108 : i64
-        scf.yield %2185 : i64
+        %2178 = arith.addi %2177, %__rlasp_stack_elide_zero_107 : i64
+        scf.yield %2178 : i64
       }
-      func.call @stack_push_pointer(%2180) : (i64) -> ()
+      func.call @stack_push_pointer(%2173) : (i64) -> ()
     } else {
       func.call @stack_push_nil() : () -> ()
     }
-    %2186 = func.call @stack_pop_pointer() : () -> i64
-    %2187 = func.call @cc_multiple_value_list(%2186) : (i64) -> i64
-    %2188 = llvm.mlir.addressof @str206 : !llvm.ptr
-    %2189 = arith.constant 37 : i64
-    %2190 = func.call @cc_make_string(%2188, %2189) : (!llvm.ptr, i64) -> i64
-    %2191 = func.call @cc_nil_value() : () -> i64
-    %2192 = func.call @cc_intern(%2190, %2191) : (i64, i64) -> i64
+    %2179 = func.call @stack_pop_pointer() : () -> i64
+    %2180 = func.call @cc_multiple_value_list(%2179) : (i64) -> i64
+    %2181 = llvm.mlir.addressof @str205 : !llvm.ptr
+    %2182 = arith.constant 37 : i64
+    %2183 = func.call @cc_make_string(%2181, %2182) : (!llvm.ptr, i64) -> i64
+    %2184 = func.call @cc_nil_value() : () -> i64
+    %2185 = func.call @cc_intern(%2183, %2184) : (i64, i64) -> i64
+    %2186 = func.call @cc_nil_value() : () -> i64
+    %2187 = func.call @cc_cons(%2185, %2186) : (i64, i64) -> i64
+    %2188 = func.call @cc_values_pack(%2187) : (i64) -> i64
+    %2189 = func.call @cc_symbol_value(%2185) : (i64) -> i64
+    %2190 = llvm.mlir.addressof @str206 : !llvm.ptr
+    %2191 = arith.constant 39 : i64
+    %2192 = func.call @cc_make_string(%2190, %2191) : (!llvm.ptr, i64) -> i64
     %2193 = func.call @cc_nil_value() : () -> i64
-    %2194 = func.call @cc_cons(%2192, %2193) : (i64, i64) -> i64
-    %2195 = func.call @cc_values_pack(%2194) : (i64) -> i64
-    %2196 = func.call @cc_symbol_value(%2192) : (i64) -> i64
-    %2197 = llvm.mlir.addressof @str207 : !llvm.ptr
-    %2198 = arith.constant 39 : i64
-    %2199 = func.call @cc_make_string(%2197, %2198) : (!llvm.ptr, i64) -> i64
-    %2200 = func.call @cc_nil_value() : () -> i64
-    %2201 = func.call @cc_intern(%2199, %2200) : (i64, i64) -> i64
-    %2202 = func.call @cc_nil_value() : () -> i64
-    %2203 = func.call @cc_cons(%2201, %2202) : (i64, i64) -> i64
-    %2204 = func.call @cc_values_pack(%2203) : (i64) -> i64
-    %2205 = func.call @cc_symbol_value(%2201) : (i64) -> i64
-    %2206 = func.call @cc_nil_value() : () -> i64
-    %2207 = arith.cmpi ne, %2196, %2206 : i64
-    %2208 = scf.if %2207 -> (i64) {
-      scf.yield %2205 : i64
+    %2194 = func.call @cc_intern(%2192, %2193) : (i64, i64) -> i64
+    %2195 = func.call @cc_nil_value() : () -> i64
+    %2196 = func.call @cc_cons(%2194, %2195) : (i64, i64) -> i64
+    %2197 = func.call @cc_values_pack(%2196) : (i64) -> i64
+    %2198 = func.call @cc_symbol_value(%2194) : (i64) -> i64
+    %2199 = func.call @cc_nil_value() : () -> i64
+    %2200 = arith.cmpi ne, %2189, %2199 : i64
+    %2201 = scf.if %2200 -> (i64) {
+      scf.yield %2198 : i64
     } else {
-      scf.yield %2187 : i64
+      scf.yield %2180 : i64
     }
-    %2209 = func.call @cc_values_pack(%2208) : (i64) -> i64
-    func.call @stack_push_pointer(%2209) : (i64) -> ()
+    %2202 = func.call @cc_values_pack(%2201) : (i64) -> i64
+    func.call @stack_push_pointer(%2202) : (i64) -> ()
     func.return
   }
   func.func @"__main"() {
-    %2210 = llvm.mlir.addressof @str208 : !llvm.ptr
-    %2211 = arith.constant 6 : i64
-    %2212 = func.call @cc_make_string(%2210, %2211) : (!llvm.ptr, i64) -> i64
-    %2213 = func.call @cc_nil_value() : () -> i64
-    %2214 = func.call @cc_intern(%2212, %2213) : (i64, i64) -> i64
+    %2203 = llvm.mlir.addressof @str207 : !llvm.ptr
+    %2204 = arith.constant 6 : i64
+    %2205 = func.call @cc_make_string(%2203, %2204) : (!llvm.ptr, i64) -> i64
+    %2206 = func.call @cc_nil_value() : () -> i64
+    %2207 = func.call @cc_intern(%2205, %2206) : (i64, i64) -> i64
+    %2208 = func.call @cc_nil_value() : () -> i64
+    %2209 = func.call @cc_cons(%2207, %2208) : (i64, i64) -> i64
+    %2210 = func.call @cc_values_pack(%2209) : (i64) -> i64
+    %2211 = func.call @cc_nil_value() : () -> i64
+    %2212 = llvm.mlir.addressof @str208 : !llvm.ptr
+    %2213 = arith.constant 37 : i64
+    %2214 = func.call @cc_make_string(%2212, %2213) : (!llvm.ptr, i64) -> i64
     %2215 = func.call @cc_nil_value() : () -> i64
-    %2216 = func.call @cc_cons(%2214, %2215) : (i64, i64) -> i64
-    %2217 = func.call @cc_values_pack(%2216) : (i64) -> i64
-    %2218 = func.call @cc_nil_value() : () -> i64
-    %2219 = llvm.mlir.addressof @str209 : !llvm.ptr
-    %2220 = arith.constant 37 : i64
-    %2221 = func.call @cc_make_string(%2219, %2220) : (!llvm.ptr, i64) -> i64
-    %2222 = func.call @cc_nil_value() : () -> i64
-    %2223 = func.call @cc_intern(%2221, %2222) : (i64, i64) -> i64
+    %2216 = func.call @cc_intern(%2214, %2215) : (i64, i64) -> i64
+    %2217 = func.call @cc_nil_value() : () -> i64
+    %2218 = func.call @cc_cons(%2216, %2217) : (i64, i64) -> i64
+    %2219 = func.call @cc_values_pack(%2218) : (i64) -> i64
+    %2220 = func.call @cc_set_symbol_value(%2216, %2211) : (i64, i64) -> i64
+    %2221 = llvm.mlir.addressof @str209 : !llvm.ptr
+    %2222 = arith.constant 38 : i64
+    %2223 = func.call @cc_make_string(%2221, %2222) : (!llvm.ptr, i64) -> i64
     %2224 = func.call @cc_nil_value() : () -> i64
-    %2225 = func.call @cc_cons(%2223, %2224) : (i64, i64) -> i64
-    %2226 = func.call @cc_values_pack(%2225) : (i64) -> i64
-    %2227 = func.call @cc_set_symbol_value(%2223, %2218) : (i64, i64) -> i64
-    %2228 = llvm.mlir.addressof @str210 : !llvm.ptr
-    %2229 = arith.constant 38 : i64
-    %2230 = func.call @cc_make_string(%2228, %2229) : (!llvm.ptr, i64) -> i64
-    %2231 = func.call @cc_nil_value() : () -> i64
-    %2232 = func.call @cc_intern(%2230, %2231) : (i64, i64) -> i64
+    %2225 = func.call @cc_intern(%2223, %2224) : (i64, i64) -> i64
+    %2226 = func.call @cc_nil_value() : () -> i64
+    %2227 = func.call @cc_cons(%2225, %2226) : (i64, i64) -> i64
+    %2228 = func.call @cc_values_pack(%2227) : (i64) -> i64
+    %2229 = func.call @cc_set_symbol_value(%2225, %2211) : (i64, i64) -> i64
+    %2230 = llvm.mlir.addressof @str210 : !llvm.ptr
+    %2231 = arith.constant 39 : i64
+    %2232 = func.call @cc_make_string(%2230, %2231) : (!llvm.ptr, i64) -> i64
     %2233 = func.call @cc_nil_value() : () -> i64
-    %2234 = func.call @cc_cons(%2232, %2233) : (i64, i64) -> i64
-    %2235 = func.call @cc_values_pack(%2234) : (i64) -> i64
-    %2236 = func.call @cc_set_symbol_value(%2232, %2218) : (i64, i64) -> i64
-    %2237 = llvm.mlir.addressof @str211 : !llvm.ptr
-    %2238 = arith.constant 39 : i64
-    %2239 = func.call @cc_make_string(%2237, %2238) : (!llvm.ptr, i64) -> i64
+    %2234 = func.call @cc_intern(%2232, %2233) : (i64, i64) -> i64
+    %2235 = func.call @cc_nil_value() : () -> i64
+    %2236 = func.call @cc_cons(%2234, %2235) : (i64, i64) -> i64
+    %2237 = func.call @cc_values_pack(%2236) : (i64) -> i64
+    %2238 = func.call @cc_set_symbol_value(%2234, %2211) : (i64, i64) -> i64
+    %2239 = func.call @cc_nil_value() : () -> i64
     %2240 = func.call @cc_nil_value() : () -> i64
-    %2241 = func.call @cc_intern(%2239, %2240) : (i64, i64) -> i64
-    %2242 = func.call @cc_nil_value() : () -> i64
-    %2243 = func.call @cc_cons(%2241, %2242) : (i64, i64) -> i64
-    %2244 = func.call @cc_values_pack(%2243) : (i64) -> i64
-    %2245 = func.call @cc_set_symbol_value(%2241, %2218) : (i64, i64) -> i64
-    %2246 = func.call @cc_nil_value() : () -> i64
-    %2247 = func.call @cc_nil_value() : () -> i64
-    %2248 = func.call @cc_errorp(%2246) : (i64) -> i64
-    %2249 = arith.cmpi ne, %2248, %2247 : i64
-    %2250 = scf.if %2249 -> (i64) {
-      scf.yield %2246 : i64
+    %2241 = func.call @cc_errorp(%2239) : (i64) -> i64
+    %2242 = arith.cmpi ne, %2241, %2240 : i64
+    %2243 = scf.if %2242 -> (i64) {
+      scf.yield %2239 : i64
     } else {
-      %2251 = func.call @cc_nil_value() : () -> i64
-      %2252 = func.call @cc_nil_value() : () -> i64
-      %2253 = func.call @cc_errorp(%2251) : (i64) -> i64
-      %2254 = arith.cmpi ne, %2253, %2252 : i64
-      %2255 = scf.if %2254 -> (i64) {
-        scf.yield %2251 : i64
+      %2244 = func.call @cc_nil_value() : () -> i64
+      %2245 = func.call @cc_nil_value() : () -> i64
+      %2246 = func.call @cc_errorp(%2244) : (i64) -> i64
+      %2247 = arith.cmpi ne, %2246, %2245 : i64
+      %2248 = scf.if %2247 -> (i64) {
+        scf.yield %2244 : i64
       } else {
-        %2256 = llvm.mlir.addressof @str212 : !llvm.ptr
-        %2257 = arith.constant 11 : i64
-        %2258 = func.call @cc_make_string(%2256, %2257) : (!llvm.ptr, i64) -> i64
-        %2259 = func.call @cc_nil_value() : () -> i64
-        %2260 = func.call @cc_intern(%2258, %2259) : (i64, i64) -> i64
-        %2261 = func.call @cc_nil_value() : () -> i64
-        %2262 = func.call @cc_cons(%2260, %2261) : (i64, i64) -> i64
-        %2263 = func.call @cc_values_pack(%2262) : (i64) -> i64
-        %__rlasp_stack_elide_zero_109 = arith.constant 0 : i64
-        %2264 = arith.addi %2260, %__rlasp_stack_elide_zero_109 : i64
-        %2265 = func.call @cc_nil_value() : () -> i64
-        %2266 = func.call @cc_errorp(%2264) : (i64) -> i64
-        %2267 = arith.cmpi ne, %2266, %2265 : i64
-        %2268 = arith.cmpi eq, %2265, %2265 : i64
-        %2269 = arith.andi %2267, %2268 : i1
-        %2270 = scf.if %2269 -> (i64) {
-          scf.yield %2264 : i64
+        %2249 = llvm.mlir.addressof @str211 : !llvm.ptr
+        %2250 = arith.constant 11 : i64
+        %2251 = func.call @cc_make_string(%2249, %2250) : (!llvm.ptr, i64) -> i64
+        %2252 = func.call @cc_nil_value() : () -> i64
+        %2253 = func.call @cc_intern(%2251, %2252) : (i64, i64) -> i64
+        %2254 = func.call @cc_nil_value() : () -> i64
+        %2255 = func.call @cc_cons(%2253, %2254) : (i64, i64) -> i64
+        %2256 = func.call @cc_values_pack(%2255) : (i64) -> i64
+        %__rlasp_stack_elide_zero_108 = arith.constant 0 : i64
+        %2257 = arith.addi %2253, %__rlasp_stack_elide_zero_108 : i64
+        %2258 = func.call @cc_nil_value() : () -> i64
+        %2259 = func.call @cc_errorp(%2257) : (i64) -> i64
+        %2260 = arith.cmpi ne, %2259, %2258 : i64
+        %2261 = arith.cmpi eq, %2258, %2258 : i64
+        %2262 = arith.andi %2260, %2261 : i1
+        %2263 = scf.if %2262 -> (i64) {
+          scf.yield %2257 : i64
         } else {
-          scf.yield %2265 : i64
+          scf.yield %2258 : i64
         }
-        %2271 = arith.cmpi ne, %2270, %2265 : i64
-        scf.if %2271 {
-          func.call @stack_push_pointer(%2270) : (i64) -> ()
+        %2264 = arith.cmpi ne, %2263, %2258 : i64
+        scf.if %2264 {
+          func.call @stack_push_pointer(%2263) : (i64) -> ()
         } else {
-          func.call @stack_push_pointer(%2264) : (i64) -> ()
-          %2272 = llvm.mlir.addressof @str213 : !llvm.ptr
-          %2273 = func.call @cc_make_function_ref_const(%2272) : (!llvm.ptr) -> i64
-          %2274 = arith.constant 1 : i64
-          func.call @cc_funcall_stack(%2273, %2274) : (i64, i64) -> ()
+          func.call @stack_push_pointer(%2257) : (i64) -> ()
+          %2265 = llvm.mlir.addressof @str212 : !llvm.ptr
+          %2266 = func.call @cc_make_function_ref_const(%2265) : (!llvm.ptr) -> i64
+          %2267 = arith.constant 1 : i64
+          func.call @cc_funcall_stack(%2266, %2267) : (i64, i64) -> ()
         }
-        %2275 = func.call @stack_pop_pointer() : () -> i64
-        %2276 = func.call @cc_nil_value() : () -> i64
-        %2277 = arith.cmpi ne, %2275, %2276 : i64
-        scf.if %2277 {
-          %2278 = llvm.mlir.addressof @str214 : !llvm.ptr
-          %2279 = arith.constant 11 : i64
-          %2280 = func.call @cc_make_string(%2278, %2279) : (!llvm.ptr, i64) -> i64
-          %2281 = func.call @cc_nil_value() : () -> i64
-          %2282 = func.call @cc_intern(%2280, %2281) : (i64, i64) -> i64
-          %2283 = func.call @cc_nil_value() : () -> i64
-          %2284 = func.call @cc_cons(%2282, %2283) : (i64, i64) -> i64
-          %2285 = func.call @cc_values_pack(%2284) : (i64) -> i64
+        %2268 = func.call @stack_pop_pointer() : () -> i64
+        %2269 = func.call @cc_nil_value() : () -> i64
+        %2270 = arith.cmpi ne, %2268, %2269 : i64
+        scf.if %2270 {
+          %2271 = llvm.mlir.addressof @str213 : !llvm.ptr
+          %2272 = arith.constant 11 : i64
+          %2273 = func.call @cc_make_string(%2271, %2272) : (!llvm.ptr, i64) -> i64
+          %2274 = func.call @cc_nil_value() : () -> i64
+          %2275 = func.call @cc_intern(%2273, %2274) : (i64, i64) -> i64
+          %2276 = func.call @cc_nil_value() : () -> i64
+          %2277 = func.call @cc_cons(%2275, %2276) : (i64, i64) -> i64
+          %2278 = func.call @cc_values_pack(%2277) : (i64) -> i64
+          %__rlasp_stack_elide_zero_109 = arith.constant 0 : i64
+          %2279 = arith.addi %2275, %__rlasp_stack_elide_zero_109 : i64
+          %2280 = func.call @cc_nil_value() : () -> i64
+          %2281 = func.call @cc_errorp(%2279) : (i64) -> i64
+          %2282 = arith.cmpi ne, %2281, %2280 : i64
+          %2283 = arith.cmpi eq, %2280, %2280 : i64
+          %2284 = arith.andi %2282, %2283 : i1
+          %2285 = scf.if %2284 -> (i64) {
+            scf.yield %2279 : i64
+          } else {
+            scf.yield %2280 : i64
+          }
+          %2286 = arith.cmpi ne, %2285, %2280 : i64
+          scf.if %2286 {
+            func.call @stack_push_pointer(%2285) : (i64) -> ()
+          } else {
+            func.call @stack_push_pointer(%2279) : (i64) -> ()
+            %2287 = llvm.mlir.addressof @str214 : !llvm.ptr
+            %2288 = func.call @cc_make_function_ref_const(%2287) : (!llvm.ptr) -> i64
+            %2289 = arith.constant 1 : i64
+            func.call @cc_funcall_stack(%2288, %2289) : (i64, i64) -> ()
+          }
+        } else {
+          %2290 = llvm.mlir.addressof @str215 : !llvm.ptr
+          %2291 = arith.constant 11 : i64
+          %2292 = func.call @cc_make_string(%2290, %2291) : (!llvm.ptr, i64) -> i64
+          %2293 = func.call @cc_nil_value() : () -> i64
+          %2294 = func.call @cc_intern(%2292, %2293) : (i64, i64) -> i64
+          %2295 = func.call @cc_nil_value() : () -> i64
+          %2296 = func.call @cc_cons(%2294, %2295) : (i64, i64) -> i64
+          %2297 = func.call @cc_values_pack(%2296) : (i64) -> i64
           %__rlasp_stack_elide_zero_110 = arith.constant 0 : i64
-          %2286 = arith.addi %2282, %__rlasp_stack_elide_zero_110 : i64
-          %2287 = func.call @cc_nil_value() : () -> i64
-          %2288 = func.call @cc_errorp(%2286) : (i64) -> i64
-          %2289 = arith.cmpi ne, %2288, %2287 : i64
-          %2290 = arith.cmpi eq, %2287, %2287 : i64
-          %2291 = arith.andi %2289, %2290 : i1
-          %2292 = scf.if %2291 -> (i64) {
-            scf.yield %2286 : i64
+          %2298 = arith.addi %2294, %__rlasp_stack_elide_zero_110 : i64
+          %2299 = func.call @cc_nil_value() : () -> i64
+          %2300 = func.call @cc_errorp(%2298) : (i64) -> i64
+          %2301 = arith.cmpi ne, %2300, %2299 : i64
+          %2302 = arith.cmpi eq, %2299, %2299 : i64
+          %2303 = arith.andi %2301, %2302 : i1
+          %2304 = scf.if %2303 -> (i64) {
+            scf.yield %2298 : i64
           } else {
-            scf.yield %2287 : i64
+            scf.yield %2299 : i64
           }
-          %2293 = arith.cmpi ne, %2292, %2287 : i64
-          scf.if %2293 {
-            func.call @stack_push_pointer(%2292) : (i64) -> ()
+          %2305 = arith.cmpi ne, %2304, %2299 : i64
+          scf.if %2305 {
+            func.call @stack_push_pointer(%2304) : (i64) -> ()
           } else {
-            func.call @stack_push_pointer(%2286) : (i64) -> ()
-            %2294 = llvm.mlir.addressof @str215 : !llvm.ptr
-            %2295 = func.call @cc_make_function_ref_const(%2294) : (!llvm.ptr) -> i64
-            %2296 = arith.constant 1 : i64
-            func.call @cc_funcall_stack(%2295, %2296) : (i64, i64) -> ()
-          }
-        } else {
-          %2297 = llvm.mlir.addressof @str216 : !llvm.ptr
-          %2298 = arith.constant 11 : i64
-          %2299 = func.call @cc_make_string(%2297, %2298) : (!llvm.ptr, i64) -> i64
-          %2300 = func.call @cc_nil_value() : () -> i64
-          %2301 = func.call @cc_intern(%2299, %2300) : (i64, i64) -> i64
-          %2302 = func.call @cc_nil_value() : () -> i64
-          %2303 = func.call @cc_cons(%2301, %2302) : (i64, i64) -> i64
-          %2304 = func.call @cc_values_pack(%2303) : (i64) -> i64
-          %__rlasp_stack_elide_zero_111 = arith.constant 0 : i64
-          %2305 = arith.addi %2301, %__rlasp_stack_elide_zero_111 : i64
-          %2306 = func.call @cc_nil_value() : () -> i64
-          %2307 = func.call @cc_errorp(%2305) : (i64) -> i64
-          %2308 = arith.cmpi ne, %2307, %2306 : i64
-          %2309 = arith.cmpi eq, %2306, %2306 : i64
-          %2310 = arith.andi %2308, %2309 : i1
-          %2311 = scf.if %2310 -> (i64) {
-            scf.yield %2305 : i64
-          } else {
-            scf.yield %2306 : i64
-          }
-          %2312 = arith.cmpi ne, %2311, %2306 : i64
-          scf.if %2312 {
-            func.call @stack_push_pointer(%2311) : (i64) -> ()
-          } else {
-            func.call @stack_push_pointer(%2305) : (i64) -> ()
-            %2313 = llvm.mlir.addressof @str217 : !llvm.ptr
-            %2314 = func.call @cc_make_function_ref_const(%2313) : (!llvm.ptr) -> i64
-            %2315 = arith.constant 1 : i64
-            func.call @cc_funcall_stack(%2314, %2315) : (i64, i64) -> ()
+            func.call @stack_push_pointer(%2298) : (i64) -> ()
+            %2306 = llvm.mlir.addressof @str216 : !llvm.ptr
+            %2307 = func.call @cc_make_function_ref_const(%2306) : (!llvm.ptr) -> i64
+            %2308 = arith.constant 1 : i64
+            func.call @cc_funcall_stack(%2307, %2308) : (i64, i64) -> ()
           }
         }
-        %2316 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %2316 : i64
+        %2309 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %2309 : i64
       }
-      %2317 = func.call @cc_nil_value() : () -> i64
-      %2318 = func.call @cc_errorp(%2255) : (i64) -> i64
-      %2319 = arith.cmpi ne, %2318, %2317 : i64
-      %2320 = scf.if %2319 -> (i64) {
-        scf.yield %2255 : i64
+      %2310 = func.call @cc_nil_value() : () -> i64
+      %2311 = func.call @cc_errorp(%2248) : (i64) -> i64
+      %2312 = arith.cmpi ne, %2311, %2310 : i64
+      %2313 = scf.if %2312 -> (i64) {
+        scf.yield %2248 : i64
       } else {
-        %2321 = llvm.mlir.addressof @str218 : !llvm.ptr
-        %2322 = arith.constant 2 : i64
-        %2323 = func.call @cc_make_string(%2321, %2322) : (!llvm.ptr, i64) -> i64
-        %2324 = llvm.mlir.addressof @str219 : !llvm.ptr
-        %2325 = arith.constant 7 : i64
-        %2326 = func.call @cc_make_string(%2324, %2325) : (!llvm.ptr, i64) -> i64
-        %2327 = func.call @cc_intern(%2323, %2326) : (i64, i64) -> i64
+        %2314 = llvm.mlir.addressof @str217 : !llvm.ptr
+        %2315 = arith.constant 2 : i64
+        %2316 = func.call @cc_make_string(%2314, %2315) : (!llvm.ptr, i64) -> i64
+        %2317 = llvm.mlir.addressof @str218 : !llvm.ptr
+        %2318 = arith.constant 7 : i64
+        %2319 = func.call @cc_make_string(%2317, %2318) : (!llvm.ptr, i64) -> i64
+        %2320 = func.call @cc_intern(%2316, %2319) : (i64, i64) -> i64
+        %2321 = func.call @cc_nil_value() : () -> i64
+        %2322 = func.call @cc_cons(%2320, %2321) : (i64, i64) -> i64
+        %2323 = func.call @cc_values_pack(%2322) : (i64) -> i64
+        %__rlasp_stack_elide_zero_111 = arith.constant 0 : i64
+        %2324 = arith.addi %2320, %__rlasp_stack_elide_zero_111 : i64
+        %2325 = llvm.mlir.addressof @str219 : !llvm.ptr
+        %2326 = arith.constant 11 : i64
+        %2327 = func.call @cc_make_string(%2325, %2326) : (!llvm.ptr, i64) -> i64
         %2328 = func.call @cc_nil_value() : () -> i64
-        %2329 = func.call @cc_cons(%2327, %2328) : (i64, i64) -> i64
-        %2330 = func.call @cc_values_pack(%2329) : (i64) -> i64
+        %2329 = func.call @cc_intern(%2327, %2328) : (i64, i64) -> i64
+        %2330 = func.call @cc_nil_value() : () -> i64
+        %2331 = func.call @cc_cons(%2329, %2330) : (i64, i64) -> i64
+        %2332 = func.call @cc_values_pack(%2331) : (i64) -> i64
         %__rlasp_stack_elide_zero_112 = arith.constant 0 : i64
-        %2331 = arith.addi %2327, %__rlasp_stack_elide_zero_112 : i64
-        %2332 = llvm.mlir.addressof @str220 : !llvm.ptr
-        %2333 = arith.constant 11 : i64
-        %2334 = func.call @cc_make_string(%2332, %2333) : (!llvm.ptr, i64) -> i64
-        %2335 = func.call @cc_nil_value() : () -> i64
-        %2336 = func.call @cc_intern(%2334, %2335) : (i64, i64) -> i64
-        %2337 = func.call @cc_nil_value() : () -> i64
-        %2338 = func.call @cc_cons(%2336, %2337) : (i64, i64) -> i64
-        %2339 = func.call @cc_values_pack(%2338) : (i64) -> i64
+        %2333 = arith.addi %2329, %__rlasp_stack_elide_zero_112 : i64
+        %2334 = func.call @cc_nil_value() : () -> i64
+        %2335 = func.call @cc_errorp(%2324) : (i64) -> i64
+        %2336 = arith.cmpi ne, %2335, %2334 : i64
+        %2337 = arith.cmpi eq, %2334, %2334 : i64
+        %2338 = arith.andi %2336, %2337 : i1
+        %2339 = scf.if %2338 -> (i64) {
+          scf.yield %2324 : i64
+        } else {
+          scf.yield %2334 : i64
+        }
+        %2340 = func.call @cc_errorp(%2333) : (i64) -> i64
+        %2341 = arith.cmpi ne, %2340, %2334 : i64
+        %2342 = arith.cmpi eq, %2339, %2334 : i64
+        %2343 = arith.andi %2341, %2342 : i1
+        %2344 = scf.if %2343 -> (i64) {
+          scf.yield %2333 : i64
+        } else {
+          scf.yield %2339 : i64
+        }
+        %2345 = arith.cmpi ne, %2344, %2334 : i64
+        scf.if %2345 {
+          func.call @stack_push_pointer(%2344) : (i64) -> ()
+        } else {
+          func.call @stack_push_pointer(%2324) : (i64) -> ()
+          func.call @stack_push_pointer(%2333) : (i64) -> ()
+          %2346 = llvm.mlir.addressof @str220 : !llvm.ptr
+          %2347 = func.call @cc_make_function_ref_const(%2346) : (!llvm.ptr) -> i64
+          %2348 = arith.constant 2 : i64
+          func.call @cc_funcall_stack(%2347, %2348) : (i64, i64) -> ()
+        }
+        %2349 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %2349 : i64
+      }
+      %2350 = func.call @cc_nil_value() : () -> i64
+      %2351 = func.call @cc_errorp(%2313) : (i64) -> i64
+      %2352 = arith.cmpi ne, %2351, %2350 : i64
+      %2353 = scf.if %2352 -> (i64) {
+        scf.yield %2313 : i64
+      } else {
+        %2354 = llvm.mlir.addressof @str221 : !llvm.ptr
+        %2355 = arith.constant 4 : i64
+        %2356 = func.call @cc_make_string(%2354, %2355) : (!llvm.ptr, i64) -> i64
+        %2357 = func.call @cc_nil_value() : () -> i64
+        %2358 = func.call @cc_intern(%2356, %2357) : (i64, i64) -> i64
+        %2359 = func.call @cc_nil_value() : () -> i64
+        %2360 = func.call @cc_cons(%2358, %2359) : (i64, i64) -> i64
+        %2361 = func.call @cc_values_pack(%2360) : (i64) -> i64
         %__rlasp_stack_elide_zero_113 = arith.constant 0 : i64
-        %2340 = arith.addi %2336, %__rlasp_stack_elide_zero_113 : i64
-        %2341 = func.call @cc_nil_value() : () -> i64
-        %2342 = func.call @cc_errorp(%2331) : (i64) -> i64
-        %2343 = arith.cmpi ne, %2342, %2341 : i64
-        %2344 = arith.cmpi eq, %2341, %2341 : i64
-        %2345 = arith.andi %2343, %2344 : i1
-        %2346 = scf.if %2345 -> (i64) {
-          scf.yield %2331 : i64
-        } else {
-          scf.yield %2341 : i64
-        }
-        %2347 = func.call @cc_errorp(%2340) : (i64) -> i64
-        %2348 = arith.cmpi ne, %2347, %2341 : i64
-        %2349 = arith.cmpi eq, %2346, %2341 : i64
-        %2350 = arith.andi %2348, %2349 : i1
-        %2351 = scf.if %2350 -> (i64) {
-          scf.yield %2340 : i64
-        } else {
-          scf.yield %2346 : i64
-        }
-        %2352 = arith.cmpi ne, %2351, %2341 : i64
-        scf.if %2352 {
-          func.call @stack_push_pointer(%2351) : (i64) -> ()
-        } else {
-          func.call @stack_push_pointer(%2331) : (i64) -> ()
-          func.call @stack_push_pointer(%2340) : (i64) -> ()
-          %2353 = llvm.mlir.addressof @str221 : !llvm.ptr
-          %2354 = func.call @cc_make_function_ref_const(%2353) : (!llvm.ptr) -> i64
-          %2355 = arith.constant 2 : i64
-          func.call @cc_funcall_stack(%2354, %2355) : (i64, i64) -> ()
-        }
-        %2356 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %2356 : i64
-      }
-      %2357 = func.call @cc_nil_value() : () -> i64
-      %2358 = func.call @cc_errorp(%2320) : (i64) -> i64
-      %2359 = arith.cmpi ne, %2358, %2357 : i64
-      %2360 = scf.if %2359 -> (i64) {
-        scf.yield %2320 : i64
-      } else {
-        %2361 = llvm.mlir.addressof @str222 : !llvm.ptr
-        %2362 = arith.constant 4 : i64
-        %2363 = func.call @cc_make_string(%2361, %2362) : (!llvm.ptr, i64) -> i64
-        %2364 = func.call @cc_nil_value() : () -> i64
-        %2365 = func.call @cc_intern(%2363, %2364) : (i64, i64) -> i64
-        %2366 = func.call @cc_nil_value() : () -> i64
-        %2367 = func.call @cc_cons(%2365, %2366) : (i64, i64) -> i64
-        %2368 = func.call @cc_values_pack(%2367) : (i64) -> i64
+        %2362 = arith.addi %2358, %__rlasp_stack_elide_zero_113 : i64
+        %2363 = func.call @cc_string(%2362) : (i64) -> i64
         %__rlasp_stack_elide_zero_114 = arith.constant 0 : i64
-        %2369 = arith.addi %2365, %__rlasp_stack_elide_zero_114 : i64
-        %2370 = func.call @cc_string(%2369) : (i64) -> i64
+        %2364 = arith.addi %2363, %__rlasp_stack_elide_zero_114 : i64
+        %2365 = llvm.mlir.addressof @str222 : !llvm.ptr
+        %2366 = arith.constant 11 : i64
+        %2367 = func.call @cc_make_string(%2365, %2366) : (!llvm.ptr, i64) -> i64
+        %2368 = func.call @cc_nil_value() : () -> i64
+        %2369 = func.call @cc_intern(%2367, %2368) : (i64, i64) -> i64
+        %2370 = func.call @cc_nil_value() : () -> i64
+        %2371 = func.call @cc_cons(%2369, %2370) : (i64, i64) -> i64
+        %2372 = func.call @cc_values_pack(%2371) : (i64) -> i64
         %__rlasp_stack_elide_zero_115 = arith.constant 0 : i64
-        %2371 = arith.addi %2370, %__rlasp_stack_elide_zero_115 : i64
-        %2372 = llvm.mlir.addressof @str223 : !llvm.ptr
-        %2373 = arith.constant 11 : i64
-        %2374 = func.call @cc_make_string(%2372, %2373) : (!llvm.ptr, i64) -> i64
-        %2375 = func.call @cc_nil_value() : () -> i64
-        %2376 = func.call @cc_intern(%2374, %2375) : (i64, i64) -> i64
-        %2377 = func.call @cc_nil_value() : () -> i64
-        %2378 = func.call @cc_cons(%2376, %2377) : (i64, i64) -> i64
-        %2379 = func.call @cc_values_pack(%2378) : (i64) -> i64
+        %2373 = arith.addi %2369, %__rlasp_stack_elide_zero_115 : i64
+        %2374 = func.call @cc_nil_value() : () -> i64
+        %2375 = func.call @cc_errorp(%2364) : (i64) -> i64
+        %2376 = arith.cmpi ne, %2375, %2374 : i64
+        %2377 = arith.cmpi eq, %2374, %2374 : i64
+        %2378 = arith.andi %2376, %2377 : i1
+        %2379 = scf.if %2378 -> (i64) {
+          scf.yield %2364 : i64
+        } else {
+          scf.yield %2374 : i64
+        }
+        %2380 = func.call @cc_errorp(%2373) : (i64) -> i64
+        %2381 = arith.cmpi ne, %2380, %2374 : i64
+        %2382 = arith.cmpi eq, %2379, %2374 : i64
+        %2383 = arith.andi %2381, %2382 : i1
+        %2384 = scf.if %2383 -> (i64) {
+          scf.yield %2373 : i64
+        } else {
+          scf.yield %2379 : i64
+        }
+        %2385 = arith.cmpi ne, %2384, %2374 : i64
+        scf.if %2385 {
+          func.call @stack_push_pointer(%2384) : (i64) -> ()
+        } else {
+          func.call @stack_push_pointer(%2364) : (i64) -> ()
+          func.call @stack_push_pointer(%2373) : (i64) -> ()
+          %2386 = llvm.mlir.addressof @str223 : !llvm.ptr
+          %2387 = func.call @cc_make_function_ref_const(%2386) : (!llvm.ptr) -> i64
+          %2388 = arith.constant 2 : i64
+          func.call @cc_funcall_stack(%2387, %2388) : (i64, i64) -> ()
+        }
+        %2389 = func.call @stack_pop_pointer() : () -> i64
+        %2390 = llvm.mlir.addressof @str224 : !llvm.ptr
+        %2391 = arith.constant 11 : i64
+        %2392 = func.call @cc_make_string(%2390, %2391) : (!llvm.ptr, i64) -> i64
+        %2393 = func.call @cc_nil_value() : () -> i64
+        %2394 = func.call @cc_intern(%2392, %2393) : (i64, i64) -> i64
+        %2395 = func.call @cc_nil_value() : () -> i64
+        %2396 = func.call @cc_cons(%2394, %2395) : (i64, i64) -> i64
+        %2397 = func.call @cc_values_pack(%2396) : (i64) -> i64
         %__rlasp_stack_elide_zero_116 = arith.constant 0 : i64
-        %2380 = arith.addi %2376, %__rlasp_stack_elide_zero_116 : i64
-        %2381 = func.call @cc_nil_value() : () -> i64
-        %2382 = func.call @cc_errorp(%2371) : (i64) -> i64
-        %2383 = arith.cmpi ne, %2382, %2381 : i64
-        %2384 = arith.cmpi eq, %2381, %2381 : i64
-        %2385 = arith.andi %2383, %2384 : i1
-        %2386 = scf.if %2385 -> (i64) {
-          scf.yield %2371 : i64
+        %2398 = arith.addi %2394, %__rlasp_stack_elide_zero_116 : i64
+        %2399 = func.call @cc_nil_value() : () -> i64
+        %2400 = func.call @cc_errorp(%2389) : (i64) -> i64
+        %2401 = arith.cmpi ne, %2400, %2399 : i64
+        %2402 = arith.cmpi eq, %2399, %2399 : i64
+        %2403 = arith.andi %2401, %2402 : i1
+        %2404 = scf.if %2403 -> (i64) {
+          scf.yield %2389 : i64
         } else {
-          scf.yield %2381 : i64
+          scf.yield %2399 : i64
         }
-        %2387 = func.call @cc_errorp(%2380) : (i64) -> i64
-        %2388 = arith.cmpi ne, %2387, %2381 : i64
-        %2389 = arith.cmpi eq, %2386, %2381 : i64
-        %2390 = arith.andi %2388, %2389 : i1
-        %2391 = scf.if %2390 -> (i64) {
-          scf.yield %2380 : i64
+        %2405 = func.call @cc_errorp(%2398) : (i64) -> i64
+        %2406 = arith.cmpi ne, %2405, %2399 : i64
+        %2407 = arith.cmpi eq, %2404, %2399 : i64
+        %2408 = arith.andi %2406, %2407 : i1
+        %2409 = scf.if %2408 -> (i64) {
+          scf.yield %2398 : i64
         } else {
-          scf.yield %2386 : i64
+          scf.yield %2404 : i64
         }
-        %2392 = arith.cmpi ne, %2391, %2381 : i64
-        scf.if %2392 {
-          func.call @stack_push_pointer(%2391) : (i64) -> ()
+        %2410 = arith.cmpi ne, %2409, %2399 : i64
+        scf.if %2410 {
+          func.call @stack_push_pointer(%2409) : (i64) -> ()
         } else {
-          func.call @stack_push_pointer(%2371) : (i64) -> ()
-          func.call @stack_push_pointer(%2380) : (i64) -> ()
-          %2393 = llvm.mlir.addressof @str224 : !llvm.ptr
-          %2394 = func.call @cc_make_function_ref_const(%2393) : (!llvm.ptr) -> i64
-          %2395 = arith.constant 2 : i64
-          func.call @cc_funcall_stack(%2394, %2395) : (i64, i64) -> ()
+          func.call @stack_push_pointer(%2389) : (i64) -> ()
+          func.call @stack_push_pointer(%2398) : (i64) -> ()
+          %2411 = llvm.mlir.addressof @str225 : !llvm.ptr
+          %2412 = func.call @cc_make_function_ref_const(%2411) : (!llvm.ptr) -> i64
+          %2413 = arith.constant 2 : i64
+          func.call @cc_funcall_stack(%2412, %2413) : (i64, i64) -> ()
         }
-        %2396 = func.call @stack_pop_pointer() : () -> i64
-        %2397 = llvm.mlir.addressof @str225 : !llvm.ptr
-        %2398 = arith.constant 11 : i64
-        %2399 = func.call @cc_make_string(%2397, %2398) : (!llvm.ptr, i64) -> i64
-        %2400 = func.call @cc_nil_value() : () -> i64
-        %2401 = func.call @cc_intern(%2399, %2400) : (i64, i64) -> i64
-        %2402 = func.call @cc_nil_value() : () -> i64
-        %2403 = func.call @cc_cons(%2401, %2402) : (i64, i64) -> i64
-        %2404 = func.call @cc_values_pack(%2403) : (i64) -> i64
+        %2414 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %2414 : i64
+      }
+      %2415 = func.call @cc_nil_value() : () -> i64
+      %2416 = func.call @cc_errorp(%2353) : (i64) -> i64
+      %2417 = arith.cmpi ne, %2416, %2415 : i64
+      %2418 = scf.if %2417 -> (i64) {
+        scf.yield %2353 : i64
+      } else {
+        %2419 = llvm.mlir.addressof @str226 : !llvm.ptr
+        %2420 = arith.constant 17 : i64
+        %2421 = func.call @cc_make_string(%2419, %2420) : (!llvm.ptr, i64) -> i64
+        %2422 = func.call @cc_nil_value() : () -> i64
+        %2423 = func.call @cc_intern(%2421, %2422) : (i64, i64) -> i64
+        %2424 = func.call @cc_nil_value() : () -> i64
+        %2425 = func.call @cc_cons(%2423, %2424) : (i64, i64) -> i64
+        %2426 = func.call @cc_values_pack(%2425) : (i64) -> i64
         %__rlasp_stack_elide_zero_117 = arith.constant 0 : i64
-        %2405 = arith.addi %2401, %__rlasp_stack_elide_zero_117 : i64
-        %2406 = func.call @cc_nil_value() : () -> i64
-        %2407 = func.call @cc_errorp(%2396) : (i64) -> i64
-        %2408 = arith.cmpi ne, %2407, %2406 : i64
-        %2409 = arith.cmpi eq, %2406, %2406 : i64
-        %2410 = arith.andi %2408, %2409 : i1
-        %2411 = scf.if %2410 -> (i64) {
-          scf.yield %2396 : i64
-        } else {
-          scf.yield %2406 : i64
-        }
-        %2412 = func.call @cc_errorp(%2405) : (i64) -> i64
-        %2413 = arith.cmpi ne, %2412, %2406 : i64
-        %2414 = arith.cmpi eq, %2411, %2406 : i64
-        %2415 = arith.andi %2413, %2414 : i1
-        %2416 = scf.if %2415 -> (i64) {
-          scf.yield %2405 : i64
-        } else {
-          scf.yield %2411 : i64
-        }
-        %2417 = arith.cmpi ne, %2416, %2406 : i64
-        scf.if %2417 {
-          func.call @stack_push_pointer(%2416) : (i64) -> ()
-        } else {
-          func.call @stack_push_pointer(%2396) : (i64) -> ()
-          func.call @stack_push_pointer(%2405) : (i64) -> ()
-          %2418 = llvm.mlir.addressof @str226 : !llvm.ptr
-          %2419 = func.call @cc_make_function_ref_const(%2418) : (!llvm.ptr) -> i64
-          %2420 = arith.constant 2 : i64
-          func.call @cc_funcall_stack(%2419, %2420) : (i64, i64) -> ()
-        }
-        %2421 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %2421 : i64
-      }
-      %2422 = func.call @cc_nil_value() : () -> i64
-      %2423 = func.call @cc_errorp(%2360) : (i64) -> i64
-      %2424 = arith.cmpi ne, %2423, %2422 : i64
-      %2425 = scf.if %2424 -> (i64) {
-        scf.yield %2360 : i64
-      } else {
-        %2426 = llvm.mlir.addressof @str227 : !llvm.ptr
-        %2427 = arith.constant 17 : i64
-        %2428 = func.call @cc_make_string(%2426, %2427) : (!llvm.ptr, i64) -> i64
-        %2429 = func.call @cc_nil_value() : () -> i64
-        %2430 = func.call @cc_intern(%2428, %2429) : (i64, i64) -> i64
-        %2431 = func.call @cc_nil_value() : () -> i64
-        %2432 = func.call @cc_cons(%2430, %2431) : (i64, i64) -> i64
-        %2433 = func.call @cc_values_pack(%2432) : (i64) -> i64
+        %2427 = arith.addi %2423, %__rlasp_stack_elide_zero_117 : i64
+        %2428 = func.call @cc_string(%2427) : (i64) -> i64
         %__rlasp_stack_elide_zero_118 = arith.constant 0 : i64
-        %2434 = arith.addi %2430, %__rlasp_stack_elide_zero_118 : i64
-        %2435 = func.call @cc_string(%2434) : (i64) -> i64
+        %2429 = arith.addi %2428, %__rlasp_stack_elide_zero_118 : i64
+        %2430 = llvm.mlir.addressof @str227 : !llvm.ptr
+        %2431 = arith.constant 11 : i64
+        %2432 = func.call @cc_make_string(%2430, %2431) : (!llvm.ptr, i64) -> i64
+        %2433 = func.call @cc_nil_value() : () -> i64
+        %2434 = func.call @cc_intern(%2432, %2433) : (i64, i64) -> i64
+        %2435 = func.call @cc_nil_value() : () -> i64
+        %2436 = func.call @cc_cons(%2434, %2435) : (i64, i64) -> i64
+        %2437 = func.call @cc_values_pack(%2436) : (i64) -> i64
         %__rlasp_stack_elide_zero_119 = arith.constant 0 : i64
-        %2436 = arith.addi %2435, %__rlasp_stack_elide_zero_119 : i64
-        %2437 = llvm.mlir.addressof @str228 : !llvm.ptr
-        %2438 = arith.constant 11 : i64
-        %2439 = func.call @cc_make_string(%2437, %2438) : (!llvm.ptr, i64) -> i64
-        %2440 = func.call @cc_nil_value() : () -> i64
-        %2441 = func.call @cc_intern(%2439, %2440) : (i64, i64) -> i64
-        %2442 = func.call @cc_nil_value() : () -> i64
-        %2443 = func.call @cc_cons(%2441, %2442) : (i64, i64) -> i64
-        %2444 = func.call @cc_values_pack(%2443) : (i64) -> i64
+        %2438 = arith.addi %2434, %__rlasp_stack_elide_zero_119 : i64
+        %2439 = func.call @cc_nil_value() : () -> i64
+        %2440 = func.call @cc_errorp(%2429) : (i64) -> i64
+        %2441 = arith.cmpi ne, %2440, %2439 : i64
+        %2442 = arith.cmpi eq, %2439, %2439 : i64
+        %2443 = arith.andi %2441, %2442 : i1
+        %2444 = scf.if %2443 -> (i64) {
+          scf.yield %2429 : i64
+        } else {
+          scf.yield %2439 : i64
+        }
+        %2445 = func.call @cc_errorp(%2438) : (i64) -> i64
+        %2446 = arith.cmpi ne, %2445, %2439 : i64
+        %2447 = arith.cmpi eq, %2444, %2439 : i64
+        %2448 = arith.andi %2446, %2447 : i1
+        %2449 = scf.if %2448 -> (i64) {
+          scf.yield %2438 : i64
+        } else {
+          scf.yield %2444 : i64
+        }
+        %2450 = arith.cmpi ne, %2449, %2439 : i64
+        scf.if %2450 {
+          func.call @stack_push_pointer(%2449) : (i64) -> ()
+        } else {
+          func.call @stack_push_pointer(%2429) : (i64) -> ()
+          func.call @stack_push_pointer(%2438) : (i64) -> ()
+          %2451 = llvm.mlir.addressof @str228 : !llvm.ptr
+          %2452 = func.call @cc_make_function_ref_const(%2451) : (!llvm.ptr) -> i64
+          %2453 = arith.constant 2 : i64
+          func.call @cc_funcall_stack(%2452, %2453) : (i64, i64) -> ()
+        }
+        %2454 = func.call @stack_pop_pointer() : () -> i64
+        %2455 = llvm.mlir.addressof @str229 : !llvm.ptr
+        %2456 = arith.constant 11 : i64
+        %2457 = func.call @cc_make_string(%2455, %2456) : (!llvm.ptr, i64) -> i64
+        %2458 = func.call @cc_nil_value() : () -> i64
+        %2459 = func.call @cc_intern(%2457, %2458) : (i64, i64) -> i64
+        %2460 = func.call @cc_nil_value() : () -> i64
+        %2461 = func.call @cc_cons(%2459, %2460) : (i64, i64) -> i64
+        %2462 = func.call @cc_values_pack(%2461) : (i64) -> i64
         %__rlasp_stack_elide_zero_120 = arith.constant 0 : i64
-        %2445 = arith.addi %2441, %__rlasp_stack_elide_zero_120 : i64
-        %2446 = func.call @cc_nil_value() : () -> i64
-        %2447 = func.call @cc_errorp(%2436) : (i64) -> i64
-        %2448 = arith.cmpi ne, %2447, %2446 : i64
-        %2449 = arith.cmpi eq, %2446, %2446 : i64
-        %2450 = arith.andi %2448, %2449 : i1
-        %2451 = scf.if %2450 -> (i64) {
-          scf.yield %2436 : i64
+        %2463 = arith.addi %2459, %__rlasp_stack_elide_zero_120 : i64
+        %2464 = func.call @cc_nil_value() : () -> i64
+        %2465 = func.call @cc_errorp(%2454) : (i64) -> i64
+        %2466 = arith.cmpi ne, %2465, %2464 : i64
+        %2467 = arith.cmpi eq, %2464, %2464 : i64
+        %2468 = arith.andi %2466, %2467 : i1
+        %2469 = scf.if %2468 -> (i64) {
+          scf.yield %2454 : i64
         } else {
-          scf.yield %2446 : i64
+          scf.yield %2464 : i64
         }
-        %2452 = func.call @cc_errorp(%2445) : (i64) -> i64
-        %2453 = arith.cmpi ne, %2452, %2446 : i64
-        %2454 = arith.cmpi eq, %2451, %2446 : i64
-        %2455 = arith.andi %2453, %2454 : i1
-        %2456 = scf.if %2455 -> (i64) {
-          scf.yield %2445 : i64
+        %2470 = func.call @cc_errorp(%2463) : (i64) -> i64
+        %2471 = arith.cmpi ne, %2470, %2464 : i64
+        %2472 = arith.cmpi eq, %2469, %2464 : i64
+        %2473 = arith.andi %2471, %2472 : i1
+        %2474 = scf.if %2473 -> (i64) {
+          scf.yield %2463 : i64
         } else {
-          scf.yield %2451 : i64
+          scf.yield %2469 : i64
         }
-        %2457 = arith.cmpi ne, %2456, %2446 : i64
-        scf.if %2457 {
-          func.call @stack_push_pointer(%2456) : (i64) -> ()
+        %2475 = arith.cmpi ne, %2474, %2464 : i64
+        scf.if %2475 {
+          func.call @stack_push_pointer(%2474) : (i64) -> ()
         } else {
-          func.call @stack_push_pointer(%2436) : (i64) -> ()
-          func.call @stack_push_pointer(%2445) : (i64) -> ()
-          %2458 = llvm.mlir.addressof @str229 : !llvm.ptr
-          %2459 = func.call @cc_make_function_ref_const(%2458) : (!llvm.ptr) -> i64
-          %2460 = arith.constant 2 : i64
-          func.call @cc_funcall_stack(%2459, %2460) : (i64, i64) -> ()
+          func.call @stack_push_pointer(%2454) : (i64) -> ()
+          func.call @stack_push_pointer(%2463) : (i64) -> ()
+          %2476 = llvm.mlir.addressof @str230 : !llvm.ptr
+          %2477 = func.call @cc_make_function_ref_const(%2476) : (!llvm.ptr) -> i64
+          %2478 = arith.constant 2 : i64
+          func.call @cc_funcall_stack(%2477, %2478) : (i64, i64) -> ()
         }
-        %2461 = func.call @stack_pop_pointer() : () -> i64
-        %2462 = llvm.mlir.addressof @str230 : !llvm.ptr
-        %2463 = arith.constant 11 : i64
-        %2464 = func.call @cc_make_string(%2462, %2463) : (!llvm.ptr, i64) -> i64
-        %2465 = func.call @cc_nil_value() : () -> i64
-        %2466 = func.call @cc_intern(%2464, %2465) : (i64, i64) -> i64
-        %2467 = func.call @cc_nil_value() : () -> i64
-        %2468 = func.call @cc_cons(%2466, %2467) : (i64, i64) -> i64
-        %2469 = func.call @cc_values_pack(%2468) : (i64) -> i64
+        %2479 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %2479 : i64
+      }
+      %2480 = func.call @cc_nil_value() : () -> i64
+      %2481 = func.call @cc_errorp(%2418) : (i64) -> i64
+      %2482 = arith.cmpi ne, %2481, %2480 : i64
+      %2483 = scf.if %2482 -> (i64) {
+        scf.yield %2418 : i64
+      } else {
+        %2484 = llvm.mlir.addressof @str231 : !llvm.ptr
+        %2485 = arith.constant 11 : i64
+        %2486 = func.call @cc_make_string(%2484, %2485) : (!llvm.ptr, i64) -> i64
+        %2487 = func.call @cc_nil_value() : () -> i64
+        %2488 = func.call @cc_intern(%2486, %2487) : (i64, i64) -> i64
+        %2489 = func.call @cc_nil_value() : () -> i64
+        %2490 = func.call @cc_cons(%2488, %2489) : (i64, i64) -> i64
+        %2491 = func.call @cc_values_pack(%2490) : (i64) -> i64
         %__rlasp_stack_elide_zero_121 = arith.constant 0 : i64
-        %2470 = arith.addi %2466, %__rlasp_stack_elide_zero_121 : i64
-        %2471 = func.call @cc_nil_value() : () -> i64
-        %2472 = func.call @cc_errorp(%2461) : (i64) -> i64
-        %2473 = arith.cmpi ne, %2472, %2471 : i64
-        %2474 = arith.cmpi eq, %2471, %2471 : i64
-        %2475 = arith.andi %2473, %2474 : i1
-        %2476 = scf.if %2475 -> (i64) {
-          scf.yield %2461 : i64
+        %2492 = arith.addi %2488, %__rlasp_stack_elide_zero_121 : i64
+        %2493 = func.call @cc_nil_value() : () -> i64
+        %2494 = func.call @cc_errorp(%2492) : (i64) -> i64
+        %2495 = arith.cmpi ne, %2494, %2493 : i64
+        %2496 = arith.cmpi eq, %2493, %2493 : i64
+        %2497 = arith.andi %2495, %2496 : i1
+        %2498 = scf.if %2497 -> (i64) {
+          scf.yield %2492 : i64
         } else {
-          scf.yield %2471 : i64
+          scf.yield %2493 : i64
         }
-        %2477 = func.call @cc_errorp(%2470) : (i64) -> i64
-        %2478 = arith.cmpi ne, %2477, %2471 : i64
-        %2479 = arith.cmpi eq, %2476, %2471 : i64
-        %2480 = arith.andi %2478, %2479 : i1
-        %2481 = scf.if %2480 -> (i64) {
-          scf.yield %2470 : i64
+        %2499 = arith.cmpi ne, %2498, %2493 : i64
+        scf.if %2499 {
+          func.call @stack_push_pointer(%2498) : (i64) -> ()
         } else {
-          scf.yield %2476 : i64
+          func.call @stack_push_pointer(%2492) : (i64) -> ()
+          %2500 = llvm.mlir.addressof @str232 : !llvm.ptr
+          %2501 = func.call @cc_make_function_ref_const(%2500) : (!llvm.ptr) -> i64
+          %2502 = arith.constant 1 : i64
+          func.call @cc_funcall_stack(%2501, %2502) : (i64, i64) -> ()
         }
-        %2482 = arith.cmpi ne, %2481, %2471 : i64
-        scf.if %2482 {
-          func.call @stack_push_pointer(%2481) : (i64) -> ()
-        } else {
-          func.call @stack_push_pointer(%2461) : (i64) -> ()
-          func.call @stack_push_pointer(%2470) : (i64) -> ()
-          %2483 = llvm.mlir.addressof @str231 : !llvm.ptr
-          %2484 = func.call @cc_make_function_ref_const(%2483) : (!llvm.ptr) -> i64
-          %2485 = arith.constant 2 : i64
-          func.call @cc_funcall_stack(%2484, %2485) : (i64, i64) -> ()
-        }
-        %2486 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %2486 : i64
+        %2503 = func.call @stack_pop_pointer() : () -> i64
+        scf.yield %2503 : i64
       }
-      %2487 = func.call @cc_nil_value() : () -> i64
-      %2488 = func.call @cc_errorp(%2425) : (i64) -> i64
-      %2489 = arith.cmpi ne, %2488, %2487 : i64
-      %2490 = scf.if %2489 -> (i64) {
-        scf.yield %2425 : i64
-      } else {
-        %2491 = llvm.mlir.addressof @str232 : !llvm.ptr
-        %2492 = arith.constant 11 : i64
-        %2493 = func.call @cc_make_string(%2491, %2492) : (!llvm.ptr, i64) -> i64
-        %2494 = func.call @cc_nil_value() : () -> i64
-        %2495 = func.call @cc_intern(%2493, %2494) : (i64, i64) -> i64
-        %2496 = func.call @cc_nil_value() : () -> i64
-        %2497 = func.call @cc_cons(%2495, %2496) : (i64, i64) -> i64
-        %2498 = func.call @cc_values_pack(%2497) : (i64) -> i64
-        %__rlasp_stack_elide_zero_122 = arith.constant 0 : i64
-        %2499 = arith.addi %2495, %__rlasp_stack_elide_zero_122 : i64
-        %2500 = func.call @cc_nil_value() : () -> i64
-        %2501 = func.call @cc_errorp(%2499) : (i64) -> i64
-        %2502 = arith.cmpi ne, %2501, %2500 : i64
-        %2503 = arith.cmpi eq, %2500, %2500 : i64
-        %2504 = arith.andi %2502, %2503 : i1
-        %2505 = scf.if %2504 -> (i64) {
-          scf.yield %2499 : i64
-        } else {
-          scf.yield %2500 : i64
-        }
-        %2506 = arith.cmpi ne, %2505, %2500 : i64
-        scf.if %2506 {
-          func.call @stack_push_pointer(%2505) : (i64) -> ()
-        } else {
-          func.call @stack_push_pointer(%2499) : (i64) -> ()
-          %2507 = llvm.mlir.addressof @str233 : !llvm.ptr
-          %2508 = func.call @cc_make_function_ref_const(%2507) : (!llvm.ptr) -> i64
-          %2509 = arith.constant 1 : i64
-          func.call @cc_funcall_stack(%2508, %2509) : (i64, i64) -> ()
-        }
-        %2510 = func.call @stack_pop_pointer() : () -> i64
-        scf.yield %2510 : i64
-      }
+      %__rlasp_stack_elide_zero_122 = arith.constant 0 : i64
+      %2504 = arith.addi %2483, %__rlasp_stack_elide_zero_122 : i64
+      scf.yield %2504 : i64
+    }
+    %2505 = func.call @cc_nil_value() : () -> i64
+    %2506 = func.call @cc_errorp(%2243) : (i64) -> i64
+    %2507 = arith.cmpi ne, %2506, %2505 : i64
+    %2508 = scf.if %2507 -> (i64) {
+      scf.yield %2243 : i64
+    } else {
+      %2509 = llvm.mlir.addressof @str233 : !llvm.ptr
+      %2510 = arith.constant 11 : i64
+      %2511 = func.call @cc_make_string(%2509, %2510) : (!llvm.ptr, i64) -> i64
+      %2512 = func.call @cc_nil_value() : () -> i64
+      %2513 = func.call @cc_intern(%2511, %2512) : (i64, i64) -> i64
+      %2514 = func.call @cc_nil_value() : () -> i64
+      %2515 = func.call @cc_cons(%2513, %2514) : (i64, i64) -> i64
+      %2516 = func.call @cc_values_pack(%2515) : (i64) -> i64
       %__rlasp_stack_elide_zero_123 = arith.constant 0 : i64
-      %2511 = arith.addi %2490, %__rlasp_stack_elide_zero_123 : i64
-      scf.yield %2511 : i64
-    }
-    %2512 = func.call @cc_nil_value() : () -> i64
-    %2513 = func.call @cc_errorp(%2250) : (i64) -> i64
-    %2514 = arith.cmpi ne, %2513, %2512 : i64
-    %2515 = scf.if %2514 -> (i64) {
-      scf.yield %2250 : i64
-    } else {
-      %2516 = llvm.mlir.addressof @str234 : !llvm.ptr
-      %2517 = arith.constant 11 : i64
-      %2518 = func.call @cc_make_string(%2516, %2517) : (!llvm.ptr, i64) -> i64
-      %2519 = func.call @cc_nil_value() : () -> i64
-      %2520 = func.call @cc_intern(%2518, %2519) : (i64, i64) -> i64
-      %2521 = func.call @cc_nil_value() : () -> i64
-      %2522 = func.call @cc_cons(%2520, %2521) : (i64, i64) -> i64
-      %2523 = func.call @cc_values_pack(%2522) : (i64) -> i64
+      %2517 = arith.addi %2513, %__rlasp_stack_elide_zero_123 : i64
+      %2518 = func.call @cc_in_package(%2517) : (i64) -> i64
       %__rlasp_stack_elide_zero_124 = arith.constant 0 : i64
-      %2524 = arith.addi %2520, %__rlasp_stack_elide_zero_124 : i64
-      %2525 = func.call @cc_in_package(%2524) : (i64) -> i64
-      %__rlasp_stack_elide_zero_125 = arith.constant 0 : i64
-      %2526 = arith.addi %2525, %__rlasp_stack_elide_zero_125 : i64
-      scf.yield %2526 : i64
+      %2519 = arith.addi %2518, %__rlasp_stack_elide_zero_124 : i64
+      scf.yield %2519 : i64
     }
-    %2527 = func.call @cc_nil_value() : () -> i64
-    %2528 = func.call @cc_errorp(%2515) : (i64) -> i64
-    %2529 = arith.cmpi ne, %2528, %2527 : i64
-    %2530 = scf.if %2529 -> (i64) {
-      scf.yield %2515 : i64
+    %2520 = func.call @cc_nil_value() : () -> i64
+    %2521 = func.call @cc_errorp(%2508) : (i64) -> i64
+    %2522 = arith.cmpi ne, %2521, %2520 : i64
+    %2523 = scf.if %2522 -> (i64) {
+      scf.yield %2508 : i64
     } else {
-      %2531 = llvm.mlir.addressof @str235 : !llvm.ptr
-      %2532 = arith.constant 23 : i64
-      %2533 = func.call @cc_make_string(%2531, %2532) : (!llvm.ptr, i64) -> i64
-      %2534 = func.call @cc_nil_value() : () -> i64
-      %2535 = func.call @cc_intern(%2533, %2534) : (i64, i64) -> i64
-      %2536 = func.call @cc_nil_value() : () -> i64
-      %2537 = func.call @cc_cons(%2535, %2536) : (i64, i64) -> i64
-      %2538 = func.call @cc_values_pack(%2537) : (i64) -> i64
+      %2524 = llvm.mlir.addressof @str234 : !llvm.ptr
+      %2525 = arith.constant 23 : i64
+      %2526 = func.call @cc_make_string(%2524, %2525) : (!llvm.ptr, i64) -> i64
+      %2527 = func.call @cc_nil_value() : () -> i64
+      %2528 = func.call @cc_intern(%2526, %2527) : (i64, i64) -> i64
+      %2529 = func.call @cc_nil_value() : () -> i64
+      %2530 = func.call @cc_cons(%2528, %2529) : (i64, i64) -> i64
+      %2531 = func.call @cc_values_pack(%2530) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2539 = func.call @stack_pop_pointer() : () -> i64
-      %2540 = func.call @cc_set_symbol_value(%2535, %2539) : (i64, i64) -> i64
-      %2541 = func.call @cc_errorp(%2540) : (i64) -> i64
-      %2542 = func.call @cc_nil_value() : () -> i64
-      %2543 = arith.cmpi ne, %2541, %2542 : i64
-      scf.if %2543 {
-        func.call @stack_push_pointer(%2540) : (i64) -> ()
+      %2532 = func.call @stack_pop_pointer() : () -> i64
+      %2533 = func.call @cc_set_symbol_value(%2528, %2532) : (i64, i64) -> i64
+      %2534 = func.call @cc_errorp(%2533) : (i64) -> i64
+      %2535 = func.call @cc_nil_value() : () -> i64
+      %2536 = arith.cmpi ne, %2534, %2535 : i64
+      scf.if %2536 {
+        func.call @stack_push_pointer(%2533) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2535) : (i64) -> ()
+        func.call @stack_push_pointer(%2528) : (i64) -> ()
       }
-      %2544 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2544 : i64
+      %2537 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2537 : i64
     }
-    %2545 = func.call @cc_nil_value() : () -> i64
-    %2546 = func.call @cc_errorp(%2530) : (i64) -> i64
-    %2547 = arith.cmpi ne, %2546, %2545 : i64
-    %2548 = scf.if %2547 -> (i64) {
-      scf.yield %2530 : i64
+    %2538 = func.call @cc_nil_value() : () -> i64
+    %2539 = func.call @cc_errorp(%2523) : (i64) -> i64
+    %2540 = arith.cmpi ne, %2539, %2538 : i64
+    %2541 = scf.if %2540 -> (i64) {
+      scf.yield %2523 : i64
     } else {
-      %2549 = llvm.mlir.addressof @str236 : !llvm.ptr
-      %2550 = arith.constant 25 : i64
-      %2551 = func.call @cc_make_string(%2549, %2550) : (!llvm.ptr, i64) -> i64
-      %2552 = func.call @cc_nil_value() : () -> i64
-      %2553 = func.call @cc_intern(%2551, %2552) : (i64, i64) -> i64
-      %2554 = func.call @cc_nil_value() : () -> i64
-      %2555 = func.call @cc_cons(%2553, %2554) : (i64, i64) -> i64
-      %2556 = func.call @cc_values_pack(%2555) : (i64) -> i64
+      %2542 = llvm.mlir.addressof @str235 : !llvm.ptr
+      %2543 = arith.constant 25 : i64
+      %2544 = func.call @cc_make_string(%2542, %2543) : (!llvm.ptr, i64) -> i64
+      %2545 = func.call @cc_nil_value() : () -> i64
+      %2546 = func.call @cc_intern(%2544, %2545) : (i64, i64) -> i64
+      %2547 = func.call @cc_nil_value() : () -> i64
+      %2548 = func.call @cc_cons(%2546, %2547) : (i64, i64) -> i64
+      %2549 = func.call @cc_values_pack(%2548) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2557 = func.call @stack_pop_pointer() : () -> i64
-      %2558 = func.call @cc_set_symbol_value(%2553, %2557) : (i64, i64) -> i64
-      %2559 = func.call @cc_errorp(%2558) : (i64) -> i64
-      %2560 = func.call @cc_nil_value() : () -> i64
-      %2561 = arith.cmpi ne, %2559, %2560 : i64
-      scf.if %2561 {
-        func.call @stack_push_pointer(%2558) : (i64) -> ()
+      %2550 = func.call @stack_pop_pointer() : () -> i64
+      %2551 = func.call @cc_set_symbol_value(%2546, %2550) : (i64, i64) -> i64
+      %2552 = func.call @cc_errorp(%2551) : (i64) -> i64
+      %2553 = func.call @cc_nil_value() : () -> i64
+      %2554 = arith.cmpi ne, %2552, %2553 : i64
+      scf.if %2554 {
+        func.call @stack_push_pointer(%2551) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2553) : (i64) -> ()
+        func.call @stack_push_pointer(%2546) : (i64) -> ()
       }
-      %2562 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2562 : i64
+      %2555 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2555 : i64
     }
-    %2563 = func.call @cc_nil_value() : () -> i64
-    %2564 = func.call @cc_errorp(%2548) : (i64) -> i64
-    %2565 = arith.cmpi ne, %2564, %2563 : i64
-    %2566 = scf.if %2565 -> (i64) {
-      scf.yield %2548 : i64
+    %2556 = func.call @cc_nil_value() : () -> i64
+    %2557 = func.call @cc_errorp(%2541) : (i64) -> i64
+    %2558 = arith.cmpi ne, %2557, %2556 : i64
+    %2559 = scf.if %2558 -> (i64) {
+      scf.yield %2541 : i64
     } else {
-      %2567 = llvm.mlir.addressof @str237 : !llvm.ptr
-      %2568 = arith.constant 23 : i64
-      %2569 = func.call @cc_make_string(%2567, %2568) : (!llvm.ptr, i64) -> i64
-      %2570 = func.call @cc_nil_value() : () -> i64
-      %2571 = func.call @cc_intern(%2569, %2570) : (i64, i64) -> i64
-      %2572 = func.call @cc_nil_value() : () -> i64
-      %2573 = func.call @cc_cons(%2571, %2572) : (i64, i64) -> i64
-      %2574 = func.call @cc_values_pack(%2573) : (i64) -> i64
+      %2560 = llvm.mlir.addressof @str236 : !llvm.ptr
+      %2561 = arith.constant 23 : i64
+      %2562 = func.call @cc_make_string(%2560, %2561) : (!llvm.ptr, i64) -> i64
+      %2563 = func.call @cc_nil_value() : () -> i64
+      %2564 = func.call @cc_intern(%2562, %2563) : (i64, i64) -> i64
+      %2565 = func.call @cc_nil_value() : () -> i64
+      %2566 = func.call @cc_cons(%2564, %2565) : (i64, i64) -> i64
+      %2567 = func.call @cc_values_pack(%2566) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2575 = func.call @stack_pop_pointer() : () -> i64
-      %2576 = func.call @cc_set_symbol_value(%2571, %2575) : (i64, i64) -> i64
-      %2577 = func.call @cc_errorp(%2576) : (i64) -> i64
-      %2578 = func.call @cc_nil_value() : () -> i64
-      %2579 = arith.cmpi ne, %2577, %2578 : i64
-      scf.if %2579 {
-        func.call @stack_push_pointer(%2576) : (i64) -> ()
+      %2568 = func.call @stack_pop_pointer() : () -> i64
+      %2569 = func.call @cc_set_symbol_value(%2564, %2568) : (i64, i64) -> i64
+      %2570 = func.call @cc_errorp(%2569) : (i64) -> i64
+      %2571 = func.call @cc_nil_value() : () -> i64
+      %2572 = arith.cmpi ne, %2570, %2571 : i64
+      scf.if %2572 {
+        func.call @stack_push_pointer(%2569) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2571) : (i64) -> ()
+        func.call @stack_push_pointer(%2564) : (i64) -> ()
       }
-      %2580 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2580 : i64
+      %2573 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2573 : i64
     }
-    %2581 = func.call @cc_nil_value() : () -> i64
-    %2582 = func.call @cc_errorp(%2566) : (i64) -> i64
-    %2583 = arith.cmpi ne, %2582, %2581 : i64
-    %2584 = scf.if %2583 -> (i64) {
-      scf.yield %2566 : i64
+    %2574 = func.call @cc_nil_value() : () -> i64
+    %2575 = func.call @cc_errorp(%2559) : (i64) -> i64
+    %2576 = arith.cmpi ne, %2575, %2574 : i64
+    %2577 = scf.if %2576 -> (i64) {
+      scf.yield %2559 : i64
     } else {
-      %2585 = llvm.mlir.addressof @str238 : !llvm.ptr
-      %2586 = arith.constant 25 : i64
-      %2587 = func.call @cc_make_string(%2585, %2586) : (!llvm.ptr, i64) -> i64
-      %2588 = func.call @cc_nil_value() : () -> i64
-      %2589 = func.call @cc_intern(%2587, %2588) : (i64, i64) -> i64
-      %2590 = func.call @cc_nil_value() : () -> i64
-      %2591 = func.call @cc_cons(%2589, %2590) : (i64, i64) -> i64
-      %2592 = func.call @cc_values_pack(%2591) : (i64) -> i64
+      %2578 = llvm.mlir.addressof @str237 : !llvm.ptr
+      %2579 = arith.constant 25 : i64
+      %2580 = func.call @cc_make_string(%2578, %2579) : (!llvm.ptr, i64) -> i64
+      %2581 = func.call @cc_nil_value() : () -> i64
+      %2582 = func.call @cc_intern(%2580, %2581) : (i64, i64) -> i64
+      %2583 = func.call @cc_nil_value() : () -> i64
+      %2584 = func.call @cc_cons(%2582, %2583) : (i64, i64) -> i64
+      %2585 = func.call @cc_values_pack(%2584) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2593 = func.call @stack_pop_pointer() : () -> i64
-      %2594 = func.call @cc_set_symbol_value(%2589, %2593) : (i64, i64) -> i64
-      %2595 = func.call @cc_errorp(%2594) : (i64) -> i64
-      %2596 = func.call @cc_nil_value() : () -> i64
-      %2597 = arith.cmpi ne, %2595, %2596 : i64
-      scf.if %2597 {
-        func.call @stack_push_pointer(%2594) : (i64) -> ()
+      %2586 = func.call @stack_pop_pointer() : () -> i64
+      %2587 = func.call @cc_set_symbol_value(%2582, %2586) : (i64, i64) -> i64
+      %2588 = func.call @cc_errorp(%2587) : (i64) -> i64
+      %2589 = func.call @cc_nil_value() : () -> i64
+      %2590 = arith.cmpi ne, %2588, %2589 : i64
+      scf.if %2590 {
+        func.call @stack_push_pointer(%2587) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2589) : (i64) -> ()
+        func.call @stack_push_pointer(%2582) : (i64) -> ()
       }
-      %2598 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2598 : i64
+      %2591 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2591 : i64
     }
-    %2599 = func.call @cc_nil_value() : () -> i64
-    %2600 = func.call @cc_errorp(%2584) : (i64) -> i64
-    %2601 = arith.cmpi ne, %2600, %2599 : i64
-    %2602 = scf.if %2601 -> (i64) {
-      scf.yield %2584 : i64
+    %2592 = func.call @cc_nil_value() : () -> i64
+    %2593 = func.call @cc_errorp(%2577) : (i64) -> i64
+    %2594 = arith.cmpi ne, %2593, %2592 : i64
+    %2595 = scf.if %2594 -> (i64) {
+      scf.yield %2577 : i64
     } else {
-      %2603 = llvm.mlir.addressof @str239 : !llvm.ptr
-      %2604 = arith.constant 19 : i64
-      %2605 = func.call @cc_make_string(%2603, %2604) : (!llvm.ptr, i64) -> i64
-      %2606 = func.call @cc_nil_value() : () -> i64
-      %2607 = func.call @cc_intern(%2605, %2606) : (i64, i64) -> i64
-      %2608 = func.call @cc_nil_value() : () -> i64
-      %2609 = func.call @cc_cons(%2607, %2608) : (i64, i64) -> i64
-      %2610 = func.call @cc_values_pack(%2609) : (i64) -> i64
+      %2596 = llvm.mlir.addressof @str238 : !llvm.ptr
+      %2597 = arith.constant 19 : i64
+      %2598 = func.call @cc_make_string(%2596, %2597) : (!llvm.ptr, i64) -> i64
+      %2599 = func.call @cc_nil_value() : () -> i64
+      %2600 = func.call @cc_intern(%2598, %2599) : (i64, i64) -> i64
+      %2601 = func.call @cc_nil_value() : () -> i64
+      %2602 = func.call @cc_cons(%2600, %2601) : (i64, i64) -> i64
+      %2603 = func.call @cc_values_pack(%2602) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2611 = func.call @stack_pop_pointer() : () -> i64
-      %2612 = func.call @cc_set_symbol_value(%2607, %2611) : (i64, i64) -> i64
-      %2613 = func.call @cc_errorp(%2612) : (i64) -> i64
-      %2614 = func.call @cc_nil_value() : () -> i64
-      %2615 = arith.cmpi ne, %2613, %2614 : i64
-      scf.if %2615 {
-        func.call @stack_push_pointer(%2612) : (i64) -> ()
+      %2604 = func.call @stack_pop_pointer() : () -> i64
+      %2605 = func.call @cc_set_symbol_value(%2600, %2604) : (i64, i64) -> i64
+      %2606 = func.call @cc_errorp(%2605) : (i64) -> i64
+      %2607 = func.call @cc_nil_value() : () -> i64
+      %2608 = arith.cmpi ne, %2606, %2607 : i64
+      scf.if %2608 {
+        func.call @stack_push_pointer(%2605) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2607) : (i64) -> ()
+        func.call @stack_push_pointer(%2600) : (i64) -> ()
       }
-      %2616 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2616 : i64
+      %2609 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2609 : i64
     }
-    %2617 = func.call @cc_nil_value() : () -> i64
-    %2618 = func.call @cc_errorp(%2602) : (i64) -> i64
-    %2619 = arith.cmpi ne, %2618, %2617 : i64
-    %2620 = scf.if %2619 -> (i64) {
-      scf.yield %2602 : i64
+    %2610 = func.call @cc_nil_value() : () -> i64
+    %2611 = func.call @cc_errorp(%2595) : (i64) -> i64
+    %2612 = arith.cmpi ne, %2611, %2610 : i64
+    %2613 = scf.if %2612 -> (i64) {
+      scf.yield %2595 : i64
     } else {
-      %2621 = llvm.mlir.addressof @str240 : !llvm.ptr
-      %2622 = arith.constant 25 : i64
-      %2623 = func.call @cc_make_string(%2621, %2622) : (!llvm.ptr, i64) -> i64
-      %2624 = func.call @cc_nil_value() : () -> i64
-      %2625 = func.call @cc_intern(%2623, %2624) : (i64, i64) -> i64
-      %2626 = func.call @cc_nil_value() : () -> i64
-      %2627 = func.call @cc_cons(%2625, %2626) : (i64, i64) -> i64
-      %2628 = func.call @cc_values_pack(%2627) : (i64) -> i64
+      %2614 = llvm.mlir.addressof @str239 : !llvm.ptr
+      %2615 = arith.constant 25 : i64
+      %2616 = func.call @cc_make_string(%2614, %2615) : (!llvm.ptr, i64) -> i64
+      %2617 = func.call @cc_nil_value() : () -> i64
+      %2618 = func.call @cc_intern(%2616, %2617) : (i64, i64) -> i64
+      %2619 = func.call @cc_nil_value() : () -> i64
+      %2620 = func.call @cc_cons(%2618, %2619) : (i64, i64) -> i64
+      %2621 = func.call @cc_values_pack(%2620) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2629 = func.call @stack_pop_pointer() : () -> i64
-      %2630 = func.call @cc_set_symbol_value(%2625, %2629) : (i64, i64) -> i64
-      %2631 = func.call @cc_errorp(%2630) : (i64) -> i64
-      %2632 = func.call @cc_nil_value() : () -> i64
-      %2633 = arith.cmpi ne, %2631, %2632 : i64
-      scf.if %2633 {
-        func.call @stack_push_pointer(%2630) : (i64) -> ()
+      %2622 = func.call @stack_pop_pointer() : () -> i64
+      %2623 = func.call @cc_set_symbol_value(%2618, %2622) : (i64, i64) -> i64
+      %2624 = func.call @cc_errorp(%2623) : (i64) -> i64
+      %2625 = func.call @cc_nil_value() : () -> i64
+      %2626 = arith.cmpi ne, %2624, %2625 : i64
+      scf.if %2626 {
+        func.call @stack_push_pointer(%2623) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2625) : (i64) -> ()
+        func.call @stack_push_pointer(%2618) : (i64) -> ()
       }
-      %2634 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2634 : i64
+      %2627 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2627 : i64
     }
-    %2635 = func.call @cc_nil_value() : () -> i64
-    %2636 = func.call @cc_errorp(%2620) : (i64) -> i64
-    %2637 = arith.cmpi ne, %2636, %2635 : i64
-    %2638 = scf.if %2637 -> (i64) {
-      scf.yield %2620 : i64
+    %2628 = func.call @cc_nil_value() : () -> i64
+    %2629 = func.call @cc_errorp(%2613) : (i64) -> i64
+    %2630 = arith.cmpi ne, %2629, %2628 : i64
+    %2631 = scf.if %2630 -> (i64) {
+      scf.yield %2613 : i64
     } else {
-      %2639 = llvm.mlir.addressof @str241 : !llvm.ptr
-      %2640 = arith.constant 19 : i64
-      %2641 = func.call @cc_make_string(%2639, %2640) : (!llvm.ptr, i64) -> i64
-      %2642 = func.call @cc_nil_value() : () -> i64
-      %2643 = func.call @cc_intern(%2641, %2642) : (i64, i64) -> i64
-      %2644 = func.call @cc_nil_value() : () -> i64
-      %2645 = func.call @cc_cons(%2643, %2644) : (i64, i64) -> i64
-      %2646 = func.call @cc_values_pack(%2645) : (i64) -> i64
-      %2647 = func.call @cc_nil_value() : () -> i64
-      func.call @stack_push_pointer(%2647) : (i64) -> ()
+      %2632 = llvm.mlir.addressof @str240 : !llvm.ptr
+      %2633 = arith.constant 19 : i64
+      %2634 = func.call @cc_make_string(%2632, %2633) : (!llvm.ptr, i64) -> i64
+      %2635 = func.call @cc_nil_value() : () -> i64
+      %2636 = func.call @cc_intern(%2634, %2635) : (i64, i64) -> i64
+      %2637 = func.call @cc_nil_value() : () -> i64
+      %2638 = func.call @cc_cons(%2636, %2637) : (i64, i64) -> i64
+      %2639 = func.call @cc_values_pack(%2638) : (i64) -> i64
+      %2640 = func.call @cc_nil_value() : () -> i64
+      func.call @stack_push_pointer(%2640) : (i64) -> ()
       func.call @cc_make_hash_table_stack() : () -> ()
-      %2648 = func.call @stack_pop_pointer() : () -> i64
-      %__rlasp_stack_elide_zero_126 = arith.constant 0 : i64
-      %2649 = arith.addi %2648, %__rlasp_stack_elide_zero_126 : i64
-      %2650 = func.call @cc_set_symbol_value(%2643, %2649) : (i64, i64) -> i64
-      %2651 = func.call @cc_errorp(%2650) : (i64) -> i64
-      %2652 = func.call @cc_nil_value() : () -> i64
-      %2653 = arith.cmpi ne, %2651, %2652 : i64
-      scf.if %2653 {
-        func.call @stack_push_pointer(%2650) : (i64) -> ()
-      } else {
+      %2641 = func.call @stack_pop_pointer() : () -> i64
+      %__rlasp_stack_elide_zero_125 = arith.constant 0 : i64
+      %2642 = arith.addi %2641, %__rlasp_stack_elide_zero_125 : i64
+      %2643 = func.call @cc_set_symbol_value(%2636, %2642) : (i64, i64) -> i64
+      %2644 = func.call @cc_errorp(%2643) : (i64) -> i64
+      %2645 = func.call @cc_nil_value() : () -> i64
+      %2646 = arith.cmpi ne, %2644, %2645 : i64
+      scf.if %2646 {
         func.call @stack_push_pointer(%2643) : (i64) -> ()
-      }
-      %2654 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2654 : i64
-    }
-    %2655 = func.call @cc_nil_value() : () -> i64
-    %2656 = func.call @cc_errorp(%2638) : (i64) -> i64
-    %2657 = arith.cmpi ne, %2656, %2655 : i64
-    %2658 = scf.if %2657 -> (i64) {
-      scf.yield %2638 : i64
-    } else {
-      %2659 = llvm.mlir.addressof @str242 : !llvm.ptr
-      %2660 = arith.constant 17 : i64
-      %2661 = func.call @cc_make_string(%2659, %2660) : (!llvm.ptr, i64) -> i64
-      %2662 = func.call @cc_nil_value() : () -> i64
-      %2663 = func.call @cc_intern(%2661, %2662) : (i64, i64) -> i64
-      %2664 = func.call @cc_nil_value() : () -> i64
-      %2665 = func.call @cc_cons(%2663, %2664) : (i64, i64) -> i64
-      %2666 = func.call @cc_values_pack(%2665) : (i64) -> i64
-      func.call @stack_push_nil() : () -> ()
-      %2667 = func.call @stack_pop_pointer() : () -> i64
-      %2668 = func.call @cc_set_symbol_value(%2663, %2667) : (i64, i64) -> i64
-      %2669 = func.call @cc_errorp(%2668) : (i64) -> i64
-      %2670 = func.call @cc_nil_value() : () -> i64
-      %2671 = arith.cmpi ne, %2669, %2670 : i64
-      scf.if %2671 {
-        func.call @stack_push_pointer(%2668) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2663) : (i64) -> ()
+        func.call @stack_push_pointer(%2636) : (i64) -> ()
       }
-      %2672 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2672 : i64
+      %2647 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2647 : i64
     }
-    %2673 = func.call @cc_nil_value() : () -> i64
-    %2674 = func.call @cc_errorp(%2658) : (i64) -> i64
-    %2675 = arith.cmpi ne, %2674, %2673 : i64
-    %2676 = scf.if %2675 -> (i64) {
-      scf.yield %2658 : i64
+    %2648 = func.call @cc_nil_value() : () -> i64
+    %2649 = func.call @cc_errorp(%2631) : (i64) -> i64
+    %2650 = arith.cmpi ne, %2649, %2648 : i64
+    %2651 = scf.if %2650 -> (i64) {
+      scf.yield %2631 : i64
     } else {
-      %2677 = llvm.mlir.addressof @str243 : !llvm.ptr
-      %2678 = arith.constant 20 : i64
-      %2679 = func.call @cc_make_string(%2677, %2678) : (!llvm.ptr, i64) -> i64
-      %2680 = func.call @cc_nil_value() : () -> i64
-      %2681 = func.call @cc_intern(%2679, %2680) : (i64, i64) -> i64
-      %2682 = func.call @cc_nil_value() : () -> i64
-      %2683 = func.call @cc_cons(%2681, %2682) : (i64, i64) -> i64
-      %2684 = func.call @cc_values_pack(%2683) : (i64) -> i64
+      %2652 = llvm.mlir.addressof @str241 : !llvm.ptr
+      %2653 = arith.constant 17 : i64
+      %2654 = func.call @cc_make_string(%2652, %2653) : (!llvm.ptr, i64) -> i64
+      %2655 = func.call @cc_nil_value() : () -> i64
+      %2656 = func.call @cc_intern(%2654, %2655) : (i64, i64) -> i64
+      %2657 = func.call @cc_nil_value() : () -> i64
+      %2658 = func.call @cc_cons(%2656, %2657) : (i64, i64) -> i64
+      %2659 = func.call @cc_values_pack(%2658) : (i64) -> i64
       func.call @stack_push_nil() : () -> ()
-      %2685 = func.call @stack_pop_pointer() : () -> i64
-      %2686 = func.call @cc_set_symbol_value(%2681, %2685) : (i64, i64) -> i64
-      %2687 = func.call @cc_errorp(%2686) : (i64) -> i64
-      %2688 = func.call @cc_nil_value() : () -> i64
-      %2689 = arith.cmpi ne, %2687, %2688 : i64
-      scf.if %2689 {
-        func.call @stack_push_pointer(%2686) : (i64) -> ()
+      %2660 = func.call @stack_pop_pointer() : () -> i64
+      %2661 = func.call @cc_set_symbol_value(%2656, %2660) : (i64, i64) -> i64
+      %2662 = func.call @cc_errorp(%2661) : (i64) -> i64
+      %2663 = func.call @cc_nil_value() : () -> i64
+      %2664 = arith.cmpi ne, %2662, %2663 : i64
+      scf.if %2664 {
+        func.call @stack_push_pointer(%2661) : (i64) -> ()
       } else {
-        func.call @stack_push_pointer(%2681) : (i64) -> ()
+        func.call @stack_push_pointer(%2656) : (i64) -> ()
       }
-      %2690 = func.call @stack_pop_pointer() : () -> i64
-      scf.yield %2690 : i64
+      %2665 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2665 : i64
     }
-    %__rlasp_stack_elide_zero_127 = arith.constant 0 : i64
-    %2691 = arith.addi %2676, %__rlasp_stack_elide_zero_127 : i64
-    %2692 = func.call @cc_multiple_value_list(%2691) : (i64) -> i64
-    %2693 = llvm.mlir.addressof @str244 : !llvm.ptr
-    %2694 = arith.constant 37 : i64
-    %2695 = func.call @cc_make_string(%2693, %2694) : (!llvm.ptr, i64) -> i64
-    %2696 = func.call @cc_nil_value() : () -> i64
-    %2697 = func.call @cc_intern(%2695, %2696) : (i64, i64) -> i64
+    %2666 = func.call @cc_nil_value() : () -> i64
+    %2667 = func.call @cc_errorp(%2651) : (i64) -> i64
+    %2668 = arith.cmpi ne, %2667, %2666 : i64
+    %2669 = scf.if %2668 -> (i64) {
+      scf.yield %2651 : i64
+    } else {
+      %2670 = llvm.mlir.addressof @str242 : !llvm.ptr
+      %2671 = arith.constant 20 : i64
+      %2672 = func.call @cc_make_string(%2670, %2671) : (!llvm.ptr, i64) -> i64
+      %2673 = func.call @cc_nil_value() : () -> i64
+      %2674 = func.call @cc_intern(%2672, %2673) : (i64, i64) -> i64
+      %2675 = func.call @cc_nil_value() : () -> i64
+      %2676 = func.call @cc_cons(%2674, %2675) : (i64, i64) -> i64
+      %2677 = func.call @cc_values_pack(%2676) : (i64) -> i64
+      func.call @stack_push_nil() : () -> ()
+      %2678 = func.call @stack_pop_pointer() : () -> i64
+      %2679 = func.call @cc_set_symbol_value(%2674, %2678) : (i64, i64) -> i64
+      %2680 = func.call @cc_errorp(%2679) : (i64) -> i64
+      %2681 = func.call @cc_nil_value() : () -> i64
+      %2682 = arith.cmpi ne, %2680, %2681 : i64
+      scf.if %2682 {
+        func.call @stack_push_pointer(%2679) : (i64) -> ()
+      } else {
+        func.call @stack_push_pointer(%2674) : (i64) -> ()
+      }
+      %2683 = func.call @stack_pop_pointer() : () -> i64
+      scf.yield %2683 : i64
+    }
+    %__rlasp_stack_elide_zero_126 = arith.constant 0 : i64
+    %2684 = arith.addi %2669, %__rlasp_stack_elide_zero_126 : i64
+    %2685 = func.call @cc_multiple_value_list(%2684) : (i64) -> i64
+    %2686 = llvm.mlir.addressof @str243 : !llvm.ptr
+    %2687 = arith.constant 37 : i64
+    %2688 = func.call @cc_make_string(%2686, %2687) : (!llvm.ptr, i64) -> i64
+    %2689 = func.call @cc_nil_value() : () -> i64
+    %2690 = func.call @cc_intern(%2688, %2689) : (i64, i64) -> i64
+    %2691 = func.call @cc_nil_value() : () -> i64
+    %2692 = func.call @cc_cons(%2690, %2691) : (i64, i64) -> i64
+    %2693 = func.call @cc_values_pack(%2692) : (i64) -> i64
+    %2694 = func.call @cc_symbol_value(%2690) : (i64) -> i64
+    %2695 = llvm.mlir.addressof @str244 : !llvm.ptr
+    %2696 = arith.constant 39 : i64
+    %2697 = func.call @cc_make_string(%2695, %2696) : (!llvm.ptr, i64) -> i64
     %2698 = func.call @cc_nil_value() : () -> i64
-    %2699 = func.call @cc_cons(%2697, %2698) : (i64, i64) -> i64
-    %2700 = func.call @cc_values_pack(%2699) : (i64) -> i64
-    %2701 = func.call @cc_symbol_value(%2697) : (i64) -> i64
-    %2702 = llvm.mlir.addressof @str245 : !llvm.ptr
-    %2703 = arith.constant 39 : i64
-    %2704 = func.call @cc_make_string(%2702, %2703) : (!llvm.ptr, i64) -> i64
-    %2705 = func.call @cc_nil_value() : () -> i64
-    %2706 = func.call @cc_intern(%2704, %2705) : (i64, i64) -> i64
-    %2707 = func.call @cc_nil_value() : () -> i64
-    %2708 = func.call @cc_cons(%2706, %2707) : (i64, i64) -> i64
-    %2709 = func.call @cc_values_pack(%2708) : (i64) -> i64
-    %2710 = func.call @cc_symbol_value(%2706) : (i64) -> i64
-    %2711 = func.call @cc_nil_value() : () -> i64
-    %2712 = arith.cmpi ne, %2701, %2711 : i64
-    %2713 = scf.if %2712 -> (i64) {
-      scf.yield %2710 : i64
+    %2699 = func.call @cc_intern(%2697, %2698) : (i64, i64) -> i64
+    %2700 = func.call @cc_nil_value() : () -> i64
+    %2701 = func.call @cc_cons(%2699, %2700) : (i64, i64) -> i64
+    %2702 = func.call @cc_values_pack(%2701) : (i64) -> i64
+    %2703 = func.call @cc_symbol_value(%2699) : (i64) -> i64
+    %2704 = func.call @cc_nil_value() : () -> i64
+    %2705 = arith.cmpi ne, %2694, %2704 : i64
+    %2706 = scf.if %2705 -> (i64) {
+      scf.yield %2703 : i64
     } else {
-      scf.yield %2692 : i64
+      scf.yield %2685 : i64
     }
-    %2714 = func.call @cc_values_pack(%2713) : (i64) -> i64
-    func.call @stack_push_pointer(%2714) : (i64) -> ()
+    %2707 = func.call @cc_values_pack(%2706) : (i64) -> i64
+    func.call @stack_push_pointer(%2707) : (i64) -> ()
     func.return
   }
   llvm.mlir.global private constant @str0("MESSAGE\00") : !llvm.array<8 x i8>
@@ -4217,194 +4204,193 @@ module {
   llvm.mlir.global private constant @str54("~%Duplicate test ~a~%\00") : !llvm.array<22 x i8>
   llvm.mlir.global private constant @str55("WARN\00") : !llvm.array<5 x i8>
   llvm.mlir.global private constant @str56("*TEST-MARKER-TABLE*\00") : !llvm.array<20 x i8>
-  llvm.mlir.global private constant @str57("%FN%(setf COMMON-LISP:GETHASH)\00") : !llvm.array<31 x i8>
-  llvm.mlir.global private constant @str58("*__MLIR_BLOCK_RETFLAG_96868088414210*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str59("*__MLIR_BLOCK_RETMVLIST_96868088414210*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str60("NOTE-COMPILE-ERROR\00") : !llvm.array<19 x i8>
-  llvm.mlir.global private constant @str61("file&error\00") : !llvm.array<11 x i8>
-  llvm.mlir.global private constant @str62("*__MLIR_BLOCK_RETFLAG_96868088414211*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str63("*__MLIR_BLOCK_RETVALUE_96868088414211*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str64("*__MLIR_BLOCK_RETMVLIST_96868088414211*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str57("*__MLIR_BLOCK_RETFLAG_96868088414210*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str58("*__MLIR_BLOCK_RETMVLIST_96868088414210*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str59("NOTE-COMPILE-ERROR\00") : !llvm.array<19 x i8>
+  llvm.mlir.global private constant @str60("file&error\00") : !llvm.array<11 x i8>
+  llvm.mlir.global private constant @str61("*__MLIR_BLOCK_RETFLAG_96868088414211*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str62("*__MLIR_BLOCK_RETVALUE_96868088414211*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str63("*__MLIR_BLOCK_RETMVLIST_96868088414211*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str64("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
   llvm.mlir.global private constant @str65("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str66("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str67("*__MLIR_BLOCK_RETFLAG_96868088414211*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str68("*__MLIR_BLOCK_RETMVLIST_96868088414211*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str69("SHOW-TEST-SUMMARY\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str70("*__MLIR_BLOCK_RETFLAG_96868088414212*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str71("*__MLIR_BLOCK_RETVALUE_96868088414212*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str72("*__MLIR_BLOCK_RETMVLIST_96868088414212*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str73("EMPH\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str74("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str75("~@[~%Failures:~%  ~/pprint-fill/~%~]~\0A~@[~%Unexpected Successes:~%  ~/pprint-fill/~%~]~\0A~@[~%Expected Failures:~%  ~/pprint-fill/~%~]\0ASuccesses: ~d\00") : !llvm.array<148 x i8>
-  llvm.mlir.global private constant @str76("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str77("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str78("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str79("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str80("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str66("*__MLIR_BLOCK_RETFLAG_96868088414211*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str67("*__MLIR_BLOCK_RETMVLIST_96868088414211*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str68("SHOW-TEST-SUMMARY\00") : !llvm.array<18 x i8>
+  llvm.mlir.global private constant @str69("*__MLIR_BLOCK_RETFLAG_96868088414212*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str70("*__MLIR_BLOCK_RETVALUE_96868088414212*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str71("*__MLIR_BLOCK_RETMVLIST_96868088414212*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str72("EMPH\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str73("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str74("~@[~%Failures:~%  ~/pprint-fill/~%~]~\0A~@[~%Unexpected Successes:~%  ~/pprint-fill/~%~]~\0A~@[~%Expected Failures:~%  ~/pprint-fill/~%~]\0ASuccesses: ~d\00") : !llvm.array<148 x i8>
+  llvm.mlir.global private constant @str75("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str76("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str77("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
+  llvm.mlir.global private constant @str78("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
+  llvm.mlir.global private constant @str79("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str80("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
   llvm.mlir.global private constant @str81("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str82("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str83("ERR\00") : !llvm.array<4 x i8>
-  llvm.mlir.global private constant @str84("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str85("Compilation error for file ~a with error  ~a\00") : !llvm.array<45 x i8>
-  llvm.mlir.global private constant @str86("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str82("ERR\00") : !llvm.array<4 x i8>
+  llvm.mlir.global private constant @str83("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str84("Compilation error for file ~a with error  ~a\00") : !llvm.array<45 x i8>
+  llvm.mlir.global private constant @str85("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str86("*DUPLICATE-TESTS*\00") : !llvm.array<18 x i8>
   llvm.mlir.global private constant @str87("*DUPLICATE-TESTS*\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str88("*DUPLICATE-TESTS*\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str89("WARN\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str90("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str91("Duplicate test ~a\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str92("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str93("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str94("*__MLIR_BLOCK_RETFLAG_96868088414212*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str95("*__MLIR_BLOCK_RETMVLIST_96868088414212*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str96("%FAIL-TEST-WITH-ERROR\00") : !llvm.array<22 x i8>
-  llvm.mlir.global private constant @str97("name\0Aform\0Aexpected\0ACOMMON-LISP:ERROR\0Adescription\00") : !llvm.array<49 x i8>
-  llvm.mlir.global private constant @str98("*__MLIR_BLOCK_RETFLAG_96868088414213*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str99("*__MLIR_BLOCK_RETVALUE_96868088414213*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str100("*__MLIR_BLOCK_RETMVLIST_96868088414213*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str88("WARN\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str89("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str90("Duplicate test ~a\00") : !llvm.array<18 x i8>
+  llvm.mlir.global private constant @str91("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str92("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str93("*__MLIR_BLOCK_RETFLAG_96868088414212*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str94("*__MLIR_BLOCK_RETMVLIST_96868088414212*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str95("%FAIL-TEST-WITH-ERROR\00") : !llvm.array<22 x i8>
+  llvm.mlir.global private constant @str96("name\0Aform\0Aexpected\0ACOMMON-LISP:ERROR\0Adescription\00") : !llvm.array<49 x i8>
+  llvm.mlir.global private constant @str97("*__MLIR_BLOCK_RETFLAG_96868088414213*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str98("*__MLIR_BLOCK_RETVALUE_96868088414213*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str99("*__MLIR_BLOCK_RETMVLIST_96868088414213*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str100("*ALL-RUNTIME-ERRORS*\00") : !llvm.array<21 x i8>
   llvm.mlir.global private constant @str101("*ALL-RUNTIME-ERRORS*\00") : !llvm.array<21 x i8>
-  llvm.mlir.global private constant @str102("*ALL-RUNTIME-ERRORS*\00") : !llvm.array<21 x i8>
-  llvm.mlir.global private constant @str103("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str102("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str103("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
   llvm.mlir.global private constant @str104("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str105("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
+  llvm.mlir.global private constant @str105("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
   llvm.mlir.global private constant @str106("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str107("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str108("ERR\00") : !llvm.array<4 x i8>
-  llvm.mlir.global private constant @str109("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str110("Failed ~s\00") : !llvm.array<10 x i8>
-  llvm.mlir.global private constant @str111("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str112("WARN\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str113("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str114("Unexpected error~%~t~a~%while evaluating~%~t~a\00") : !llvm.array<47 x i8>
-  llvm.mlir.global private constant @str115("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str116("INFO\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str117("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str118("~s\00") : !llvm.array<3 x i8>
-  llvm.mlir.global private constant @str119("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str120("*__MLIR_BLOCK_RETFLAG_96868088414213*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str121("*__MLIR_BLOCK_RETMVLIST_96868088414213*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str122("%FAIL-TEST\00") : !llvm.array<11 x i8>
-  llvm.mlir.global private constant @str123("name\0Aform\0Aexpected\0Aactual\0Adescription\0Atest\00") : !llvm.array<43 x i8>
-  llvm.mlir.global private constant @str124("*__MLIR_BLOCK_RETFLAG_96868088414214*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str125("*__MLIR_BLOCK_RETVALUE_96868088414214*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str126("*__MLIR_BLOCK_RETMVLIST_96868088414214*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str127("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str107("ERR\00") : !llvm.array<4 x i8>
+  llvm.mlir.global private constant @str108("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str109("Failed ~s\00") : !llvm.array<10 x i8>
+  llvm.mlir.global private constant @str110("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str111("WARN\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str112("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str113("Unexpected error~%~t~a~%while evaluating~%~t~a\00") : !llvm.array<47 x i8>
+  llvm.mlir.global private constant @str114("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str115("INFO\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str116("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str117("~s\00") : !llvm.array<3 x i8>
+  llvm.mlir.global private constant @str118("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str119("*__MLIR_BLOCK_RETFLAG_96868088414213*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str120("*__MLIR_BLOCK_RETMVLIST_96868088414213*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str121("%FAIL-TEST\00") : !llvm.array<11 x i8>
+  llvm.mlir.global private constant @str122("name\0Aform\0Aexpected\0Aactual\0Adescription\0Atest\00") : !llvm.array<43 x i8>
+  llvm.mlir.global private constant @str123("*__MLIR_BLOCK_RETFLAG_96868088414214*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str124("*__MLIR_BLOCK_RETVALUE_96868088414214*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str125("*__MLIR_BLOCK_RETMVLIST_96868088414214*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str126("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str127("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
   llvm.mlir.global private constant @str128("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str129("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
+  llvm.mlir.global private constant @str129("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
   llvm.mlir.global private constant @str130("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str131("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str132("ERR\00") : !llvm.array<4 x i8>
-  llvm.mlir.global private constant @str133("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str134("Failed ~s\00") : !llvm.array<10 x i8>
-  llvm.mlir.global private constant @str135("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str136("WARN\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str137("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str138("Wanted values ~s to~%~{~t~a~%~}but got~%~{~t~a~%~}\00") : !llvm.array<51 x i8>
-  llvm.mlir.global private constant @str139("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str140("WARN\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str141("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str142("while evaluating~%~t~a~%\00") : !llvm.array<25 x i8>
-  llvm.mlir.global private constant @str143("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str144("INFO\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str145("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str146("~s\00") : !llvm.array<3 x i8>
-  llvm.mlir.global private constant @str147("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str148("*__MLIR_BLOCK_RETFLAG_96868088414214*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str149("*__MLIR_BLOCK_RETMVLIST_96868088414214*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str150("%SUCCEED-TEST\00") : !llvm.array<14 x i8>
-  llvm.mlir.global private constant @str151("name\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str152("*__MLIR_BLOCK_RETFLAG_96868088414215*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str153("*__MLIR_BLOCK_RETVALUE_96868088414215*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str154("*__MLIR_BLOCK_RETMVLIST_96868088414215*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str155("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str131("ERR\00") : !llvm.array<4 x i8>
+  llvm.mlir.global private constant @str132("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str133("Failed ~s\00") : !llvm.array<10 x i8>
+  llvm.mlir.global private constant @str134("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str135("WARN\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str136("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str137("Wanted values ~s to~%~{~t~a~%~}but got~%~{~t~a~%~}\00") : !llvm.array<51 x i8>
+  llvm.mlir.global private constant @str138("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str139("WARN\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str140("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str141("while evaluating~%~t~a~%\00") : !llvm.array<25 x i8>
+  llvm.mlir.global private constant @str142("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str143("INFO\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str144("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str145("~s\00") : !llvm.array<3 x i8>
+  llvm.mlir.global private constant @str146("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str147("*__MLIR_BLOCK_RETFLAG_96868088414214*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str148("*__MLIR_BLOCK_RETMVLIST_96868088414214*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str149("%SUCCEED-TEST\00") : !llvm.array<14 x i8>
+  llvm.mlir.global private constant @str150("name\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str151("*__MLIR_BLOCK_RETFLAG_96868088414215*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str152("*__MLIR_BLOCK_RETVALUE_96868088414215*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str153("*__MLIR_BLOCK_RETMVLIST_96868088414215*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str154("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str155("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
   llvm.mlir.global private constant @str156("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str157("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str157("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
   llvm.mlir.global private constant @str158("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str159("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str160("INFO\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str161("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str162("Passed ~s\00") : !llvm.array<10 x i8>
-  llvm.mlir.global private constant @str163("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str164("*__MLIR_BLOCK_RETFLAG_96868088414215*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str165("*__MLIR_BLOCK_RETMVLIST_96868088414215*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str166("%TEST\00") : !llvm.array<6 x i8>
-  llvm.mlir.global private constant @str167("name\0Aform\0Athunk\0Aexpected\0Adescription\0Atest\00") : !llvm.array<42 x i8>
-  llvm.mlir.global private constant @str168("DESCRIPTION\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str169("TEST\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str170("EQUALP\00") : !llvm.array<7 x i8>
-  llvm.mlir.global private constant @str171("COMMON-LISP\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str172("*__MLIR_BLOCK_RETFLAG_96868088414216*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str173("*__MLIR_BLOCK_RETVALUE_96868088414216*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str174("*__MLIR_BLOCK_RETMVLIST_96868088414216*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str175("%FN%note-test\00") : !llvm.array<14 x i8>
-  llvm.mlir.global private constant @str176("%FN%%fail-test-with-error\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str177("%FN%%succeed-test\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str178("%FN%%fail-test\00") : !llvm.array<15 x i8>
-  llvm.mlir.global private constant @str179("*__MLIR_BLOCK_RETFLAG_96868088414216*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str180("*__MLIR_BLOCK_RETMVLIST_96868088414216*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str181("LOAD-IF-COMPILED-CORRECTLY\00") : !llvm.array<27 x i8>
-  llvm.mlir.global private constant @str182("file\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str183("*__MLIR_BLOCK_RETFLAG_96868088414217*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str184("*__MLIR_BLOCK_RETVALUE_96868088414217*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str185("*__MLIR_BLOCK_RETMVLIST_96868088414217*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str186("FILE\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str187("COMPILE-FILE\00") : !llvm.array<13 x i8>
-  llvm.mlir.global private constant @str188("FILE\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str189("ERROR\00") : !llvm.array<6 x i8>
-  llvm.mlir.global private constant @str190("COMMON-LISP\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str191("%FN%note-compile-error\00") : !llvm.array<23 x i8>
-  llvm.mlir.global private constant @str192("ERR\00") : !llvm.array<4 x i8>
-  llvm.mlir.global private constant @str193("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str194("Regression: compile-file of ~a failed with ~a\00") : !llvm.array<46 x i8>
-  llvm.mlir.global private constant @str195("%FN%message\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str196("*__MLIR_BLOCK_RETFLAG_96868088414217*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str197("*__MLIR_BLOCK_RETMVLIST_96868088414217*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str198("NO-HANDLER-CASE-LOAD-IF-COMPILED-CORRECTLY\00") : !llvm.array<43 x i8>
-  llvm.mlir.global private constant @str199("file\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str200("*__MLIR_BLOCK_RETFLAG_96868088414218*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str201("*__MLIR_BLOCK_RETVALUE_96868088414218*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str202("*__MLIR_BLOCK_RETMVLIST_96868088414218*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str203("FILE\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str204("COMPILE-FILE\00") : !llvm.array<13 x i8>
-  llvm.mlir.global private constant @str205("FILE\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str206("*__MLIR_BLOCK_RETFLAG_96868088414218*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str207("*__MLIR_BLOCK_RETMVLIST_96868088414218*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str208("__MAIN\00") : !llvm.array<7 x i8>
-  llvm.mlir.global private constant @str209("*__MLIR_BLOCK_RETFLAG_96868088414219*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str210("*__MLIR_BLOCK_RETVALUE_96868088414219*\00") : !llvm.array<39 x i8>
-  llvm.mlir.global private constant @str211("*__MLIR_BLOCK_RETMVLIST_96868088414219*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global private constant @str212("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str213("find-package\00") : !llvm.array<13 x i8>
-  llvm.mlir.global private constant @str214("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str215("find-package\00") : !llvm.array<13 x i8>
-  llvm.mlir.global private constant @str216("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str217("make-package\00") : !llvm.array<13 x i8>
-  llvm.mlir.global private constant @str218("CL\00") : !llvm.array<3 x i8>
-  llvm.mlir.global private constant @str219("KEYWORD\00") : !llvm.array<8 x i8>
-  llvm.mlir.global private constant @str220("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str221("use-package\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str222("TEST\00") : !llvm.array<5 x i8>
-  llvm.mlir.global private constant @str223("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str224("intern\00") : !llvm.array<7 x i8>
-  llvm.mlir.global private constant @str225("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str226("export\00") : !llvm.array<7 x i8>
-  llvm.mlir.global private constant @str227("TEST-EXPECT-ERROR\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str228("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str229("intern\00") : !llvm.array<7 x i8>
-  llvm.mlir.global private constant @str230("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str231("export\00") : !llvm.array<7 x i8>
-  llvm.mlir.global private constant @str232("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str233("find-package\00") : !llvm.array<13 x i8>
-  llvm.mlir.global private constant @str234("CLASP-TESTS\00") : !llvm.array<12 x i8>
-  llvm.mlir.global private constant @str235("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str236("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str237("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
-  llvm.mlir.global private constant @str238("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str239("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
-  llvm.mlir.global private constant @str240("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
-  llvm.mlir.global private constant @str241("*TEST-MARKER-TABLE*\00") : !llvm.array<20 x i8>
-  llvm.mlir.global private constant @str242("*DUPLICATE-TESTS*\00") : !llvm.array<18 x i8>
-  llvm.mlir.global private constant @str243("*ALL-RUNTIME-ERRORS*\00") : !llvm.array<21 x i8>
-  llvm.mlir.global private constant @str244("*__MLIR_BLOCK_RETFLAG_96868088414219*\00") : !llvm.array<38 x i8>
-  llvm.mlir.global private constant @str245("*__MLIR_BLOCK_RETMVLIST_96868088414219*\00") : !llvm.array<40 x i8>
-  llvm.mlir.global constant @__argslist_functions("%FN%message\00%FN%message\00%FN%%test\00%FN%%test\00\00") : !llvm.array<45 x i8>
+  llvm.mlir.global private constant @str159("INFO\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str160("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str161("Passed ~s\00") : !llvm.array<10 x i8>
+  llvm.mlir.global private constant @str162("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str163("*__MLIR_BLOCK_RETFLAG_96868088414215*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str164("*__MLIR_BLOCK_RETMVLIST_96868088414215*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str165("%TEST\00") : !llvm.array<6 x i8>
+  llvm.mlir.global private constant @str166("name\0Aform\0Athunk\0Aexpected\0Adescription\0Atest\00") : !llvm.array<42 x i8>
+  llvm.mlir.global private constant @str167("DESCRIPTION\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str168("TEST\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str169("EQUALP\00") : !llvm.array<7 x i8>
+  llvm.mlir.global private constant @str170("COMMON-LISP\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str171("*__MLIR_BLOCK_RETFLAG_96868088414216*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str172("*__MLIR_BLOCK_RETVALUE_96868088414216*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str173("*__MLIR_BLOCK_RETMVLIST_96868088414216*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str174("%FN%note-test\00") : !llvm.array<14 x i8>
+  llvm.mlir.global private constant @str175("%FN%%fail-test-with-error\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str176("%FN%%succeed-test\00") : !llvm.array<18 x i8>
+  llvm.mlir.global private constant @str177("%FN%%fail-test\00") : !llvm.array<15 x i8>
+  llvm.mlir.global private constant @str178("*__MLIR_BLOCK_RETFLAG_96868088414216*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str179("*__MLIR_BLOCK_RETMVLIST_96868088414216*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str180("LOAD-IF-COMPILED-CORRECTLY\00") : !llvm.array<27 x i8>
+  llvm.mlir.global private constant @str181("file\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str182("*__MLIR_BLOCK_RETFLAG_96868088414217*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str183("*__MLIR_BLOCK_RETVALUE_96868088414217*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str184("*__MLIR_BLOCK_RETMVLIST_96868088414217*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str185("FILE\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str186("COMPILE-FILE\00") : !llvm.array<13 x i8>
+  llvm.mlir.global private constant @str187("FILE\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str188("ERROR\00") : !llvm.array<6 x i8>
+  llvm.mlir.global private constant @str189("COMMON-LISP\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str190("%FN%note-compile-error\00") : !llvm.array<23 x i8>
+  llvm.mlir.global private constant @str191("ERR\00") : !llvm.array<4 x i8>
+  llvm.mlir.global private constant @str192("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str193("Regression: compile-file of ~a failed with ~a\00") : !llvm.array<46 x i8>
+  llvm.mlir.global private constant @str194("%FN%message\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str195("*__MLIR_BLOCK_RETFLAG_96868088414217*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str196("*__MLIR_BLOCK_RETMVLIST_96868088414217*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str197("NO-HANDLER-CASE-LOAD-IF-COMPILED-CORRECTLY\00") : !llvm.array<43 x i8>
+  llvm.mlir.global private constant @str198("file\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str199("*__MLIR_BLOCK_RETFLAG_96868088414218*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str200("*__MLIR_BLOCK_RETVALUE_96868088414218*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str201("*__MLIR_BLOCK_RETMVLIST_96868088414218*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str202("FILE\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str203("COMPILE-FILE\00") : !llvm.array<13 x i8>
+  llvm.mlir.global private constant @str204("FILE\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str205("*__MLIR_BLOCK_RETFLAG_96868088414218*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str206("*__MLIR_BLOCK_RETMVLIST_96868088414218*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str207("__MAIN\00") : !llvm.array<7 x i8>
+  llvm.mlir.global private constant @str208("*__MLIR_BLOCK_RETFLAG_96868088414219*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str209("*__MLIR_BLOCK_RETVALUE_96868088414219*\00") : !llvm.array<39 x i8>
+  llvm.mlir.global private constant @str210("*__MLIR_BLOCK_RETMVLIST_96868088414219*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global private constant @str211("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str212("find-package\00") : !llvm.array<13 x i8>
+  llvm.mlir.global private constant @str213("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str214("find-package\00") : !llvm.array<13 x i8>
+  llvm.mlir.global private constant @str215("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str216("make-package\00") : !llvm.array<13 x i8>
+  llvm.mlir.global private constant @str217("CL\00") : !llvm.array<3 x i8>
+  llvm.mlir.global private constant @str218("KEYWORD\00") : !llvm.array<8 x i8>
+  llvm.mlir.global private constant @str219("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str220("use-package\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str221("TEST\00") : !llvm.array<5 x i8>
+  llvm.mlir.global private constant @str222("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str223("intern\00") : !llvm.array<7 x i8>
+  llvm.mlir.global private constant @str224("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str225("export\00") : !llvm.array<7 x i8>
+  llvm.mlir.global private constant @str226("TEST-EXPECT-ERROR\00") : !llvm.array<18 x i8>
+  llvm.mlir.global private constant @str227("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str228("intern\00") : !llvm.array<7 x i8>
+  llvm.mlir.global private constant @str229("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str230("export\00") : !llvm.array<7 x i8>
+  llvm.mlir.global private constant @str231("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str232("find-package\00") : !llvm.array<13 x i8>
+  llvm.mlir.global private constant @str233("CLASP-TESTS\00") : !llvm.array<12 x i8>
+  llvm.mlir.global private constant @str234("*EXPECTED-FAILED-TESTS*\00") : !llvm.array<24 x i8>
+  llvm.mlir.global private constant @str235("*UNEXPECTED-FAILED-TESTS*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str236("*EXPECTED-PASSED-TESTS*\00") : !llvm.array<24 x i8>
+  llvm.mlir.global private constant @str237("*UNEXPECTED-PASSED-TESTS*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str238("*EXPECTED-FAILURES*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str239("*FILES-FAILED-TO-COMPILE*\00") : !llvm.array<26 x i8>
+  llvm.mlir.global private constant @str240("*TEST-MARKER-TABLE*\00") : !llvm.array<20 x i8>
+  llvm.mlir.global private constant @str241("*DUPLICATE-TESTS*\00") : !llvm.array<18 x i8>
+  llvm.mlir.global private constant @str242("*ALL-RUNTIME-ERRORS*\00") : !llvm.array<21 x i8>
+  llvm.mlir.global private constant @str243("*__MLIR_BLOCK_RETFLAG_96868088414219*\00") : !llvm.array<38 x i8>
+  llvm.mlir.global private constant @str244("*__MLIR_BLOCK_RETMVLIST_96868088414219*\00") : !llvm.array<40 x i8>
+  llvm.mlir.global constant @__argslist_functions("%FN%%test\00%FN%message\00%FN%%test\00%FN%message\00\00") : !llvm.array<45 x i8>
 }

@@ -146,8 +146,11 @@ func.func private @cc_make_array_with_contents(i64, i64) -> i64
 func.func private @cc_make_array_with_initial_element(i64, i64) -> i64
 func.func private @cc_make_array_stack()
 func.func private @cc_aref(i64, i64) -> i64
+func.func private @cc_aref_raw_index(i64, i64) -> i64
+func.func private @cc_aref_raw_index_eq_fixnum(i64, i64, i64) -> i64
 func.func private @cc_aref_stack()
 func.func private @cc_set_aref(i64, i64, i64) -> i64
+func.func private @cc_set_aref_raw_index(i64, i64, i64) -> i64
 
 // Vectors
 func.func private @cc_make_vector(i64) -> i64

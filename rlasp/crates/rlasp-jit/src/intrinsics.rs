@@ -7308,27 +7308,22 @@ pub extern "C" fn cc_format_stack() {
 #[no_mangle]
 pub extern "C" fn cc_make_hash_table() -> usize {
     let table = rlasp_runtime::HashTable::allocate();
-    if let Some(key) = hash_table_key(table) {
-        HASH_TABLE_META
-            .lock()
-            .unwrap()
-            .insert(key, default_hash_table_meta());
-    }
     table.raw()
 }
 
 /// Make a hash table with test function and size
 #[no_mangle]
 pub extern "C" fn cc_make_hash_table_full(test: usize, size: usize) -> usize {
-    let table = unsafe { LispObject::from_raw(cc_make_hash_table()) };
-    if let Some(key) = hash_table_key(table) {
-        let mut meta_map = HASH_TABLE_META.lock().unwrap();
-        if let Some(meta) = meta_map.get_mut(&key) {
-            meta.test = normalize_hash_test_designator(unsafe { LispObject::from_raw(test) });
-            let size_obj = unsafe { LispObject::from_raw(size) };
-            if let Some(sz) = parse_non_negative_index(size_obj) {
-                meta.size = sz.max(1);
-            }
+    let table = rlasp_runtime::HashTable::allocate();
+    let mut meta = default_hash_table_meta();
+    meta.test = normalize_hash_test_designator(unsafe { LispObject::from_raw(test) });
+    let size_obj = unsafe { LispObject::from_raw(size) };
+    if let Some(sz) = parse_non_negative_index(size_obj) {
+        meta.size = sz.max(1);
+    }
+    if !hash_meta_is_untracked_default(&meta) {
+        if let Some(key) = hash_table_key(table) {
+            HASH_TABLE_META.lock().unwrap().insert(key, meta);
         }
     }
     table.raw()
@@ -7368,8 +7363,10 @@ pub extern "C" fn cc_make_hash_table_stack() {
     }
 
     let table = rlasp_runtime::HashTable::allocate();
-    if let Some(key) = hash_table_key(table) {
+    if !hash_meta_is_untracked_default(&meta) {
+        if let Some(key) = hash_table_key(table) {
         HASH_TABLE_META.lock().unwrap().insert(key, meta);
+        }
     }
     if trace {
         eprintln!("[make-hash-table-stack] pushing table_raw={}", table.raw());
@@ -7511,17 +7508,22 @@ pub extern "C" fn cc_gethash(key: usize, table: usize, default: usize) -> usize 
     let default_obj = unsafe { LispObject::from_raw(default) };
 
     if let Some(table_key) = hash_table_key(table_obj) {
-        if let Some(meta) = HASH_TABLE_META.lock().unwrap().get(&table_key).cloned() {
-            if hash_meta_requires_entry_tracking(&meta) {
-                for (stored_key, stored_value) in &meta.entries {
-                    if hash_test_matches(meta.test, key_obj, *stored_key) {
-                        set_multiple_values_pair(*stored_value, LispObject::t());
-                        return stored_value.raw();
-                    }
+        let tracked_meta = {
+            let meta_map = HASH_TABLE_META.lock().unwrap();
+            meta_map
+                .get(&table_key)
+                .filter(|meta| hash_meta_requires_entry_tracking(meta))
+                .cloned()
+        };
+        if let Some(meta) = tracked_meta {
+            for (stored_key, stored_value) in &meta.entries {
+                if hash_test_matches(meta.test, key_obj, *stored_key) {
+                    set_multiple_values_pair(*stored_value, LispObject::t());
+                    return stored_value.raw();
                 }
-                set_multiple_values_pair(default_obj, LispObject::nil());
-                return default_obj.raw();
             }
+            set_multiple_values_pair(default_obj, LispObject::nil());
+            return default_obj.raw();
         }
     }
 
@@ -7550,20 +7552,20 @@ pub extern "C" fn cc_puthash(key: usize, value: usize, table: usize) -> usize {
     let table_obj = unsafe { LispObject::from_raw(table) };
 
     if let Some(table_key) = hash_table_key(table_obj) {
-        let meta_snapshot = HASH_TABLE_META.lock().unwrap().get(&table_key).cloned();
-        if let Some(mut meta) = meta_snapshot {
-            if hash_meta_requires_entry_tracking(&meta) {
+        let mut meta_map = HASH_TABLE_META.lock().unwrap();
+        if let Some(meta) = meta_map.get_mut(&table_key) {
+            if hash_meta_requires_entry_tracking(meta) {
+                let test = meta.test;
                 let idx = meta
                     .entries
                     .iter()
-                    .position(|(stored_key, _)| hash_test_matches(meta.test, key_obj, *stored_key));
+                    .position(|(stored_key, _)| hash_test_matches(test, key_obj, *stored_key));
                 if let Some(i) = idx {
                     meta.entries[i] = (key_obj, value_obj);
                 } else {
                     meta.entries.push((key_obj, value_obj));
                 }
             }
-            HASH_TABLE_META.lock().unwrap().insert(table_key, meta);
         }
     }
 
@@ -25022,6 +25024,14 @@ fn hash_test_designator_name(test: LispObject) -> Option<String> {
     None
 }
 
+fn hash_meta_is_untracked_default(meta: &HashTableMeta) -> bool {
+    !hash_meta_requires_entry_tracking(meta)
+        && meta.size == 16
+        && meta.weakness.is_nil()
+        && meta.entries.is_empty()
+        && meta.structure_types.is_empty()
+}
+
 fn hash_meta_requires_entry_tracking(meta: &HashTableMeta) -> bool {
     if !meta.weakness.is_nil() {
         return true;
@@ -25826,6 +25836,78 @@ pub extern "C" fn cc_aref(array: usize, index: usize) -> usize {
     rlasp_runtime::LispError::type_error("aref requires an array").raw()
 }
 
+/// Access array element with an already-unboxed non-negative rank-1 index.
+#[no_mangle]
+pub extern "C" fn cc_aref_raw_index(array: usize, index_raw: i64) -> usize {
+    let array_obj = unsafe { LispObject::from_raw(array) };
+    if index_raw < 0 {
+        return rlasp_runtime::LispError::type_error("invalid array index").raw();
+    }
+    let idx = index_raw as usize;
+
+    if let Some(vec_ptr) = as_vector_ptr_checked(array_obj) {
+        let vec = unsafe { &*vec_ptr };
+        if idx >= vec.len() {
+            if vec.len() > 0 {
+                return rlasp_runtime::LispError::type_error(&format!(
+                    "array index out of bounds: expected 0-{}",
+                    vec.len() - 1
+                ))
+                .raw();
+            }
+            return rlasp_runtime::LispError::type_error("array index out of bounds").raw();
+        }
+        return vec.get(idx).unwrap_or(LispObject::nil()).raw();
+    }
+
+    if let Some(str_ptr) = as_string_ptr_checked(array_obj) {
+        let s = unsafe { &*str_ptr };
+        if let Some(ch) = s.char_at(idx) {
+            return LispObject::character(ch).raw();
+        }
+        if s.len_chars() > 0 {
+            return rlasp_runtime::LispError::type_error(&format!(
+                "array index out of bounds: expected 0-{}",
+                s.len_chars() - 1
+            ))
+            .raw();
+        }
+        return rlasp_runtime::LispError::type_error("array index out of bounds").raw();
+    }
+
+    rlasp_runtime::LispError::type_error("aref requires an array").raw()
+}
+
+/// Compare a rank-1 array element against a raw fixnum without materializing
+/// the element or the expected value on the Lisp stack.
+#[no_mangle]
+pub extern "C" fn cc_aref_raw_index_eq_fixnum(array: usize, index_raw: i64, expected_raw: i64) -> i64 {
+    let array_obj = unsafe { LispObject::from_raw(array) };
+    if index_raw < 0 {
+        return 0;
+    }
+    let idx = index_raw as usize;
+
+    if let Some(vec_ptr) = as_vector_ptr_checked(array_obj) {
+        let vec = unsafe { &*vec_ptr };
+        if idx >= vec.len() {
+            return 0;
+        }
+        return if vec
+            .get(idx)
+            .and_then(|value| value.as_fixnum())
+            .map(|value| value == expected_raw)
+            .unwrap_or(false)
+        {
+            1
+        } else {
+            0
+        };
+    }
+
+    0
+}
+
 /// Set array element at index
 #[no_mangle]
 pub extern "C" fn cc_set_aref(array: usize, index: usize, value: usize) -> usize {
@@ -25865,6 +25947,53 @@ pub extern "C" fn cc_set_aref(array: usize, index: usize, value: usize) -> usize
         } else {
             return rlasp_runtime::LispError::type_error("invalid string index").raw();
         };
+        if idx >= s.len_chars() {
+            if s.len_chars() > 0 {
+                return rlasp_runtime::LispError::type_error(&format!(
+                    "array index out of bounds: expected 0-{}",
+                    s.len_chars() - 1
+                ))
+                .raw();
+            }
+            return rlasp_runtime::LispError::type_error("array index out of bounds").raw();
+        }
+        if let Some(ch) = value_obj.as_character() {
+            s.set_char(idx, ch);
+        }
+        return value;
+    }
+
+    rlasp_runtime::LispError::type_error("setf aref requires an array").raw()
+}
+
+/// Set array element with an already-unboxed non-negative rank-1 index.
+#[no_mangle]
+pub extern "C" fn cc_set_aref_raw_index(array: usize, index_raw: i64, value: usize) -> usize {
+    let array_obj = unsafe { LispObject::from_raw(array) };
+    let value_obj = unsafe { LispObject::from_raw(value) };
+    if index_raw < 0 {
+        return rlasp_runtime::LispError::type_error("invalid array index").raw();
+    }
+    let idx = index_raw as usize;
+
+    if let Some(vec_ptr) = as_vector_ptr_checked(array_obj) {
+        let vec = unsafe { &mut *(vec_ptr as *mut rlasp_runtime::RVector) };
+        if idx >= vec.len() {
+            if vec.len() > 0 {
+                return rlasp_runtime::LispError::type_error(&format!(
+                    "array index out of bounds: expected 0-{}",
+                    vec.len() - 1
+                ))
+                .raw();
+            }
+            return rlasp_runtime::LispError::type_error("array index out of bounds").raw();
+        }
+        vec.set(idx, value_obj);
+        return value;
+    }
+
+    if let Some(str_ptr) = as_string_ptr_checked(array_obj) {
+        let s = unsafe { &mut *(str_ptr as *mut rlasp_runtime::RString) };
         if idx >= s.len_chars() {
             if s.len_chars() > 0 {
                 return rlasp_runtime::LispError::type_error(&format!(

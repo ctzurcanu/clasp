@@ -2,14 +2,14 @@
 
 use crate::header::{ObjectType, TypeHeader};
 use crate::object::LispObject;
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 /// Hash table with Common Lisp semantics
 #[repr(C)]
 pub struct HashTable {
     header: TypeHeader,
-    table: Arc<RwLock<HashMap<u64, (LispObject, LispObject)>>>,
+    table: UnsafeCell<HashMap<u64, (LispObject, LispObject)>>,
 }
 
 impl HashTable {
@@ -17,14 +17,14 @@ impl HashTable {
     pub fn new() -> Self {
         Self {
             header: TypeHeader::new(ObjectType::HashTable),
-            table: Arc::new(RwLock::new(HashMap::new())),
+            table: UnsafeCell::new(HashMap::new()),
         }
     }
 
     /// Get a value from the hash table
     pub fn get(&self, key: LispObject) -> Option<LispObject> {
         let hash = Self::hash_object(key);
-        let table = self.table.read().unwrap();
+        let table = unsafe { &*self.table.get() };
         if let Some((stored_key, value)) = table.get(&hash) {
             // Check if keys are actually equal (in case of hash collision)
             if Self::keys_equal(*stored_key, key) {
@@ -40,32 +40,32 @@ impl HashTable {
     /// Put a value in the hash table
     pub fn put(&self, key: LispObject, value: LispObject) {
         let hash = Self::hash_object(key);
-        let mut table = self.table.write().unwrap();
+        let table = unsafe { &mut *self.table.get() };
         table.insert(hash, (key, value));
     }
 
     /// Remove a value from the hash table
     pub fn remove(&self, key: LispObject) -> bool {
         let hash = Self::hash_object(key);
-        let mut table = self.table.write().unwrap();
+        let table = unsafe { &mut *self.table.get() };
         table.remove(&hash).is_some()
     }
 
     /// Remove all entries from the hash table.
     pub fn clear(&self) {
-        let mut table = self.table.write().unwrap();
+        let table = unsafe { &mut *self.table.get() };
         table.clear();
     }
 
     /// Return the number of entries in the hash table.
     pub fn count(&self) -> usize {
-        let table = self.table.read().unwrap();
+        let table = unsafe { &*self.table.get() };
         table.len()
     }
 
     /// Get all key-value pairs
     pub fn entries(&self) -> Vec<(LispObject, LispObject)> {
-        let table = self.table.read().unwrap();
+        let table = unsafe { &*self.table.get() };
         table.iter().map(|(_, (k, v))| (*k, *v)).collect()
     }
 
@@ -183,6 +183,5 @@ fn object_type(obj: LispObject) -> Option<ObjectType> {
 
 impl Drop for HashTable {
     fn drop(&mut self) {
-        // Arc will handle cleanup
     }
 }
