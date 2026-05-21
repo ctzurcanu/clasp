@@ -577,7 +577,15 @@ pub fn class_of(val: &EvalResult) -> String {
                 inst.class_name.clone()
             }
         }
-        EvalResult::Fixnum(_) => "FIXNUM".to_string(),
+        EvalResult::Fixnum(n) => {
+            const CL_FIXNUM_MIN: i64 = -(1i64 << 61);
+            const CL_FIXNUM_MAX: i64 = (1i64 << 61) - 1;
+            if (CL_FIXNUM_MIN..=CL_FIXNUM_MAX).contains(n) {
+                "FIXNUM".to_string()
+            } else {
+                "BIGNUM".to_string()
+            }
+        }
         EvalResult::Bignum(_) => "BIGNUM".to_string(),
         EvalResult::Ratio(_) => "RATIO".to_string(),
         EvalResult::Float(_) => "FLOAT".to_string(),

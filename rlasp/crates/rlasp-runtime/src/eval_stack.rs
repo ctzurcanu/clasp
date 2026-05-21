@@ -175,11 +175,22 @@ impl EvalStack {
 
     /// Pop a fixnum
     pub fn pop_fixnum(&mut self) -> Option<i64> {
-        let (tag, data) = self.pop()?;
-        if tag != TypeTag::Fixnum || data.len() != 8 {
+        let type_entry = *self.type_stack.last()?;
+        let tag = Self::tag_from_u16(type_entry.type_tag);
+        let len = type_entry.length as usize;
+        if tag != TypeTag::Fixnum || len != 8 || self.value_sp < len {
             return None;
         }
-        Some(i64::from_le_bytes(data.try_into().ok()?))
+
+        self.type_stack.pop();
+        if self.root_top > 0 {
+            self.root_top -= 1;
+            self.root_slots[self.root_top] = 0;
+        }
+        self.value_sp -= len;
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&self.value_stack[self.value_sp..self.value_sp + len]);
+        Some(i64::from_le_bytes(bytes))
     }
 
     /// Pop a pointer
@@ -187,13 +198,27 @@ impl EvalStack {
     /// This bridges the two-stack architecture with functions expecting tagged pointers
     /// Values exceeding 62 bits are promoted to bignum
     pub fn pop_pointer(&mut self) -> Option<usize> {
-        let (tag, data) = self.pop()?;
+        let type_entry = *self.type_stack.last()?;
+        let tag = Self::tag_from_u16(type_entry.type_tag);
+        let len = type_entry.length as usize;
+        if self.value_sp < len {
+            return None;
+        }
+
+        self.type_stack.pop();
+        if self.root_top > 0 {
+            self.root_top -= 1;
+            self.root_slots[self.root_top] = 0;
+        }
+        self.value_sp -= len;
 
         match tag {
             TypeTag::Nil => Some(crate::LispObject::nil().raw()),
-            TypeTag::Fixnum if data.len() == 8 => {
+            TypeTag::Fixnum if len == 8 => {
                 // Box the raw fixnum into a LispObject
-                let val = i64::from_le_bytes(data.try_into().ok()?);
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(&self.value_stack[self.value_sp..self.value_sp + len]);
+                let val = i64::from_le_bytes(bytes);
                 // Check if value fits in 62-bit fixnum representation
                 // 62 bits signed: -2^61 to 2^61-1
                 const MAX_FIXNUM: i64 = (1 << 61) - 1;
@@ -206,8 +231,10 @@ impl EvalStack {
                     Some(crate::Number::allocate_bignum(Integer::from(val)).raw())
                 }
             }
-            TypeTag::Pointer if data.len() == 8 => {
-                Some(usize::from_le_bytes(data.try_into().ok()?))
+            TypeTag::Pointer if len == 8 => {
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(&self.value_stack[self.value_sp..self.value_sp + len]);
+                Some(usize::from_le_bytes(bytes))
             }
             _ => None,
         }

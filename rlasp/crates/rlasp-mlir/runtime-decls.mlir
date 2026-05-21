@@ -21,6 +21,8 @@ func.func private @cc_box_float(f64) -> i64
 func.func private @cc_box_single_float(f64) -> i64
 func.func private @cc_single_float_to_bits(i64) -> i64
 func.func private @cc_double_float_to_bits(i64) -> i64
+func.func private @cc_bits_to_single_float(i64) -> i64
+func.func private @cc_bits_to_double_float(i64) -> i64
 func.func private @cc_unbox_float(i64) -> f64
 func.func private @cc_box_character(i64) -> i64
 func.func private @cc_unbox_character(i64) -> i64

@@ -87,7 +87,35 @@ impl Cons {
 
     /// Create a boxed cons cell and return a LispObject pointer to it
     pub fn allocate(car: LispObject, cdr: LispObject) -> LispObject {
-        let ptr = unsafe { crate::gc::gc_allocate_value(Cons::new(car, cdr)).as_ptr() };
+        let mut car_root = car.raw();
+        let mut cdr_root = cdr.raw();
+        unsafe {
+            crate::gc::gc_add_root_range(
+                (&mut car_root as *mut usize).cast::<u8>(),
+                (&mut car_root as *mut usize).add(1).cast::<u8>(),
+            );
+            crate::gc::gc_add_root_range(
+                (&mut cdr_root as *mut usize).cast::<u8>(),
+                (&mut cdr_root as *mut usize).add(1).cast::<u8>(),
+            );
+        }
+        let ptr = unsafe {
+            crate::gc::gc_allocate_value(Cons::new(
+                LispObject::from_raw(car_root),
+                LispObject::from_raw(cdr_root),
+            ))
+            .as_ptr()
+        };
+        unsafe {
+            crate::gc::gc_remove_root_range(
+                (&mut car_root as *mut usize).cast::<u8>(),
+                (&mut car_root as *mut usize).add(1).cast::<u8>(),
+            );
+            crate::gc::gc_remove_root_range(
+                (&mut cdr_root as *mut usize).cast::<u8>(),
+                (&mut cdr_root as *mut usize).add(1).cast::<u8>(),
+            );
+        }
         LispObject::from_cons_ptr(ptr)
     }
 

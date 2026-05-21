@@ -6,12 +6,13 @@ use super::eval_types::{primary_value, structural_equal, EvalResult, GENSYM_COUN
 use crate::ir::{ASTNode, ConstantValue};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 thread_local! {
     static ARRAY_META: RefCell<HashMap<usize, ArrayMetadata>> = RefCell::new(HashMap::new());
+    static ARRAY_META_OWNERS: RefCell<HashMap<usize, Weak<RefCell<Vec<EvalResult>>>>> = RefCell::new(HashMap::new());
     static BRIDGE_HANDLE_TABLE: RefCell<HashMap<String, EvalResult>> = RefCell::new(HashMap::new());
     static CALL_NEXT_METHOD_STACK: RefCell<Vec<CallNextMethodFrame>> = RefCell::new(Vec::new());
     static BRIDGE_ENV_STACK: RefCell<Vec<HashMap<String, EvalResult>>> = RefCell::new(Vec::new());
@@ -431,8 +432,22 @@ fn keyword_name_from_symbol_for_declared(
 }
 
 fn with_array_meta(arr: &Rc<RefCell<Vec<EvalResult>>>, updater: impl FnOnce(&mut ArrayMetadata)) {
+    let key = array_key(arr);
+    ARRAY_META_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        let stale = owners
+            .get(&key)
+            .and_then(|weak| weak.upgrade())
+            .map(|owner| !Rc::ptr_eq(&owner, arr))
+            .unwrap_or(true);
+        if stale {
+            ARRAY_META.with(|m| {
+                m.borrow_mut().remove(&key);
+            });
+            owners.insert(key, Rc::downgrade(arr));
+        }
+    });
     ARRAY_META.with(|m| {
-        let key = array_key(arr);
         let mut map = m.borrow_mut();
         let meta = map.entry(key).or_default();
         updater(meta);
@@ -533,9 +548,23 @@ pub(super) fn set_array_dims(arr: &Rc<RefCell<Vec<EvalResult>>>, dims: Vec<usize
 }
 
 fn metadata_for_array(arr: &Rc<RefCell<Vec<EvalResult>>>) -> ArrayMetadata {
+    let key = array_key(arr);
+    let stale = ARRAY_META_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        match owners.get(&key).and_then(|weak| weak.upgrade()) {
+            Some(owner) if Rc::ptr_eq(&owner, arr) => false,
+            _ => {
+                owners.insert(key, Rc::downgrade(arr));
+                true
+            }
+        }
+    });
     ARRAY_META.with(|m| {
         let mut map = m.borrow_mut();
-        map.entry(array_key(arr)).or_default().clone()
+        if stale {
+            map.remove(&key);
+        }
+        map.entry(key).or_default().clone()
     })
 }
 
@@ -11488,7 +11517,13 @@ pub(super) fn eval_type_of(
     let type_name = match val {
         EvalResult::Nil => "NULL",
         EvalResult::Bool(_) | EvalResult::Boolean(_) => "BOOLEAN",
-        EvalResult::Fixnum(_) => "FIXNUM",
+        EvalResult::Fixnum(n) => {
+            if is_cl_fixnum_i64(n) {
+                "FIXNUM"
+            } else {
+                "BIGNUM"
+            }
+        }
         EvalResult::Bignum(_) => "BIGNUM",
         EvalResult::Ratio(_) => "RATIO",
         EvalResult::Float(_) => "FLOAT",
@@ -13117,16 +13152,22 @@ pub(super) fn eval_truncate(
             return Err("truncate: floating-point overflow".to_string());
         }
         let r = n - q * d;
-        let mut q_int = Integer::rounding_from(q, RoundingMode::Nearest).0;
-        if matches!(number, EvalResult::FloatSingle(_))
+        let q_int = Integer::rounding_from(q, RoundingMode::Nearest).0;
+        let q_val = if matches!(number, EvalResult::FloatSingle(_))
             && matches!(divisor, EvalResult::Fixnum(1))
-            && q <= CL_FIXNUM_MIN as f64
             && q >= (CL_FIXNUM_MIN - 1024) as f64
+            && q <= (CL_FIXNUM_MIN + 1024) as f64
         {
-            q_int = Integer::from(CL_FIXNUM_MIN);
-        }
+            if q <= CL_FIXNUM_MIN as f64 {
+                EvalResult::Fixnum(CL_FIXNUM_MIN)
+            } else {
+                EvalResult::Bignum(q_int)
+            }
+        } else {
+            int_to_eval(q_int)
+        };
         return Ok(EvalResult::MultipleValues(vec![
-            int_to_eval(q_int),
+            q_val,
             EvalResult::Float(r),
         ]));
     }

@@ -6,5 +6,6 @@
 %FN%message
 %FN%no-handler-case-load-if-compiled-correctly
 %FN%note-compile-error
+%FN%note-test
 %FN%reset-clasp-tests
 %FN%show-test-summary

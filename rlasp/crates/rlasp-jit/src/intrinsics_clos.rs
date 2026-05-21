@@ -844,6 +844,11 @@ fn maybe_update_instance_for_redefined_class(
         return None;
     }
     let class = unsafe { &*class_ptr };
+    let current_class_ptr = find_class(&normalize_type_name(class.name()))
+        .or_else(|| find_class(class.name()));
+    if current_class_ptr == Some(class_ptr) {
+        return None;
+    }
     {
         let registry = get_generic_registry().lock().unwrap();
         let has_update_methods = registry
@@ -2411,6 +2416,30 @@ pub extern "C" fn cc_typep(object: usize, class_name: usize) -> usize {
 
     // Numeric hierarchy checks (CL): FIXNUM/BIGNUM < INTEGER < RATIONAL < REAL < NUMBER.
     // Our runtime reports bignums as obj_class "INTEGER", fixnums as "FIXNUM".
+    if obj_class == "FIXNUM" {
+        if let Some(n) = obj.as_fixnum() {
+            const CL_FIXNUM_MIN: i64 = -(1i64 << 61);
+            const CL_FIXNUM_MAX: i64 = (1i64 << 61) - 1;
+            let in_cl_fixnum_range = (CL_FIXNUM_MIN..=CL_FIXNUM_MAX).contains(&n);
+            let matches_range = if in_cl_fixnum_range {
+                matches!(
+                    name_str.as_str(),
+                    "FIXNUM" | "INTEGER" | "RATIONAL" | "REAL" | "NUMBER"
+                )
+            } else {
+                matches!(
+                    name_str.as_str(),
+                    "BIGNUM" | "INTEGER" | "RATIONAL" | "REAL" | "NUMBER"
+                )
+            };
+            if matches_range {
+                return LispObject::t().raw();
+            }
+            if matches!(name_str.as_str(), "FIXNUM" | "BIGNUM") {
+                return LispObject::nil().raw();
+            }
+        }
+    }
     let numeric_match = match (obj_class.as_str(), name_str.as_str()) {
         ("FIXNUM", "FIXNUM")
         | ("FIXNUM", "INTEGER")

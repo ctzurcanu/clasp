@@ -1101,9 +1101,12 @@ pub(crate) fn try_eval_bridge_call(function_name: &str, args: &[usize]) -> Optio
                 | "eval"
                 | "bytecompile"
                 | "single-float-to-bits"
+                | "bits-to-single-float"
                 | "single-float-from-bits"
                 | "double-float-to-bits"
+                | "bits-to-double-float"
                 | "double-float-from-bits"
+                | "copy-structure"
                 | "make-package"
                 | "delete-package"
                 | "rename-package"
@@ -1483,7 +1486,13 @@ fn as_package_ptr_checked(obj: LispObject) -> Option<*const rlasp_runtime::Packa
 /// Box a fixnum (i64 → LispObject)
 #[no_mangle]
 pub extern "C" fn cc_box_fixnum(val: i64) -> usize {
-    LispObject::fixnum(val).raw()
+    const MAX_FIXNUM: i64 = (1i64 << 61) - 1;
+    const MIN_FIXNUM: i64 = -(1i64 << 61);
+    if (MIN_FIXNUM..=MAX_FIXNUM).contains(&val) {
+        LispObject::fixnum(val).raw()
+    } else {
+        rlasp_runtime::Number::allocate_bignum(Integer::from(val)).raw()
+    }
 }
 
 /// Unbox a fixnum (LispObject → i64)
@@ -1566,6 +1575,48 @@ pub extern "C" fn cc_double_float_to_bits(obj: usize) -> usize {
         )
         .raw(),
     }
+}
+
+fn lisp_to_u64_bits(obj: usize, max: u64) -> Option<u64> {
+    let value = unsafe { LispObject::from_raw(obj) };
+    let bits = lisp_to_exact_integer(value)?;
+    if bits < Integer::from(0) || !u64::convertible_from(&bits) {
+        return None;
+    }
+    let bits = u64::exact_from(&bits);
+    (bits <= max).then_some(bits)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_bits_to_single_float(obj: usize) -> usize {
+    let Some(bits) = lisp_to_u64_bits(obj, u32::MAX as u64) else {
+        return rlasp_runtime::LispError::type_error(
+            "ext:bits-to-single-float requires an unsigned 32-bit integer",
+        )
+        .raw();
+    };
+    rlasp_runtime::Number::allocate_single_float(f32::from_bits(bits as u32) as f64).raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_single_float_from_bits(obj: usize) -> usize {
+    cc_bits_to_single_float(obj)
+}
+
+#[no_mangle]
+pub extern "C" fn cc_bits_to_double_float(obj: usize) -> usize {
+    let Some(bits) = lisp_to_u64_bits(obj, u64::MAX) else {
+        return rlasp_runtime::LispError::type_error(
+            "ext:bits-to-double-float requires an unsigned 64-bit integer",
+        )
+        .raw();
+    };
+    rlasp_runtime::Number::allocate_float(f64::from_bits(bits)).raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cc_double_float_from_bits(obj: usize) -> usize {
+    cc_bits_to_double_float(obj)
 }
 
 /// Unbox a float (LispObject → f64)
@@ -8683,6 +8734,9 @@ fn lookup_standard_symbol_constant(name: &str) -> Option<usize> {
     let key = strip_package_prefix(name).to_ascii_uppercase();
     match key.as_str() {
         "PI" => Some(Number::allocate_float(std::f64::consts::PI).raw()),
+        "ARRAY-TOTAL-SIZE-LIMIT" => Some(LispObject::fixnum(ARRAY_TOTAL_SIZE_LIMIT_RUNTIME as i64).raw()),
+        "ARRAY-RANK-LIMIT" => Some(LispObject::fixnum(8).raw()),
+        "CHAR-CODE-LIMIT" => Some(LispObject::fixnum(55_296).raw()),
         // Runtime fixnum is 62-bit signed (2 tag bits), so these constants must be fixnums.
         "MOST-POSITIVE-FIXNUM" => Some(LispObject::fixnum((1i64 << 61) - 1).raw()),
         "MOST-NEGATIVE-FIXNUM" => Some(LispObject::fixnum(-(1i64 << 61)).raw()),
@@ -9089,6 +9143,7 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             // Keep selected sequence/MP/restart operators on native path; the
             // bridge evaluator still diverges for these in edge-case tests.
             | "mapcar"
+            | "mapc"
             | "concatenate"
             | "first"
             | "second"
@@ -9102,6 +9157,7 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "tenth"
             | "nth"
             | "nthcdr"
+            | "last"
             | "every"
             | "some"
             | "notevery"
@@ -9164,6 +9220,10 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "char-downcase"
             | "upper-case-p"
             | "lower-case-p"
+            // Documentation set/get is backed by native registries for
+            // compiler-macro/function docs.
+            | "documentation"
+            | "slot-value"
             // Keep COERCE on the native path; bridge dispatch currently
             // mishandles package-qualified type designators like
             // COMMON-LISP:SINGLE-FLOAT and returns the original object.
@@ -9315,9 +9375,12 @@ fn should_force_bridge_dispatch(raw_name: &str, dispatch_name: &str) -> bool {
             | "describe"
             | "room"
             | "single-float-to-bits"
+            | "bits-to-single-float"
             | "single-float-from-bits"
             | "double-float-to-bits"
+            | "bits-to-double-float"
             | "double-float-from-bits"
+            | "copy-structure"
             | "read"
             | "read-delimited-list"
             | "copy-readtable"
@@ -14374,6 +14437,47 @@ fn builtin_condition_accessor_slot(name: &str) -> Option<&'static str> {
     }
 }
 
+fn runtime_lisp_error_condition_slot(instance: usize, slot_name: &str) -> Option<usize> {
+    let obj = unsafe { LispObject::from_raw(instance) };
+    let ptr = obj.as_general_ptr::<rlasp_runtime::LispError>()?;
+    if ptr.is_null()
+        || unsafe { rlasp_runtime::header::TypeHeader::from_ptr(ptr) }
+            != Some(rlasp_runtime::header::ObjectType::Error)
+    {
+        return None;
+    }
+    let err = unsafe { &*ptr };
+    match (err.kind, slot_name) {
+        (rlasp_runtime::error::ErrorKind::UndefinedFunction, "NAME")
+        | (rlasp_runtime::error::ErrorKind::UnboundVariable, "NAME") => {
+            let message = err.message.as_deref().unwrap_or_default();
+            let name = message
+                .rsplit_once(' ')
+                .map(|(_, tail)| tail)
+                .unwrap_or(message)
+                .trim();
+            if name.is_empty() {
+                Some(LispObject::nil().raw())
+            } else {
+                Some(rlasp_runtime::Symbol::allocate(
+                    strip_package_prefix(name).to_ascii_uppercase(),
+                )
+                .raw())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn condition_accessor_value(instance: usize, slot_name: &str) -> usize {
+    runtime_lisp_error_condition_slot(instance, slot_name).unwrap_or_else(|| {
+        crate::intrinsics_clos::slot_value_native(
+            instance,
+            rlasp_runtime::Symbol::allocate(slot_name.to_string()).raw(),
+        )
+    })
+}
+
 fn direct_make_condition_intrinsic(args: &[usize]) -> usize {
     let trace = std::env::var("RLASP_TRACE_MAKE_CONDITION").is_ok();
     if args.is_empty() {
@@ -14541,10 +14645,7 @@ fn try_direct_forced_builtin_call(name: &str, args: &[usize]) -> Option<usize> {
 
     if let Some(slot_name) = builtin_condition_accessor_slot(name) {
         return Some(match args.len() {
-            1 => crate::intrinsics_clos::slot_value_native(
-                args[0],
-                rlasp_runtime::Symbol::allocate(slot_name.to_string()).raw(),
-            ),
+            1 => condition_accessor_value(args[0], slot_name),
             _ => rlasp_runtime::LispError::allocate(
                 rlasp_runtime::error::ErrorKind::InvalidArgument,
                 Some(format!("{name} requires exactly one argument")),
@@ -14620,6 +14721,37 @@ fn try_direct_forced_builtin_call(name: &str, args: &[usize]) -> Option<usize> {
             _ => rlasp_runtime::LispError::allocate(
                 rlasp_runtime::error::ErrorKind::InvalidArgument,
                 Some("ext:double-float-to-bits requires exactly one argument".to_string()),
+            )
+            .raw(),
+        }),
+        "bits-to-single-float" | "single-float-from-bits" => Some(match args.len() {
+            1 => cc_bits_to_single_float(args[0]),
+            _ => rlasp_runtime::LispError::allocate(
+                rlasp_runtime::error::ErrorKind::InvalidArgument,
+                Some("ext:bits-to-single-float requires exactly one argument".to_string()),
+            )
+            .raw(),
+        }),
+        "bits-to-double-float" | "double-float-from-bits" => Some(match args.len() {
+            1 => cc_bits_to_double_float(args[0]),
+            _ => rlasp_runtime::LispError::allocate(
+                rlasp_runtime::error::ErrorKind::InvalidArgument,
+                Some("ext:bits-to-double-float requires exactly one argument".to_string()),
+            )
+            .raw(),
+        }),
+        "copy-structure" => Some(match args.len() {
+            1 => {
+                if cc_hash_table_p(args[0]) != LispObject::nil().raw() {
+                    cc_copy_hash_table(args[0])
+                } else {
+                    rlasp_runtime::LispError::type_error("copy-structure requires a structure")
+                        .raw()
+                }
+            }
+            _ => rlasp_runtime::LispError::allocate(
+                rlasp_runtime::error::ErrorKind::InvalidArgument,
+                Some("copy-structure requires exactly one argument".to_string()),
             )
             .raw(),
         }),
@@ -15314,8 +15446,7 @@ fn direct_frame_function_lambda_list_intrinsic(args: &[usize]) -> usize {
     } else {
         LispObject::t()
     };
-    set_multiple_values_2(lambda_list, available);
-    lambda_list.raw()
+    cc_values2(lambda_list.raw(), available.raw())
 }
 
 fn direct_frame_function_documentation_intrinsic(args: &[usize]) -> usize {
@@ -15636,11 +15767,11 @@ pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
                 dynamic_capture_function_binding_name(&name)
             );
         }
+        store_function_object_binding(&name, value);
+        if let Some(function_name) = dynamic_capture_function_binding_name(&name) {
+            store_function_object_binding(function_name, value);
+        }
         if let Some(entry) = lookup_function_entry(&source_name) {
-            store_function_object_binding(&name, value);
-            if let Some(function_name) = dynamic_capture_function_binding_name(&name) {
-                store_function_object_binding(function_name, value);
-            }
             let mut registry = get_registry().lock().unwrap();
             insert_function_entry_aliases_unlocked(&mut registry, &name, entry.clone());
             if let Some(function_name) = dynamic_capture_function_binding_name(&name) {
@@ -15653,10 +15784,6 @@ pub extern "C" fn cc_set_symbol_value(symbol: usize, value: usize) -> usize {
             .unwrap_or(source_name.as_str())
             .starts_with("__lambda_")
         {
-            store_function_object_binding(&name, value);
-            if let Some(function_name) = dynamic_capture_function_binding_name(&name) {
-                store_function_object_binding(function_name, value);
-            }
             if trace_function_bindings {
                 eprintln!(
                     "[function-binding-stored-lambda] symbol={} value_name={} dyn_alias={:?}",
@@ -15974,9 +16101,29 @@ pub extern "C" fn cc_documentation(object: usize, doc_type: usize) -> usize {
                 return builtin;
             }
 
+            if doc_type_name == "function" && name.starts_with("(setf ") {
+                return generic_documentation_string(&name, &doc_type_name);
+            }
+
             let base = strip_package_prefix(&name).to_ascii_uppercase();
+            let prefixed_name = if name.starts_with("%FN%") {
+                name.clone()
+            } else {
+                format!("%FN%{}", name)
+            };
+            let prefixed_base = if base.starts_with("%FN%") {
+                base.clone()
+            } else {
+                format!("%FN%{}", base)
+            };
             let has_callable = function_registry_has_callable(&name)
                 || function_registry_has_callable(&base)
+                || function_registry_has_callable(&prefixed_name)
+                || function_registry_has_callable(&prefixed_base)
+                || lookup_function_object_binding(&name).is_some()
+                || lookup_function_object_binding(&base).is_some()
+                || lookup_function_object_binding(&prefixed_name).is_some()
+                || lookup_function_object_binding(&prefixed_base).is_some()
                 || (!name.starts_with('(') && is_special_operator_name(base.as_str()))
                 || (!name.starts_with('(')
                     && (rlasp_runtime::is_cl_builtin(base.as_str())
@@ -16874,7 +17021,13 @@ pub extern "C" fn cc_type_of(obj: usize) -> usize {
         if extract_function_name(lo.raw()).is_some() {
             return Symbol::allocate("FUNCTION".to_string()).raw();
         }
-        return Symbol::allocate("FIXNUM".to_string()).raw();
+        let n = lo.as_fixnum().unwrap();
+        const CL_FIXNUM_MIN: i64 = -(1i64 << 61);
+        const CL_FIXNUM_MAX: i64 = (1i64 << 61) - 1;
+        if (CL_FIXNUM_MIN..=CL_FIXNUM_MAX).contains(&n) {
+            return Symbol::allocate("FIXNUM".to_string()).raw();
+        }
+        return Symbol::allocate("BIGNUM".to_string()).raw();
     }
     if lo.as_cons_ptr().is_some() {
         return Symbol::allocate("CONS".to_string()).raw();
@@ -21612,7 +21765,7 @@ pub extern "C" fn cc_build_range(start: usize, limit: usize, below_mode: usize) 
 // Additional Arithmetic Functions
 // ============================================================================
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DivRoundingMode {
     Floor,
     Ceiling,
@@ -21969,7 +22122,24 @@ fn divide_with_rounding(
         } else {
             format!("{:.0}", qi).parse::<malachite::Integer>().ok()?
         };
-        let q_obj = integer_to_lisp_obj(q_int);
+        let q_obj = if mode == DivRoundingMode::Truncate
+            && std::env::var_os("RLASP_AOT_ARTIFACT_EXEC").is_none()
+        {
+            const CL_FIXNUM_MIN: i64 = -(1i64 << 61);
+            let lower = (CL_FIXNUM_MIN - 1024) as f64;
+            let upper = (CL_FIXNUM_MIN + 1024) as f64;
+            if q >= lower && q <= upper {
+                if q <= CL_FIXNUM_MIN as f64 {
+                    LispObject::fixnum(CL_FIXNUM_MIN)
+                } else {
+                    Number::allocate_bignum(q_int)
+                }
+            } else {
+                integer_to_lisp_obj(q_int)
+            }
+        } else {
+            integer_to_lisp_obj(q_int)
+        };
         let r_obj = Number::allocate_float(nx - q * dy);
         return Some((q_obj, r_obj));
     }
@@ -23876,6 +24046,7 @@ pub extern "C" fn cc_last_n(list: usize, n: usize) -> usize {
     let list_obj = unsafe { LispObject::from_raw(list) };
     let n_obj = unsafe { LispObject::from_raw(n) };
     let Some(n_val) = parse_non_negative_index(n_obj) else {
+        clear_multiple_values();
         return rlasp_runtime::LispError::type_error("last requires a non-negative integer count")
             .raw();
     };
@@ -23890,15 +24061,20 @@ pub extern "C" fn cc_last_n(list: usize, n: usize) -> usize {
     }
 
     if n_val == 0 {
+        clear_multiple_values();
         return current.raw();
     }
     if cells.is_empty() {
+        clear_multiple_values();
         return LispObject::nil().raw();
     }
     if n_val >= cells.len() {
+        clear_multiple_values();
         return list_obj.raw();
     }
-    cells[cells.len() - n_val].raw()
+    let result = cells[cells.len() - n_val].raw();
+    clear_multiple_values();
+    result
 }
 
 #[no_mangle]
@@ -27969,6 +28145,32 @@ fn clasp_test_compare(test_name: &str, actual: LispObject, expected: LispObject)
     }
 }
 
+fn clasp_tests_symbol(name: &str) -> usize {
+    bridge_intern_exact_symbol(name, Some("CLASP-TESTS"))
+}
+
+fn clasp_test_expected_failure(name: LispObject) -> bool {
+    let expected_failures_sym = clasp_tests_symbol("*EXPECTED-FAILURES*");
+    let expected_failures = unsafe { LispObject::from_raw(cc_symbol_value(expected_failures_sym)) };
+    list_to_vec(expected_failures)
+        .into_iter()
+        .any(|candidate| cc_eq(candidate.raw(), name.raw()) != LispObject::nil().raw())
+}
+
+fn clasp_test_push_result(name: LispObject, passed: bool) {
+    let expected_failure = clasp_test_expected_failure(name);
+    let target = match (passed, expected_failure) {
+        (true, true) => "*UNEXPECTED-PASSED-TESTS*",
+        (true, false) => "*EXPECTED-PASSED-TESTS*",
+        (false, true) => "*EXPECTED-FAILED-TESTS*",
+        (false, false) => "*UNEXPECTED-FAILED-TESTS*",
+    };
+    let sym = clasp_tests_symbol(target);
+    let old = cc_symbol_value(sym);
+    let new_list = cc_cons(name.raw(), old);
+    cc_set_symbol_value(sym, new_list);
+}
+
 struct RootedLispValues {
     heap_values: Vec<usize>,
 }
@@ -28091,8 +28293,10 @@ pub extern "C" fn cc_clasp_tests_percent_test_stack() {
     };
 
     if passed {
+        clasp_test_push_result(name, true);
         write_text_to_cl_output(&format!("\nPassed {}\n", display_name));
     } else if let Some(error) = error_obj {
+        clasp_test_push_result(name, false);
         write_text_to_cl_output(&format!(
             "\nFailed {}\nUnexpected error\n\t{}\nwhile evaluating\n\t{}\n",
             display_name,
@@ -28134,6 +28338,7 @@ pub extern "C" fn cc_clasp_tests_percent_test_stack() {
             }
             write_text_to_cl_output("\n");
         }
+        clasp_test_push_result(name, false);
         write_text_to_cl_output(&format!("\nFailed {}\n", display_name));
     }
 
@@ -29824,10 +30029,7 @@ pub extern "C" fn cc_funcall_stack(func_ref: usize, num_args: i64) {
                     );
                 } else {
                     let instance = stack_pop_pointer();
-                    stack_push_pointer(crate::intrinsics_clos::slot_value_native(
-                        instance,
-                        rlasp_runtime::Symbol::allocate(slot_name.to_string()).raw(),
-                    ));
+                    stack_push_pointer(condition_accessor_value(instance, slot_name));
                 }
                 handled_call = true;
             }

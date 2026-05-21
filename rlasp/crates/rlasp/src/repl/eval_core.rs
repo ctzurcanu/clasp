@@ -28000,17 +28000,19 @@ pub(in crate::repl) fn eval_call_with_env(
                     }
                     i += 2;
                 }
+                let normalize_sequence_type =
+                    |s: &str| normalize_symbol_base_name(s).to_uppercase();
                 let type_name = match &type_val {
-                    EvalResult::Symbol(s) => s.to_uppercase(),
+                    EvalResult::Symbol(s) => normalize_sequence_type(s),
                     EvalResult::Cons(car, cdr) => {
                         let head = match &*car.borrow() {
-                            EvalResult::Symbol(s) => s.to_uppercase(),
+                            EvalResult::Symbol(s) => normalize_sequence_type(s),
                             _ => String::new(),
                         };
                         if head == "ARRAY" {
                             if let EvalResult::Cons(elem, _) = &*cdr.borrow() {
                                 if let EvalResult::Symbol(s) = &*elem.borrow() {
-                                    let upper = s.to_uppercase();
+                                    let upper = normalize_sequence_type(s);
                                     if upper == "CHAR"
                                         || upper == "CHARACTER"
                                         || upper == "BASE-CHAR"

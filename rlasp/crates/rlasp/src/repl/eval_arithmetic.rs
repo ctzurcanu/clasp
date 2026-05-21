@@ -63,6 +63,20 @@ fn numeric_type_error(op: &str) -> String {
     format!("TYPE-ERROR: {} requires numeric arguments", op)
 }
 
+fn exact_integer_result(n: Integer) -> EvalResult {
+    const MIN_CL_FIXNUM: i64 = -(1i64 << 61);
+    const MAX_CL_FIXNUM: i64 = (1i64 << 61) - 1;
+
+    if i64::convertible_from(&n) {
+        let i = i64::exact_from(&n);
+        if (MIN_CL_FIXNUM..=MAX_CL_FIXNUM).contains(&i) {
+            return EvalResult::Fixnum(i);
+        }
+    }
+
+    EvalResult::Bignum(n)
+}
+
 fn real_type_error(op: &str) -> String {
     format!("TYPE-ERROR: {} requires real arguments", op)
 }
@@ -1713,41 +1727,19 @@ pub(super) fn eval_ash(
 
     match (num, count) {
         (EvalResult::Fixnum(n), EvalResult::Fixnum(c)) => {
+            let n = Integer::from(n);
             if c >= 0 {
-                if c >= 63 {
-                    let shifted = Integer::from(n) << (c as u64);
-                    if i64::convertible_from(&shifted) {
-                        Ok(EvalResult::Fixnum(i64::exact_from(&shifted)))
-                    } else {
-                        Ok(EvalResult::Bignum(shifted))
-                    }
-                } else {
-                    Ok(EvalResult::Fixnum(n << c))
-                }
+                Ok(exact_integer_result(n << (c as u64)))
             } else {
                 let shift = (-c) as u64;
-                if shift >= 63 {
-                    Ok(EvalResult::Fixnum(if n < 0 { -1 } else { 0 }))
-                } else {
-                    Ok(EvalResult::Fixnum(n >> shift))
-                }
+                Ok(exact_integer_result(n >> shift))
             }
         }
         (EvalResult::Bignum(n), EvalResult::Fixnum(c)) => {
             if c >= 0 {
-                let shifted = n << (c as u64);
-                if i64::convertible_from(&shifted) {
-                    Ok(EvalResult::Fixnum(i64::exact_from(&shifted)))
-                } else {
-                    Ok(EvalResult::Bignum(shifted))
-                }
+                Ok(exact_integer_result(n << (c as u64)))
             } else {
-                let shifted = n >> ((-c) as u64);
-                if i64::convertible_from(&shifted) {
-                    Ok(EvalResult::Fixnum(i64::exact_from(&shifted)))
-                } else {
-                    Ok(EvalResult::Bignum(shifted))
-                }
+                Ok(exact_integer_result(n >> ((-c) as u64)))
             }
         }
         _ => Err("TYPE-ERROR: ash requires integer arguments".to_string()),

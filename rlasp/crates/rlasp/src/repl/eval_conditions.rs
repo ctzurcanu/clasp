@@ -123,6 +123,23 @@ pub fn make_error_condition_from_message(msg: &str) -> EvalResult {
         EvalResult::String(msg.to_string()),
     );
     slots.insert("FORMAT-ARGUMENTS".to_string(), EvalResult::Nil);
+    if type_name == "UNDEFINED-FUNCTION" || type_name == "UNBOUND-VARIABLE" {
+        let prefix = if type_name == "UNDEFINED-FUNCTION" {
+            "Undefined function "
+        } else {
+            "Unbound variable "
+        };
+        if let Some(raw_name) = msg.trim().strip_prefix(prefix) {
+            let name = raw_name
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c: char| c == '(' || c == ')' || c == '\'' || c == '"');
+            if !name.is_empty() {
+                slots.insert("NAME".to_string(), EvalResult::Symbol(name.to_ascii_uppercase()));
+            }
+        }
+    }
     EvalResult::Condition(Rc::new(RefCell::new(ConditionInstance {
         type_name: type_name.to_string(),
         slots,

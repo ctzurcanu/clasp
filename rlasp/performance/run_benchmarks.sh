@@ -13,6 +13,7 @@ AOT_SCRIPT="${AOT_SCRIPT:-/Users/christiantzurcanu/Documents/dev/clasp/rlasp/scr
 RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-180}"
 IRLASP_MEMORY_CEILING_MB="${IRLASP_MEMORY_CEILING_MB:-1024}"
 IRLASP_MEMORY_CEILING_CHECK_MS="${IRLASP_MEMORY_CEILING_CHECK_MS:-100}"
+RLASP_MLIR_TARGET_AOT="${RLASP_MLIR_TARGET_AOT:-1}"
 BENCH_FILTER="${BENCH_FILTER:-}"
 TIMEOUT_BIN=""
 if command -v gtimeout >/dev/null 2>&1; then
@@ -75,6 +76,36 @@ result_line() {
   awk '/^ALGO=/{line=$0} END{if(line!="") print line}' "$f"
 }
 
+print_result_output() {
+  local label="$1"
+  local result="$2"
+  local file="$3"
+  if [[ -z "$result" ]]; then
+    echo "    output: <no ALGO line>"
+    return
+  fi
+
+  local len="${#result}"
+  if [[ "$len" -le 240 ]]; then
+    echo "    output: $result"
+    return
+  fi
+
+  local head="${result[1,160]}"
+  local tail="${result[-60,-1]}"
+  local digest="unavailable"
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$result" | shasum -a 256 | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$result" | sha256sum | awk '{print $1}')"
+  fi
+
+  echo "    output: ${head} ... ${tail}"
+  echo "    output_note: long output truncated for display; exact ${label} output is in $file"
+  echo "    output_length_chars: $len"
+  echo "    output_sha256: $digest"
+}
+
 exit_label() {
   local rc="$1"
   if [[ "$rc" -eq 0 ]]; then
@@ -97,6 +128,7 @@ CSV_FILE="${LOG_DIR}/benchmark-results.csv"
 echo "benchmark,args,sbcl_s,clasp_s,irlasp_interpret_s,irlasp_mlir_compile_s,irlasp_mlir_exec_s,irlasp_mlir_total_s,irlasp_aot_build_s,irlasp_aot_exec_s,irlasp_aot_total_s,sbcl_rc,clasp_rc,irlasp_interpret_rc,irlasp_mlir_compile_rc,irlasp_mlir_exec_rc,irlasp_aot_build_rc,irlasp_aot_exec_rc,cl_baseline,cl_expected_present,irlasp_interpret_match_cl,irlasp_mlir_match_cl,irlasp_aot_match_cl,result_match" >"$CSV_FILE"
 echo "IRLASP_MEMORY_CEILING_MB=$IRLASP_MEMORY_CEILING_MB"
 echo "IRLASP_MEMORY_CEILING_CHECK_MS=$IRLASP_MEMORY_CEILING_CHECK_MS"
+echo "RLASP_MLIR_TARGET_AOT=$RLASP_MLIR_TARGET_AOT"
 
 while IFS='|' read -r bench_file bench_args_raw; do
   [[ -z "$bench_file" ]] && continue
@@ -164,7 +196,7 @@ while IFS='|' read -r bench_file bench_args_raw; do
   rm -f "$mlirbc_path"
   run_timed "$mlir_compile_out" "$mlir_compile_time" \
     env RLASP_MEMORY_CEILING_MB="$IRLASP_MEMORY_CEILING_MB" RLASP_MEMORY_CEILING_ACTION=exit RLASP_MEMORY_CEILING_CHECK_MS="$IRLASP_MEMORY_CEILING_CHECK_MS" \
-      RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SELECTIVE_EVAL=1 \
+      RLASP_SAVE_ARTIFACTS=1 RLASP_MLIR_COMPILE_ONLY=1 RLASP_MLIR_SELECTIVE_EVAL=1 RLASP_MLIR_TARGET_AOT="$RLASP_MLIR_TARGET_AOT" \
       "$IRLASP_BIN" -m mlir "$bench_path" "${args[@]}"
   mlir_compile_rc="$RUN_RC"
   mlir_compile_s="$RUN_TIME_S"
@@ -254,15 +286,15 @@ while IFS='|' read -r bench_file bench_args_raw; do
   echo "  SBCL"
   echo "    exit: ${sbcl_rc} ($(exit_label "$sbcl_rc"))"
   echo "    time_s: $sbcl_s"
-  echo "    output: ${sbcl_result:-<no ALGO line>}"
+  print_result_output "SBCL" "$sbcl_result" "$sbcl_out"
   echo "  CLASP"
   echo "    exit: ${clasp_rc} ($(exit_label "$clasp_rc"))"
   echo "    time_s: $clasp_s"
-  echo "    output: ${clasp_result:-<no ALGO line>}"
+  print_result_output "CLASP" "$clasp_result" "$clasp_out"
   echo "  rlasp interpret"
   echo "    exit: ${interp_rc} ($(exit_label "$interp_rc"))"
   echo "    time_s: $interp_s"
-  echo "    output: ${interp_result:-<no ALGO line>}"
+  print_result_output "rlasp interpret" "$interp_result" "$interp_out"
   echo "    matches CL baseline: $(match_label "$interp_match_cl")"
   echo "  rlasp mlir"
   echo "    compile_exit: ${mlir_compile_rc} ($(exit_label "$mlir_compile_rc"))"
@@ -270,7 +302,7 @@ while IFS='|' read -r bench_file bench_args_raw; do
   echo "    exec_exit: ${mlir_exec_rc} ($(exit_label "$mlir_exec_rc"))"
   echo "    exec_time_s: $mlir_exec_s"
   echo "    total_time_s: $mlir_total_s"
-  echo "    output: ${mlir_result:-<no ALGO line>}"
+  print_result_output "rlasp mlir" "$mlir_result" "$mlir_exec_out"
   echo "    matches CL baseline: $(match_label "$mlir_match_cl")"
   echo "  rlasp aot"
   echo "    build_exit: ${aot_build_rc} ($(exit_label "$aot_build_rc"))"
@@ -278,7 +310,7 @@ while IFS='|' read -r bench_file bench_args_raw; do
   echo "    exec_exit: ${aot_exec_rc} ($(exit_label "$aot_exec_rc"))"
   echo "    exec_time_s: $aot_exec_s"
   echo "    total_time_s: $aot_total_s"
-  echo "    output: ${aot_result:-<no ALGO line>}"
+  print_result_output "rlasp aot" "$aot_result" "$aot_exec_out"
   echo "    matches CL baseline: $(match_label "$aot_match_cl")"
   echo "  baseline: $cl_baseline"
   echo "  all rlasp modes match CL baseline: $(match_label "$result_match")"

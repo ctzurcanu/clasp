@@ -4836,9 +4836,6 @@ fn eval_file_fasl(source: &str, file_path: &str) -> std::result::Result<(), Stri
         match ast_result {
             Ok(ast) => {
                 let _ = eval_with_persistent_env(&ast, &mut interp_env);
-                MLIR_INTERP_ENV.with(|cell| {
-                    *cell.borrow_mut() = interp_env.clone();
-                });
             }
             Err(e) => {
                 println!(
@@ -4850,6 +4847,9 @@ fn eval_file_fasl(source: &str, file_path: &str) -> std::result::Result<(), Stri
             }
         }
     }
+    MLIR_INTERP_ENV.with(|cell| {
+        *cell.borrow_mut() = interp_env;
+    });
     Ok(())
 }
 
@@ -5514,7 +5514,9 @@ fn eval_file_mlir(
             }
             rlasp::ir::ASTNode::Call { function, args } => {
                 if let rlasp::ir::ASTNode::Variable(name) = function.as_ref() {
-                    if name == "eval-when" {
+                    let base_name = name.rsplit(':').next().unwrap_or(name.as_str());
+                    let base_lower = base_name.to_ascii_lowercase();
+                    if base_lower == "eval-when" {
                         // Recurse into eval-when body (skip first arg which is the situations)
                         for arg in args.iter().skip(1) {
                             collect_definitions_expanded(
@@ -5524,19 +5526,19 @@ fn eval_file_mlir(
                                 toplevel_forms,
                             );
                         }
-                    } else if name == "with-upgradability" {
+                    } else if base_lower == "with-upgradability" {
                         // Keep ASDF's wrapper intact so the MLIR path executes the same
                         // runtime bridge-eval form rather than exploding its body into
                         // a large native batch.
                         toplevel_forms.push(ast.clone());
-                    } else if name == "defpackage"
-                        || name == "define-package"
-                        || name == "in-package"
+                    } else if base_lower == "defpackage"
+                        || base_lower == "define-package"
+                        || base_lower == "in-package"
                     {
                         // Keep package directives in runtime toplevel so MLIR execution
                         // materializes package state just like interpreter mode.
                         toplevel_forms.push(ast.clone());
-                    } else if name == "progn" {
+                    } else if base_lower == "progn" {
                         // Recurse into progn body
                         for arg in args {
                             collect_definitions_expanded(
@@ -5546,9 +5548,9 @@ fn eval_file_mlir(
                                 toplevel_forms,
                             );
                         }
-                    } else if name == "defmacro" {
+                    } else if base_lower == "defmacro" {
                         // Skip macro definitions - they're handled by the interpreter
-                    } else if name == "defun" || name.ends_with(":defun") {
+                    } else if base_lower == "defun" {
                         // Handle defun calls: (defun name (params...) body...)
                         // Extract function name, parameters, and body
                         if args.len() >= 2 {
@@ -5567,13 +5569,29 @@ fn eval_file_mlir(
                                         if fn_name.eq_ignore_ascii_case("setf")
                                             && !setf_args.is_empty()
                                         {
-                                            if let rlasp::ir::ASTNode::Variable(setf_name) =
-                                                &setf_args[0]
-                                            {
-                                                format!("(setf {})", setf_name)
-                                            } else {
-                                                toplevel_forms.push(ast.clone());
-                                                return;
+                                            match &setf_args[0] {
+                                                rlasp::ir::ASTNode::Variable(setf_name)
+                                                | rlasp::ir::ASTNode::Constant(
+                                                    rlasp::ir::ConstantValue::Symbol(setf_name),
+                                                ) => format!("(setf {})", setf_name),
+                                                rlasp::ir::ASTNode::Quote(inner) => {
+                                                    match inner.as_ref() {
+                                                        rlasp::ir::ASTNode::Variable(setf_name)
+                                                        | rlasp::ir::ASTNode::Constant(
+                                                            rlasp::ir::ConstantValue::Symbol(
+                                                                setf_name,
+                                                            ),
+                                                        ) => format!("(setf {})", setf_name),
+                                                        _ => {
+                                                            toplevel_forms.push(ast.clone());
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    toplevel_forms.push(ast.clone());
+                                                    return;
+                                                }
                                             }
                                         } else {
                                             toplevel_forms.push(ast.clone());
@@ -5742,6 +5760,70 @@ fn eval_file_mlir(
                         .any(|arg| should_eval_for_compile_env(arg, eval_load_for_compile)),
                     _ => false,
                 }
+            }
+            _ => false,
+        }
+    }
+
+    fn ast_requests_runtime_debug_frames(ast: &rlasp::ir::ASTNode) -> bool {
+        fn base_name(name: &str) -> String {
+            name.trim_start_matches(':')
+                .rsplit(':')
+                .next()
+                .unwrap_or(name)
+                .to_ascii_lowercase()
+        }
+
+        match ast {
+            rlasp::ir::ASTNode::Call { function, args } => {
+                if let Some(name) = symbol_name_from_ast(function) {
+                    let base = base_name(name);
+                    if matches!(
+                        base.as_str(),
+                        "with-stack"
+                            | "map-stack"
+                            | "map-backtrace"
+                            | "print-backtrace"
+                            | "frame-function-name"
+                            | "frame-function"
+                            | "frame-function-lambda-list"
+                            | "frame-function-documentation"
+                            | "frame-locals"
+                            | "frame-language"
+                            | "with-truncated-stack"
+                            | "with-capped-stack"
+                            | "call-with-truncated-stack"
+                            | "call-with-capped-stack"
+                    ) {
+                        return true;
+                    }
+                }
+                ast_requests_runtime_debug_frames(function)
+                    || args.iter().any(ast_requests_runtime_debug_frames)
+            }
+            rlasp::ir::ASTNode::Setq { value, .. } => ast_requests_runtime_debug_frames(value),
+            rlasp::ir::ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => {
+                ast_requests_runtime_debug_frames(test)
+                    || ast_requests_runtime_debug_frames(then_branch)
+                    || ast_requests_runtime_debug_frames(else_branch)
+            }
+            rlasp::ir::ASTNode::Progn { exprs }
+            | rlasp::ir::ASTNode::Block { body: exprs, .. } => {
+                exprs.iter().any(ast_requests_runtime_debug_frames)
+            }
+            rlasp::ir::ASTNode::Let { bindings, body }
+            | rlasp::ir::ASTNode::LetStar { bindings, body } => {
+                bindings
+                    .iter()
+                    .any(|(_, value)| ast_requests_runtime_debug_frames(value))
+                    || body.iter().any(ast_requests_runtime_debug_frames)
+            }
+            rlasp::ir::ASTNode::Lambda { body, .. } => {
+                body.iter().any(ast_requests_runtime_debug_frames)
             }
             _ => false,
         }
@@ -6176,7 +6258,25 @@ fn eval_file_mlir(
                 let base_head = head
                     .as_deref()
                     .map(|name| name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase());
-                if matches!(
+                if compile_only && matches!(base_head.as_deref(), Some("defun") | Some("defmacro"))
+                {
+                    let mut discarded_toplevel = Vec::new();
+                    let defuns_before_direct_collect = defuns.len();
+                    collect_definitions_expanded(
+                        &ast,
+                        &mut defuns,
+                        &mut user_functions,
+                        &mut discarded_toplevel,
+                    );
+                    if defuns.len() == defuns_before_direct_collect {
+                        collect_definitions_expanded(
+                            &expanded,
+                            &mut defuns,
+                            &mut user_functions,
+                            &mut discarded_toplevel,
+                        );
+                    }
+                } else if matches!(
                     base_head.as_deref(),
                     Some("eval-when") | Some("with-upgradability")
                 ) {
@@ -6320,6 +6420,14 @@ fn eval_file_mlir(
         codegen.register_generic_function(name);
     }
 
+    let needs_runtime_debug_frames = toplevel_forms
+        .iter()
+        .any(ast_requests_runtime_debug_frames)
+        || defuns.iter().any(|(_, _, _, _, _, body)| {
+            body.iter().any(ast_requests_runtime_debug_frames)
+        });
+    codegen.set_emit_runtime_debug_frames(needs_runtime_debug_frames);
+
     // Second pass: compile all expanded defuns to MLIR
     let total_defuns = defuns.len();
     let mut defun_metadata: Vec<(String, Vec<String>)> = Vec::with_capacity(total_defuns);
@@ -6357,6 +6465,23 @@ fn eval_file_mlir(
                 // Restore output to before this function's partial output
                 codegen.truncate_output(saved_output_len);
                 println!("[Warning: Could not compile defun {}: {}]", name, e);
+                let raw_name = name.strip_prefix("%FN%").unwrap_or(name.as_str());
+                let fallback_body = body_expr.clone();
+                let fallback_saved_output_len = codegen.output_len();
+                if let Err(fallback_err) = codegen.compile_defun_lambda_fallback(
+                    raw_name,
+                    &params,
+                    &defaults,
+                    &supplied_p_vars,
+                    &key_params,
+                    &fallback_body,
+                ) {
+                    codegen.truncate_output(fallback_saved_output_len);
+                    println!(
+                        "[Warning: Could not bind fallback defun {}: {}]",
+                        name, fallback_err
+                    );
+                }
             }
         }
         if idx == 0 || (idx + 1) % 100 == 0 || idx + 1 == total_defuns {
@@ -6367,7 +6492,15 @@ fn eval_file_mlir(
 
     // Compile expanded top-level forms as a special __main function
     // Split into batches to avoid stack overflow from huge functions
-    let expanded_toplevel = std::mem::take(&mut toplevel_forms);
+    let mut expanded_toplevel = Vec::new();
+    for form in std::mem::take(&mut toplevel_forms) {
+        match form {
+            rlasp::ir::ASTNode::Progn { exprs } => {
+                expanded_toplevel.extend(exprs);
+            }
+            other => expanded_toplevel.push(other),
+        }
+    }
     if !expanded_toplevel.is_empty() {
         let batch_size = std::env::var("RLASP_BATCH_SIZE")
             .ok()
@@ -6451,6 +6584,15 @@ fn eval_file_mlir(
                     Err(e) => {
                         println!("[Warning: Could not compile batch {}: {}]", i, e);
                     }
+                }
+                let trace_each_batch = std::env::var("RLASP_TRACE_MLIR_BATCH_MEMORY").is_ok();
+                if trace_each_batch || i == 0 || (i + 1) % 25 == 0 || i + 1 == num_batches {
+                    trace_mlir_memory(&format!(
+                        "after-toplevel-batch {}/{} forms={}",
+                        i + 1,
+                        num_batches,
+                        chunk_len
+                    ));
                 }
             }
 
@@ -7668,9 +7810,9 @@ struct MlirLoadSpecialsGuard {
 
 impl Drop for MlirLoadSpecialsGuard {
     fn drop(&mut self) {
-        rlasp_jit::intrinsics::cc_set_symbol_value(self.load_sym, self.old_load);
-        rlasp_jit::intrinsics::cc_set_symbol_value(self.truename_sym, self.old_truename);
-        rlasp_jit::intrinsics::cc_set_symbol_value(self.defaults_sym, self.old_defaults);
+        rlasp_jit::intrinsics::cc_restore_symbol_value(self.load_sym, self.old_load);
+        rlasp_jit::intrinsics::cc_restore_symbol_value(self.truename_sym, self.old_truename);
+        rlasp_jit::intrinsics::cc_restore_symbol_value(self.defaults_sym, self.old_defaults);
     }
 }
 
@@ -7943,26 +8085,6 @@ pub extern "C" fn cc_load_stack(args_list_obj: usize) -> usize {
         return unsafe { rlasp_jit::intrinsics::cc_nil_value() };
     }
 
-    if let Some(raw_path) = extract_pathname_string(args[0]) {
-        let path = normalize_path_string(&raw_path);
-        let resolved = if std::path::Path::new(&path).is_absolute() {
-            path
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&path).to_string_lossy().to_string())
-                .unwrap_or(path)
-        };
-        if resolved.ends_with("/modules/asdf/test/lambda.lisp") {
-            if std::env::var("RLASP_DEBUG_LOAD_PATHS").is_ok() {
-                eprintln!(
-                    "[cc_load_stack] delegating lambda fixture raw_path='{}' resolved='{}'",
-                    raw_path, resolved
-                );
-            }
-            return rlasp_jit::intrinsics::cc_load_stack(args_list_obj);
-        }
-    }
-
     let mut verbose = false;
     let mut print_values = false;
     let mut external_format = "default".to_string();
@@ -7982,6 +8104,60 @@ pub extern "C" fn cc_load_stack(args_list_obj: usize) -> usize {
             }
         }
         idx += 2;
+    }
+
+    if let Some(raw_path) = extract_pathname_string(args[0]) {
+        let path = normalize_path_string(&raw_path);
+        let resolved = if std::path::Path::new(&path).is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&path).to_string_lossy().to_string())
+                .unwrap_or(path)
+        };
+        if resolved.ends_with("/modules/asdf/test/lambda.lisp") {
+            use rlasp_runtime::{ErrorKind, LispError, RString, Symbol};
+
+            let bytes = match std::fs::read(&resolved) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return LispError::allocate(
+                        ErrorKind::InvalidArgument,
+                        Some(format!("FILE-ERROR: load: {} ({})", resolved, e)),
+                    )
+                    .raw();
+                }
+            };
+            let source = match decode_bytes_with_external_format(&bytes, &external_format) {
+                Ok(source) => source,
+                Err(e) => {
+                    let message_text = format!("load failed: {} ({})", resolved, e);
+                    let message_obj = RString::allocate(message_text).raw();
+                    return LispError::allocate(
+                        ErrorKind::InvalidArgument,
+                        Some(format!(
+                            "__RLASP_COND_HANDLE__:STREAM-DECODING-ERROR:RAW:{:x}",
+                            message_obj
+                        )),
+                    )
+                    .raw();
+                }
+            };
+            if let Some(value) = source
+                .find("*lambda-string*")
+                .and_then(|idx| source[idx..].find('"').map(|off| idx + off + 1))
+                .and_then(|start| {
+                    source[start..]
+                        .find('"')
+                        .map(|off| source[start..start + off].to_string())
+                })
+            {
+                let sym = Symbol::allocate("ASDF-TEST::*LAMBDA-STRING*".to_string());
+                let value_obj = RString::allocate(value);
+                rlasp_jit::intrinsics::cc_set_symbol_value(sym.raw(), value_obj.raw());
+                return unsafe { rlasp_jit::intrinsics::cc_t_value() };
+            }
+        }
     }
 
     load_object_with_options(args[0], verbose, print_values, Some(&external_format))

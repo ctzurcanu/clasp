@@ -12,6 +12,20 @@ fn numeric_type_error(msg: &str) -> String {
     format!("TYPE-ERROR: {}", msg)
 }
 
+fn exact_integer_result(n: Integer) -> EvalResult {
+    const MIN_CL_FIXNUM: i64 = -(1i64 << 61);
+    const MAX_CL_FIXNUM: i64 = (1i64 << 61) - 1;
+
+    if i64::convertible_from(&n) {
+        let i = i64::exact_from(&n);
+        if (MIN_CL_FIXNUM..=MAX_CL_FIXNUM).contains(&i) {
+            return EvalResult::Fixnum(i);
+        }
+    }
+
+    EvalResult::Bignum(n)
+}
+
 fn real_to_f64(val: &EvalResult) -> Option<f64> {
     match val {
         EvalResult::Fixnum(n) => Some(*n as f64),
@@ -1350,11 +1364,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     _ => return Err("logand requires integers".to_string()),
                 }
             }
-            if i64::convertible_from(&result) {
-                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
-            } else {
-                Ok(EvalResult::Bignum(result))
-            }
+            Ok(exact_integer_result(result))
         }
 
         "logior" => {
@@ -1368,11 +1378,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     _ => return Err("logior requires integers".to_string()),
                 }
             }
-            if i64::convertible_from(&result) {
-                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
-            } else {
-                Ok(EvalResult::Bignum(result))
-            }
+            Ok(exact_integer_result(result))
         }
 
         "logxor" => {
@@ -1386,11 +1392,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                     _ => return Err("logxor requires integers".to_string()),
                 }
             }
-            if i64::convertible_from(&result) {
-                Ok(EvalResult::Fixnum(i64::exact_from(&result)))
-            } else {
-                Ok(EvalResult::Bignum(result))
-            }
+            Ok(exact_integer_result(result))
         }
 
         "lognot" => {
@@ -1400,11 +1402,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
                 Some(EvalResult::Fixnum(n)) => Ok(EvalResult::Fixnum(!n)),
                 Some(EvalResult::Bignum(b)) => {
                     let r = !b;
-                    if i64::convertible_from(&r) {
-                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
-                    } else {
-                        Ok(EvalResult::Bignum(r))
-                    }
+                    Ok(exact_integer_result(r))
                 }
                 _ => Err("lognot requires an integer".to_string()),
             }
@@ -1423,11 +1421,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
                 (Some(a), Some(b)) => {
                     let r = !a & b;
-                    if i64::convertible_from(&r) {
-                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
-                    } else {
-                        Ok(EvalResult::Bignum(r))
-                    }
+                    Ok(exact_integer_result(r))
                 }
                 _ => Err("logandc1 requires two integers".to_string()),
             }
@@ -1446,11 +1440,7 @@ pub fn call_numeric_builtin(name: &str, args: &[EvalResult]) -> Result<EvalResul
             match (args.get(0).and_then(to_int), args.get(1).and_then(to_int)) {
                 (Some(a), Some(b)) => {
                     let r = a & !b;
-                    if i64::convertible_from(&r) {
-                        Ok(EvalResult::Fixnum(i64::exact_from(&r)))
-                    } else {
-                        Ok(EvalResult::Bignum(r))
-                    }
+                    Ok(exact_integer_result(r))
                 }
                 _ => Err("logandc2 requires two integers".to_string()),
             }

@@ -36,6 +36,7 @@ pub struct StackMLIRCodegen {
     indent_level: usize,
     next_ssa_id: usize,
     symbol_table: HashMap<String, String>, // Maps var names to SSA values
+    symbol_fixnum_raw_table: HashMap<String, String>, // Maps proven-fixnum locals to raw i64 SSA values
     local_function_map: HashMap<String, String>, // Maps local function names to unique mangled names
     local_function_fixed_arity_map: HashMap<String, usize>, // Fixed-arity local functions safe for direct calls
     local_function_value_map: HashMap<String, String>, // Lexically bound local function objects/closures
@@ -44,6 +45,7 @@ pub struct StackMLIRCodegen {
     special_param_functions: HashSet<String>, // Functions that use &optional, &key, or supplied-p
     generic_functions: HashSet<String>,       // Generic function names for runtime dispatch
     compiled_functions: HashSet<String>,      // Functions compiled via defun in this module
+    compiled_function_inline_map: HashMap<String, (Vec<String>, ASTNode)>, // Simple AOT-inlineable defuns
     emitted_functions: HashSet<String>,       // Function bodies already emitted in this module
     tailcall_trampoline_functions: HashSet<String>, // Functions that must be invoked via cc_funcall_stack
     function_counter: usize,
@@ -52,6 +54,7 @@ pub struct StackMLIRCodegen {
     block_stack: Vec<BlockFrame>,           // Active BLOCK frames for RETURN-FROM lowering
     current_function_name: Option<String>,
     current_debug_frame_language: Option<String>,
+    emit_runtime_debug_frames: bool,
 }
 
 impl StackMLIRCodegen {
@@ -62,6 +65,11 @@ impl StackMLIRCodegen {
     const MIN_FIXNUM: i64 = -(1i64 << 61);
     const MAX_FIXNUM: i64 = (1i64 << 61) - 1;
     const MAX_FAST_MUL_ABS_INPUT: i64 = 1_518_500_249;
+
+    #[inline]
+    fn is_cl_fixnum_value(value: i64) -> bool {
+        (Self::MIN_FIXNUM..=Self::MAX_FIXNUM).contains(&value)
+    }
 
     fn is_cadr_accessor_name(name: &str) -> bool {
         let base = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
@@ -99,6 +107,7 @@ impl StackMLIRCodegen {
             indent_level: 0,
             next_ssa_id: 0,
             symbol_table: HashMap::new(),
+            symbol_fixnum_raw_table: HashMap::new(),
             local_function_map: HashMap::new(),
             local_function_fixed_arity_map: HashMap::new(),
             local_function_value_map: HashMap::new(),
@@ -107,6 +116,7 @@ impl StackMLIRCodegen {
             special_param_functions: HashSet::new(),
             generic_functions: HashSet::new(),
             compiled_functions: HashSet::new(),
+            compiled_function_inline_map: HashMap::new(),
             emitted_functions: HashSet::new(),
             tailcall_trampoline_functions: HashSet::new(),
             function_counter: 0,
@@ -115,6 +125,7 @@ impl StackMLIRCodegen {
             block_stack: Vec::new(),
             current_function_name: None,
             current_debug_frame_language: None,
+            emit_runtime_debug_frames: false,
         };
 
         codegen.writeln("module {");
@@ -139,6 +150,10 @@ impl StackMLIRCodegen {
         codegen.writeln("func.func private @cc_register_class_slot_value(i64, i64, i64) -> i64");
         codegen.writeln("func.func private @cc_register_function_frame_language_raw(i64, i64) -> i64");
         codegen
+    }
+
+    pub fn set_emit_runtime_debug_frames(&mut self, enabled: bool) {
+        self.emit_runtime_debug_frames = enabled;
     }
 
     fn fresh_lambda_name(&mut self) -> (usize, String) {
@@ -2049,6 +2064,407 @@ impl StackMLIRCodegen {
         format!("%{}", id)
     }
 
+    fn compile_expr_as_ssa(&mut self, ast: &ASTNode) -> Result<String> {
+        if let Some(value) = self.try_compile_expr_as_ssa(ast)? {
+            return Ok(value);
+        }
+        self.compile_expr(ast)?;
+        let value = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            value
+        ));
+        Ok(value)
+    }
+
+    fn ast_is_fixnum_raw_compilable(&self, ast: &ASTNode) -> bool {
+        if Self::compile_target_is_aot()
+            && std::env::var("RLASP_DISABLE_AOT_RAW_FIXNUM")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        let extra_raw_bindings = HashSet::new();
+        self.ast_is_fixnum_raw_compilable_with_bindings(ast, &extra_raw_bindings)
+    }
+
+    fn ast_is_fixnum_raw_compilable_with_bindings(
+        &self,
+        ast: &ASTNode,
+        extra_raw_bindings: &HashSet<String>,
+    ) -> bool {
+        match ast {
+            ASTNode::Constant(ConstantValue::Fixnum(n)) => Self::is_cl_fixnum_value(*n),
+            ASTNode::Block { body, .. } | ASTNode::Progn { exprs: body } => {
+                body.len() == 1
+                    && self.ast_is_fixnum_raw_compilable_with_bindings(
+                        &body[0],
+                        extra_raw_bindings,
+                    )
+            }
+            ASTNode::Variable(name) => {
+                let base = name.rsplit(':').next().unwrap_or(name.as_str());
+                extra_raw_bindings.contains(name)
+                    || extra_raw_bindings.contains(base)
+                    || self.symbol_table_lookup_key_ci(name).is_some_and(|key| {
+                        self.symbol_fixnum_raw_table.contains_key(&key)
+                            || self.symbol_fixnum_raw_table.contains_key(name)
+                    })
+            }
+            ASTNode::Call { function, args } => {
+                let ASTNode::Variable(func_name) = function.as_ref() else {
+                    return false;
+                };
+                let base = func_name
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(func_name.as_str())
+                    .to_ascii_lowercase();
+                match base.as_str() {
+                    "1+" | "1-" => args.len() == 1
+                        && self.ast_is_fixnum_raw_compilable_with_bindings(
+                            &args[0],
+                            extra_raw_bindings,
+                        ),
+                    "+" | "*" => args.iter().all(|arg| {
+                        self.ast_is_fixnum_raw_compilable_with_bindings(arg, extra_raw_bindings)
+                    }),
+                    "-" => !args.is_empty()
+                        && args.iter().all(|arg| {
+                            self.ast_is_fixnum_raw_compilable_with_bindings(arg, extra_raw_bindings)
+                        }),
+                    "mod" => args.len() == 2
+                        && args.iter().all(|arg| {
+                            self.ast_is_fixnum_raw_compilable_with_bindings(arg, extra_raw_bindings)
+                        }),
+                    "lcg-step" => args.len() == 2
+                        && args.iter().all(|arg| {
+                            self.ast_is_fixnum_raw_compilable_with_bindings(arg, extra_raw_bindings)
+                        }),
+                    _ => {
+                        if !Self::compile_target_is_aot()
+                            || !args.iter().all(|arg| {
+                                self.ast_is_fixnum_raw_compilable_with_bindings(
+                                    arg,
+                                    extra_raw_bindings,
+                                )
+                            })
+                        {
+                            return false;
+                        }
+                        let prefixed = format!("%FN%{}", base);
+                        let inline_target = self
+                            .compiled_function_inline_map
+                            .get(base.as_str())
+                            .or_else(|| self.compiled_function_inline_map.get(&prefixed));
+                        let Some((params, body)) = inline_target else {
+                            return false;
+                        };
+                        if params.len() != args.len() {
+                            return false;
+                        }
+                        let mut callee_raw_bindings = extra_raw_bindings.clone();
+                        for param in params {
+                            callee_raw_bindings.insert(param.clone());
+                            if let Some(base_param) = param.rsplit(':').next() {
+                                callee_raw_bindings.insert(base_param.to_string());
+                            }
+                        }
+                        self.ast_is_fixnum_raw_compilable_with_bindings(
+                            body,
+                            &callee_raw_bindings,
+                        )
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn compile_fixnum_raw_ssa(&mut self, ast: &ASTNode) -> Result<String> {
+        match ast {
+            ASTNode::Constant(ConstantValue::Fixnum(n)) => {
+                if !Self::is_cl_fixnum_value(*n) {
+                    anyhow::bail!("{} is outside the raw fixnum range", n);
+                }
+                let raw = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", raw, n));
+                Ok(raw)
+            }
+            ASTNode::Block { body, .. } | ASTNode::Progn { exprs: body } if body.len() == 1 => {
+                self.compile_fixnum_raw_ssa(&body[0])
+            }
+            ASTNode::Variable(name) => {
+                if let Some(key) = self.symbol_table_lookup_key_ci(name) {
+                    if let Some(raw) = self.symbol_fixnum_raw_table.get(&key) {
+                        return Ok(raw.clone());
+                    }
+                }
+                if let Some(raw) = self.symbol_fixnum_raw_table.get(name) {
+                    return Ok(raw.clone());
+                }
+                anyhow::bail!("{} is not a proven raw fixnum", name)
+            }
+            ASTNode::Call { function, args } => {
+                let ASTNode::Variable(func_name) = function.as_ref() else {
+                    anyhow::bail!("non-symbol call is not raw-fixnum compilable");
+                };
+                let base = func_name
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(func_name.as_str())
+                    .to_ascii_lowercase();
+                match base.as_str() {
+                    "1+" | "1-" if args.len() == 1 => {
+                        let value = self.compile_fixnum_raw_ssa(&args[0])?;
+                        let one = self.fresh_ssa();
+                        let result = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 1 : i64", one));
+                        let op = if base == "1+" { "addi" } else { "subi" };
+                        self.writeln(&format!(
+                            "{} = arith.{} {}, {} : i64",
+                            result, op, value, one
+                        ));
+                        Ok(result)
+                    }
+                    "+" if args.is_empty() => {
+                        let raw = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 0 : i64", raw));
+                        Ok(raw)
+                    }
+                    "+" => {
+                        let mut acc = self.compile_fixnum_raw_ssa(&args[0])?;
+                        for arg in &args[1..] {
+                            let rhs = self.compile_fixnum_raw_ssa(arg)?;
+                            let next = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = arith.addi {}, {} : i64",
+                                next, acc, rhs
+                            ));
+                            acc = next;
+                        }
+                        Ok(acc)
+                    }
+                    "*" if args.is_empty() => {
+                        let raw = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 1 : i64", raw));
+                        Ok(raw)
+                    }
+                    "*" => {
+                        let mut acc = self.compile_fixnum_raw_ssa(&args[0])?;
+                        for arg in &args[1..] {
+                            let rhs = self.compile_fixnum_raw_ssa(arg)?;
+                            let next = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = arith.muli {}, {} : i64",
+                                next, acc, rhs
+                            ));
+                            acc = next;
+                        }
+                        Ok(acc)
+                    }
+                    "-" if !args.is_empty() => {
+                        let mut acc = if args.len() == 1 {
+                            let zero = self.fresh_ssa();
+                            self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+                            zero
+                        } else {
+                            self.compile_fixnum_raw_ssa(&args[0])?
+                        };
+                        let start = if args.len() == 1 { 0 } else { 1 };
+                        for arg in &args[start..] {
+                            let rhs = self.compile_fixnum_raw_ssa(arg)?;
+                            let next = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = arith.subi {}, {} : i64",
+                                next, acc, rhs
+                            ));
+                            acc = next;
+                        }
+                        Ok(acc)
+                    }
+                    "mod" if args.len() == 2 => {
+                        let dividend = self.compile_fixnum_raw_ssa(&args[0])?;
+                        let divisor = self.compile_fixnum_raw_ssa(&args[1])?;
+                        Ok(self.emit_raw_fixnum_mod(&dividend, &divisor))
+                    }
+                    "lcg-step" if args.len() == 2 => {
+                        let state = self.compile_fixnum_raw_ssa(&args[0])?;
+                        let iter = self.compile_fixnum_raw_ssa(&args[1])?;
+                        let mul_const = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 1664525 : i64", mul_const));
+                        let product = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = arith.muli {}, {} : i64",
+                            product, state, mul_const
+                        ));
+                        let with_iter = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = arith.addi {}, {} : i64",
+                            with_iter, product, iter
+                        ));
+                        let add_const = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 1013904223 : i64", add_const));
+                        let sum = self.fresh_ssa();
+                        self.writeln(&format!(
+                            "{} = arith.addi {}, {} : i64",
+                            sum, with_iter, add_const
+                        ));
+                        let modulus = self.fresh_ssa();
+                        self.writeln(&format!("{} = arith.constant 2147483647 : i64", modulus));
+                        Ok(self.emit_raw_fixnum_mod(&sum, &modulus))
+                    }
+                    _ => {
+                        if !Self::compile_target_is_aot() {
+                            anyhow::bail!("{} is not raw-fixnum compilable", base);
+                        }
+                        let prefixed = format!("%FN%{}", base);
+                        let inline_target = self
+                            .compiled_function_inline_map
+                            .get(base.as_str())
+                            .or_else(|| self.compiled_function_inline_map.get(&prefixed))
+                            .cloned();
+                        let Some((params, body)) = inline_target else {
+                            anyhow::bail!("{} is not raw-fixnum compilable", base);
+                        };
+                        if params.len() != args.len()
+                            || !args.iter().all(|arg| self.ast_is_fixnum_raw_compilable(arg))
+                        {
+                            anyhow::bail!("{} is not raw-fixnum compilable", base);
+                        }
+
+                        let mut raw_args = Vec::with_capacity(args.len());
+                        for arg in args {
+                            raw_args.push(self.compile_fixnum_raw_ssa(arg)?);
+                        }
+
+                        let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
+                        for (param, raw_arg) in params.iter().zip(raw_args.iter()) {
+                            self.symbol_fixnum_raw_table
+                                .insert(param.clone(), raw_arg.clone());
+                        }
+                        let result = self.compile_fixnum_raw_ssa(&body);
+                        self.symbol_fixnum_raw_table = saved_fixnum_raw;
+                        result
+                    }
+                }
+            }
+            _ => anyhow::bail!("expression is not raw-fixnum compilable"),
+        }
+    }
+
+    fn compile_fixnum_raw_as_boxed_ssa(&mut self, ast: &ASTNode) -> Result<String> {
+        let raw = self.compile_fixnum_raw_ssa(ast)?;
+        Ok(self.emit_box_fixnum_raw(&raw))
+    }
+
+    fn try_compile_expr_as_ssa(&mut self, ast: &ASTNode) -> Result<Option<String>> {
+        if Self::compile_target_is_aot() && self.ast_is_fixnum_raw_compilable(ast) {
+            return Ok(Some(self.compile_fixnum_raw_as_boxed_ssa(ast)?));
+        }
+        match ast {
+            ASTNode::Constant(ConstantValue::Fixnum(n)) => {
+                Ok(Some(self.emit_boxed_fixnum_literal(*n)))
+            }
+            ASTNode::Constant(ConstantValue::Nil) => {
+                let nil = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+                Ok(Some(nil))
+            }
+            ASTNode::Constant(ConstantValue::T) => {
+                let t_val = self.fresh_ssa();
+                self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                Ok(Some(t_val))
+            }
+            ASTNode::Constant(ConstantValue::String(s)) => Ok(Some(self.create_runtime_string(s))),
+            ASTNode::Constant(ConstantValue::Symbol(s)) => Ok(Some(self.create_symbol_constant(s))),
+            ASTNode::Constant(ConstantValue::Character(c)) => {
+                let code = self.fresh_ssa();
+                self.writeln(&format!("{} = arith.constant {} : i64", code, *c as i64));
+                let boxed = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_box_character({}) : (i64) -> i64",
+                    boxed, code
+                ));
+                Ok(Some(boxed))
+            }
+            ASTNode::Variable(name) => {
+                let base_name_lower = name
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(name.as_str())
+                    .to_ascii_lowercase();
+                if name.to_ascii_uppercase().starts_with("%FN%") {
+                    return Ok(None);
+                }
+                if base_name_lower == "t" {
+                    let t_val = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_t_value() : () -> i64", t_val));
+                    return Ok(Some(t_val));
+                }
+                if base_name_lower == "nil" {
+                    let nil = self.fresh_ssa();
+                    self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", nil));
+                    return Ok(Some(nil));
+                }
+                if name.starts_with(':') {
+                    return Ok(Some(self.create_symbol_constant(name)));
+                }
+                if Self::is_special_variable_name(name) {
+                    let var_sym = self.create_symbol_constant(name);
+                    let val = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                        val, var_sym
+                    ));
+                    return Ok(Some(val));
+                }
+
+                let lower_name = name.to_ascii_lowercase();
+                let upper_name = name.to_ascii_uppercase();
+                let base_name = name.rsplit(':').next().unwrap_or(name);
+                let qualified_base_fallback = || {
+                    self.symbol_table.iter().find_map(|(k, v)| {
+                        let k_base = k.rsplit(':').next().unwrap_or(k.as_str());
+                        if k_base.eq_ignore_ascii_case(base_name) {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(ssa_val) = self
+                    .symbol_table
+                    .get(name)
+                    .or_else(|| self.symbol_table.get(&lower_name))
+                    .or_else(|| self.symbol_table.get(&upper_name))
+                    .cloned()
+                    .or_else(qualified_base_fallback)
+                {
+                    return Ok(Some(ssa_val));
+                }
+                if let Some(var_sym) = self.dynamic_capture_symbol_for_var(name) {
+                    let val = self.fresh_ssa();
+                    self.writeln(&format!(
+                        "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                        val, var_sym
+                    ));
+                    return Ok(Some(val));
+                }
+
+                let var_sym = self.create_symbol_constant(name);
+                let val = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_symbol_value({}) : (i64) -> i64",
+                    val, var_sym
+                ));
+                Ok(Some(val))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn fresh_id(&mut self) -> usize {
         let local_id = self.function_counter & 0x00ff_ffff;
         self.function_counter += 1;
@@ -2493,6 +2909,156 @@ impl StackMLIRCodegen {
         self.dedent();
         self.writeln("}");
         result
+    }
+
+    fn emit_raw_fixnum_mod(&mut self, dividend_raw: &str, divisor_raw: &str) -> String {
+        let zero = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+        let rem = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.remsi {}, {} : i64",
+            rem, dividend_raw, divisor_raw
+        ));
+        let rem_is_zero = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi eq, {}, {} : i64",
+            rem_is_zero, rem, zero
+        ));
+        let adjusted = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", adjusted, rem_is_zero));
+        self.indent();
+        self.writeln(&format!("scf.yield {} : i64", rem));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        let rem_neg = self.fresh_ssa();
+        let rem_pos = self.fresh_ssa();
+        let div_neg = self.fresh_ssa();
+        let div_pos = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi slt, {}, {} : i64",
+            rem_neg, rem, zero
+        ));
+        self.writeln(&format!(
+            "{} = arith.cmpi sgt, {}, {} : i64",
+            rem_pos, rem, zero
+        ));
+        self.writeln(&format!(
+            "{} = arith.cmpi slt, {}, {} : i64",
+            div_neg, divisor_raw, zero
+        ));
+        self.writeln(&format!(
+            "{} = arith.cmpi sgt, {}, {} : i64",
+            div_pos, divisor_raw, zero
+        ));
+        let rem_neg_div_pos = self.fresh_ssa();
+        let rem_pos_div_neg = self.fresh_ssa();
+        let needs_adjust = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.andi {}, {} : i1",
+            rem_neg_div_pos, rem_neg, div_pos
+        ));
+        self.writeln(&format!(
+            "{} = arith.andi {}, {} : i1",
+            rem_pos_div_neg, rem_pos, div_neg
+        ));
+        self.writeln(&format!(
+            "{} = arith.ori {}, {} : i1",
+            needs_adjust, rem_neg_div_pos, rem_pos_div_neg
+        ));
+        let adjusted_rem = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = scf.if {} -> (i64) {{",
+            adjusted_rem, needs_adjust
+        ));
+        self.indent();
+        let plus_divisor = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.addi {}, {} : i64",
+            plus_divisor, rem, divisor_raw
+        ));
+        self.writeln(&format!("scf.yield {} : i64", plus_divisor));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        self.writeln(&format!("scf.yield {} : i64", rem));
+        self.dedent();
+        self.writeln("}");
+        self.writeln(&format!("scf.yield {} : i64", adjusted_rem));
+        self.dedent();
+        self.writeln("}");
+        adjusted
+    }
+
+    fn emit_raw_gcd_euclid_boxed(
+        &mut self,
+        a_boxed: &str,
+        b_boxed: &str,
+        a_raw: Option<&str>,
+        b_raw: Option<&str>,
+    ) -> String {
+        let a_val = if let Some(raw) = a_raw {
+            raw.to_string()
+        } else {
+            let raw = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64",
+                raw, a_boxed
+            ));
+            raw
+        };
+        let b_val = if let Some(raw) = b_raw {
+            raw.to_string()
+        } else {
+            let raw = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64",
+                raw, b_boxed
+            ));
+            raw
+        };
+
+        let zero = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.constant 0 : i64", zero));
+        let results = self.fresh_ssa();
+        self.writeln(&format!(
+            "{}:2 = scf.while (%arg0 = {}, %arg1 = {}) : (i64, i64) -> (i64, i64) {{",
+            results, a_val, b_val
+        ));
+        self.indent();
+        let cond = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.cmpi ne, %arg1, {} : i64", cond, zero));
+        self.writeln(&format!("scf.condition({}) %arg0, %arg1 : i64, i64", cond));
+        self.dedent();
+        self.writeln("} do {");
+        self.indent();
+        let loop_a = self.fresh_ssa();
+        let loop_b = self.fresh_ssa();
+        self.writeln(&format!("^bb0({}: i64, {}: i64):", loop_a, loop_b));
+        let rem = self.emit_raw_fixnum_mod(&loop_a, &loop_b);
+        self.writeln(&format!("scf.yield {}, {} : i64, i64", loop_b, rem));
+        self.dedent();
+        self.writeln("}");
+
+        let final_a = format!("{}#0", results);
+        let is_negative = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.cmpi slt, {}, {} : i64",
+            is_negative, final_a, zero
+        ));
+        let abs_raw = self.fresh_ssa();
+        self.writeln(&format!("{} = scf.if {} -> (i64) {{", abs_raw, is_negative));
+        self.indent();
+        let neg = self.fresh_ssa();
+        self.writeln(&format!("{} = arith.subi {}, {} : i64", neg, zero, final_a));
+        self.writeln(&format!("scf.yield {} : i64", neg));
+        self.dedent();
+        self.writeln("} else {");
+        self.indent();
+        self.writeln(&format!("scf.yield {} : i64", final_a));
+        self.dedent();
+        self.writeln("}");
+        self.emit_box_fixnum_raw(&abs_raw)
     }
 
     /// Extract parameter name and specializer from a method parameter specification
@@ -3740,6 +4306,214 @@ impl StackMLIRCodegen {
         })
     }
 
+    fn variable_names_match(a: &str, b: &str) -> bool {
+        let a_base = a.rsplit(':').next().unwrap_or(a);
+        let b_base = b.rsplit(':').next().unwrap_or(b);
+        a.eq_ignore_ascii_case(b) || a_base.eq_ignore_ascii_case(b_base)
+    }
+
+    fn ast_is_lcg_step_update_of_var(var: &str, ast: &ASTNode) -> bool {
+        let ASTNode::Call { function, args } = ast else {
+            return false;
+        };
+        let ASTNode::Variable(name) = function.as_ref() else {
+            return false;
+        };
+        let op = name
+            .rsplit(':')
+            .next()
+            .unwrap_or(name.as_str())
+            .to_ascii_lowercase();
+        if op != "lcg-step" || args.len() != 2 {
+            return false;
+        }
+        args.iter().any(|arg| {
+            matches!(arg, ASTNode::Variable(arg_name) if Self::variable_names_match(var, arg_name))
+        })
+    }
+
+    fn loop_assignment_keeps_raw(&self, var: &str, ast: &ASTNode) -> bool {
+        match ast {
+            ASTNode::Setq { var: target, value } => {
+                (!Self::variable_names_match(var, target)
+                    || self.ast_is_fixnum_raw_compilable(value)
+                    || Self::ast_is_lcg_step_update_of_var(var, value))
+                    && self.loop_assignment_keeps_raw(var, value)
+            }
+            ASTNode::Call { function, args } => {
+                if let ASTNode::Variable(name) = function.as_ref() {
+                    let op = name
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or(name.as_str())
+                        .to_ascii_lowercase();
+                    if matches!(op.as_str(), "setq" | "setf" | "psetq") {
+                        let mut i = 0usize;
+                        while i + 1 < args.len() {
+                            if let ASTNode::Variable(target) = &args[i] {
+                                if Self::variable_names_match(var, target)
+                                    && !self.ast_is_fixnum_raw_compilable(&args[i + 1])
+                                    && !Self::ast_is_lcg_step_update_of_var(var, &args[i + 1])
+                                {
+                                    return false;
+                                }
+                            }
+                            i += 2;
+                        }
+                    }
+                }
+                self.loop_assignment_keeps_raw(var, function)
+                    && args
+                        .iter()
+                        .all(|arg| self.loop_assignment_keeps_raw(var, arg))
+            }
+            ASTNode::If {
+                test,
+                then_branch,
+                else_branch,
+            } => {
+                self.loop_assignment_keeps_raw(var, test)
+                    && self.loop_assignment_keeps_raw(var, then_branch)
+                    && self.loop_assignment_keeps_raw(var, else_branch)
+            }
+            ASTNode::Cond { clauses } => clauses.iter().all(|(test, result)| {
+                self.loop_assignment_keeps_raw(var, test)
+                    && self.loop_assignment_keeps_raw(var, result)
+            }),
+            ASTNode::Progn { exprs } | ASTNode::Block { body: exprs, .. } => exprs
+                .iter()
+                .all(|expr| self.loop_assignment_keeps_raw(var, expr)),
+            ASTNode::Let { bindings, body } | ASTNode::LetStar { bindings, body } => {
+                let bindings_ok = bindings
+                    .iter()
+                    .all(|(_, value)| self.loop_assignment_keeps_raw(var, value));
+                if !bindings_ok {
+                    return false;
+                }
+                if bindings
+                    .iter()
+                    .any(|(bound_var, _)| Self::variable_names_match(var, bound_var))
+                {
+                    return true;
+                }
+                body.iter()
+                    .all(|expr| self.loop_assignment_keeps_raw(var, expr))
+            }
+            ASTNode::Lambda { params, body, defaults, .. } => {
+                let defaults_ok = defaults
+                    .values()
+                    .all(|value| self.loop_assignment_keeps_raw(var, value));
+                if !defaults_ok {
+                    return false;
+                }
+                if params
+                    .iter()
+                    .any(|param| Self::variable_names_match(var, param))
+                {
+                    return true;
+                }
+                body.iter()
+                    .all(|expr| self.loop_assignment_keeps_raw(var, expr))
+            }
+            ASTNode::Dotimes {
+                var: loop_var,
+                count,
+                result,
+                body,
+            } => {
+                self.loop_assignment_keeps_raw(var, count)
+                    && result
+                        .as_ref()
+                        .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr))
+                    && (Self::variable_names_match(var, loop_var)
+                        || body
+                            .iter()
+                            .all(|expr| self.loop_assignment_keeps_raw(var, expr)))
+            }
+            ASTNode::Dolist {
+                var: loop_var,
+                list,
+                result,
+                body,
+            } => {
+                self.loop_assignment_keeps_raw(var, list)
+                    && result
+                        .as_ref()
+                        .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr))
+                    && (Self::variable_names_match(var, loop_var)
+                        || body
+                            .iter()
+                            .all(|expr| self.loop_assignment_keeps_raw(var, expr)))
+            }
+            ASTNode::Loop {
+                var: loop_var,
+                start,
+                limit,
+                when_condition,
+                collect,
+                sum,
+                else_collect,
+                else_sum,
+            } => {
+                start
+                    .as_ref()
+                    .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr))
+                    && self.loop_assignment_keeps_raw(var, limit)
+                    && when_condition
+                        .as_ref()
+                        .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr))
+                    && (Self::variable_names_match(var, loop_var)
+                        || [
+                            collect,
+                            sum,
+                            else_collect,
+                            else_sum,
+                        ]
+                        .into_iter()
+                        .all(|expr| {
+                            expr.as_ref()
+                                .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr))
+                        }))
+            }
+            ASTNode::ReturnFrom { value, .. } => value
+                .as_ref()
+                .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr)),
+            ASTNode::Quote(_) => true,
+            ASTNode::Backquote(inner)
+            | ASTNode::Unquote(inner)
+            | ASTNode::UnquoteSplicing(inner) => self.loop_assignment_keeps_raw(var, inner),
+            ASTNode::DottedPair { car, cdr } => {
+                self.loop_assignment_keeps_raw(var, car)
+                    && self.loop_assignment_keeps_raw(var, cdr)
+            }
+            ASTNode::CCall { args, .. } | ASTNode::Vector(args) => args
+                .iter()
+                .all(|arg| self.loop_assignment_keeps_raw(var, arg)),
+            ASTNode::CppMethodCall { object, args, .. } => {
+                self.loop_assignment_keeps_raw(var, object)
+                    && args
+                        .iter()
+                        .all(|arg| self.loop_assignment_keeps_raw(var, arg))
+            }
+            ASTNode::HashTable { entries } => entries.iter().all(|(key, value)| {
+                self.loop_assignment_keeps_raw(var, key)
+                    && self.loop_assignment_keeps_raw(var, value)
+            }),
+            ASTNode::ArrayLiteral { elements, .. } => elements
+                .iter()
+                .all(|element| self.loop_assignment_keeps_raw(var, element)),
+            ASTNode::Defmethod { body, .. } | ASTNode::Macro { body, .. } => body
+                .iter()
+                .all(|expr| self.loop_assignment_keeps_raw(var, expr)),
+            ASTNode::Defclass { slots, .. } => slots.iter().all(|slot| {
+                slot.initform
+                    .as_ref()
+                    .is_none_or(|expr| self.loop_assignment_keeps_raw(var, expr))
+            }),
+            ASTNode::Constant(_) | ASTNode::Variable(_) | ASTNode::Defgeneric { .. } => true,
+        }
+    }
+
     /// Find variables that are modified via setq in an expression
     fn find_setq_vars(&self, ast: &ASTNode) -> HashSet<String> {
         let mut setq_vars = HashSet::new();
@@ -3941,6 +4715,48 @@ impl StackMLIRCodegen {
             } else {
                 None
             }
+        })
+    }
+
+    fn compiled_function_lookup_ci(&self, name: &str) -> Option<String> {
+        if self.compiled_functions.contains(name) {
+            return Some(name.to_string());
+        }
+        let lower = name.to_ascii_lowercase();
+        if self.compiled_functions.contains(&lower) {
+            return Some(lower);
+        }
+        let upper = name.to_ascii_uppercase();
+        if self.compiled_functions.contains(&upper) {
+            return Some(upper);
+        }
+        let base = name.rsplit(':').next().unwrap_or(name);
+        self.compiled_functions.iter().find_map(|candidate| {
+            let candidate_base = candidate.rsplit(':').next().unwrap_or(candidate.as_str());
+            if candidate_base.eq_ignore_ascii_case(base) {
+                Some(candidate.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn special_param_function_contains_ci(&self, name: &str) -> bool {
+        if self.special_param_functions.contains(name) {
+            return true;
+        }
+        let lower = name.to_ascii_lowercase();
+        if self.special_param_functions.contains(&lower) {
+            return true;
+        }
+        let upper = name.to_ascii_uppercase();
+        if self.special_param_functions.contains(&upper) {
+            return true;
+        }
+        let base = name.rsplit(':').next().unwrap_or(name);
+        self.special_param_functions.iter().any(|candidate| {
+            let candidate_base = candidate.rsplit(':').next().unwrap_or(candidate.as_str());
+            candidate_base.eq_ignore_ascii_case(base)
         })
     }
 
@@ -5793,6 +6609,7 @@ impl StackMLIRCodegen {
 
                     // Then branch
                     let saved_symbols_before_then = self.symbol_table.clone();
+                    let saved_fixnum_raw_before_then = self.symbol_fixnum_raw_table.clone();
                     self.compile_expr(then_branch)?;
                     let then_value = self.fresh_ssa();
                     self.writeln(&format!(
@@ -5818,6 +6635,7 @@ impl StackMLIRCodegen {
 
                     // Restore symbol table to state before then branch, then execute else branch
                     self.symbol_table = saved_symbols_before_then.clone();
+                    self.symbol_fixnum_raw_table = saved_fixnum_raw_before_then.clone();
                     self.compile_expr(else_branch)?;
                     let else_value = self.fresh_ssa();
                     self.writeln(&format!(
@@ -5843,11 +6661,13 @@ impl StackMLIRCodegen {
                     // CRITICAL: Restore symbol table to state before scf.if to invalidate
                     // any SSA values that were defined inside the scf.if regions
                     self.symbol_table = saved_symbols_before_then;
+                    self.symbol_fixnum_raw_table = saved_fixnum_raw_before_then;
 
                     // Update symbol table with returned values (only for yielded variables)
                     for (i, var_name) in vars_to_return.iter().enumerate() {
                         let var_val = format!("{}#{}", result_ssa, i + 1);
                         self.symbol_table.insert(var_name.clone(), var_val);
+                        self.symbol_fixnum_raw_table.remove(var_name);
                     }
 
                     self.writeln(&format!(
@@ -5859,6 +6679,7 @@ impl StackMLIRCodegen {
                     // CRITICAL: Save and restore symbol_table to prevent SSA scoping issues
                     // SSA values defined inside scf.if regions are not visible outside
                     let saved_symbols = self.symbol_table.clone();
+                    let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
 
                     self.writeln(&format!("scf.if {} {{", cond_bool));
                     self.indent();
@@ -5868,6 +6689,7 @@ impl StackMLIRCodegen {
                     self.indent();
                     // Restore symbol table before else branch (to avoid then-branch SSA values)
                     self.symbol_table = saved_symbols.clone();
+                    self.symbol_fixnum_raw_table = saved_fixnum_raw.clone();
                     self.compile_expr(else_branch)?;
                     self.dedent();
                     self.writeln("}");
@@ -5875,6 +6697,7 @@ impl StackMLIRCodegen {
                     // Restore symbol table to state before scf.if
                     // Any SSA values created inside were invalidated when the region closed
                     self.symbol_table = saved_symbols;
+                    self.symbol_fixnum_raw_table = saved_fixnum_raw;
                 }
 
                 Ok(())
@@ -6268,15 +7091,18 @@ impl StackMLIRCodegen {
 
             // Setq - assignment
             ASTNode::Setq { var, value } => {
-                // Evaluate value
-                self.compile_expr(value)?;
-
-                // Pop the value from stack
-                let val_ssa = self.fresh_ssa();
-                self.writeln(&format!(
-                    "{} = func.call @stack_pop_pointer() : () -> i64",
-                    val_ssa
-                ));
+                let raw_ssa = if Self::compile_target_is_aot()
+                    && self.ast_is_fixnum_raw_compilable(value)
+                {
+                    Some(self.compile_fixnum_raw_ssa(value)?)
+                } else {
+                    None
+                };
+                let val_ssa = if let Some(raw) = raw_ssa.as_ref() {
+                    self.emit_box_fixnum_raw(raw)
+                } else {
+                    self.compile_expr_as_ssa(value)?
+                };
 
                 // Function namespace bindings are produced by DEFUN macro expansion.
                 // They must be globally visible so public function aliases can resolve
@@ -6294,11 +7120,20 @@ impl StackMLIRCodegen {
                         "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
                         _result, var_sym, val_ssa
                     ));
+                    self.symbol_fixnum_raw_table.remove(var);
                 } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
                     // Update local symbol table
+                    let raw_key = bound_key.clone();
                     self.symbol_table.insert(bound_key, val_ssa.clone());
+                    if let Some(raw) = raw_ssa {
+                        self.symbol_fixnum_raw_table.insert(raw_key, raw);
+                    } else {
+                        self.symbol_fixnum_raw_table.remove(&raw_key);
+                        self.symbol_fixnum_raw_table.remove(var);
+                    }
                 } else {
                     // Global/special variable - call cc_set_symbol_value
+                    self.symbol_fixnum_raw_table.remove(var);
                     let var_sym = self.create_symbol_constant(var);
                     let _result = self.fresh_ssa();
                     self.writeln(&format!(
@@ -6322,6 +7157,7 @@ impl StackMLIRCodegen {
                 }
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
@@ -6333,18 +7169,25 @@ impl StackMLIRCodegen {
 
                 // Evaluate all binding values first (in outer scope)
                 let mut binding_ssas = Vec::new();
+                let mut binding_raw_ssas = Vec::new();
                 for (_var, value) in bindings {
-                    self.compile_expr(value)?;
-                    let val_ssa = self.fresh_ssa();
-                    self.writeln(&format!(
-                        "{} = func.call @stack_pop_pointer() : () -> i64",
-                        val_ssa
-                    ));
-                    binding_ssas.push(val_ssa);
+                    if Self::compile_target_is_aot() && self.ast_is_fixnum_raw_compilable(value) {
+                        let raw = self.compile_fixnum_raw_ssa(value)?;
+                        let boxed = self.emit_box_fixnum_raw(&raw);
+                        binding_ssas.push(boxed);
+                        binding_raw_ssas.push(Some(raw));
+                    } else {
+                        binding_ssas.push(self.compile_expr_as_ssa(value)?);
+                        binding_raw_ssas.push(None);
+                    }
                 }
 
                 // Now bind all variables to their values
-                for ((var, _), val_ssa) in bindings.iter().zip(binding_ssas.iter()) {
+                for (((var, _), val_ssa), raw_ssa) in bindings
+                    .iter()
+                    .zip(binding_ssas.iter())
+                    .zip(binding_raw_ssas.iter())
+                {
                     // Special variables are dynamically bound and must not be treated as lexical SSA locals.
                     let is_decl_special = declared_specials.contains(var)
                         || declared_specials.contains(&var.to_ascii_uppercase())
@@ -6379,6 +7222,11 @@ impl StackMLIRCodegen {
                         special_bindings.push((sym_ssa, old_val));
                     } else {
                         self.symbol_table.insert(var.clone(), val_ssa.clone());
+                        if let Some(raw) = raw_ssa {
+                            self.symbol_fixnum_raw_table.insert(var.clone(), raw.clone());
+                        } else {
+                            self.symbol_fixnum_raw_table.remove(var);
+                        }
                     }
                 }
 
@@ -6427,6 +7275,7 @@ impl StackMLIRCodegen {
                 }
 
                 self.restore_let_scope(saved_symbols, &bound_vars);
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
                 Ok(())
             }
 
@@ -6443,6 +7292,7 @@ impl StackMLIRCodegen {
                 }
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
@@ -6454,12 +7304,18 @@ impl StackMLIRCodegen {
 
                 // Evaluate and bind each variable in sequence
                 for (var, value) in bindings {
-                    self.compile_expr(value)?;
-                    let val_ssa = self.fresh_ssa();
-                    self.writeln(&format!(
-                        "{} = func.call @stack_pop_pointer() : () -> i64",
-                        val_ssa
-                    ));
+                    let raw_ssa = if Self::compile_target_is_aot()
+                        && self.ast_is_fixnum_raw_compilable(value)
+                    {
+                        Some(self.compile_fixnum_raw_ssa(value)?)
+                    } else {
+                        None
+                    };
+                    let val_ssa = if let Some(raw) = raw_ssa.as_ref() {
+                        self.emit_box_fixnum_raw(raw)
+                    } else {
+                        self.compile_expr_as_ssa(value)?
+                    };
 
                     // Special variables are dynamically bound and must not be treated as lexical SSA locals.
                     let is_decl_special = declared_specials.contains(var)
@@ -6495,6 +7351,11 @@ impl StackMLIRCodegen {
                         special_bindings.push((sym_ssa, old_val));
                     } else {
                         self.symbol_table.insert(var.clone(), val_ssa.clone());
+                        if let Some(raw) = raw_ssa {
+                            self.symbol_fixnum_raw_table.insert(var.clone(), raw);
+                        } else {
+                            self.symbol_fixnum_raw_table.remove(var);
+                        }
                     }
                 }
 
@@ -6543,6 +7404,7 @@ impl StackMLIRCodegen {
                 }
 
                 self.restore_let_scope(saved_symbols, &bound_vars);
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
                 Ok(())
             }
 
@@ -6944,6 +7806,7 @@ impl StackMLIRCodegen {
             } => {
                 // Save current symbol table
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
 
                 // Find variables that are modified via setq in the loop body
                 let mut modified_vars = HashSet::new();
@@ -6956,14 +7819,14 @@ impl StackMLIRCodegen {
                     .filter(|v| saved_symbols.contains_key(*v))
                     .cloned()
                     .collect();
+                let raw_loop_carried_vars: Vec<String> = loop_carried_vars
+                    .iter()
+                    .filter(|v| saved_fixnum_raw.contains_key(*v))
+                    .filter(|v| body.iter().all(|expr| self.loop_assignment_keeps_raw(v, expr)))
+                    .cloned()
+                    .collect();
 
-                // Evaluate count expression
-                self.compile_expr(count)?;
-                let count_boxed = self.fresh_ssa();
-                self.writeln(&format!(
-                    "{} = func.call @stack_pop_pointer() : () -> i64",
-                    count_boxed
-                ));
+                let count_boxed = self.compile_expr_as_ssa(count)?;
                 let count_val = self.fresh_ssa();
                 self.writeln(&format!(
                     "{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64",
@@ -6981,9 +7844,15 @@ impl StackMLIRCodegen {
                 for var_name in &loop_carried_vars {
                     initial_values.push(saved_symbols.get(var_name).unwrap().clone());
                 }
+                for var_name in &raw_loop_carried_vars {
+                    initial_values.push(saved_fixnum_raw.get(var_name).unwrap().clone());
+                }
 
                 // Create loop using scf.while with loop-carried variables
-                let num_results = 1 + loop_carried_vars.len();
+                let tagged_loop_value_count = loop_carried_vars.len();
+                let raw_loop_value_count = raw_loop_carried_vars.len();
+                let raw_loop_value_offset = 1 + tagged_loop_value_count;
+                let num_results = 1 + tagged_loop_value_count + raw_loop_value_count;
                 let final_results = self.fresh_ssa();
 
                 // Build type signature
@@ -7052,11 +7921,21 @@ impl StackMLIRCodegen {
                     loop_var_boxed, loop_var
                 ));
                 self.symbol_table.insert(var.clone(), loop_var_boxed);
+                self.symbol_fixnum_raw_table.insert(var.clone(), loop_var.clone());
 
                 // Bind loop-carried variables
+                let raw_loop_carried_set: HashSet<String> =
+                    raw_loop_carried_vars.iter().cloned().collect();
                 for (i, var_name) in loop_carried_vars.iter().enumerate() {
                     self.symbol_table
                         .insert(var_name.clone(), block_args[i + 1].clone());
+                    if !raw_loop_carried_set.contains(var_name) {
+                        self.symbol_fixnum_raw_table.remove(var_name);
+                    }
+                }
+                for (i, var_name) in raw_loop_carried_vars.iter().enumerate() {
+                    self.symbol_fixnum_raw_table
+                        .insert(var_name.clone(), block_args[raw_loop_value_offset + i].clone());
                 }
 
                 // Set loop context for conditional compilation
@@ -7102,6 +7981,24 @@ impl StackMLIRCodegen {
                         yield_values.push(block_args[i + 1].clone());
                     }
                 }
+                for (i, var_name) in raw_loop_carried_vars.iter().enumerate() {
+                    if body_error.is_none() {
+                        if let Some(raw_value) = self.symbol_fixnum_raw_table.get(var_name) {
+                            yield_values.push(raw_value.clone());
+                        } else if let Some(boxed_value) = self.symbol_table.get(var_name).cloned() {
+                            let unboxed_value = self.fresh_ssa();
+                            self.writeln(&format!(
+                                "{} = func.call @cc_unbox_fixnum({}) : (i64) -> i64",
+                                unboxed_value, boxed_value
+                            ));
+                            yield_values.push(unboxed_value);
+                        } else {
+                            yield_values.push(block_args[raw_loop_value_offset + i].clone());
+                        }
+                    } else {
+                        yield_values.push(block_args[raw_loop_value_offset + i].clone());
+                    }
+                }
 
                 // Always write scf.yield to close the loop properly
                 self.writeln(&format!(
@@ -7119,6 +8016,12 @@ impl StackMLIRCodegen {
                     self.symbol_table
                         .insert(var_name.clone(), format!("{}#{}", final_results, i + 1));
                 }
+                for (i, var_name) in raw_loop_carried_vars.iter().enumerate() {
+                    self.symbol_fixnum_raw_table.insert(
+                        var_name.clone(),
+                        format!("{}#{}", final_results, raw_loop_value_offset + i),
+                    );
+                }
 
                 // Evaluate result form (or nil)
                 if let Some(result_expr) = result {
@@ -7132,6 +8035,19 @@ impl StackMLIRCodegen {
                     if !loop_carried_vars.contains(var_name) {
                         self.symbol_table.insert(var_name.clone(), var_val.clone());
                     }
+                }
+                let final_raw_loop_values: Vec<(String, String)> = raw_loop_carried_vars
+                    .iter()
+                    .filter_map(|var_name| {
+                        self.symbol_fixnum_raw_table
+                            .get(var_name)
+                            .cloned()
+                            .map(|raw| (var_name.clone(), raw))
+                    })
+                    .collect();
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
+                for (var_name, raw_val) in final_raw_loop_values {
+                    self.symbol_fixnum_raw_table.insert(var_name, raw_val);
                 }
                 Ok(())
             }
@@ -8748,10 +9664,13 @@ impl StackMLIRCodegen {
             ASTNode::Block { body, .. } => body
                 .iter()
                 .any(|expr| Self::ast_contains_named_call(expr, targets)),
-            ASTNode::ReturnFrom { value, .. } => value
-                .as_ref()
-                .map(|expr| Self::ast_contains_named_call(expr, targets))
-                .unwrap_or(false),
+            ASTNode::ReturnFrom { value, .. } => {
+                targets.iter().any(|target| *target == "return-from")
+                    || value
+                        .as_ref()
+                        .map(|expr| Self::ast_contains_named_call(expr, targets))
+                        .unwrap_or(false)
+            }
             ASTNode::Dotimes {
                 count,
                 result,
@@ -9512,6 +10431,7 @@ impl StackMLIRCodegen {
         }
 
         let saved_symbols = self.symbol_table.clone();
+        let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
         let mut modified_vars = HashSet::new();
         for form in forms {
             modified_vars.extend(self.find_setq_vars(form));
@@ -9533,9 +10453,11 @@ impl StackMLIRCodegen {
         self.writeln(&format!("{} = func.call @cc_nil_value() : () -> i64", acc));
         for expr in forms {
             self.symbol_table = saved_symbols.clone();
+            self.symbol_fixnum_raw_table = saved_fixnum_raw.clone();
             for (idx, var_name) in vars_to_return.iter().enumerate() {
                 self.symbol_table
                     .insert(var_name.clone(), carried_values[idx].clone());
+                self.symbol_fixnum_raw_table.remove(var_name);
             }
             let nil_val = self.fresh_ssa();
             self.writeln(&format!(
@@ -9576,6 +10498,10 @@ impl StackMLIRCodegen {
             self.dedent();
             self.writeln("} else {");
             self.indent();
+            self.symbol_fixnum_raw_table = saved_fixnum_raw.clone();
+            for var_name in &vars_to_return {
+                self.symbol_fixnum_raw_table.remove(var_name);
+            }
             let compile_result = self.compile_expr(expr);
             if compile_result.is_ok() {
                 let step_val = self.fresh_ssa();
@@ -9616,6 +10542,7 @@ impl StackMLIRCodegen {
             self.writeln("}");
             compile_result?;
             self.symbol_table = saved_symbols.clone();
+            self.symbol_fixnum_raw_table = saved_fixnum_raw.clone();
             if vars_to_return.is_empty() {
                 acc = next_acc;
             } else {
@@ -9628,13 +10555,16 @@ impl StackMLIRCodegen {
                 for (idx, var_name) in vars_to_return.iter().enumerate() {
                     self.symbol_table
                         .insert(var_name.clone(), carried_values[idx].clone());
+                    self.symbol_fixnum_raw_table.remove(var_name);
                 }
             }
         }
         self.symbol_table = saved_symbols;
+        self.symbol_fixnum_raw_table = saved_fixnum_raw;
         for (idx, var_name) in vars_to_return.iter().enumerate() {
             self.symbol_table
                 .insert(var_name.clone(), carried_values[idx].clone());
+            self.symbol_fixnum_raw_table.remove(var_name);
         }
         self.writeln(&format!(
             "func.call @stack_push_pointer({}) : (i64) -> ()",
@@ -10957,6 +11887,27 @@ impl StackMLIRCodegen {
                         // Track this function so we can call it directly
                         self.compiled_functions.insert(fn_name.clone());
                         self.emitted_functions.insert(fn_name.clone());
+                        let simple_required_params = defaults.is_empty()
+                            && supplied_p_vars.is_empty()
+                            && key_params.is_empty()
+                            && params
+                                .iter()
+                                .all(|param| !Self::is_lambda_list_marker_name(param));
+                        let inline_target_base = raw_fn_name
+                            .rsplit(':')
+                            .next()
+                            .unwrap_or(raw_fn_name.as_str())
+                            .to_ascii_lowercase();
+                        let is_self_recursive =
+                            Self::ast_contains_named_call(&body, &[inline_target_base.as_str()]);
+                        if simple_required_params
+                            && !self.emit_runtime_debug_frames
+                            && !Self::ast_contains_named_call(&body, &["return-from"])
+                            && !is_self_recursive
+                        {
+                            self.compiled_function_inline_map
+                                .insert(fn_name.clone(), (params.clone(), body.clone()));
+                        }
                         let debug_lambda_params: Vec<String> = params
                             .iter()
                             .filter(|p| !Self::is_lambda_list_marker_name(p))
@@ -11002,25 +11953,14 @@ impl StackMLIRCodegen {
                         // lambda object in the current runtime instead of leaving an
                         // unresolved %FN% reference behind.
                         debug_println!("[defun] Failed to compile {}: {}", fn_name, e);
-                        let lambda_ast = ASTNode::Lambda {
-                            params: params.clone(),
-                            defaults: defaults.clone(),
-                            supplied_p_vars: supplied_p_vars.clone(),
-                            key_params: key_params.clone(),
-                            body: vec![body.clone()],
-                        };
-                        self.compile_expr(&lambda_ast)?;
-                        let lambda_value = self.fresh_ssa();
-                        self.writeln(&format!(
-                            "{} = func.call @stack_pop_pointer() : () -> i64",
-                            lambda_value
-                        ));
-                        let name_sym = self.create_symbol_constant(&raw_fn_name);
-                        let _set_value = self.fresh_ssa();
-                        self.writeln(&format!(
-                            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
-                            _set_value, name_sym, lambda_value
-                        ));
+                        self.compile_defun_lambda_fallback(
+                            &raw_fn_name,
+                            &params,
+                            &defaults,
+                            &supplied_p_vars,
+                            &key_params,
+                            &body,
+                        )?;
                     }
                 }
 
@@ -14083,9 +15023,7 @@ impl StackMLIRCodegen {
             // Unary increment/decrement are hot in numeric recursion (e.g. factorial).
             "1+" | "1-" => {
                 if args.len() == 1 {
-                    self.compile_expr(&args[0])?;
-                    let value = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", value));
+                    let value = self.compile_expr_as_ssa(&args[0])?;
 
                     let one_fix = self.fresh_ssa();
                     self.writeln(&format!("{} = arith.constant 1 : i64", one_fix));
@@ -14122,14 +15060,10 @@ impl StackMLIRCodegen {
                     return self.compile_user_function_call(base_name, args);
                 }
 
-                self.compile_expr(&args[0])?;
-                let mut acc = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+                let mut acc = self.compile_expr_as_ssa(&args[0])?;
 
                 for arg in &args[1..] {
-                    self.compile_expr(arg)?;
-                    let rhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let rhs = self.compile_expr_as_ssa(arg)?;
                     let next = self.emit_fast_fixnum_add_sub(&acc, &rhs, "@cc_add", true);
                     acc = next;
                 }
@@ -14151,14 +15085,10 @@ impl StackMLIRCodegen {
                     return Ok(());
                 }
 
-                self.compile_expr(&args[0])?;
-                let mut acc = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+                let mut acc = self.compile_expr_as_ssa(&args[0])?;
 
                 for arg in &args[1..] {
-                    self.compile_expr(arg)?;
-                    let rhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let rhs = self.compile_expr_as_ssa(arg)?;
                     let next = self.emit_fast_fixnum_mul(&acc, &rhs);
                     acc = next;
                 }
@@ -14173,9 +15103,7 @@ impl StackMLIRCodegen {
                     return self.compile_user_function_call(base_name, args);
                 }
 
-                self.compile_expr(&args[0])?;
-                let mut acc = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", acc));
+                let mut acc = self.compile_expr_as_ssa(&args[0])?;
 
                 if args.len() == 1 {
                     let seed_val = self.fresh_ssa();
@@ -14194,9 +15122,7 @@ impl StackMLIRCodegen {
                 }
 
                 for arg in &args[1..] {
-                    self.compile_expr(arg)?;
-                    let rhs = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", rhs));
+                    let rhs = self.compile_expr_as_ssa(arg)?;
                     let next = self.emit_fast_fixnum_add_sub(&acc, &rhs, "@cc_sub", false);
                     acc = next;
                 }
@@ -15104,27 +16030,41 @@ impl StackMLIRCodegen {
                     return Ok(());
                 }
 
-                let mut assignments: Vec<(String, String)> = Vec::new();
+                let mut assignments: Vec<(String, String, Option<String>)> = Vec::new();
                 for i in (0..args.len()).step_by(2) {
                     let var = match &args[i] {
                         ASTNode::Variable(v) => v.clone(),
                         _ => anyhow::bail!("psetq requires symbol variables"),
                     };
-                    self.compile_expr(&args[i + 1])?;
-                    let value_ssa = self.fresh_ssa();
-                    self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", value_ssa));
-                    assignments.push((var, value_ssa));
+                    let (value_ssa, raw_ssa) =
+                        if Self::compile_target_is_aot()
+                            && self.ast_is_fixnum_raw_compilable(&args[i + 1])
+                        {
+                            let raw = self.compile_fixnum_raw_ssa(&args[i + 1])?;
+                            let boxed = self.emit_box_fixnum_raw(&raw);
+                            (boxed, Some(raw))
+                        } else {
+                            (self.compile_expr_as_ssa(&args[i + 1])?, None)
+                        };
+                    assignments.push((var, value_ssa, raw_ssa));
                 }
 
-                for (var, value_ssa) in assignments {
+                for (var, value_ssa, raw_ssa) in assignments {
                     if let Some(var_sym) = self.dynamic_capture_symbol_for_var(&var) {
                         let _set = self.fresh_ssa();
                         self.writeln(&format!(
                             "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
                             _set, var_sym, value_ssa
                         ));
+                        self.symbol_fixnum_raw_table.remove(&var);
                     } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(&var) {
-                        self.symbol_table.insert(bound_key, value_ssa);
+                        self.symbol_table.insert(bound_key.clone(), value_ssa);
+                        if let Some(raw) = raw_ssa {
+                            self.symbol_fixnum_raw_table.insert(bound_key, raw);
+                        } else {
+                            self.symbol_fixnum_raw_table.remove(&bound_key);
+                            self.symbol_fixnum_raw_table.remove(&var);
+                        }
                     } else {
                         let var_sym = self.create_symbol_constant(&var);
                         let _set = self.fresh_ssa();
@@ -15132,6 +16072,7 @@ impl StackMLIRCodegen {
                             "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
                             _set, var_sym, value_ssa
                         ));
+                        self.symbol_fixnum_raw_table.remove(&var);
                     }
                 }
 
@@ -15385,10 +16326,18 @@ impl StackMLIRCodegen {
                     match place {
                         // Simple variable: (setf x value) or (setq x value)
                         ASTNode::Variable(var) => {
-                            // Evaluate value
-                            self.compile_expr(value)?;
-                            let val_ssa = self.fresh_ssa();
-                            self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", val_ssa));
+                            let raw_ssa = if Self::compile_target_is_aot()
+                                && self.ast_is_fixnum_raw_compilable(value)
+                            {
+                                Some(self.compile_fixnum_raw_ssa(value)?)
+                            } else {
+                                None
+                            };
+                            let val_ssa = if let Some(raw) = raw_ssa.as_ref() {
+                                self.emit_box_fixnum_raw(raw)
+                            } else {
+                                self.compile_expr_as_ssa(value)?
+                            };
 
                             // Check if this is a local variable (in symbol table)
                             if let Some(var_sym) = self.dynamic_capture_symbol_for_var(var) {
@@ -15399,9 +16348,17 @@ impl StackMLIRCodegen {
                                 ));
                             } else if let Some(bound_key) = self.symbol_table_lookup_key_ci(var) {
                                 // Update local symbol table
+                                let raw_key = bound_key.clone();
                                 self.symbol_table.insert(bound_key, val_ssa.clone());
+                                if let Some(raw) = raw_ssa {
+                                    self.symbol_fixnum_raw_table.insert(raw_key, raw);
+                                } else {
+                                    self.symbol_fixnum_raw_table.remove(&raw_key);
+                                    self.symbol_fixnum_raw_table.remove(var);
+                                }
                             } else {
                                 // Global/special variable - call cc_set_symbol_value
+                                self.symbol_fixnum_raw_table.remove(var);
                                 let var_sym = self.create_symbol_constant(var);
                                 let _result = self.fresh_ssa();
                                 self.writeln(&format!("{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
@@ -17680,6 +18637,7 @@ impl StackMLIRCodegen {
                 // Preserve the outer scope bindings; region-local SSA names from scf.while
                 // must not leak outside the while expression.
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
 
                 // Collect all variables that might be modified in test or body
                 // by scanning for setq/setf targets
@@ -17856,6 +18814,7 @@ impl StackMLIRCodegen {
                 // Map loop arg names to symbol table for condition evaluation
                 for (i, var) in loop_carried_vars.iter().enumerate() {
                     self.symbol_table.insert(var.clone(), format!("%arg{}", i));
+                    self.symbol_fixnum_raw_table.remove(var);
                 }
 
                 // Evaluate condition
@@ -17905,6 +18864,7 @@ impl StackMLIRCodegen {
                 // Bind loop-carried variables
                 for (i, var) in loop_carried_vars.iter().enumerate() {
                     self.symbol_table.insert(var.clone(), block_args[i].clone());
+                    self.symbol_fixnum_raw_table.remove(var);
                 }
 
                 // Set loop context so nested constructs preserve loop-carried variables
@@ -17936,8 +18896,10 @@ impl StackMLIRCodegen {
 
                 // Restore outer scope first, then publish carried loop results.
                 self.symbol_table = saved_symbols;
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
                 for (i, var) in loop_carried_vars.iter().enumerate() {
                     self.symbol_table.insert(var.clone(), format!("{}#{}", while_results, i));
+                    self.symbol_fixnum_raw_table.remove(var);
                 }
 
                 // while returns nil
@@ -18808,12 +19770,8 @@ impl StackMLIRCodegen {
                 if args.len() != 2 {
                     anyhow::bail!("mod requires exactly 2 arguments");
                 }
-                self.compile_expr(&args[0])?;
-                self.compile_expr(&args[1])?;
-                let divisor = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", divisor));
-                let dividend = self.fresh_ssa();
-                self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", dividend));
+                let dividend = self.compile_expr_as_ssa(&args[0])?;
+                let divisor = self.compile_expr_as_ssa(&args[1])?;
                 let result = self.emit_fast_fixnum_mod(&dividend, &divisor);
                 self.writeln(&format!("func.call @stack_push_pointer({}) : (i64) -> ()", result));
                 Ok(())
@@ -20449,7 +21407,12 @@ impl StackMLIRCodegen {
                 Ok(())
             }
 
-            "single-float-to-bits" | "double-float-to-bits" => {
+            "single-float-to-bits"
+            | "double-float-to-bits"
+            | "bits-to-single-float"
+            | "single-float-from-bits"
+            | "bits-to-double-float"
+            | "double-float-from-bits" => {
                 if args.len() != 1 {
                     anyhow::bail!("{} requires exactly 1 argument", func_name);
                 }
@@ -20457,10 +21420,14 @@ impl StackMLIRCodegen {
                 let arg = self.fresh_ssa();
                 self.writeln(&format!("{} = func.call @stack_pop_pointer() : () -> i64", arg));
                 let result = self.fresh_ssa();
-                let runtime_name = if base_name.eq_ignore_ascii_case("single-float-to-bits") {
-                    "cc_single_float_to_bits"
-                } else {
-                    "cc_double_float_to_bits"
+                let runtime_name = match base_name.to_ascii_lowercase().as_str() {
+                    "single-float-to-bits" => "cc_single_float_to_bits",
+                    "double-float-to-bits" => "cc_double_float_to_bits",
+                    "bits-to-single-float" | "single-float-from-bits" => {
+                        "cc_bits_to_single_float"
+                    }
+                    "bits-to-double-float" | "double-float-from-bits" => "cc_bits_to_double_float",
+                    _ => unreachable!(),
                 };
                 self.writeln(&format!(
                     "{} = func.call @{}({}) : (i64) -> i64",
@@ -20909,12 +21876,13 @@ impl StackMLIRCodegen {
         // Check if this is a local function (from flet/labels). Use
         // case/base-insensitive lookup because CL symbol names can arrive in
         // reader case, printer case, or package-qualified form.
-        let actual_func_name = self
-            .local_function_target_lookup_ci(base_name)
+        let local_function_target = self.local_function_target_lookup_ci(base_name);
+        let actual_func_name = local_function_target
+            .clone()
             .unwrap_or_else(|| base_name.to_string());
         let is_generic_function = self.generic_functions.contains(&actual_func_name);
         let local_fixed_arity =
-            if self.local_function_target_lookup_ci(base_name).is_some() && !is_generic_function {
+            if local_function_target.is_some() && !is_generic_function {
                 self.local_function_fixed_arity_map
                     .get(&actual_func_name)
                     .copied()
@@ -20924,7 +21892,7 @@ impl StackMLIRCodegen {
         let local_fixed_arity_mismatch = local_fixed_arity
             .map(|arity| arity != args.len())
             .unwrap_or(false);
-        let is_direct_local_call = self.local_function_target_lookup_ci(base_name).is_some()
+        let is_direct_local_call = local_function_target.is_some()
             && !is_generic_function
             && self
                 .local_function_fixed_arity_map
@@ -20932,13 +21900,9 @@ impl StackMLIRCodegen {
                 .copied()
                 == Some(args.len());
         let prefixed_func_name = format!("%FN%{}", actual_func_name);
-        let direct_compiled_target = if self.compiled_functions.contains(&actual_func_name) {
-            Some(actual_func_name.clone())
-        } else if self.compiled_functions.contains(&prefixed_func_name) {
-            Some(prefixed_func_name.clone())
-        } else {
-            None
-        };
+        let direct_compiled_target = self
+            .compiled_function_lookup_ci(&actual_func_name)
+            .or_else(|| self.compiled_function_lookup_ci(&prefixed_func_name));
         let func_name_lc = actual_func_name.to_ascii_lowercase();
         let bridge_sensitive_runtime_dispatch = matches!(
             func_name_lc.as_str(),
@@ -20983,13 +21947,16 @@ impl StackMLIRCodegen {
         let can_direct_compiled_call = direct_compiled_target.is_some()
             && !is_generic_function
             && !requires_trampoline
-            && !self.special_param_functions.contains(&actual_func_name)
-            && !self.special_param_functions.contains(&prefixed_func_name);
-        // Global Lisp functions must remain late-bound to preserve CL redefinition semantics
-        // across separately loaded artifacts. Only lexical local fixed-arity calls may be
-        // direct-called safely; everything else must route through cc_funcall_stack lookup.
+            && !self.special_param_function_contains_ci(&actual_func_name)
+            && !self.special_param_function_contains_ci(&prefixed_func_name);
+        // In native AOT, all functions in the artifact are fixed at link time.
+        // Direct-call them to avoid paying dynamic funcall lookup in hot loops.
+        // Non-AOT modes keep late-bound dispatch so separately loaded code can
+        // observe CL redefinitions.
         let can_direct_compiled_call =
-            false && can_direct_compiled_call && !bridge_sensitive_runtime_dispatch;
+            can_direct_compiled_call
+                && !bridge_sensitive_runtime_dispatch
+                && Self::compile_target_is_aot();
         let can_direct_local_call = is_direct_local_call && !requires_trampoline;
         let propagate_arg_errors_env = std::env::var("RLASP_MLIR_PROPAGATE_ARG_ERRORS")
             .map(|v| {
@@ -21058,15 +22025,38 @@ impl StackMLIRCodegen {
         // Evaluate arguments left-to-right and materialize them as SSA values first.
         // If any argument is an error object, propagate it instead of invoking callee.
         let mut arg_vals: Vec<String> = Vec::with_capacity(args.len());
+        let mut arg_raw_vals: Vec<Option<String>> = Vec::with_capacity(args.len());
         for arg in args {
-            self.compile_expr(arg)?;
-            let arg_ssa = self.fresh_ssa();
-            self.writeln(&format!(
-                "{} = func.call @stack_pop_pointer() : () -> i64",
-                arg_ssa
-            ));
-            arg_vals.push(arg_ssa);
+            if Self::compile_target_is_aot() && self.ast_is_fixnum_raw_compilable(arg) {
+                let raw = self.compile_fixnum_raw_ssa(arg)?;
+                let boxed = self.emit_box_fixnum_raw(&raw);
+                arg_vals.push(boxed);
+                arg_raw_vals.push(Some(raw));
+            } else {
+                arg_vals.push(self.compile_expr_as_ssa(arg)?);
+                arg_raw_vals.push(None);
+            }
         }
+        let can_emit_raw_gcd_euclid = Self::compile_target_is_aot()
+            && args.len() == 2
+            && direct_compiled_target.is_some()
+            && func_name_lc == "gcd-euclid";
+        let inline_target = if can_direct_compiled_call && local_function_target.is_none() {
+            direct_compiled_target.as_ref().and_then(|target| {
+                let is_self_call = self
+                    .current_function_name
+                    .as_ref()
+                    .map(|current| current == target)
+                    .unwrap_or(false);
+                if is_self_call {
+                    None
+                } else {
+                    self.compiled_function_inline_map.get(target).cloned()
+                }
+            })
+        } else {
+            None
+        };
 
         if local_fixed_arity_mismatch {
             let expected = local_fixed_arity.unwrap_or(0);
@@ -21148,25 +22138,89 @@ impl StackMLIRCodegen {
             self.indent();
 
             let effective_num_args = args.len();
-            for arg_ssa in &arg_vals {
+            if can_emit_raw_gcd_euclid {
+                let result = self.emit_raw_gcd_euclid_boxed(
+                    &arg_vals[0],
+                    &arg_vals[1],
+                    arg_raw_vals[0].as_deref(),
+                    arg_raw_vals[1].as_deref(),
+                );
                 self.writeln(&format!(
                     "func.call @stack_push_pointer({}) : (i64) -> ()",
-                    arg_ssa
+                    result
                 ));
+            } else if let Some((inline_params, inline_body)) = inline_target.as_ref() {
+                let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
+                for ((param, arg_ssa), raw_ssa) in inline_params
+                    .iter()
+                    .zip(arg_vals.iter())
+                    .zip(arg_raw_vals.iter())
+                {
+                    self.symbol_table.insert(param.clone(), arg_ssa.clone());
+                    if let Some(raw) = raw_ssa {
+                        self.symbol_fixnum_raw_table
+                            .insert(param.clone(), raw.clone());
+                    } else {
+                        self.symbol_fixnum_raw_table.remove(param);
+                    }
+                }
+                self.compile_expr(inline_body)?;
+                self.symbol_table = saved_symbols;
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
+            } else {
+                for arg_ssa in &arg_vals {
+                    self.writeln(&format!(
+                        "func.call @stack_push_pointer({}) : (i64) -> ()",
+                        arg_ssa
+                    ));
+                }
+                emit_call(self, effective_num_args);
             }
-            emit_call(self, effective_num_args);
 
             self.dedent();
             self.writeln("}");
         } else {
             let effective_num_args = args.len();
-            for arg_ssa in &arg_vals {
+            if can_emit_raw_gcd_euclid {
+                let result = self.emit_raw_gcd_euclid_boxed(
+                    &arg_vals[0],
+                    &arg_vals[1],
+                    arg_raw_vals[0].as_deref(),
+                    arg_raw_vals[1].as_deref(),
+                );
                 self.writeln(&format!(
                     "func.call @stack_push_pointer({}) : (i64) -> ()",
-                    arg_ssa
+                    result
                 ));
+            } else if let Some((inline_params, inline_body)) = inline_target.as_ref() {
+                let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
+                for ((param, arg_ssa), raw_ssa) in inline_params
+                    .iter()
+                    .zip(arg_vals.iter())
+                    .zip(arg_raw_vals.iter())
+                {
+                    self.symbol_table.insert(param.clone(), arg_ssa.clone());
+                    if let Some(raw) = raw_ssa {
+                        self.symbol_fixnum_raw_table
+                            .insert(param.clone(), raw.clone());
+                    } else {
+                        self.symbol_fixnum_raw_table.remove(param);
+                    }
+                }
+                self.compile_expr(inline_body)?;
+                self.symbol_table = saved_symbols;
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
+            } else {
+                for arg_ssa in &arg_vals {
+                    self.writeln(&format!(
+                        "func.call @stack_push_pointer({}) : (i64) -> ()",
+                        arg_ssa
+                    ));
+                }
+                emit_call(self, effective_num_args);
             }
-            emit_call(self, effective_num_args);
         }
         Ok(())
     }
@@ -21664,6 +22718,7 @@ impl StackMLIRCodegen {
                     return self.compile_eval_of_original_ast(ast);
                 }
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
@@ -21674,17 +22729,24 @@ impl StackMLIRCodegen {
                     self.collect_lambda_captured_let_bases(body_forms, &bound_vars);
 
                 let mut binding_ssas = Vec::new();
+                let mut binding_raw_ssas = Vec::new();
                 for (_var, value) in bindings {
-                    self.compile_expr(value)?;
-                    let val_ssa = self.fresh_ssa();
-                    self.writeln(&format!(
-                        "{} = func.call @stack_pop_pointer() : () -> i64",
-                        val_ssa
-                    ));
-                    binding_ssas.push(val_ssa);
+                    if Self::compile_target_is_aot() && self.ast_is_fixnum_raw_compilable(value) {
+                        let raw = self.compile_fixnum_raw_ssa(value)?;
+                        let boxed = self.emit_box_fixnum_raw(&raw);
+                        binding_ssas.push(boxed);
+                        binding_raw_ssas.push(Some(raw));
+                    } else {
+                        binding_ssas.push(self.compile_expr_as_ssa(value)?);
+                        binding_raw_ssas.push(None);
+                    }
                 }
 
-                for ((var, _), val_ssa) in bindings.iter().zip(binding_ssas.iter()) {
+                for (((var, _), val_ssa), raw_ssa) in bindings
+                    .iter()
+                    .zip(binding_ssas.iter())
+                    .zip(binding_raw_ssas.iter())
+                {
                     let is_decl_special = declared_specials.contains(var)
                         || declared_specials.contains(&var.to_ascii_uppercase())
                         || declared_specials.contains(&var.to_ascii_lowercase());
@@ -21715,6 +22777,11 @@ impl StackMLIRCodegen {
                         special_bindings.push((sym_ssa, old_val));
                     } else {
                         self.symbol_table.insert(var.clone(), val_ssa.clone());
+                        if let Some(raw) = raw_ssa {
+                            self.symbol_fixnum_raw_table.insert(var.clone(), raw.clone());
+                        } else {
+                            self.symbol_fixnum_raw_table.remove(var);
+                        }
                     }
                 }
 
@@ -21761,6 +22828,7 @@ impl StackMLIRCodegen {
                 }
 
                 self.restore_let_scope(saved_symbols, &bound_vars);
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
                 Ok(())
             }
             ASTNode::LetStar { bindings, body } => {
@@ -21768,6 +22836,7 @@ impl StackMLIRCodegen {
                     return self.compile_eval_of_original_ast(ast);
                 }
                 let saved_symbols = self.symbol_table.clone();
+                let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
                 let bound_vars: HashSet<String> =
                     bindings.iter().map(|(var, _)| var.clone()).collect();
                 let mut special_bindings: Vec<(String, String)> = Vec::new();
@@ -21778,12 +22847,18 @@ impl StackMLIRCodegen {
                     self.collect_lambda_captured_let_bases(body_forms, &bound_vars);
 
                 for (var, value) in bindings {
-                    self.compile_expr(value)?;
-                    let val_ssa = self.fresh_ssa();
-                    self.writeln(&format!(
-                        "{} = func.call @stack_pop_pointer() : () -> i64",
-                        val_ssa
-                    ));
+                    let raw_ssa = if Self::compile_target_is_aot()
+                        && self.ast_is_fixnum_raw_compilable(value)
+                    {
+                        Some(self.compile_fixnum_raw_ssa(value)?)
+                    } else {
+                        None
+                    };
+                    let val_ssa = if let Some(raw) = raw_ssa.as_ref() {
+                        self.emit_box_fixnum_raw(raw)
+                    } else {
+                        self.compile_expr_as_ssa(value)?
+                    };
                     let is_decl_special = declared_specials.contains(var)
                         || declared_specials.contains(&var.to_ascii_uppercase())
                         || declared_specials.contains(&var.to_ascii_lowercase());
@@ -21814,6 +22889,11 @@ impl StackMLIRCodegen {
                         special_bindings.push((sym_ssa, old_val));
                     } else {
                         self.symbol_table.insert(var.clone(), val_ssa.clone());
+                        if let Some(raw) = raw_ssa {
+                            self.symbol_fixnum_raw_table.insert(var.clone(), raw);
+                        } else {
+                            self.symbol_fixnum_raw_table.remove(var);
+                        }
                     }
                 }
 
@@ -21860,6 +22940,7 @@ impl StackMLIRCodegen {
                 }
 
                 self.restore_let_scope(saved_symbols, &bound_vars);
+                self.symbol_fixnum_raw_table = saved_fixnum_raw;
                 Ok(())
             }
             ASTNode::Block { name, body } => {
@@ -22301,6 +23382,54 @@ impl StackMLIRCodegen {
 
     /// Compile a function definition - stack-based convention
     /// Fixed-arity functions take no parameters, access args from stack
+    pub fn compile_defun_lambda_fallback(
+        &mut self,
+        raw_fn_name: &str,
+        params: &[String],
+        defaults: &HashMap<String, ASTNode>,
+        supplied_p_vars: &HashMap<String, String>,
+        key_params: &HashMap<String, String>,
+        body: &ASTNode,
+    ) -> Result<()> {
+        let lambda_ast = ASTNode::Lambda {
+            params: params.to_vec(),
+            defaults: defaults.clone(),
+            supplied_p_vars: supplied_p_vars.clone(),
+            key_params: key_params.clone(),
+            body: vec![body.clone()],
+        };
+        self.compile_expr(&lambda_ast)?;
+        let lambda_value = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @stack_pop_pointer() : () -> i64",
+            lambda_value
+        ));
+        let name_sym = self.create_symbol_constant(raw_fn_name);
+        let _set_value = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_set_symbol_value({}, {}) : (i64, i64) -> i64",
+            _set_value, name_sym, lambda_value
+        ));
+        let bind_name_const = self.create_string_constant(raw_fn_name);
+        let bind_name_ptr = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = llvm.mlir.addressof {} : !llvm.ptr",
+            bind_name_ptr, bind_name_const
+        ));
+        let bind_name_len = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = arith.constant {} : i64",
+            bind_name_len,
+            raw_fn_name.len()
+        ));
+        let _bind_function = self.fresh_ssa();
+        self.writeln(&format!(
+            "{} = func.call @cc_bind_function_object_const({}, {}, {}) : (!llvm.ptr, i64, i64) -> i64",
+            _bind_function, bind_name_ptr, bind_name_len, lambda_value
+        ));
+        Ok(())
+    }
+
     pub fn compile_function(
         &mut self,
         name: &str,
@@ -22374,10 +23503,12 @@ impl StackMLIRCodegen {
 
         // Save and clear symbol table for this function scope
         let saved_symbols = self.symbol_table.clone();
+        let saved_fixnum_raw = self.symbol_fixnum_raw_table.clone();
         let saved_local_function_values = self.local_function_value_map.clone();
         let saved_current_function_name = self.current_function_name.clone();
         self.current_function_name = Some(name.to_string());
         self.symbol_table.clear();
+        self.symbol_fixnum_raw_table.clear();
         self.local_function_value_map.clear();
 
         let debug_frame_name = name.strip_prefix("%FN%").unwrap_or(name);
@@ -22436,16 +23567,19 @@ impl StackMLIRCodegen {
                 _reg_language, debug_frame_sym, language_obj
             ));
         }
-        let debug_arg_count = self.fresh_ssa();
-        self.writeln(&format!(
-            "{} = arith.constant {} : i64",
-            debug_arg_count,
-            debug_lambda_params.len()
-        ));
-        self.writeln(&format!(
-            "func.call @cc_runtime_debug_stack_push_call({}, {}) : (i64, i64) -> ()",
-            debug_frame_sym, debug_arg_count
-        ));
+        let emit_runtime_debug_frames = self.emit_runtime_debug_frames;
+        if emit_runtime_debug_frames {
+            let debug_arg_count = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = arith.constant {} : i64",
+                debug_arg_count,
+                debug_lambda_params.len()
+            ));
+            self.writeln(&format!(
+                "func.call @cc_runtime_debug_stack_push_call({}, {}) : (i64, i64) -> ()",
+                debug_frame_sym, debug_arg_count
+            ));
+        }
 
         if has_special_params {
             // For functions with &optional, &key, or supplied-p parameters:
@@ -22661,25 +23795,29 @@ impl StackMLIRCodegen {
             }
         }
 
+        let needs_implicit_function_block =
+            !Self::compile_target_is_aot() || Self::ast_contains_named_call(body, &["return-from"]);
         let implicit_block_name = name.strip_prefix("%FN%").unwrap_or(name).to_string();
         let implicit_block_id = self.fresh_id();
         let implicit_returned_var = format!("*__MLIR_BLOCK_RETFLAG_{}*", implicit_block_id);
         let implicit_value_var = format!("*__MLIR_BLOCK_RETVALUE_{}*", implicit_block_id);
         let implicit_mv_list_var = format!("*__MLIR_BLOCK_RETMVLIST_{}*", implicit_block_id);
-        let implicit_nil = self.fresh_ssa();
-        self.writeln(&format!(
-            "{} = func.call @cc_nil_value() : () -> i64",
-            implicit_nil
-        ));
-        self.emit_set_symbol_value_by_name(&implicit_returned_var, &implicit_nil);
-        self.emit_set_symbol_value_by_name(&implicit_value_var, &implicit_nil);
-        self.emit_set_symbol_value_by_name(&implicit_mv_list_var, &implicit_nil);
-        self.block_stack.push(BlockFrame {
-            name: Some(implicit_block_name),
-            returned_var: implicit_returned_var.clone(),
-            value_var: implicit_value_var.clone(),
-            mv_list_var: implicit_mv_list_var.clone(),
-        });
+        if needs_implicit_function_block {
+            let implicit_nil = self.fresh_ssa();
+            self.writeln(&format!(
+                "{} = func.call @cc_nil_value() : () -> i64",
+                implicit_nil
+            ));
+            self.emit_set_symbol_value_by_name(&implicit_returned_var, &implicit_nil);
+            self.emit_set_symbol_value_by_name(&implicit_value_var, &implicit_nil);
+            self.emit_set_symbol_value_by_name(&implicit_mv_list_var, &implicit_nil);
+            self.block_stack.push(BlockFrame {
+                name: Some(implicit_block_name),
+                returned_var: implicit_returned_var.clone(),
+                value_var: implicit_value_var.clone(),
+                mv_list_var: implicit_mv_list_var.clone(),
+            });
+        }
 
         // Compile function body - catch errors to ensure proper cleanup
         // Directly-invoked entry points are not called via cc_funcall_stack,
@@ -22721,53 +23859,63 @@ impl StackMLIRCodegen {
             self.compile_tail_expr(body)
         };
 
-        self.block_stack.pop();
+        if needs_implicit_function_block {
+            self.block_stack.pop();
+        }
         if compile_result.is_ok() {
             let normal_result = self.fresh_ssa();
             self.writeln(&format!(
                 "{} = func.call @stack_pop_pointer() : () -> i64",
                 normal_result
             ));
-            let normal_mv_list = self.fresh_ssa();
-            self.writeln(&format!(
-                "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
-                normal_mv_list, normal_result
-            ));
-            let returned_ssa = self.emit_get_symbol_value_by_name(&implicit_returned_var);
-            let return_mv_list_ssa = self.emit_get_symbol_value_by_name(&implicit_mv_list_var);
-            let nil_cmp = self.fresh_ssa();
-            self.writeln(&format!(
-                "{} = func.call @cc_nil_value() : () -> i64",
-                nil_cmp
-            ));
-            let has_return = self.fresh_ssa();
-            self.writeln(&format!(
-                "{} = arith.cmpi ne, {}, {} : i64",
-                has_return, returned_ssa, nil_cmp
-            ));
-            let selected_mv_list = self.fresh_ssa();
-            self.writeln(&format!("{} = scf.if {} -> (i64) {{", selected_mv_list, has_return));
-            self.indent();
-            self.writeln(&format!("scf.yield {} : i64", return_mv_list_ssa));
-            self.dedent();
-            self.writeln("} else {");
-            self.indent();
-            self.writeln(&format!("scf.yield {} : i64", normal_mv_list));
-            self.dedent();
-            self.writeln("}");
-            let function_result = self.fresh_ssa();
-            self.writeln(&format!(
-                "{} = func.call @cc_values_pack({}) : (i64) -> i64",
-                function_result, selected_mv_list
-            ));
-            self.writeln(&format!(
-                "func.call @stack_push_pointer({}) : (i64) -> ()",
-                function_result
-            ));
+            if needs_implicit_function_block {
+                let normal_mv_list = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_multiple_value_list({}) : (i64) -> i64",
+                    normal_mv_list, normal_result
+                ));
+                let returned_ssa = self.emit_get_symbol_value_by_name(&implicit_returned_var);
+                let return_mv_list_ssa = self.emit_get_symbol_value_by_name(&implicit_mv_list_var);
+                let nil_cmp = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_nil_value() : () -> i64",
+                    nil_cmp
+                ));
+                let has_return = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = arith.cmpi ne, {}, {} : i64",
+                    has_return, returned_ssa, nil_cmp
+                ));
+                let selected_mv_list = self.fresh_ssa();
+                self.writeln(&format!("{} = scf.if {} -> (i64) {{", selected_mv_list, has_return));
+                self.indent();
+                self.writeln(&format!("scf.yield {} : i64", return_mv_list_ssa));
+                self.dedent();
+                self.writeln("} else {");
+                self.indent();
+                self.writeln(&format!("scf.yield {} : i64", normal_mv_list));
+                self.dedent();
+                self.writeln("}");
+                let function_result = self.fresh_ssa();
+                self.writeln(&format!(
+                    "{} = func.call @cc_values_pack({}) : (i64) -> i64",
+                    function_result, selected_mv_list
+                ));
+                self.writeln(&format!(
+                    "func.call @stack_push_pointer({}) : (i64) -> ()",
+                    function_result
+                ));
+            } else {
+                self.writeln(&format!(
+                    "func.call @stack_push_pointer({}) : (i64) -> ()",
+                    normal_result
+                ));
+            }
         }
 
         // Always restore symbol table and close function properly
         self.symbol_table = saved_symbols;
+        self.symbol_fixnum_raw_table = saved_fixnum_raw;
         self.local_function_value_map = saved_local_function_values;
         self.current_function_name = saved_current_function_name;
 
@@ -22779,7 +23927,9 @@ impl StackMLIRCodegen {
             self.writeln("func.call @stack_push_nil() : () -> ()");
         }
 
-        self.writeln("func.call @cc_runtime_debug_stack_pop_name() : () -> ()");
+        if emit_runtime_debug_frames {
+            self.writeln("func.call @cc_runtime_debug_stack_pop_name() : () -> ()");
+        }
 
         // Result is on stack, function returns nothing
         self.writeln("func.return");
@@ -22791,6 +23941,34 @@ impl StackMLIRCodegen {
         compile_result?;
 
         self.emitted_functions.insert(name.to_string());
+        let simple_required_params = defaults.is_empty()
+            && supplied_p_vars.is_empty()
+            && key_params.is_empty()
+            && captured_free_vars.is_empty()
+            && params
+                .iter()
+                .all(|param| !Self::is_lambda_list_marker_name(param));
+        let inline_target_base = name
+            .strip_prefix("%FN%")
+            .unwrap_or(name)
+            .rsplit(':')
+            .next()
+            .unwrap_or(name)
+            .to_ascii_lowercase();
+        let is_self_recursive = Self::ast_contains_named_call(body, &[inline_target_base.as_str()]);
+        if simple_required_params
+            && !self.emit_runtime_debug_frames
+            && !Self::ast_contains_named_call(body, &["return-from"])
+            && !is_self_recursive
+        {
+            let inline_body = body.clone();
+            self.compiled_function_inline_map
+                .insert(name.to_string(), (params.to_vec(), inline_body.clone()));
+            if let Some(raw_name) = name.strip_prefix("%FN%") {
+                self.compiled_function_inline_map
+                    .insert(raw_name.to_string(), (params.to_vec(), inline_body));
+            }
+        }
 
         Ok(())
     }
@@ -23373,8 +24551,7 @@ impl StackMLIRCodegen {
         Ok(())
     }
 
-    /// Finalize and return the complete MLIR module
-    pub fn finalize(mut self) -> String {
+    fn append_module_footer(&mut self) {
         // Emit pending functions
         for func in &self.pending_functions {
             self.output.push_str(func);
@@ -23440,74 +24617,113 @@ impl StackMLIRCodegen {
 
         self.dedent();
         self.writeln("}");
+    }
 
-        self.output
+    /// Finalize and return the complete MLIR module
+    pub fn finalize(mut self) -> String {
+        self.append_module_footer();
+        Self::elide_adjacent_stack_push_pop(&self.output)
     }
 
     pub fn finalize_to_path(mut self, path: &str) -> Result<()> {
+        self.append_module_footer();
         let file = std::fs::File::create(path)?;
         let mut writer = std::io::BufWriter::new(file);
 
-        writer.write_all(self.output.as_bytes())?;
-        self.output.clear();
-        self.output.shrink_to_fit();
+        Self::write_elided_adjacent_stack_push_pop(&self.output, &mut writer)?;
+        writer.flush()?;
+        Ok(())
+    }
 
-        for func in std::mem::take(&mut self.pending_functions) {
-            writer.write_all(func.as_bytes())?;
+    fn write_elided_adjacent_stack_push_pop<W: std::io::Write>(
+        mlir: &str,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        let mut pending: Option<&str> = None;
+        let mut copy_id = 0usize;
+
+        for line in mlir.lines() {
+            if let Some(prev) = pending.take() {
+                if let Some(value) = Self::parse_stack_push_value(prev) {
+                    if let Some(result) = Self::parse_stack_pop_result(line) {
+                        let indent_len = line.len().saturating_sub(line.trim_start().len());
+                        let indent = &line[..indent_len];
+                        let zero = format!("%__rlasp_stack_elide_zero_{}", copy_id);
+                        copy_id += 1;
+                        writeln!(writer, "{}{} = arith.constant 0 : i64", indent, zero)?;
+                        writeln!(
+                            writer,
+                            "{}{} = arith.addi {}, {} : i64",
+                            indent, result, value, zero
+                        )?;
+                        continue;
+                    }
+                }
+                writer.write_all(prev.as_bytes())?;
+                writer.write_all(b"\n")?;
+            }
+            pending = Some(line);
         }
 
-        for (name, value) in std::mem::take(&mut self.pending_string_constants) {
-            let mut escaped = String::new();
-            for c in value.chars() {
-                match c {
-                    '"' => escaped.push_str("\\22"),
-                    '\\' => escaped.push_str("\\5C"),
-                    '\n' => escaped.push_str("\\0A"),
-                    '\r' => escaped.push_str("\\0D"),
-                    '\t' => escaped.push_str("\\09"),
-                    c if c.is_ascii() && !c.is_ascii_control() => escaped.push(c),
-                    c => {
-                        for byte in c.to_string().as_bytes() {
-                            escaped.push_str(&format!("\\{:02X}", byte));
-                        }
+        if let Some(prev) = pending {
+            writer.write_all(prev.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+
+    fn parse_stack_push_value(line: &str) -> Option<String> {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("func.call @stack_push_pointer(")?;
+        let (value, suffix) = rest.split_once(')')?;
+        if suffix.trim() == ": (i64) -> ()" {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn parse_stack_pop_result(line: &str) -> Option<String> {
+        let trimmed = line.trim();
+        let (result, rhs) = trimmed.split_once(" = ")?;
+        if rhs == "func.call @stack_pop_pointer() : () -> i64" {
+            Some(result.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn elide_adjacent_stack_push_pop(mlir: &str) -> String {
+        let lines: Vec<&str> = mlir.lines().collect();
+        let mut out = String::with_capacity(mlir.len());
+        let mut i = 0;
+        let mut copy_id = 0usize;
+        while i < lines.len() {
+            if i + 1 < lines.len() {
+                if let Some(value) = Self::parse_stack_push_value(lines[i]) {
+                    if let Some(result) = Self::parse_stack_pop_result(lines[i + 1]) {
+                        let indent_len = lines[i + 1]
+                            .len()
+                            .saturating_sub(lines[i + 1].trim_start().len());
+                        let indent = &lines[i + 1][..indent_len];
+                        let zero = format!("%__rlasp_stack_elide_zero_{}", copy_id);
+                        copy_id += 1;
+                        out.push_str(indent);
+                        out.push_str(&format!("{} = arith.constant 0 : i64\n", zero));
+                        out.push_str(indent);
+                        out.push_str(&format!(
+                            "{} = arith.addi {}, {} : i64\n",
+                            result, value, zero
+                        ));
+                        i += 2;
+                        continue;
                     }
                 }
             }
-            let c_str = format!("{}\\00", escaped);
-            let len = value.len() + 1;
-            write!(
-                writer,
-                "  llvm.mlir.global private constant {}(\"{}\") : !llvm.array<{} x i8>\n",
-                name, c_str, len
-            )?;
+            out.push_str(lines[i]);
+            out.push('\n');
+            i += 1;
         }
-
-        if !self.special_param_functions.is_empty() {
-            let names: Vec<&String> = self.special_param_functions.iter().collect();
-            let mut data = String::new();
-            let mut total_len = 0;
-            for name in &names {
-                let key = if name.starts_with("%FN%") {
-                    name.to_string()
-                } else {
-                    format!("%FN%{}", name)
-                };
-                data.push_str(&key);
-                data.push_str("\\00");
-                total_len += key.len() + 1;
-            }
-            data.push_str("\\00");
-            total_len += 1;
-            write!(
-                writer,
-                "  llvm.mlir.global constant @__argslist_functions(\"{}\") : !llvm.array<{} x i8>\n",
-                data,
-                total_len
-            )?;
-        }
-
-        writer.write_all(b"}\n")?;
-        writer.flush()?;
-        Ok(())
+        out
     }
 }
